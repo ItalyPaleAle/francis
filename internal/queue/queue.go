@@ -1,0 +1,154 @@
+// This code was adapted from https://github.com/dapr/kit/tree/v0.15.4/
+// Copyright (C) 2023 The Dapr Authors
+// License: Apache2
+
+package queue
+
+import (
+	"container/heap"
+	"time"
+)
+
+// Queueable is the interface for items that can be added to the queue.
+type Queueable[T comparable] interface {
+	comparable
+	Key() T
+	ScheduledTime() time.Time
+}
+
+// queue implements a queue for items that are scheduled to be executed at a later time.
+// It acts as a "priority queue", in which items are added in order of when they're scheduled.
+// Internally, it uses a heap (from container/heap) that allows Insert and Pop operations to be completed in O(log N) time (where N is the queue's length).
+// Note: methods in this struct are not safe for concurrent use. Callers should use locks to ensure consistency.
+type queue[K comparable, T Queueable[K]] struct {
+	heap  *queueHeap[K, T]
+	items map[K]*queueItem[K, T]
+}
+
+// newQueue creates a new queue.
+func newQueue[K comparable, T Queueable[K]]() queue[K, T] {
+	return queue[K, T]{
+		heap:  new(queueHeap[K, T]),
+		items: make(map[K]*queueItem[K, T]),
+	}
+}
+
+// Len returns the number of items in the queue.
+func (p *queue[K, T]) Len() int {
+	return p.heap.Len()
+}
+
+// Insert inserts a new item into the queue.
+// If replace is true, existing items are replaced
+func (p *queue[K, T]) Insert(r T, replace bool) {
+	key := r.Key()
+
+	// Check if the item already exists
+	item, ok := p.items[key]
+	if ok {
+		if replace {
+			item.value = r
+			heap.Fix(p.heap, item.index)
+		}
+		return
+	}
+
+	item = &queueItem[K, T]{
+		value: r,
+	}
+	heap.Push(p.heap, item)
+	p.items[key] = item
+}
+
+// Pop removes the next item in the queue and returns it.
+// The returned boolean value will be "true" if an item was found.
+func (p *queue[K, T]) Pop() (T, bool) {
+	if p.Len() == 0 {
+		var zero T
+		return zero, false
+	}
+
+	item, ok := heap.Pop(p.heap).(*queueItem[K, T])
+	if !ok || item == nil {
+		var zero T
+		return zero, false
+	}
+
+	delete(p.items, item.value.Key())
+	return item.value, true
+}
+
+// Peek returns the next item in the queue, without removing it.
+// The returned boolean value will be "true" if an item was found.
+func (p *queue[K, T]) Peek() (T, bool) {
+	if p.Len() == 0 {
+		var zero T
+		return zero, false
+	}
+
+	return (*p.heap)[0].value, true
+}
+
+// Remove an item from the queue.
+func (p *queue[K, T]) Remove(key K) {
+	// If the item is not in the queue, this is a nop
+	item, ok := p.items[key]
+	if !ok {
+		return
+	}
+
+	heap.Remove(p.heap, item.index)
+	delete(p.items, key)
+}
+
+// Update an item in the queue.
+func (p *queue[K, T]) Update(r T) {
+	// If the item is not in the queue, this is a nop
+	item, ok := p.items[r.Key()]
+	if !ok {
+		return
+	}
+
+	item.value = r
+	heap.Fix(p.heap, item.index)
+}
+
+type queueItem[K comparable, T Queueable[K]] struct {
+	value T
+
+	// The index of the item in the heap. This is maintained by the heap.Interface methods.
+	index int
+}
+
+type queueHeap[K comparable, T Queueable[K]] []*queueItem[K, T]
+
+func (pq queueHeap[K, T]) Len() int {
+	return len(pq)
+}
+
+func (pq queueHeap[K, T]) Less(i, j int) bool {
+	return pq[i].value.ScheduledTime().Before(pq[j].value.ScheduledTime())
+}
+
+func (pq queueHeap[K, T]) Swap(i, j int) {
+	pq[i], pq[j] = pq[j], pq[i]
+	pq[i].index = i
+	pq[j].index = j
+}
+
+func (pq *queueHeap[K, T]) Push(x any) {
+	n := len(*pq)
+	item := x.(*queueItem[K, T])
+	item.index = n
+	*pq = append(*pq, item)
+}
+
+func (pq *queueHeap[K, T]) Pop() any {
+	old := *pq
+	n := len(old)
+	item := old[n-1]
+	old[n-1] = nil  // Avoid memory leak
+	item.index = -1 // For safety
+	*pq = old[0 : n-1]
+	return item
+}

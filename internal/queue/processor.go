@@ -1,0 +1,223 @@
+// This code was adapted from https://github.com/dapr/kit/tree/v0.15.4/
+// Copyright (C) 2023 The Dapr Authors
+// License: Apache2
+
+package queue
+
+import (
+	"sync"
+	"sync/atomic"
+	"time"
+
+	kclock "k8s.io/utils/clock"
+)
+
+type Options[K comparable, T Queueable[K]] struct {
+	ExecuteFn func(r T)
+	Clock     kclock.Clock
+}
+
+// Processor manages the queue of items and processes them at the correct time.
+type Processor[K comparable, T Queueable[K]] struct {
+	executeFn          func(r T)
+	queue              queue[K, T]
+	clock              kclock.Clock
+	lock               sync.Mutex
+	wg                 sync.WaitGroup
+	processorRunningCh chan struct{}
+	stopCh             chan struct{}
+	resetCh            chan struct{}
+	stopped            atomic.Bool
+}
+
+// NewProcessor returns a new Processor object.
+// executeFn is the callback invoked when the item is to be executed; this will be invoked in a background goroutine.
+func NewProcessor[K comparable, T Queueable[K]](opts Options[K, T]) *Processor[K, T] {
+	cl := opts.Clock
+	if cl == nil {
+		cl = kclock.RealClock{}
+	}
+	return &Processor[K, T]{
+		executeFn:          opts.ExecuteFn,
+		queue:              newQueue[K, T](),
+		processorRunningCh: make(chan struct{}, 1),
+		stopCh:             make(chan struct{}),
+		resetCh:            make(chan struct{}, 1),
+		clock:              cl,
+	}
+}
+
+// Enqueue adds a new items to the queue.
+// If a item with the same ID already exists, it'll be replaced.
+func (p *Processor[K, T]) Enqueue(rs ...T) {
+	if p.stopped.Load() {
+		return
+	}
+
+	p.lock.Lock()
+	defer p.lock.Unlock()
+
+	for _, r := range rs {
+		p.enqueue(r)
+	}
+}
+
+func (p *Processor[K, T]) enqueue(r T) {
+	// Insert or replace the item in the queue
+	// If the item added or replaced is the first one in the queue, we need to know that
+	peek, ok := p.queue.Peek()
+	isFirst := (ok && peek.Key() == r.Key()) // This is going to be true if the item being replaced is the first one in the queue
+	p.queue.Insert(r, true)
+	peek, _ = p.queue.Peek()         // No need to check for "ok" here because we know this will return an item
+	isFirst = isFirst || (peek == r) // This is also going to be true if the item just added landed at the front of the queue
+	p.process(isFirst)
+}
+
+// Dequeue removes a item from the queue.
+func (p *Processor[K, T]) Dequeue(key K) {
+	if p.stopped.Load() {
+		return
+	}
+
+	// We need to check if this is the next item in the queue, as that requires stopping the processor
+	p.lock.Lock()
+	peek, ok := p.queue.Peek()
+	p.queue.Remove(key)
+	if ok && peek.Key() == key {
+		// If the item was the first one in the queue, restart the processor
+		p.process(true)
+	}
+	p.lock.Unlock()
+}
+
+// Close stops the processor.
+// This method blocks until the processor loop returns.
+func (p *Processor[K, T]) Close() error {
+	defer p.wg.Wait()
+	if p.stopped.CompareAndSwap(false, true) {
+		// Send a signal to stop
+		close(p.stopCh)
+		// Blocks until processor loop ends
+		p.processorRunningCh <- struct{}{}
+		return nil
+	}
+
+	return nil
+}
+
+// Start the processing loop if it's not already running.
+// This must be invoked while the caller has a lock.
+func (p *Processor[K, T]) process(isNext bool) {
+	// Do not start a loop if it's already running
+	select {
+	case p.processorRunningCh <- struct{}{}:
+		// Nop - fallthrough
+	default:
+		// Already running
+		if isNext {
+			// If this is the next item, send a reset signal
+			// Use a select in case another goroutine is sending a reset signal too
+			select {
+			case p.resetCh <- struct{}{}:
+			default:
+			}
+		}
+		return
+	}
+
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		p.processLoop()
+	}()
+}
+
+// Processing loop.
+func (p *Processor[K, T]) processLoop() {
+	defer func() {
+		// Release the channel when exiting
+		<-p.processorRunningCh
+	}()
+
+	var (
+		r             T
+		ok            bool
+		t             kclock.Timer
+		scheduledTime time.Time
+		deadline      time.Duration
+	)
+
+	for {
+		// Continue processing items until the queue is empty
+		p.lock.Lock()
+		r, ok = p.queue.Peek()
+		p.lock.Unlock()
+		if !ok {
+			return
+		}
+
+		// Check if after obtaining the lock we have a stop or reset signals
+		// Do this before we create a timer
+		select {
+		case <-p.stopCh:
+			// Exit on stop signals
+			return
+		case <-p.resetCh:
+			// Restart the loop on reset signals
+			continue
+		default:
+			// Nop, proceed
+		}
+
+		scheduledTime = r.ScheduledTime()
+		deadline = scheduledTime.Sub(p.clock.Now())
+
+		// If the deadline is less than 0.5ms away, execute it right away
+		// This is more efficient than creating a timer
+		if deadline < 500*time.Microsecond {
+			p.execute(r)
+			continue
+		}
+
+		t = p.clock.NewTimer(deadline)
+		select {
+		// Wait for when it's time to execute the item
+		case <-t.C():
+			p.execute(r)
+
+		// If we get a reset signal, restart the loop
+		case <-p.resetCh:
+			// Restart the loop
+			continue
+
+		// If we receive a stop signal, exit
+		case <-p.stopCh:
+			// Stop the timer and exit the loop
+			if !t.Stop() {
+				<-t.C()
+			}
+			return
+		}
+	}
+}
+
+// Executes a item when it's time.
+func (p *Processor[K, T]) execute(r T) {
+	// Pop the item now that we're ready to process it
+	// There's a small chance this is a different item than the one we peeked before
+	p.lock.Lock()
+	// For safety, let's peek at the first item before popping it and make sure it's the same object
+	// It's unlikely, but if it's a different object then restart the loop
+	peek, ok := p.queue.Peek()
+	if !ok || peek != r {
+		p.lock.Unlock()
+		return
+	}
+	r, ok = p.queue.Pop()
+	p.lock.Unlock()
+	if !ok {
+		return
+	}
+
+	p.executeFn(r)
+}
