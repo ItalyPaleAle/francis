@@ -131,7 +131,8 @@ func (m Migrations) tableExists(parentCtx context.Context, db sqladapter.Databas
 }
 
 func (m Migrations) createMetadataTable(ctx context.Context, db sqladapter.DatabaseSQLConn, logger *slog.Logger) error {
-	logger.InfoContext(ctx, "Creating metadata table if it doesn't exist", slog.String("table", m.MetadataTableName))
+	logger.InfoContext(ctx, "Creating metadata table", slog.String("table", m.MetadataTableName))
+
 	// Add an "IF NOT EXISTS" in case another process is creating the same table at the same time
 	// In the next step we'll acquire a lock so there won't be issues with concurrency
 	_, err := db.ExecContext(ctx, fmt.Sprintf(

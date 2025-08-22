@@ -1,5 +1,5 @@
 CREATE TABLE hosts (
-    host_id uuid NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
+    host_id text NOT NULL PRIMARY KEY,
     host_address text NOT NULL,
     host_last_health_check timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -8,7 +8,7 @@ CREATE UNIQUE INDEX host_address_idx ON hosts (host_address);
 CREATE INDEX host_last_health_check_idx ON hosts (host_last_health_check);
 
 CREATE TABLE host_actor_types (
-    host_id uuid NOT NULL,
+    host_id text NOT NULL,
     actor_type text NOT NULL,
     actor_idle_timeout interval NOT NULL,
     actor_concurrency_limit int NOT NULL DEFAULT 0,
@@ -23,7 +23,7 @@ CREATE INDEX actor_type_idx ON host_actor_types (actor_type);
 CREATE TABLE actors (
     actor_id text NOT NULL,
     actor_type text NOT NULL,
-    host_id uuid,
+    host_id text,
     actor_idle_timeout integer NOT NULL,
     actor_activation timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 

@@ -7,11 +7,9 @@ import (
 
 // ActorProvider is the interface implemented by all actor providers
 type ActorProvider interface {
-	// Init the actor provider
-	Init(ctx context.Context) error
-
 	// Run the actor provider
 	// This method blocks until the context is canceled
+	// If the provider is already running, returns ErrAlreadyRunning
 	Run(ctx context.Context) error
 
 	// RegisterHost registers a new actor host.
