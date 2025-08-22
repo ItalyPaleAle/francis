@@ -11,7 +11,8 @@ import (
 
 	"github.com/alphadose/haxmap"
 
-	"github.com/italypaleale/actors/internal/components"
+	"github.com/italypaleale/actors/actor"
+	"github.com/italypaleale/actors/components"
 )
 
 const (
@@ -19,15 +20,17 @@ const (
 	defaultIdleTimeout   = int64(15 * 60) // 15 minutes
 )
 
+// Host is an actor host.
 type Host struct {
 	running       atomic.Bool
 	actorProvider components.ActorProvider
+	service       *actor.Service
 
 	// Actor factory methods; key is actor type
-	actorFactories map[string]ActorFactory
+	actorFactories map[string]actor.Factory
 
 	// Active actors; key is "actorType/actorID"
-	actors       *haxmap.Map[string, Actor]
+	actors       *haxmap.Map[string, actor.Actor]
 	actorsConfig []components.ActorHostType
 }
 
@@ -38,7 +41,7 @@ type RegisterActorOptions struct {
 	AlarmConcurrencyLimit int
 }
 
-// NewHost returns a new actor host
+// NewHost returns a new actor host.
 func NewHost(actorProvider components.ActorProvider) (*Host, error) {
 	if actorProvider == nil {
 		return nil, errors.New("actor provider is nil")
@@ -47,15 +50,21 @@ func NewHost(actorProvider components.ActorProvider) (*Host, error) {
 	h := &Host{
 		actorProvider:  actorProvider,
 		actorsConfig:   []components.ActorHostType{},
-		actorFactories: map[string]ActorFactory{},
-		actors:         haxmap.New[string, Actor](defaultActorsMapSize),
+		actorFactories: map[string]actor.Factory{},
+		actors:         haxmap.New[string, actor.Actor](defaultActorsMapSize),
 	}
+	h.service = actor.NewService(h)
 	return h, nil
+}
+
+// Service returns a Service object configured to interact with this host.
+func (h *Host) Service() *actor.Service {
+	return h.service
 }
 
 // RegisterActor registers a new actor in the host.
 // Must be called before Run.
-func (h *Host) RegisterActor(actorType string, factory ActorFactory, opts RegisterActorOptions) error {
+func (h *Host) RegisterActor(actorType string, factory actor.Factory, opts RegisterActorOptions) error {
 	if h.running.Load() {
 		return errors.New("cannot call RegisterActor after host has started")
 	}
@@ -100,19 +109,19 @@ func (h *Host) RegisterActor(actorType string, factory ActorFactory, opts Regist
 	return nil
 }
 
-// Run the host service
+// Run the host service.
 // Note this function is blocking, and will return only when the service is shut down via context cancellation.
-func (s *Host) Run(ctx context.Context) error {
-	if !s.running.CompareAndSwap(false, true) {
+func (h *Host) Run(ctx context.Context) error {
+	if !h.running.CompareAndSwap(false, true) {
 		return errors.New("service is already running")
 	}
-	defer s.running.Store(false)
+	defer h.running.Store(false)
 
 	// Register the host
 	address := "todo"
-	res, err := s.actorProvider.RegisterActorHost(ctx, components.RegisterActorHostRequest{
+	res, err := h.actorProvider.RegisterHost(ctx, components.RegisterHostReq{
 		Address:    address,
-		ActorTypes: s.actorsConfig,
+		ActorTypes: h.actorsConfig,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to register actor host: %w", err)
@@ -125,7 +134,7 @@ func (s *Host) Run(ctx context.Context) error {
 		unregisterCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		unregisterErr := s.actorProvider.UnregisterActorHost(unregisterCtx, res.HostID)
+		unregisterErr := h.actorProvider.UnregisterHost(unregisterCtx, res.HostID)
 		if unregisterErr != nil {
 			slog.WarnContext(unregisterCtx, "Error unregistering actor host", "error", unregisterErr, "hostId", res.HostID)
 			return
@@ -135,10 +144,60 @@ func (s *Host) Run(ctx context.Context) error {
 	}()
 
 	// Block until the context is canceled
-	err = s.actorProvider.Run(ctx)
+	err = h.actorProvider.Run(ctx)
 	if err != nil {
 		return fmt.Errorf("error running actor provider: %w", err)
 	}
 
 	return nil
+}
+
+func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, method string, data any) (any, error) {
+	// TODO: Check if actor is not local
+	return h.invokeLocal(ctx, actorType, actorID, method, data)
+}
+
+func (h *Host) invokeLocal(ctx context.Context, actorType string, actorID string, method string, data any) (any, error) {
+	actor, err := h.getOrCreateActor(actorType, actorID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Invoke the actor
+	return actor.Invoke(ctx, method, data)
+}
+
+func (h *Host) executeAlarm(ctx context.Context, actorType string, actorID string, name string, data any) error {
+	actor, err := h.getOrCreateActor(actorType, actorID)
+	if err != nil {
+		return err
+	}
+
+	// Invoke the actor
+	return actor.Alarm(ctx, name, data)
+}
+
+func (h *Host) getOrCreateActor(actorType string, actorID string) (actor.Actor, error) {
+	// Get the factory function
+	fn, err := h.createActorFn(actorType, actorID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get (or create) the actor
+	actor, _ := h.actors.GetOrCompute(actorType+"/"+actorID, fn)
+
+	return actor, nil
+}
+
+func (h *Host) createActorFn(actorType string, actorID string) (func() actor.Actor, error) {
+	// We don't need a locking mechanism here as this map is "locked" after the service has started
+	factoryFn := h.actorFactories[actorType]
+	if factoryFn == nil {
+		return nil, errors.New("unsupported actor type")
+	}
+
+	return func() actor.Actor {
+		return factoryFn(actorID, h.service)
+	}, nil
 }

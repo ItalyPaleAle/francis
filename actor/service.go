@@ -6,24 +6,23 @@ import (
 	"errors"
 )
 
-// ErrStateNotFound is returned by getActorState when the object cannot be found
+// ErrStateNotFound is returned by getActorState when the object cannot be found.
 var ErrStateNotFound = errors.New("not found")
 
-// AlarmOptions contains the options for a new alarm.
-type AlarmOptions struct {
-	Data    json.RawMessage `json:"data"`
-	DueTime string          `json:"dueTime"`
-	Period  string          `json:"period"`
-	TTL     string          `json:"ttl"`
-}
-
-// Service allows interacting with the actor host, to invoke
+// Service allows interacting with the actor host, to invoke actors and perform operations on state and alarms.
 type Service struct {
+	host Host
 }
 
-func (s Service) Invoke(ctx context.Context, actorType string, actorID string, method string, data any) ([]byte, error) {
-	// TODO
-	return nil, nil
+// NewService returns a new Service configured to interact with specific Host.
+func NewService(host Host) *Service {
+	return &Service{
+		host: host,
+	}
+}
+
+func (s Service) Invoke(ctx context.Context, actorType string, actorID string, method string, data any) (any, error) {
+	return s.host.Invoke(ctx, actorType, actorID, method, data)
 }
 
 // saveActorState saves the state for an actor.
@@ -53,8 +52,20 @@ func (s Service) setActorAlarm(ctx context.Context, actorType string, actorID st
 	return nil
 }
 
+// AlarmOptions contains the options for a new alarm.
+type AlarmOptions struct {
+	Data    json.RawMessage `json:"data"`
+	DueTime string          `json:"dueTime"`
+	Period  string          `json:"period"`
+	TTL     string          `json:"ttl"`
+}
+
 // deleteActorAlarm deletes an alarm for an actor.
 func (s Service) deleteActorAlarm(ctx context.Context, actorType string, actorID string, alarmName string) error {
 	// TODO
 	return nil
+}
+
+type Host interface {
+	Invoke(ctx context.Context, actorType string, actorID string, method string, data any) (any, error)
 }

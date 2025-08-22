@@ -1,6 +1,7 @@
 config.yaml
 tls-*.pem
 scratchpad
+scratch
 
 # Compiled
 .out
