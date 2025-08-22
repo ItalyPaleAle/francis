@@ -18,12 +18,9 @@ const (
 	DefaultConnectionString = "data.db"
 )
 
-// sqliteConnectionString is the connection string for a SQLite database
-type sqliteConnectionString string
-
 // IsInMemoryDB returns true if the connection string is for an in-memory database.
-func (m sqliteConnectionString) IsInMemoryDB() bool {
-	lc := strings.ToLower(string(m))
+func IsInMemoryDB(connString string) bool {
+	lc := strings.ToLower(connString)
 
 	// First way to define an in-memory database is to use ":memory:" or "file::memory:" as connection string
 	if strings.HasPrefix(lc, ":memory:") || strings.HasPrefix(lc, "file::memory:") {
@@ -41,18 +38,9 @@ func (m sqliteConnectionString) IsInMemoryDB() bool {
 }
 
 // Parse and validate the connection string.
-func (m *sqliteConnectionString) Parse(log *slog.Logger) error {
-	if m == nil {
-		return errors.New("connection string pointer cannot be nil")
-	}
-	if *m == "" {
-		*m = sqliteConnectionString(DefaultConnectionString)
-	}
-
-	connString := string(*m)
-
+func ParseConnectionString(connString string, log *slog.Logger) (string, error) {
 	// Check if we're using the in-memory database
-	isMemoryDB := m.IsInMemoryDB()
+	isMemoryDB := IsInMemoryDB(connString)
 
 	// Get the "query string" from the connection string if present
 	idx := strings.IndexRune(connString, '?')
@@ -116,7 +104,7 @@ func (m *sqliteConnectionString) Parse(log *slog.Logger) error {
 			case strings.HasPrefix(p, "journal_mode"):
 				hasJournalMode = true
 			case strings.HasPrefix(p, "foreign_keys"):
-				return errors.New("found forbidden option '_pragma=foreign_keys' in the connection string")
+				return "", errors.New("found forbidden option '_pragma=foreign_keys' in the connection string")
 			}
 		}
 	}
@@ -149,7 +137,5 @@ func (m *sqliteConnectionString) Parse(log *slog.Logger) error {
 		connString = "file:" + connString
 	}
 
-	*m = sqliteConnectionString(connString)
-
-	return nil
+	return connString, nil
 }

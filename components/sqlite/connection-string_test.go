@@ -15,7 +15,7 @@ import (
 func TestSQLiteConnectionString_IsInMemoryDB(t *testing.T) {
 	tests := []struct {
 		name     string
-		connStr  sqliteConnectionString
+		connStr  string
 		expected bool
 	}{
 		{
@@ -82,7 +82,7 @@ func TestSQLiteConnectionString_IsInMemoryDB(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := tt.connStr.IsInMemoryDB()
+			result := IsInMemoryDB(tt.connStr)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
@@ -93,18 +93,11 @@ func TestSQLiteConnectionString_Parse(t *testing.T) {
 
 	tests := []struct {
 		name           string
-		input          sqliteConnectionString
+		input          string
 		expectedResult string
 		shouldError    bool
 		description    string
 	}{
-		{
-			name:           "empty connection string",
-			input:          "",
-			expectedResult: "file:" + DefaultConnectionString + "?_pragma=busy_timeout%282500%29&_pragma=foreign_keys%281%29&_pragma=journal_mode%28WAL%29&_txlock=immediate",
-			shouldError:    false,
-			description:    "should use default connection string",
-		},
 		{
 			name:           "simple file database",
 			input:          "test.db",
@@ -220,7 +213,7 @@ func TestSQLiteConnectionString_Parse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := tt.input.Parse(logger)
+			res, err := ParseConnectionString(tt.input, logger)
 
 			if tt.shouldError {
 				require.Error(t, err)
@@ -229,8 +222,7 @@ func TestSQLiteConnectionString_Parse(t *testing.T) {
 
 			require.NoError(t, err)
 
-			result := string(tt.input)
-			compareConnectionStrings(t, result, tt.expectedResult)
+			compareConnectionStrings(t, res, tt.expectedResult)
 		})
 	}
 }
@@ -242,14 +234,11 @@ func TestSQLiteConnectionString_Parse_LogWarning(t *testing.T) {
 		Level: slog.LevelWarn,
 	}))
 
-	connStr := sqliteConnectionString("test.db?_txlock=exclusive")
-	err := connStr.Parse(logger)
-
-	require.NoError(t, err, "Parse() returned unexpected error")
+	_, err := ParseConnectionString("test.db?_txlock=exclusive", logger)
+	require.NoError(t, err)
 
 	logContent := logOutput.String()
-	assert.Contains(t, logContent, "_txlock different from the recommended value 'immediate'",
-		"Expected warning about _txlock not found in log output")
+	assert.Contains(t, logContent, "_txlock different from the recommended value 'immediate'", "Expected warning about _txlock not found in log output")
 }
 
 // Helper function to compare query strings (order-independent)

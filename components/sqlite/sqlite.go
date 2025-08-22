@@ -30,19 +30,23 @@ type SQLiteProvider struct {
 }
 
 func NewSQLiteProvider(ctx context.Context, connStr string, log *slog.Logger) (components.ActorProvider, error) {
+	var err error
+
 	s := &SQLiteProvider{
 		log: log,
 	}
 
 	// Parse the connection string
-	connStrObj := sqliteConnectionString(connStr)
-	err := connStrObj.Parse(s.log)
+	if connStr == "" {
+		connStr = DefaultConnectionString
+	}
+	connStr, err = ParseConnectionString(connStr, s.log)
 	if err != nil {
 		return nil, fmt.Errorf("connection string for SQLite is not valid")
 	}
 
 	// Open the database
-	s.db, err = sql.Open("sqlite", string(connStrObj))
+	s.db, err = sql.Open("sqlite", connStr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
 	}
