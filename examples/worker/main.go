@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/italypaleale/actors/actor"
+	"github.com/italypaleale/actors/components"
 	"github.com/italypaleale/actors/components/sqlite"
 	"github.com/italypaleale/actors/host"
 	"github.com/italypaleale/actors/internal/servicerunner"
@@ -28,7 +29,7 @@ func runWorker(ctx context.Context) error {
 	log := slog.Default()
 
 	// Init the provider
-	provider, err := sqlite.NewSQLiteProvider(ctx, "data.db", log)
+	provider, err := sqlite.NewSQLiteProvider(ctx, "data.db", log, components.ProviderOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to init provider: %w", err)
 	}

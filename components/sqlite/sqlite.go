@@ -13,8 +13,6 @@ import (
 	// Blank import for the sqlite driver
 	_ "modernc.org/sqlite"
 
-	"github.com/google/uuid"
-
 	"github.com/italypaleale/actors/components"
 	"github.com/italypaleale/actors/internal/sql/migrations"
 	sqlitemigrations "github.com/italypaleale/actors/internal/sql/migrations/sqlite"
@@ -24,16 +22,18 @@ import (
 var migrationScripts embed.FS
 
 type SQLiteProvider struct {
+	opts    components.ProviderOptions
 	db      *sql.DB
 	running atomic.Bool
 	log     *slog.Logger
 }
 
-func NewSQLiteProvider(ctx context.Context, connStr string, log *slog.Logger) (components.ActorProvider, error) {
+func NewSQLiteProvider(ctx context.Context, connStr string, log *slog.Logger, opts components.ProviderOptions) (components.ActorProvider, error) {
 	var err error
 
 	s := &SQLiteProvider{
-		log: log,
+		opts: opts,
+		log:  log,
 	}
 
 	// Parse the connection string
@@ -114,33 +114,6 @@ func (s *SQLiteProvider) performMigrations(ctx context.Context) error {
 		return fmt.Errorf("migrations failed with error: %w", err)
 	}
 
-	return nil
-}
-
-func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {
-	hostID, err := uuid.NewV7()
-	if err != nil {
-		return components.RegisterHostRes{}, fmt.Errorf("failed to generate host ID: %w", err)
-	}
-
-	return components.RegisterHostRes{
-		HostID: hostID.String(),
-	}, nil
-}
-
-func (s *SQLiteProvider) UpdateActorHost(ctx context.Context, actorHostID string, req components.UpdateActorHostReq) error {
-	return nil
-}
-
-func (s *SQLiteProvider) UnregisterHost(ctx context.Context, actorHostID string) error {
-	return nil
-}
-
-func (s *SQLiteProvider) LookupActor(ctx context.Context, ref components.ActorRef, opts components.LookupActorOpts) (components.LookupActorRes, error) {
-	return components.LookupActorRes{}, nil
-}
-
-func (s *SQLiteProvider) RemoveActor(ctx context.Context, ref components.ActorRef) error {
 	return nil
 }
 
