@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -11,8 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	// Blank import for the sqlite driver
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
 
 	"github.com/italypaleale/actors/components"
 	"github.com/italypaleale/actors/internal/sql/migrations"
@@ -42,6 +42,11 @@ func NewSQLiteProvider(sqliteOpts SQLiteProviderOptions, providerOpts components
 	// Ensure the logger is non-nil
 	if s.log == nil {
 		s.log = slog.New(slog.DiscardHandler)
+	}
+
+	// Set default health check deadline
+	if s.providerOpts.HostHealthCheckDeadline <= time.Second {
+		s.providerOpts.HostHealthCheckDeadline = components.HostHealthCheckDeadline
 	}
 
 	// Set default timeout if empty
@@ -136,4 +141,22 @@ func (s *SQLiteProvider) performMigrations(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// Checks if an error returned by the database is a unique constraint violation error, such as a duplicate unique index or primary key.
+func isConstraintError(err error) bool {
+	// These bits are set on all constraint-related errors
+	// https://www.sqlite.org/rescode.html#constraint
+	const sqliteConstraintCode = 19
+
+	if err == nil {
+		return false
+	}
+
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+
+	return sqliteErr.Code()&sqliteConstraintCode != 0
 }

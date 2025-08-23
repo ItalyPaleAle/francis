@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+const HostHealthCheckDeadline = 30 * time.Second
+
 // ActorProvider is the interface implemented by all actor providers
 type ActorProvider interface {
 	// Run the actor provider
@@ -58,7 +60,7 @@ type ProviderOptions struct {
 	Logger *slog.Logger
 
 	// Maximum interval between pings received from an actor host.
-	HostHealthCheck time.Duration
+	HostHealthCheckDeadline time.Duration
 
 	// Alarms lease duration
 	AlarmsLeaseDuration time.Duration
