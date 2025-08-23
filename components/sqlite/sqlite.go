@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync/atomic"
+	"time"
 
 	// Blank import for the sqlite driver
 	_ "modernc.org/sqlite"
@@ -22,47 +23,67 @@ import (
 var migrationScripts embed.FS
 
 type SQLiteProvider struct {
-	opts    components.ProviderOptions
-	db      *sql.DB
-	running atomic.Bool
-	log     *slog.Logger
+	providerOpts components.ProviderOptions
+	db           *sql.DB
+	running      atomic.Bool
+	log          *slog.Logger
+	timeout      time.Duration
 }
 
-func NewSQLiteProvider(ctx context.Context, connStr string, log *slog.Logger, opts components.ProviderOptions) (components.ActorProvider, error) {
+func NewSQLiteProvider(sqliteOpts SQLiteProviderOptions, providerOpts components.ProviderOptions) (components.ActorProvider, error) {
 	var err error
 
 	s := &SQLiteProvider{
-		opts: opts,
-		log:  log,
+		providerOpts: providerOpts,
+		log:          providerOpts.Logger,
+		timeout:      sqliteOpts.Timeout,
+	}
+
+	// Ensure the logger is non-nil
+	if s.log == nil {
+		s.log = slog.New(slog.DiscardHandler)
+	}
+
+	// Set default timeout if empty
+	if s.timeout <= 0 {
+		s.timeout = DefaultTimeout
 	}
 
 	// Parse the connection string
-	if connStr == "" {
-		connStr = DefaultConnectionString
+	if sqliteOpts.ConnectionString == "" {
+		sqliteOpts.ConnectionString = DefaultConnectionString
 	}
-	connStr, err = ParseConnectionString(connStr, s.log)
+	sqliteOpts.ConnectionString, err = ParseConnectionString(sqliteOpts.ConnectionString, s.log)
 	if err != nil {
 		return nil, fmt.Errorf("connection string for SQLite is not valid")
 	}
 
 	// Open the database
-	s.db, err = sql.Open("sqlite", connStr)
+	s.db, err = sql.Open("sqlite", sqliteOpts.ConnectionString)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
-	}
-
-	// Migrate schema
-	err = s.performMigrations(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to perform migrations: %w", err)
 	}
 
 	return s, nil
 }
 
+type SQLiteProviderOptions struct {
+	// Connection string or path to the SQLite database
+	ConnectionString string
+
+	// Timeout for requests to the database
+	Timeout time.Duration
+}
+
 func (s *SQLiteProvider) Run(ctx context.Context) error {
 	if !s.running.CompareAndSwap(false, true) {
 		return components.ErrAlreadyRunning
+	}
+
+	// Migrate schema
+	err := s.performMigrations(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to perform migrations: %w", err)
 	}
 
 	<-ctx.Done()
@@ -114,25 +135,5 @@ func (s *SQLiteProvider) performMigrations(ctx context.Context) error {
 		return fmt.Errorf("migrations failed with error: %w", err)
 	}
 
-	return nil
-}
-
-func (s *SQLiteProvider) SetAlarm(ctx context.Context, ref components.ActorRef, name string, req components.SetAlarmReq) error {
-	return nil
-}
-
-func (s *SQLiteProvider) DeleteAlarm(ctx context.Context, ref components.ActorRef, name string) error {
-	return nil
-}
-
-func (s *SQLiteProvider) GetState(ctx context.Context, ref components.ActorRef) ([]byte, error) {
-	return nil, nil
-}
-
-func (s *SQLiteProvider) SetState(ctx context.Context, ref components.ActorRef, data []byte) error {
-	return nil
-}
-
-func (s *SQLiteProvider) DeleteState(ctx context.Context, ref components.ActorRef) error {
 	return nil
 }

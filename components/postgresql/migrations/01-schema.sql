@@ -20,9 +20,9 @@ CREATE TABLE host_actor_types (
 
 CREATE INDEX actor_type_idx ON host_actor_types (actor_type);
 
-CREATE TABLE actors (
-    actor_id text NOT NULL,
+CREATE TABLE active_actors (
     actor_type text NOT NULL,
+    actor_id text NOT NULL,
     host_id uuid,
     actor_idle_timeout integer NOT NULL,
     actor_activation timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -30,3 +30,14 @@ CREATE TABLE actors (
     PRIMARY KEY (actor_type, actor_id),
     FOREIGN KEY (host_id) REFERENCES hosts (host_id) ON DELETE CASCADE
 );
+
+CREATE TABLE actor_state (
+    actor_type text NOT NULL,
+    actor_id text NOT NULL,
+    actor_state_data blob NOT NULL,
+    actor_state_expiration timestamp,
+
+    PRIMARY KEY (actor_type, actor_id)
+);
+
+CREATE INDEX actor_state_expiration_idx ON actor_state (actor_state_expiration) WHERE actor_state_expiration IS NOT NULL;

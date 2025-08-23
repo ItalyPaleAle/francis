@@ -29,7 +29,14 @@ func runWorker(ctx context.Context) error {
 	log := slog.Default()
 
 	// Init the provider
-	provider, err := sqlite.NewSQLiteProvider(ctx, "data.db", log, components.ProviderOptions{})
+	provider, err := sqlite.NewSQLiteProvider(
+		sqlite.SQLiteProviderOptions{
+			ConnectionString: "data.db",
+		},
+		components.ProviderOptions{
+			Logger: log,
+		},
+	)
 	if err != nil {
 		return fmt.Errorf("failed to init provider: %w", err)
 	}

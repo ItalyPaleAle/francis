@@ -25,29 +25,26 @@ func (s Service) Invoke(ctx context.Context, actorType string, actorID string, m
 	return s.host.Invoke(ctx, actorType, actorID, method, data)
 }
 
-// saveActorState saves the state for an actor.
-func (s Service) saveActorState(ctx context.Context, actorType string, actorID string, state any) error {
-	// TODO
-	return nil
+// setState saves the state for an actor.
+func (s Service) setState(ctx context.Context, actorType string, actorID string, state any) error {
+	return s.host.SetState(ctx, actorType, actorID, state)
 }
 
-// GetActorState retrieves the state for an actor.
+// getState retrieves the state for an actor.
 // The state is JSON-decoded into dest.
 // Returns ErrStateNotFound if the state cannot be found.
-func (s Service) getActorState(ctx context.Context, actorType string, actorID string, dest any) error {
-	// TODO
-	return nil
+func (s Service) getState(ctx context.Context, actorType string, actorID string, dest any) error {
+	return s.host.GetState(ctx, actorType, actorID, dest)
 }
 
-// deleteActorState deletes the state for an actor.
+// deleteState deletes the state for an actor.
 // Returns ErrStateNotFound if the state cannot be found.
-func (s Service) deleteActorState(ctx context.Context, actorType string, actorID string) error {
-	// TODO
-	return nil
+func (s Service) deleteState(ctx context.Context, actorType string, actorID string) error {
+	return s.host.DeleteState(ctx, actorType, actorID)
 }
 
-// setActorAlarm creates or replaces an alarm for an actor.
-func (s Service) setActorAlarm(ctx context.Context, actorType string, actorID string, alarmName string, opts AlarmOptions) error {
+// setAlarm creates or replaces an alarm for an actor.
+func (s Service) setAlarm(ctx context.Context, actorType string, actorID string, alarmName string, opts AlarmOptions) error {
 	// TODO
 	return nil
 }
@@ -60,12 +57,15 @@ type AlarmOptions struct {
 	TTL     string          `json:"ttl"`
 }
 
-// deleteActorAlarm deletes an alarm for an actor.
-func (s Service) deleteActorAlarm(ctx context.Context, actorType string, actorID string, alarmName string) error {
+// deleteAlarm deletes an alarm for an actor.
+func (s Service) deleteAlarm(ctx context.Context, actorType string, actorID string, alarmName string) error {
 	// TODO
 	return nil
 }
 
 type Host interface {
 	Invoke(ctx context.Context, actorType string, actorID string, method string, data any) (any, error)
+	SetState(ctx context.Context, actorType string, actorID string, state any) error
+	GetState(ctx context.Context, actorType string, actorID string, dest any) error
+	DeleteState(ctx context.Context, actorType string, actorID string) error
 }

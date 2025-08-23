@@ -2,6 +2,7 @@ package components
 
 import (
 	"context"
+	"log/slog"
 	"time"
 )
 
@@ -44,7 +45,7 @@ type ActorProvider interface {
 	GetState(ctx context.Context, ref ActorRef) ([]byte, error)
 
 	// SetState sets the persistent state of an actor.
-	SetState(ctx context.Context, ref ActorRef, data []byte) error
+	SetState(ctx context.Context, ref ActorRef, data []byte, opts SetStateOpts) error
 
 	// DeleteState deletes the persistent state of an actor.
 	// If there's no state, returns ErrNoState.
@@ -53,6 +54,9 @@ type ActorProvider interface {
 
 // ProviderOptions contains the configuration for the actor provider
 type ProviderOptions struct {
+	// Instance of a slog.Logger
+	Logger *slog.Logger
+
 	// Maximum interval between pings received from an actor host.
 	HostHealthCheck time.Duration
 
@@ -136,4 +140,9 @@ type SetAlarmReq struct {
 	DueTime time.Time
 	Period  time.Duration
 	TTL     time.Time
+}
+
+// SetStateOpts contains options for SetState
+type SetStateOpts struct {
+	TTL time.Duration
 }

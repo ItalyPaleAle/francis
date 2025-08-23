@@ -16,6 +16,7 @@ import (
 const (
 	DefaultBusyTimeout      = 2500 * time.Millisecond
 	DefaultConnectionString = "data.db"
+	DefaultTimeout          = 5 * time.Second
 )
 
 // IsInMemoryDB returns true if the connection string is for an in-memory database.

@@ -1,7 +1,7 @@
 CREATE TABLE hosts (
     host_id text NOT NULL PRIMARY KEY,
     host_address text NOT NULL,
-    host_last_health_check timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
+    host_last_health_check integer NOT NULL DEFAULT (unixepoch())
 );
 
 CREATE UNIQUE INDEX host_address_idx ON hosts (host_address);
@@ -20,13 +20,24 @@ CREATE TABLE host_actor_types (
 
 CREATE INDEX actor_type_idx ON host_actor_types (actor_type);
 
-CREATE TABLE actors (
-    actor_id text NOT NULL,
+CREATE TABLE active_actors (
     actor_type text NOT NULL,
+    actor_id text NOT NULL,
     host_id text,
     actor_idle_timeout integer NOT NULL,
-    actor_activation timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    actor_activation integer NOT NULL DEFAULT (unixepoch()),
 
     PRIMARY KEY (actor_type, actor_id),
     FOREIGN KEY (host_id) REFERENCES hosts (host_id) ON DELETE CASCADE
 );
+
+CREATE TABLE actor_state (
+    actor_type text NOT NULL,
+    actor_id text NOT NULL,
+    actor_state_data blob NOT NULL,
+    actor_state_expiration integer,
+
+    PRIMARY KEY (actor_type, actor_id)
+);
+
+CREATE INDEX actor_state_expiration_idx ON actor_state (actor_state_expiration) WHERE actor_state_expiration IS NOT NULL;

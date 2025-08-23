@@ -7,8 +7,8 @@ import (
 
 // Client allows interacting with the actor service, and it's pre-configured for the active actor
 type Client[T any] interface {
-	// SaveState saves the actor's state.
-	SaveState(ctx context.Context, state T) error
+	// SetState saves the actor's state.
+	SetState(ctx context.Context, state T) error
 	// GetState retrieves the actor's state.
 	GetState(ctx context.Context) (state T, err error)
 	// DeleteState deletes the actor's state.
@@ -36,9 +36,9 @@ func NewActorClient[T any](actorType string, actorID string, service *Service) C
 	}
 }
 
-// SaveState saves the actor's state.
-func (c *client[T]) SaveState(ctx context.Context, state T) error {
-	err := c.service.saveActorState(ctx, c.actorType, c.actorID, state)
+// SetState saves the actor's state.
+func (c *client[T]) SetState(ctx context.Context, state T) error {
+	err := c.service.setState(ctx, c.actorType, c.actorID, state)
 	if err != nil {
 		return err
 	}
@@ -56,7 +56,7 @@ func (c *client[T]) GetState(ctx context.Context) (state T, err error) {
 		return c.state, nil
 	}
 
-	err = c.service.getActorState(ctx, c.actorType, c.actorID, &state)
+	err = c.service.getState(ctx, c.actorType, c.actorID, &state)
 	// Ignore the error indicating the state can't be found, and return a zero state
 	if err != nil && !errors.Is(err, ErrStateNotFound) {
 		return state, err
@@ -76,15 +76,15 @@ func (c *client[T]) DeleteState(ctx context.Context) error {
 	c.hasState = true
 	c.state = zero
 
-	return c.service.deleteActorState(ctx, c.actorType, c.actorID)
+	return c.service.deleteState(ctx, c.actorType, c.actorID)
 }
 
 // SetAlarm creates or replaces an alarm.
 func (c *client[T]) SetAlarm(ctx context.Context, alarmName string, opts AlarmOptions) error {
-	return c.service.setActorAlarm(ctx, c.actorType, c.actorID, alarmName, opts)
+	return c.service.setAlarm(ctx, c.actorType, c.actorID, alarmName, opts)
 }
 
 // DeleteAlarm deletes an alarm.
 func (c *client[T]) DeleteAlarm(ctx context.Context, alarmName string) error {
-	return c.service.deleteActorAlarm(ctx, c.actorType, c.actorID, alarmName)
+	return c.service.deleteAlarm(ctx, c.actorType, c.actorID, alarmName)
 }
