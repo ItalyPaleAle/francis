@@ -30,7 +30,7 @@ type SQLiteProvider struct {
 	timeout      time.Duration
 }
 
-func NewSQLiteProvider(sqliteOpts SQLiteProviderOptions, providerOpts components.ProviderOptions) (components.ActorProvider, error) {
+func NewSQLiteProvider(ctx context.Context, sqliteOpts SQLiteProviderOptions, providerOpts components.ProviderOptions) (components.ActorProvider, error) {
 	var err error
 
 	s := &SQLiteProvider{
@@ -54,6 +54,11 @@ func NewSQLiteProvider(sqliteOpts SQLiteProviderOptions, providerOpts components
 		s.timeout = DefaultTimeout
 	}
 
+	// Warn if the timeout is greater than HostHealthCheckDeadline
+	if s.timeout >= s.providerOpts.HostHealthCheckDeadline {
+		s.log.Warn("The configured query host health check deadline is not bigger than the query timeout, this could cause issues")
+	}
+
 	// Parse the connection string
 	if sqliteOpts.ConnectionString == "" {
 		sqliteOpts.ConnectionString = DefaultConnectionString
@@ -67,6 +72,12 @@ func NewSQLiteProvider(sqliteOpts SQLiteProviderOptions, providerOpts components
 	s.db, err = sql.Open("sqlite", sqliteOpts.ConnectionString)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
+	}
+
+	// Migrate schema
+	err = s.performMigrations(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to perform migrations: %w", err)
 	}
 
 	return s, nil
@@ -83,12 +94,6 @@ type SQLiteProviderOptions struct {
 func (s *SQLiteProvider) Run(ctx context.Context) error {
 	if !s.running.CompareAndSwap(false, true) {
 		return components.ErrAlreadyRunning
-	}
-
-	// Migrate schema
-	err := s.performMigrations(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to perform migrations: %w", err)
 	}
 
 	<-ctx.Done()

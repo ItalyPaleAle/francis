@@ -30,6 +30,7 @@ func runWorker(ctx context.Context) error {
 
 	// Init the provider
 	provider, err := sqlite.NewSQLiteProvider(
+		ctx,
 		sqlite.SQLiteProviderOptions{
 			ConnectionString: "data.db",
 		},
@@ -42,7 +43,7 @@ func runWorker(ctx context.Context) error {
 	}
 
 	// Create and init a new actor host
-	h, err := host.NewHost(provider)
+	h, err := host.NewHost(provider, "todo")
 	if err != nil {
 		return fmt.Errorf("failed to create actor host: %w", err)
 	}

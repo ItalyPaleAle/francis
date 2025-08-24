@@ -118,6 +118,11 @@ type ActorRef struct {
 	ActorID   string
 }
 
+// String implements fmt.Stringer.
+func (r ActorRef) String() string {
+	return r.ActorType + "/" + r.ActorID
+}
+
 // LookupActorOpts contains options for LookupActor.
 type LookupActorOpts struct {
 	// List of hosts on which the actor can be activated.

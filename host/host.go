@@ -23,6 +23,9 @@ const (
 
 // Host is an actor host.
 type Host struct {
+	// Address the host is reachable at
+	address string
+
 	running       atomic.Bool
 	actorProvider components.ActorProvider
 	service       *actor.Service
@@ -43,7 +46,7 @@ type RegisterActorOptions struct {
 }
 
 // NewHost returns a new actor host.
-func NewHost(actorProvider components.ActorProvider) (*Host, error) {
+func NewHost(actorProvider components.ActorProvider, address string) (*Host, error) {
 	if actorProvider == nil {
 		return nil, errors.New("actor provider is nil")
 	}
@@ -119,16 +122,15 @@ func (h *Host) Run(ctx context.Context) error {
 	defer h.running.Store(false)
 
 	// Register the host
-	address := "todo"
 	res, err := h.actorProvider.RegisterHost(ctx, components.RegisterHostReq{
-		Address:    address,
+		Address:    h.address,
 		ActorTypes: h.actorsConfig,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to register actor host: %w", err)
 	}
 
-	slog.InfoContext(ctx, "Registered actor host", "hostId", res.HostID, "address", address)
+	slog.InfoContext(ctx, "Registered actor host", "hostId", res.HostID, "address", h.address)
 
 	defer func() {
 		// Use a background context here as the parent one is likely canceled at this point
@@ -154,12 +156,23 @@ func (h *Host) Run(ctx context.Context) error {
 }
 
 func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, method string, data any) (any, error) {
+	// Look up the actor
+	ref := actorRef(actorType, actorID)
+	res, err := h.actorProvider.LookupActor(ctx, ref, components.LookupActorOpts{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to look up actor '%s': %w", ref, err)
+	}
+
 	// TODO: Check if actor is not local
-	return h.invokeLocal(ctx, actorType, actorID, method, data)
+	if res.Address != h.address {
+		return nil, errors.New("invoking remote actors not yet implemented")
+	}
+
+	return h.invokeLocal(ctx, ref, method, data)
 }
 
-func (h *Host) invokeLocal(ctx context.Context, actorType string, actorID string, method string, data any) (any, error) {
-	actor, err := h.getOrCreateActor(actorType, actorID)
+func (h *Host) invokeLocal(ctx context.Context, ref components.ActorRef, method string, data any) (any, error) {
+	actor, err := h.getOrCreateActor(ref)
 	if err != nil {
 		return nil, err
 	}
@@ -168,8 +181,8 @@ func (h *Host) invokeLocal(ctx context.Context, actorType string, actorID string
 	return actor.Invoke(ctx, method, data)
 }
 
-func (h *Host) executeAlarm(ctx context.Context, actorType string, actorID string, name string, data any) error {
-	actor, err := h.getOrCreateActor(actorType, actorID)
+func (h *Host) executeAlarm(ctx context.Context, ref components.ActorRef, name string, data any) error {
+	actor, err := h.getOrCreateActor(ref)
 	if err != nil {
 		return err
 	}
@@ -178,28 +191,30 @@ func (h *Host) executeAlarm(ctx context.Context, actorType string, actorID strin
 	return actor.Alarm(ctx, name, data)
 }
 
-func (h *Host) getOrCreateActor(actorType string, actorID string) (actor.Actor, error) {
+func (h *Host) getOrCreateActor(ref components.ActorRef) (actor.Actor, error) {
+	// TODO: Idle timeout
+
 	// Get the factory function
-	fn, err := h.createActorFn(actorType, actorID)
+	fn, err := h.createActorFn(ref)
 	if err != nil {
 		return nil, err
 	}
 
 	// Get (or create) the actor
-	actor, _ := h.actors.GetOrCompute(actorType+"/"+actorID, fn)
+	actor, _ := h.actors.GetOrCompute(ref.String(), fn)
 
 	return actor, nil
 }
 
-func (h *Host) createActorFn(actorType string, actorID string) (func() actor.Actor, error) {
+func (h *Host) createActorFn(ref components.ActorRef) (func() actor.Actor, error) {
 	// We don't need a locking mechanism here as this map is "locked" after the service has started
-	factoryFn := h.actorFactories[actorType]
+	factoryFn := h.actorFactories[ref.ActorType]
 	if factoryFn == nil {
 		return nil, errors.New("unsupported actor type")
 	}
 
 	return func() actor.Actor {
-		return factoryFn(actorID, h.service)
+		return factoryFn(ref.ActorID, h.service)
 	}, nil
 }
 

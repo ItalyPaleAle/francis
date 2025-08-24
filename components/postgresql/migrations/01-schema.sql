@@ -23,7 +23,7 @@ CREATE INDEX actor_type_idx ON host_actor_types (actor_type);
 CREATE TABLE active_actors (
     actor_type text NOT NULL,
     actor_id text NOT NULL,
-    host_id uuid,
+    host_id uuid NOT NULL,
     actor_idle_timeout integer NOT NULL,
     actor_activation timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
 

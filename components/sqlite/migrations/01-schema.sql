@@ -23,7 +23,7 @@ CREATE INDEX actor_type_idx ON host_actor_types (actor_type);
 CREATE TABLE active_actors (
     actor_type text NOT NULL,
     actor_id text NOT NULL,
-    host_id text,
+    host_id text NOT NULL,
     actor_idle_timeout integer NOT NULL,
     actor_activation integer NOT NULL DEFAULT (unixepoch()),
 
@@ -41,3 +41,9 @@ CREATE TABLE actor_state (
 );
 
 CREATE INDEX actor_state_expiration_idx ON actor_state (actor_state_expiration) WHERE actor_state_expiration IS NOT NULL;
+
+CREATE VIEW host_active_actor_count
+	(host_id, actor_type, active_count)
+AS SELECT host_id, actor_type, COUNT(ROWID)
+FROM active_actors
+GROUP BY host_id, actor_type;
