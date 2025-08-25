@@ -47,7 +47,10 @@ func runWorker(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to create actor host: %w", err)
 	}
-	h.RegisterActor("myactor", NewMyActor, host.RegisterActorOptions{})
+	err = h.RegisterActor("myactor", NewMyActor, host.RegisterActorOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to register actor 'myactor': %w", err)
+	}
 
 	// Get the service
 	actorService := h.Service()

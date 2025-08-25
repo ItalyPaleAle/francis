@@ -59,7 +59,7 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 		// Insert all supported host types
 		err = s.insertHostActorTypes(ctx, tx, hostID, req.ActorTypes)
 		if err != nil {
-			return zero, err
+			return zero, fmt.Errorf("error inserting supported actor types: %w", err)
 		}
 
 		return zero, nil
@@ -73,15 +73,91 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 	}, nil
 }
 
-func (s *SQLiteProvider) UpdateActorHost(ctx context.Context, actorHostID string, req components.UpdateActorHostReq) error {
+func (s *SQLiteProvider) UpdateActorHost(ctx context.Context, hostID string, req components.UpdateActorHostReq) error {
+	// At this stage, there are two things we can update here (one or both):
+	// - The last health check
+	// - The list of supported actor types (if non-nil)
+	if !req.UpdateLastHealthCheck && req.ActorTypes == nil {
+		// Nothing to do/update
+		return nil
+	}
+
+	_, oErr := transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
+		// Update the last health check if needed
+		if req.UpdateLastHealthCheck {
+			err = s.updateActorHostLastHealthCheck(ctx, hostID, tx)
+			if err != nil {
+				return zero, fmt.Errorf("failed to update last health check: %w", err)
+			}
+		}
+
+		// Also update the list of supported actor types if non-nil
+		// Note that a nil list means "do not update", while an empty, non-nil list causes the removal of all supported actor types
+		if req.ActorTypes != nil {
+			// First, delete all supported actor types for the host
+			queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+			defer cancel()
+			_, err = tx.
+				ExecContext(queryCtx,
+					`DELETE FROM host_actor_types WHERE host_id = ?`,
+					hostID,
+				)
+			if err != nil {
+				return zero, fmt.Errorf("error executing query: %w", err)
+			}
+
+			// Insert the new supported actor types
+			err = s.insertHostActorTypes(ctx, tx, hostID, req.ActorTypes)
+			if err != nil {
+				return zero, fmt.Errorf("error inserting supported actor types: %w", err)
+			}
+		}
+
+		return zero, nil
+	})
+	if oErr != nil {
+		return fmt.Errorf("failed to update host: %w", oErr)
+	}
+
 	return nil
 }
 
-func (s *SQLiteProvider) UnregisterHost(ctx context.Context, actorHostID string) error {
+func (s *SQLiteProvider) updateActorHostLastHealthCheck(ctx context.Context, hostID string, tx *sql.Tx) error {
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	res, err := tx.
+		ExecContext(queryCtx,
+			`UPDATE hosts
+		SET
+			host_last_health_check = unixepoch()
+		WHERE
+			host_id = ?
+			AND host_last_health_check >= (unixepoch() - ?)`,
+			hostID, s.providerOpts.HostHealthCheckDeadline,
+		)
+	if err != nil {
+		return fmt.Errorf("error executing query: %w", err)
+	}
+
+	// Check how many rows were updated.
+	// Because we added a check for the last health check, if the host hadn't been updated in too long,
+	// it may have been considered un-healthy already, and no row would be updated.
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("error counting affected rows: %w", err)
+	}
+	if affected == 0 {
+		return components.ErrHostUnregistered
+	}
+
+	return nil
+}
+
+func (s *SQLiteProvider) UnregisterHost(ctx context.Context, hostID string) error {
 	// Deleting from the hosts table causes all actors to be deactivate
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-	res, err := s.db.ExecContext(queryCtx, "DELETE FROM hosts WHERE host_id = ?", actorHostID)
+	res, err := s.db.ExecContext(queryCtx, "DELETE FROM hosts WHERE host_id = ?", hostID)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)
 	}
@@ -276,7 +352,7 @@ func (s *SQLiteProvider) insertHostActorTypes(ctx context.Context, tx *sql.Tx, h
 	defer cancel()
 	_, err := tx.ExecContext(queryCtx, q.String(), args...)
 	if err != nil {
-		return fmt.Errorf("error inserting supported actor types: %w", err)
+		return fmt.Errorf("error executing query: %w", err)
 	}
 
 	return nil
