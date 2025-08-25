@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -106,14 +107,9 @@ func runControlServer(actorService *actor.Service) func(ctx context.Context) err
 
 			if resp != nil {
 				w.WriteHeader(http.StatusOK)
-				switch v := resp.(type) {
-				case []byte:
-					_, _ = w.Write(v)
-				case string:
-					_, _ = w.Write([]byte(v))
-				default:
-					// ignore unsupported types; could add encoding here if needed
-				}
+				enc := json.NewEncoder(w)
+				enc.SetEscapeHTML(false)
+				enc.Encode(resp)
 			} else {
 				w.WriteHeader(http.StatusNoContent)
 			}
