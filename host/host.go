@@ -15,6 +15,7 @@ import (
 	"github.com/italypaleale/actors/actor"
 	"github.com/italypaleale/actors/components"
 	"github.com/italypaleale/actors/components/sqlite"
+	"github.com/italypaleale/actors/internal/servicerunner"
 )
 
 const (
@@ -30,6 +31,9 @@ type Host struct {
 	// Address the host is reachable at
 	address string
 
+	// Host ID for the registered host
+	hostID string
+
 	running       atomic.Bool
 	actorProvider components.ActorProvider
 	service       *actor.Service
@@ -40,6 +44,8 @@ type Host struct {
 	// Active actors; key is "actorType/actorID"
 	actors       *haxmap.Map[string, actor.Actor]
 	actorsConfig []components.ActorHostType
+
+	log *slog.Logger
 }
 
 // RegisterActorOptions is the type for the options for the RegisterActor method.
@@ -116,10 +122,12 @@ func NewHost(opts NewHostOptions) (*Host, error) {
 	}
 
 	h := &Host{
+		address:        opts.Address,
 		actorProvider:  actorProvider,
 		actorsConfig:   []components.ActorHostType{},
 		actorFactories: map[string]actor.Factory{},
 		actors:         haxmap.New[string, actor.Actor](defaultActorsMapSize),
+		log:            opts.Logger,
 	}
 	h.service = actor.NewService(h)
 
@@ -180,11 +188,14 @@ func (h *Host) RegisterActor(actorType string, factory actor.Factory, opts Regis
 
 // Run the host service.
 // Note this function is blocking, and will return only when the service is shut down via context cancellation.
-func (h *Host) Run(ctx context.Context) error {
+func (h *Host) Run(parentCtx context.Context) error {
 	if !h.running.CompareAndSwap(false, true) {
 		return errors.New("service is already running")
 	}
 	defer h.running.Store(false)
+
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
 
 	// Perform initialization steps
 	err := h.actorProvider.Init(ctx)
@@ -201,8 +212,12 @@ func (h *Host) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to register actor host: %w", err)
 	}
 
-	slog.InfoContext(ctx, "Registered actor host", "hostId", res.HostID, "address", h.address)
+	h.hostID = res.HostID
 
+	h.log.InfoContext(ctx, "Registered actor host", "hostId", h.hostID, "address", h.address)
+
+	// Upon returning, we unregister the host so it can be removed cleanly
+	// If the application crashes and this code isn't executed, eventually the host will be removed for not sending health checks periodically
 	defer func() {
 		// Use a background context here as the parent one is likely canceled at this point
 		unregisterCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -210,20 +225,49 @@ func (h *Host) Run(ctx context.Context) error {
 
 		unregisterErr := h.actorProvider.UnregisterHost(unregisterCtx, res.HostID)
 		if unregisterErr != nil {
-			slog.WarnContext(unregisterCtx, "Error unregistering actor host", "error", unregisterErr, "hostId", res.HostID)
+			h.log.WarnContext(unregisterCtx, "Error unregistering actor host", "error", unregisterErr, "hostId", res.HostID)
 			return
 		}
 
-		slog.InfoContext(ctx, "Unregistered actor host", "hostId", res.HostID)
+		h.log.InfoContext(ctx, "Unregistered actor host", "hostId", res.HostID)
 	}()
 
-	// This call blocks until the context is canceled
-	err = h.actorProvider.Run(ctx)
-	if err != nil {
-		return fmt.Errorf("error running actor provider: %w", err)
-	}
+	return servicerunner.
+		NewServiceRunner(
+			// Perform health checks in background
+			h.runHealthChecks,
 
-	return nil
+			// Run the actor provider
+			h.actorProvider.Run,
+		).
+		Run(ctx)
+}
+
+func (h *Host) runHealthChecks(ctx context.Context) error {
+	var err error
+
+	// Perform periodic health checks
+	interval := h.actorProvider.HealthCheckInterval()
+	h.log.DebugContext(ctx, "Starting background health checks", "interval", interval)
+
+	t := time.NewTicker(interval)
+	defer t.Stop()
+
+	for {
+		select {
+		case <-t.C:
+			h.log.DebugContext(ctx, "Sending health check to the provider")
+			err = h.actorProvider.UpdateActorHost(ctx, h.hostID, components.UpdateActorHostReq{UpdateLastHealthCheck: true})
+			if err != nil {
+				// TODO: Should we retry once in case of errors?
+				h.log.ErrorContext(ctx, "Health check failed", slog.Any("error", err))
+				return fmt.Errorf("failed to perform health check: %w", err)
+			}
+		case <-ctx.Done():
+			// Stop when the context is canceled
+			return ctx.Err()
+		}
+	}
 }
 
 func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, method string, data any) (any, error) {

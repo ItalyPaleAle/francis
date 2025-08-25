@@ -6,7 +6,11 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"time"
+
+	"github.com/lmittmann/tint"
+	"github.com/mattn/go-isatty"
 
 	"github.com/italypaleale/actors/actor"
 	"github.com/italypaleale/actors/host"
@@ -14,22 +18,42 @@ import (
 	"github.com/italypaleale/actors/internal/signals"
 )
 
+var log *slog.Logger
+
 func main() {
+	log = initLogger(slog.LevelDebug)
+
 	ctx := signals.SignalContext(context.Background())
 
 	err := runWorker(ctx)
 	if err != nil {
-		slog.Error("Error running worker", slog.Any("error", err))
+		log.Error("Error running worker", slog.Any("error", err))
+		os.Exit(1)
 	}
 }
 
-func runWorker(ctx context.Context) error {
-	log := slog.Default()
+func initLogger(level slog.Level) *slog.Logger {
+	var handler slog.Handler
+	if isatty.IsTerminal(os.Stdout.Fd()) {
+		// Enable colors if we have a TTY
+		handler = tint.NewHandler(os.Stdout, &tint.Options{
+			TimeFormat: time.StampMilli,
+			Level:      level,
+		})
+	} else {
+		handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+			Level: level,
+		})
+	}
 
+	return slog.New(handler)
+}
+
+func runWorker(ctx context.Context) error {
 	// Create a new actor host
 	h, err := host.NewHost(host.NewHostOptions{
 		Address: "todo",
-		Logger:  log,
+		Logger:  log.With("scope", "actor-host"),
 		ProviderOptions: host.SQLiteProviderOptions{
 			ConnectionString: "data.db",
 		},
@@ -102,7 +126,7 @@ func runControlServer(actorService *actor.Service) func(ctx context.Context) err
 		serveErrCh := make(chan error, 1)
 
 		go func() {
-			slog.Info("Control server listening", slog.String("addr", server.Addr))
+			log.Info("Control server listening", slog.String("addr", server.Addr))
 			rErr := server.ListenAndServe()
 			if rErr != nil && rErr != http.ErrServerClosed {
 				serveErrCh <- rErr
@@ -117,7 +141,7 @@ func runControlServer(actorService *actor.Service) func(ctx context.Context) err
 			defer shutdownErr()
 			err := server.Shutdown(shutdownCtx)
 			if err != nil {
-				slog.Warn("Error shutting down server", slog.Any("error", err))
+				log.Warn("Error shutting down server", slog.Any("error", err))
 			}
 		case err := <-serveErrCh:
 			return err

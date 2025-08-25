@@ -19,9 +19,9 @@ type myActorState struct {
 }
 
 func NewMyActor(actorID string, service *actor.Service) actor.Actor {
-	log := slog.
-		Default().
+	log := log.
 		With(
+			slog.String("scope", "actor"),
 			slog.String("actorType", "myactor"),
 			slog.String("actorID", actorID),
 		)

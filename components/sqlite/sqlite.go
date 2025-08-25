@@ -45,9 +45,12 @@ func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, provi
 		s.timeout = DefaultTimeout
 	}
 
-	// Warn if the timeout is greater than HostHealthCheckDeadline
+	// The query timeout should be greater than HostHealthCheckDeadline
 	if s.timeout >= s.cfg.HostHealthCheckDeadline {
-		s.log.Warn("The configured query host health check deadline is not bigger than the query timeout, this could cause issues")
+		return nil, fmt.Errorf("the configured host health check deadline ('%v') must be bigger than the query timeout ('%v')", s.timeout, s.cfg.HostHealthCheckDeadline)
+	}
+	if s.cfg.HostHealthCheckDeadline-s.timeout < 5*time.Second {
+		s.log.Warn("The configured host health check deadline is less than 5s more than the query timeout: this could cause issues", "healthCheckDeadline", s.cfg.HostHealthCheckDeadline, "queryTimeout", s.timeout)
 	}
 
 	// Parse the connection string
@@ -95,6 +98,18 @@ func (s *SQLiteProvider) Run(ctx context.Context) error {
 
 	<-ctx.Done()
 	return nil
+}
+
+func (s *SQLiteProvider) HealthCheckInterval() time.Duration {
+	// The recommended health check interval is the deadline, less the query timeout, less 1s, then rounded down to the closest 5s
+	interval := (s.cfg.HostHealthCheckDeadline - s.timeout - time.Second).Truncate(time.Second)
+	interval = interval - time.Duration(int64(interval.Seconds())%5)*time.Second
+
+	// ...however, there's a minimum of 1s
+	if interval < time.Second {
+		interval = time.Second
+	}
+	return interval
 }
 
 func (s *SQLiteProvider) performMigrations(ctx context.Context) error {

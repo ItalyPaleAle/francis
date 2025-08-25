@@ -59,6 +59,9 @@ type ActorProvider interface {
 	// DeleteState deletes the persistent state of an actor.
 	// If there's no state, returns ErrNoState.
 	DeleteState(ctx context.Context, ref ActorRef) error
+
+	// HealthCheckInterval returns the recommended health check interval for hosts.
+	HealthCheckInterval() time.Duration
 }
 
 // ProviderOptions is an empty interface implemented by all options structs for providers
