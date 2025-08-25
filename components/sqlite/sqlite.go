@@ -23,39 +23,30 @@ import (
 var migrationScripts embed.FS
 
 type SQLiteProvider struct {
-	providerOpts components.ProviderOptions
-	db           *sql.DB
-	running      atomic.Bool
-	log          *slog.Logger
-	timeout      time.Duration
+	cfg     components.ProviderConfig
+	db      *sql.DB
+	running atomic.Bool
+	log     *slog.Logger
+	timeout time.Duration
 }
 
-func NewSQLiteProvider(ctx context.Context, sqliteOpts SQLiteProviderOptions, providerOpts components.ProviderOptions) (components.ActorProvider, error) {
+func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, providerConfig components.ProviderConfig) (components.ActorProvider, error) {
 	var err error
 
 	s := &SQLiteProvider{
-		providerOpts: providerOpts,
-		log:          providerOpts.Logger,
-		timeout:      sqliteOpts.Timeout,
+		cfg:     providerConfig,
+		log:     log,
+		timeout: sqliteOpts.Timeout,
 	}
 
-	// Ensure the logger is non-nil
-	if s.log == nil {
-		s.log = slog.New(slog.DiscardHandler)
-	}
-
-	// Set default health check deadline
-	if s.providerOpts.HostHealthCheckDeadline <= time.Second {
-		s.providerOpts.HostHealthCheckDeadline = components.HostHealthCheckDeadline
-	}
-
-	// Set default timeout if empty
+	// Set default values
+	s.cfg.SetDefaults()
 	if s.timeout <= 0 {
 		s.timeout = DefaultTimeout
 	}
 
 	// Warn if the timeout is greater than HostHealthCheckDeadline
-	if s.timeout >= s.providerOpts.HostHealthCheckDeadline {
+	if s.timeout >= s.cfg.HostHealthCheckDeadline {
 		s.log.Warn("The configured query host health check deadline is not bigger than the query timeout, this could cause issues")
 	}
 
@@ -74,21 +65,27 @@ func NewSQLiteProvider(ctx context.Context, sqliteOpts SQLiteProviderOptions, pr
 		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
 	}
 
-	// Migrate schema
-	err = s.performMigrations(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to perform migrations: %w", err)
-	}
-
 	return s, nil
 }
 
 type SQLiteProviderOptions struct {
+	components.ProviderOptions
+
 	// Connection string or path to the SQLite database
 	ConnectionString string
 
 	// Timeout for requests to the database
 	Timeout time.Duration
+}
+
+func (s *SQLiteProvider) Init(ctx context.Context) error {
+	// Perform schema migrations
+	err := s.performMigrations(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to perform schema migrations: %w", err)
+	}
+
+	return nil
 }
 
 func (s *SQLiteProvider) Run(ctx context.Context) error {

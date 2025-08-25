@@ -2,14 +2,21 @@ package components
 
 import (
 	"context"
-	"log/slog"
 	"time"
 )
 
-const HostHealthCheckDeadline = 30 * time.Second
+const (
+	DefaultHostHealthCheckDeadline  = 20 * time.Second
+	DefaultAlarmsLeaseDuration      = 20 * time.Second
+	DefaultAlarmsFetchAheadInterval = 2500 * time.Millisecond
+	DefaultAlarmsFetchAheadBatch    = 25
+)
 
 // ActorProvider is the interface implemented by all actor providers
 type ActorProvider interface {
+	// Init the actor provider
+	Init(ctx context.Context) error
+
 	// Run the actor provider
 	// This method blocks until the context is canceled
 	// If the provider is already running, returns ErrAlreadyRunning
@@ -54,11 +61,11 @@ type ActorProvider interface {
 	DeleteState(ctx context.Context, ref ActorRef) error
 }
 
-// ProviderOptions contains the configuration for the actor provider
-type ProviderOptions struct {
-	// Instance of a slog.Logger
-	Logger *slog.Logger
+// ProviderOptions is an empty interface implemented by all options structs for providers
+type ProviderOptions interface{}
 
+// ProviderConfig contains the configuration for the actor provider
+type ProviderConfig struct {
 	// Maximum interval between pings received from an actor host.
 	HostHealthCheckDeadline time.Duration
 
@@ -69,7 +76,22 @@ type ProviderOptions struct {
 	AlarmsFetchAheadInterval time.Duration
 
 	// Batch size for pre-fetching alarms
-	AlarmsFetchAheadBatch int
+	AlarmsFetchAheadBatchSize int
+}
+
+func (o *ProviderConfig) SetDefaults() {
+	if o.HostHealthCheckDeadline < time.Second {
+		o.HostHealthCheckDeadline = DefaultHostHealthCheckDeadline
+	}
+	if o.AlarmsLeaseDuration < time.Second {
+		o.AlarmsLeaseDuration = DefaultAlarmsLeaseDuration
+	}
+	if o.AlarmsFetchAheadInterval < 100*time.Millisecond {
+		o.AlarmsFetchAheadInterval = DefaultAlarmsFetchAheadInterval
+	}
+	if o.AlarmsFetchAheadBatchSize <= 0 {
+		o.AlarmsFetchAheadBatchSize = DefaultAlarmsFetchAheadBatch
+	}
 }
 
 // RegisterHostReq is the request object for the RegisterHost method.

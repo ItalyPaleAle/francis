@@ -34,7 +34,7 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 				host_address = ?
 				OR host_last_health_check < (unixepoch() - ?)`,
 			req.Address,
-			s.providerOpts.HostHealthCheckDeadline,
+			int64(s.cfg.HostHealthCheckDeadline.Seconds()),
 		)
 		if err != nil {
 			return zero, fmt.Errorf("error removing failed hosts: %w", err)
@@ -133,7 +133,8 @@ func (s *SQLiteProvider) updateActorHostLastHealthCheck(ctx context.Context, hos
 		WHERE
 			host_id = ?
 			AND host_last_health_check >= (unixepoch() - ?)`,
-			hostID, s.providerOpts.HostHealthCheckDeadline,
+			hostID,
+			int64(s.cfg.HostHealthCheckDeadline.Seconds()),
 		)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)
@@ -186,7 +187,9 @@ func (s *SQLiteProvider) LookupActor(ctx context.Context, ref components.ActorRe
 					active_actors.actor_type = ?
 					AND active_actors.actor_id = ?
 					AND hosts.host_last_health_check >= (unixepoch() - ?)`,
-				ref.ActorType, ref.ActorID, s.providerOpts.HostHealthCheckDeadline,
+				ref.ActorType,
+				ref.ActorID,
+				int64(s.cfg.HostHealthCheckDeadline.Seconds()),
 			).
 			Scan(&res.HostID, &res.Address, &res.IdleTimeout)
 
@@ -219,7 +222,7 @@ func (s *SQLiteProvider) LookupActor(ctx context.Context, ref components.ActorRe
 		// First, find a host that is capable of executing the actor and has capacity
 		// We start by building the host restrictions, if any
 		params := make([]any, 0, len(opts.Hosts)+2)
-		params = append(params, ref.ActorType, s.providerOpts.HostHealthCheckDeadline)
+		params = append(params, ref.ActorType, int64(s.cfg.HostHealthCheckDeadline.Seconds()))
 		hostClause := strings.Builder{}
 		if len(opts.Hosts) > 0 {
 			hostClause.Grow(len("hosts.host_id=? OR ")*len(opts.Hosts) + len("AND ()"))
@@ -256,7 +259,9 @@ func (s *SQLiteProvider) LookupActor(ctx context.Context, ref components.ActorRe
 					)
 				`+hostClause.String()+`
 				ORDER BY random() LIMIT 1`,
-				ref.ActorType, s.providerOpts.HostHealthCheckDeadline).
+				ref.ActorType,
+				int64(s.cfg.HostHealthCheckDeadline.Seconds()),
+			).
 			Scan(&res.HostID, &res.Address, &res.IdleTimeout)
 
 		if err != nil {

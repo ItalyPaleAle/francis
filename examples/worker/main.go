@@ -9,8 +9,6 @@ import (
 	"time"
 
 	"github.com/italypaleale/actors/actor"
-	"github.com/italypaleale/actors/components"
-	"github.com/italypaleale/actors/components/sqlite"
 	"github.com/italypaleale/actors/host"
 	"github.com/italypaleale/actors/internal/servicerunner"
 	"github.com/italypaleale/actors/internal/signals"
@@ -28,25 +26,19 @@ func main() {
 func runWorker(ctx context.Context) error {
 	log := slog.Default()
 
-	// Init the provider
-	provider, err := sqlite.NewSQLiteProvider(
-		ctx,
-		sqlite.SQLiteProviderOptions{
+	// Create a new actor host
+	h, err := host.NewHost(host.NewHostOptions{
+		Address: "todo",
+		Logger:  log,
+		ProviderOptions: host.SQLiteProviderOptions{
 			ConnectionString: "data.db",
 		},
-		components.ProviderOptions{
-			Logger: log,
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("failed to init provider: %w", err)
-	}
-
-	// Create and init a new actor host
-	h, err := host.NewHost(provider, "todo")
+	})
 	if err != nil {
 		return fmt.Errorf("failed to create actor host: %w", err)
 	}
+
+	// Register all supported actors
 	err = h.RegisterActor("myactor", NewMyActor, host.RegisterActorOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to register actor 'myactor': %w", err)
@@ -88,9 +80,8 @@ func runControlServer(actorService *actor.Service) func(ctx context.Context) err
 				return
 			}
 
-			w.WriteHeader(http.StatusOK)
-
 			if resp != nil {
+				w.WriteHeader(http.StatusOK)
 				switch v := resp.(type) {
 				case []byte:
 					_, _ = w.Write(v)
@@ -99,6 +90,8 @@ func runControlServer(actorService *actor.Service) func(ctx context.Context) err
 				default:
 					// ignore unsupported types; could add encoding here if needed
 				}
+			} else {
+				w.WriteHeader(http.StatusNoContent)
 			}
 		})
 
@@ -109,7 +102,7 @@ func runControlServer(actorService *actor.Service) func(ctx context.Context) err
 		serveErrCh := make(chan error, 1)
 
 		go func() {
-			slog.Info("control server listening", slog.String("addr", server.Addr))
+			slog.Info("Control server listening", slog.String("addr", server.Addr))
 			rErr := server.ListenAndServe()
 			if rErr != nil && rErr != http.ErrServerClosed {
 				serveErrCh <- rErr

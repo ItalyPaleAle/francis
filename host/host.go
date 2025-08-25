@@ -14,12 +14,16 @@ import (
 
 	"github.com/italypaleale/actors/actor"
 	"github.com/italypaleale/actors/components"
+	"github.com/italypaleale/actors/components/sqlite"
 )
 
 const (
 	defaultActorsMapSize = 32
 	defaultIdleTimeout   = int64(15 * 60) // 15 minutes
 )
+
+// Re-export provider options
+type SQLiteProviderOptions = sqlite.SQLiteProviderOptions
 
 // Host is an actor host.
 type Host struct {
@@ -45,10 +49,70 @@ type RegisterActorOptions struct {
 	AlarmConcurrencyLimit int
 }
 
+type NewHostOptions struct {
+	// Address where the host can be reached at
+	Address string
+
+	// Instance of a slog.Logger
+	Logger *slog.Logger
+
+	// Options for the provider
+	ProviderOptions components.ProviderOptions
+
+	// Maximum interval between pings received from an actor host.
+	HostHealthCheckDeadline time.Duration
+
+	// Alarms lease duration
+	AlarmsLeaseDuration time.Duration
+
+	// Pre-fetch interval for alarms
+	AlarmsFetchAheadInterval time.Duration
+
+	// Batch size for pre-fetching alarms
+	AlarmsFetchAheadBatchSize int
+}
+
+func (o NewHostOptions) getProviderConfig() components.ProviderConfig {
+	return components.ProviderConfig{
+		HostHealthCheckDeadline:   o.HostHealthCheckDeadline,
+		AlarmsLeaseDuration:       o.AlarmsLeaseDuration,
+		AlarmsFetchAheadInterval:  o.AlarmsFetchAheadInterval,
+		AlarmsFetchAheadBatchSize: o.AlarmsFetchAheadBatchSize,
+	}
+}
+
 // NewHost returns a new actor host.
-func NewHost(actorProvider components.ActorProvider, address string) (*Host, error) {
-	if actorProvider == nil {
-		return nil, errors.New("actor provider is nil")
+func NewHost(opts NewHostOptions) (*Host, error) {
+	// Validate the options passed
+	if opts.Address == "" {
+		return nil, errors.New("option Address is required")
+	}
+
+	// Set a default logger, which sends logs to /dev/null, if none is passed
+	if opts.Logger == nil {
+		opts.Logger = slog.New(slog.DiscardHandler)
+	}
+
+	// Get the provider
+	var (
+		actorProvider components.ActorProvider
+		err           error
+	)
+	switch x := opts.ProviderOptions.(type) {
+	case sqlite.SQLiteProviderOptions:
+		actorProvider, err = sqlite.NewSQLiteProvider(opts.Logger, x, opts.getProviderConfig())
+		if err != nil {
+			return nil, fmt.Errorf("failed to create SQLite provider: %w", err)
+		}
+	case *sqlite.SQLiteProviderOptions:
+		actorProvider, err = sqlite.NewSQLiteProvider(opts.Logger, *x, opts.getProviderConfig())
+		if err != nil {
+			return nil, fmt.Errorf("failed to create SQLite provider: %w", err)
+		}
+	case nil:
+		return nil, errors.New("option ProviderOptions is required")
+	default:
+		return nil, fmt.Errorf("unsupported value for ProviderOptions: %T", opts.ProviderOptions)
 	}
 
 	h := &Host{
@@ -58,6 +122,7 @@ func NewHost(actorProvider components.ActorProvider, address string) (*Host, err
 		actors:         haxmap.New[string, actor.Actor](defaultActorsMapSize),
 	}
 	h.service = actor.NewService(h)
+
 	return h, nil
 }
 
@@ -121,6 +186,12 @@ func (h *Host) Run(ctx context.Context) error {
 	}
 	defer h.running.Store(false)
 
+	// Perform initialization steps
+	err := h.actorProvider.Init(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to init provider: %w", err)
+	}
+
 	// Register the host
 	res, err := h.actorProvider.RegisterHost(ctx, components.RegisterHostReq{
 		Address:    h.address,
@@ -146,7 +217,7 @@ func (h *Host) Run(ctx context.Context) error {
 		slog.InfoContext(ctx, "Unregistered actor host", "hostId", res.HostID)
 	}()
 
-	// Block until the context is canceled
+	// This call blocks until the context is canceled
 	err = h.actorProvider.Run(ctx)
 	if err != nil {
 		return fmt.Errorf("error running actor provider: %w", err)
