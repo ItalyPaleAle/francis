@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/alphadose/haxmap"
-	msgpack "github.com/vmihailenco/msgpack/v5"
 
 	"github.com/italypaleale/actors/actor"
 	"github.com/italypaleale/actors/components"
@@ -267,120 +266,5 @@ func (h *Host) runHealthChecks(ctx context.Context) error {
 			// Stop when the context is canceled
 			return ctx.Err()
 		}
-	}
-}
-
-func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, method string, data any) (any, error) {
-	// Look up the actor
-	ref := actorRef(actorType, actorID)
-	res, err := h.actorProvider.LookupActor(ctx, ref, components.LookupActorOpts{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to look up actor '%s': %w", ref, err)
-	}
-
-	// TODO: Check if actor is not local
-	if res.Address != h.address {
-		return nil, errors.New("invoking remote actors not yet implemented")
-	}
-
-	return h.invokeLocal(ctx, ref, method, data)
-}
-
-func (h *Host) invokeLocal(ctx context.Context, ref components.ActorRef, method string, data any) (any, error) {
-	actor, err := h.getOrCreateActor(ref)
-	if err != nil {
-		return nil, err
-	}
-
-	// Invoke the actor
-	return actor.Invoke(ctx, method, data)
-}
-
-func (h *Host) executeAlarm(ctx context.Context, ref components.ActorRef, name string, data any) error {
-	actor, err := h.getOrCreateActor(ref)
-	if err != nil {
-		return err
-	}
-
-	// Invoke the actor
-	return actor.Alarm(ctx, name, data)
-}
-
-func (h *Host) getOrCreateActor(ref components.ActorRef) (actor.Actor, error) {
-	// TODO: Idle timeout
-
-	// Get the factory function
-	fn, err := h.createActorFn(ref)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get (or create) the actor
-	actor, _ := h.actors.GetOrCompute(ref.String(), fn)
-
-	return actor, nil
-}
-
-func (h *Host) createActorFn(ref components.ActorRef) (func() actor.Actor, error) {
-	// We don't need a locking mechanism here as this map is "locked" after the service has started
-	factoryFn := h.actorFactories[ref.ActorType]
-	if factoryFn == nil {
-		return nil, errors.New("unsupported actor type")
-	}
-
-	return func() actor.Actor {
-		return factoryFn(ref.ActorID, h.service)
-	}, nil
-}
-
-func (h *Host) SetState(ctx context.Context, actorType string, actorID string, state any) error {
-	// Encode the state using msgpack
-	data, err := msgpack.Marshal(state)
-	if err != nil {
-		return fmt.Errorf("failed serializing state using msgpack: %w", err)
-	}
-
-	err = h.actorProvider.SetState(ctx, actorRef(actorType, actorID), data, components.SetStateOpts{
-		// TODO: support TTL
-		TTL: 0,
-	})
-	if err != nil {
-		return fmt.Errorf("failed saving state: %w", err)
-	}
-
-	return nil
-}
-
-func (h *Host) GetState(ctx context.Context, actorType string, actorID string, dest any) error {
-	data, err := h.actorProvider.GetState(ctx, actorRef(actorType, actorID))
-	if errors.Is(err, components.ErrNoState) {
-		return actor.ErrStateNotFound
-	} else if err != nil {
-		return fmt.Errorf("failed retrieving state: %w", err)
-	}
-
-	err = msgpack.Unmarshal(data, dest)
-	if err != nil {
-		return fmt.Errorf("failed unserializing state using msgpack: %w", err)
-	}
-
-	return nil
-}
-
-func (h *Host) DeleteState(ctx context.Context, actorType string, actorID string) error {
-	err := h.actorProvider.DeleteState(ctx, actorRef(actorType, actorID))
-	if errors.Is(err, components.ErrNoState) {
-		return actor.ErrStateNotFound
-	} else if err != nil {
-		return fmt.Errorf("failed deleting state: %w", err)
-	}
-
-	return nil
-}
-
-func actorRef(actorType string, actorID string) components.ActorRef {
-	return components.ActorRef{
-		ActorType: actorType,
-		ActorID:   actorID,
 	}
 }
