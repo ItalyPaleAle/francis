@@ -51,13 +51,6 @@ func (h *Host) invokeLocal(ctx context.Context, ref components.ActorRef, method 
 	return res, nil
 }
 
-func actorRef(actorType string, actorID string) components.ActorRef {
-	return components.ActorRef{
-		ActorType: actorType,
-		ActorID:   actorID,
-	}
-}
-
 func (h *Host) getOrCreateActor(ref components.ActorRef) (*activeActor, error) {
 	// Get the factory function
 	fn, err := h.createActorFn(ref)

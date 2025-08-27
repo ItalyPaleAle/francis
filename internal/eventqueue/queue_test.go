@@ -2,7 +2,7 @@
 // Copyright (C) 2023 The Dapr Authors
 // License: Apache2
 
-package queue
+package eventqueue
 
 import (
 	"strconv"

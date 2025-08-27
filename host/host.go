@@ -15,7 +15,7 @@ import (
 	"github.com/italypaleale/actors/actor"
 	"github.com/italypaleale/actors/components"
 	"github.com/italypaleale/actors/components/sqlite"
-	"github.com/italypaleale/actors/internal/queue"
+	"github.com/italypaleale/actors/internal/eventqueue"
 	"github.com/italypaleale/actors/internal/servicerunner"
 )
 
@@ -51,7 +51,7 @@ type Host struct {
 
 	// Active actors; key is "actorType/actorID"
 	actors             *haxmap.Map[string, *activeActor]
-	idleActorProcessor *queue.Processor[string, *activeActor]
+	idleActorProcessor *eventqueue.Processor[string, *activeActor]
 
 	// Map of actor configuration objects; key is actor type
 	actorsConfig map[string]components.ActorHostType
@@ -152,7 +152,7 @@ func NewHost(opts NewHostOptions) (*Host, error) {
 		clock:          opts.clock,
 	}
 	h.service = actor.NewService(h)
-	h.idleActorProcessor = queue.NewProcessor(queue.Options[string, *activeActor]{
+	h.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
 		Clock:     h.clock,
 		ExecuteFn: h.idleProcessorExecuteFn,
 	})
@@ -405,4 +405,11 @@ func (h *Host) deactivateActor(act *activeActor) error {
 	}
 
 	return nil
+}
+
+func actorRef(actorType string, actorID string) components.ActorRef {
+	return components.ActorRef{
+		ActorType: actorType,
+		ActorID:   actorID,
+	}
 }
