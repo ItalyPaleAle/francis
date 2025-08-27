@@ -64,7 +64,9 @@ func runWorker(ctx context.Context) error {
 	}
 
 	// Register all supported actors
-	err = h.RegisterActor("myactor", NewMyActor, host.RegisterActorOptions{})
+	err = h.RegisterActor("myactor", NewMyActor, host.RegisterActorOptions{
+		IdleTimeout: 10 * time.Second,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to register actor 'myactor': %w", err)
 	}
@@ -100,6 +102,7 @@ func runControlServer(actorService *actor.Service) func(ctx context.Context) err
 
 			resp, err := actorService.Invoke(r.Context(), r.PathValue("actorType"), r.PathValue("actorID"), r.PathValue("method"), body)
 			if err != nil {
+				log.ErrorContext(r.Context(), "Error invoking actor", slog.Any("error", err))
 				w.WriteHeader(http.StatusInternalServerError)
 				fmt.Fprint(w, err.Error())
 				return

@@ -135,6 +135,8 @@ type ActorHostType struct {
 	// This cannot be bigger than ConcurrencyLimit
 	// Set to 0 for no limit
 	AlarmConcurrencyLimit int32
+	// Actor deactivation timeout
+	DeactivationTimeout time.Duration
 }
 
 // ActorRef references an actor (type and ID).

@@ -10,16 +10,25 @@ import (
 	"time"
 
 	"github.com/alphadose/haxmap"
+	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/actors/actor"
 	"github.com/italypaleale/actors/components"
 	"github.com/italypaleale/actors/components/sqlite"
+	"github.com/italypaleale/actors/internal/queue"
 	"github.com/italypaleale/actors/internal/servicerunner"
 )
 
+// This file contains code adapted from https://github.com/dapr/dapr/tree/v1.14.5/
+// Copyright (C) 2024 The Dapr Authors
+// License: Apache2
+
 const (
-	defaultActorsMapSize = 32
-	defaultIdleTimeout   = int64(15 * 60) // 15 minutes
+	defaultActorsMapSize       = 128
+	defaultIdleTimeout         = 5 * 60 // 5 minutes
+	defaultDeactivationTimeout = 10 * time.Second
+	// If an idle actor is getting deactivated, but it's still busy, will be re-enqueued with its idle timeout increased by this duration
+	actorBusyReEnqueueInterval = 10 * time.Second
 )
 
 // Re-export provider options
@@ -41,15 +50,20 @@ type Host struct {
 	actorFactories map[string]actor.Factory
 
 	// Active actors; key is "actorType/actorID"
-	actors       *haxmap.Map[string, actor.Actor]
-	actorsConfig []components.ActorHostType
+	actors             *haxmap.Map[string, *activeActor]
+	idleActorProcessor *queue.Processor[string, *activeActor]
 
-	log *slog.Logger
+	// Map of actor configuration objects; key is actor type
+	actorsConfig map[string]components.ActorHostType
+
+	log   *slog.Logger
+	clock clock.WithTicker
 }
 
 // RegisterActorOptions is the type for the options for the RegisterActor method.
 type RegisterActorOptions struct {
 	IdleTimeout           time.Duration
+	DeactivationTimeout   time.Duration
 	ConcurrencyLimit      int
 	AlarmConcurrencyLimit int
 }
@@ -75,6 +89,9 @@ type NewHostOptions struct {
 
 	// Batch size for pre-fetching alarms
 	AlarmsFetchAheadBatchSize int
+
+	// Allows setting a clock for testing
+	clock clock.WithTicker
 }
 
 func (o NewHostOptions) getProviderConfig() components.ProviderConfig {
@@ -96,6 +113,11 @@ func NewHost(opts NewHostOptions) (*Host, error) {
 	// Set a default logger, which sends logs to /dev/null, if none is passed
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
+	}
+
+	// Init a real clock if none is passed
+	if opts.clock == nil {
+		opts.clock = &clock.RealClock{}
 	}
 
 	// Get the provider
@@ -123,12 +145,17 @@ func NewHost(opts NewHostOptions) (*Host, error) {
 	h := &Host{
 		address:        opts.Address,
 		actorProvider:  actorProvider,
-		actorsConfig:   []components.ActorHostType{},
+		actorsConfig:   map[string]components.ActorHostType{},
 		actorFactories: map[string]actor.Factory{},
-		actors:         haxmap.New[string, actor.Actor](defaultActorsMapSize),
+		actors:         haxmap.New[string, *activeActor](defaultActorsMapSize),
 		log:            opts.Logger,
+		clock:          opts.clock,
 	}
 	h.service = actor.NewService(h)
+	h.idleActorProcessor = queue.NewProcessor(queue.Options[string, *activeActor]{
+		Clock:     h.clock,
+		ExecuteFn: h.idleProcessorExecuteFn,
+	})
 
 	return h, nil
 }
@@ -173,12 +200,17 @@ func (h *Host) RegisterActor(actorType string, factory actor.Factory, opts Regis
 		return errors.New("option AlarmConcurrencyLimit must not be smaller than ConcurrencyLimit")
 	}
 
-	h.actorsConfig = append(h.actorsConfig, components.ActorHostType{
+	if opts.DeactivationTimeout <= 0 {
+		opts.DeactivationTimeout = defaultDeactivationTimeout
+	}
+
+	h.actorsConfig[actorType] = components.ActorHostType{
 		ActorType:             actorType,
 		IdleTimeout:           int32(idleTimeout),
 		ConcurrencyLimit:      int32(opts.ConcurrencyLimit),
 		AlarmConcurrencyLimit: int32(opts.AlarmConcurrencyLimit),
-	})
+		DeactivationTimeout:   opts.DeactivationTimeout,
+	}
 
 	h.actorFactories[actorType] = factory
 
@@ -203,9 +235,16 @@ func (h *Host) Run(parentCtx context.Context) error {
 	}
 
 	// Register the host
+	actorsConfigList := make([]components.ActorHostType, len(h.actorsConfig))
+	var i int
+	for _, ac := range h.actorsConfig {
+		actorsConfigList[i] = ac
+		i++
+	}
+
 	res, err := h.actorProvider.RegisterHost(ctx, components.RegisterHostReq{
 		Address:    h.address,
-		ActorTypes: h.actorsConfig,
+		ActorTypes: actorsConfigList,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to register actor host: %w", err)
@@ -247,7 +286,7 @@ func (h *Host) runHealthChecks(ctx context.Context) error {
 
 	// Perform periodic health checks
 	interval := h.actorProvider.HealthCheckInterval()
-	h.log.DebugContext(ctx, "Starting background health checks", "interval", interval)
+	h.log.DebugContext(ctx, "Starting background health checks", slog.Any("interval", interval))
 
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -267,4 +306,103 @@ func (h *Host) runHealthChecks(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+}
+
+func (h *Host) idleProcessorExecuteFn(act *activeActor) {
+	// TODO: We need to refactor this because there's a race condition
+	key := act.Key()
+
+	// This function is outlined for testing
+	if !h.idleActorBusyCheck(act) {
+		return
+	}
+
+	// Remove the actor from the table
+	// This will prevent more state changes
+	_, ok := h.actors.GetAndDel(key)
+
+	// If nothing was loaded, the actor was probably already deactivated
+	if !ok {
+		return
+	}
+
+	// Also remove from the idle actor processor
+	err := h.idleActorProcessor.Dequeue(key)
+	if err != nil {
+		// Log error
+		return
+	}
+
+	// Proceed with deactivating the actor
+	err = h.deactivateActor(act)
+	if err != nil {
+		h.log.Error("Failed to deactivate actor", slog.String("actorRef", act.Key()), slog.Any("error", err))
+	}
+}
+
+func (h *Host) idleActorBusyCheck(act *activeActor) bool {
+	// If the actor is still busy, we will increase its idle time and re-enqueue it
+	if act.IsBusy() {
+		act.updateIdleAt(actorBusyReEnqueueInterval)
+		h.idleActorProcessor.Enqueue(act)
+		return false
+	}
+
+	return true
+}
+
+func (h *Host) haltActor(act *activeActor) error {
+	key := act.Key()
+
+	h.log.Debug("Halting actor", slog.String("actorRef", key))
+
+	// Remove the actor from the table
+	// This will prevent more state changes
+	act, ok := h.actors.GetAndDel(key)
+
+	// If nothing was loaded, the actor was probably already deactivated
+	if !ok || act == nil {
+		return nil
+	}
+
+	// Also remove from the idle actor processor
+	err := h.idleActorProcessor.Dequeue(key)
+	if err != nil {
+		return fmt.Errorf("failed to dequeue actor from the idle processor: %w", err)
+	}
+
+	// Halt the actor, so it drains the current call and prevents more calls
+	err = act.Halt()
+	if err != nil {
+		return fmt.Errorf("failed to halt actor: %w", err)
+	}
+
+	// Send the actor a message it has been deactivated
+	err = h.deactivateActor(act)
+	if err != nil {
+		return fmt.Errorf("failed to deactivate actor: %w", err)
+	}
+
+	return nil
+}
+
+func (h *Host) deactivateActor(act *activeActor) error {
+	// Remove the actor from the list of active actors regardless of what happens next
+	// Note that here, the actor may already have been deleted from the active actors map by the caller
+	h.actors.Del(act.Key())
+
+	h.log.Debug("Deactivated actor", slog.String("actorRef", act.Key()))
+
+	// This uses a background context because it should be unrelated from the caller's context
+	// Once the decision to deactivate an actor has been made, we must go through with it or we could have an inconsistent state
+	ctx, cancel := context.WithTimeout(context.Background(), h.actorsConfig[act.ActorType()].DeactivationTimeout)
+	defer cancel()
+
+	// Call the Deactivate method on the actor
+	err := act.instance.Deactivate(ctx)
+	if err != nil {
+		return fmt.Errorf("error from actor: %w", err)
+	}
+
+	return nil
 }

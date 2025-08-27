@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
+	"time"
 
 	"github.com/italypaleale/actors/actor"
 )
@@ -42,6 +44,12 @@ func (m *MyActor) Invoke(ctx context.Context, method string, data any) (any, err
 		return nil, fmt.Errorf("error retrieving state: %w", err)
 	}
 
+	if strings.HasSuffix(method, "-wait") {
+		method = strings.TrimSuffix(method, "-wait")
+
+		time.Sleep(time.Second)
+	}
+
 	switch method {
 	case "increment":
 		state.Counter++
@@ -54,17 +62,17 @@ func (m *MyActor) Invoke(ctx context.Context, method string, data any) (any, err
 		return nil, fmt.Errorf("error saving state: %w", err)
 	}
 
-	m.log.InfoContext(ctx, "Actor Invoked", "method", method, "counter", state.Counter, "invocations", m.invocations)
+	m.log.InfoContext(ctx, "Actor invoked", "method", method, "counter", state.Counter, "invocations", m.invocations)
 
 	return state.Counter, nil
 }
 
 func (m *MyActor) Alarm(ctx context.Context, name string, data any) error {
-	m.log.InfoContext(ctx, "Actor Alarm", "name", name)
+	m.log.InfoContext(ctx, "Actor received alarm", "name", name)
 	return nil
 }
 
 func (m *MyActor) Deactivate(ctx context.Context) error {
-	m.log.InfoContext(ctx, "Actor Deactivate", "invocations", m.invocations)
+	m.log.InfoContext(ctx, "Actor deactivated", "invocations", m.invocations)
 	return nil
 }

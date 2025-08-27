@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
-	"github.com/italypaleale/actors/actor"
 	"github.com/italypaleale/actors/components"
 )
 
@@ -26,13 +26,29 @@ func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, met
 }
 
 func (h *Host) invokeLocal(ctx context.Context, ref components.ActorRef, method string, data any) (any, error) {
-	actor, err := h.getOrCreateActor(ref)
+	act, err := h.getOrCreateActor(ref)
 	if err != nil {
 		return nil, err
 	}
 
+	// Acquire a lock for turn-based concurrency
+	err = act.Lock(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire lock for actor: %w", err)
+	}
+	defer act.Unlock()
+	err = h.idleActorProcessor.Enqueue(act)
+	if err != nil {
+		return nil, fmt.Errorf("failed to enqueue actor in idle processor: %w", err)
+	}
+
 	// Invoke the actor
-	return actor.Invoke(ctx, method, data)
+	res, err := act.instance.Invoke(ctx, method, data)
+	if err != nil {
+		return nil, fmt.Errorf("error from actor: %w", err)
+	}
+
+	return res, nil
 }
 
 func actorRef(actorType string, actorID string) components.ActorRef {
@@ -42,9 +58,7 @@ func actorRef(actorType string, actorID string) components.ActorRef {
 	}
 }
 
-func (h *Host) getOrCreateActor(ref components.ActorRef) (actor.Actor, error) {
-	// TODO: Idle timeout
-
+func (h *Host) getOrCreateActor(ref components.ActorRef) (*activeActor, error) {
 	// Get the factory function
 	fn, err := h.createActorFn(ref)
 	if err != nil {
@@ -57,14 +71,17 @@ func (h *Host) getOrCreateActor(ref components.ActorRef) (actor.Actor, error) {
 	return actor, nil
 }
 
-func (h *Host) createActorFn(ref components.ActorRef) (func() actor.Actor, error) {
-	// We don't need a locking mechanism here as this map is "locked" after the service has started
+func (h *Host) createActorFn(ref components.ActorRef) (func() *activeActor, error) {
+	// We don't need a locking mechanism here as these maps are "locked" after the service has started
 	factoryFn := h.actorFactories[ref.ActorType]
 	if factoryFn == nil {
 		return nil, errors.New("unsupported actor type")
 	}
 
-	return func() actor.Actor {
-		return factoryFn(ref.ActorID, h.service)
+	idleTimeout := time.Duration(h.actorsConfig[ref.ActorType].IdleTimeout) * time.Second
+
+	return func() *activeActor {
+		instance := factoryFn(ref.ActorID, h.service)
+		return newActiveActor(ref, instance, idleTimeout, h.clock)
 	}, nil
 }
