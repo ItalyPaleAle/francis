@@ -252,7 +252,15 @@ func (h *Host) Run(parentCtx context.Context) error {
 
 	h.hostID = res.HostID
 
-	h.log.InfoContext(ctx, "Registered actor host", "hostId", h.hostID, "address", h.address)
+	h.log.InfoContext(ctx, "Registered actor host", slog.String("hostId", h.hostID), slog.String("address", h.address))
+
+	// Before returning, we halt all remaining actors
+	defer func() {
+		haltErr := h.HaltAll()
+		if haltErr != nil {
+			h.log.Warn("Error halting actors", slog.Any("error", haltErr), slog.String("hostId", res.HostID))
+		}
+	}()
 
 	// Upon returning, we unregister the host so it can be removed cleanly
 	// If the application crashes and this code isn't executed, eventually the host will be removed for not sending health checks periodically
@@ -263,11 +271,11 @@ func (h *Host) Run(parentCtx context.Context) error {
 
 		unregisterErr := h.actorProvider.UnregisterHost(unregisterCtx, res.HostID)
 		if unregisterErr != nil {
-			h.log.WarnContext(unregisterCtx, "Error unregistering actor host", "error", unregisterErr, "hostId", res.HostID)
+			h.log.WarnContext(unregisterCtx, "Error unregistering actor host", slog.Any("error", unregisterErr), slog.String("hostId", res.HostID))
 			return
 		}
 
-		h.log.InfoContext(ctx, "Unregistered actor host", "hostId", res.HostID)
+		h.log.InfoContext(ctx, "Unregistered actor host", slog.String("hostId", res.HostID))
 	}()
 
 	return servicerunner.

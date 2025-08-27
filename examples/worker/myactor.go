@@ -47,7 +47,13 @@ func (m *MyActor) Invoke(ctx context.Context, method string, data any) (any, err
 	if strings.HasSuffix(method, "-wait") {
 		method = strings.TrimSuffix(method, "-wait")
 
-		time.Sleep(2500 * time.Millisecond)
+		const waitTime = 2500 * time.Millisecond
+		select {
+		case <-time.After(waitTime):
+			// All good
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 
 	switch method {

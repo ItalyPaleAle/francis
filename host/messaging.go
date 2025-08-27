@@ -22,6 +22,7 @@ func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, met
 		return nil, errors.New("invoking remote actors not yet implemented")
 	}
 
+	// TODO: Handle errActorHalted and retry, actor could be on a separate host
 	return h.invokeLocal(ctx, ref, method, data)
 }
 
