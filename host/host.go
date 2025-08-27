@@ -281,6 +281,37 @@ func (h *Host) Run(parentCtx context.Context) error {
 		Run(ctx)
 }
 
+func (h *Host) HaltAll() error {
+	// Deactivate all actors, each in its own goroutine
+	errCh := make(chan error)
+	var count int
+	for _, act := range h.actors.Iterator() {
+		count++
+		go func(act *activeActor) {
+			err := h.haltActor(act)
+			if err != nil {
+				err = fmt.Errorf("failed to halt actor '%s': %w", act.Key(), err)
+			}
+			errCh <- err
+		}(act)
+	}
+
+	// Collect all errors
+	errs := make([]error, 0)
+	for range count {
+		err := <-errCh
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("error halting actors: %w", errors.Join(errs...))
+	}
+
+	return nil
+}
+
 func (h *Host) runHealthChecks(ctx context.Context) error {
 	var err error
 
@@ -362,9 +393,8 @@ func (h *Host) haltActor(act *activeActor) error {
 	// Remove the actor from the table
 	// This will prevent more state changes
 	act, ok := h.actors.GetAndDel(key)
-
-	// If nothing was loaded, the actor was already deactivated
 	if !ok || act == nil {
+		// If nothing was loaded, the actor was already deactivated
 		return nil
 	}
 
