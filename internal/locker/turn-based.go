@@ -65,6 +65,26 @@ func (l *TurnBasedLocker) Lock(ctx context.Context) error {
 	}
 }
 
+// TryLock attempts to acquire the lock immediately if it's available and the queue isn't stopped.
+// It returns true if the lock was acquired, false if it's already locked, and an error if the queue is stopped.
+func (l *TurnBasedLocker) TryLock() (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.stopped {
+		return false, ErrStopped
+	}
+
+	if !l.isLocked {
+		// Lock acquired successfully
+		l.isLocked = true
+		return true, nil
+	}
+
+	// Lock is already held
+	return false, nil
+}
+
 // Unlock releases the lock, allowing the next waiter to acquire it.
 func (l *TurnBasedLocker) Unlock() {
 	l.mu.Lock()
@@ -106,12 +126,21 @@ func (l *TurnBasedLocker) Stop() {
 	l.queue = nil
 }
 
-// IsStopped returns whether the queue has been stopped. The current lock holder should check this after acquiring the lock.
+// IsStopped returns whether the queue has been stopped.
+// The current lock holder should check this after acquiring the lock.
 func (l *TurnBasedLocker) IsStopped() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	return l.stopped
+}
+
+// IsLocked returns true if the lock is currently being held.
+func (l *TurnBasedLocker) IsLocked() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return l.isLocked
 }
 
 // QueueLength returns the length of the queue.

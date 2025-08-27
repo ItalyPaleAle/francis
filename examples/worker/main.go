@@ -65,7 +65,7 @@ func runWorker(ctx context.Context) error {
 
 	// Register all supported actors
 	err = h.RegisterActor("myactor", NewMyActor, host.RegisterActorOptions{
-		IdleTimeout: 10 * time.Second,
+		IdleTimeout: 5 * time.Second,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to register actor 'myactor': %w", err)

@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -10,6 +11,8 @@ import (
 
 	"github.com/italypaleale/actors/actor"
 	"github.com/italypaleale/actors/components"
+	"github.com/italypaleale/actors/internal/eventqueue"
+	"github.com/italypaleale/actors/internal/locker"
 )
 
 // This file contains code adapted from https://github.com/dapr/dapr/tree/v1.14.5/
@@ -18,6 +21,8 @@ import (
 
 var errActorHalted = errors.New("actor is halted")
 
+type idleActorProcessor = *eventqueue.Processor[string, *activeActor]
+
 // activeActor references an actor that is currently active on this host
 type activeActor struct {
 	// Actor reference
@@ -25,12 +30,6 @@ type activeActor struct {
 
 	// Actor object
 	instance actor.Actor
-
-	// Used as semaphore the actor when a call is in progress
-	sempahore chan struct{}
-
-	// Number of the current pending actor calls
-	pendingCalls atomic.Int32
 
 	// Configured max idle time for actors of this type
 	idleTimeout time.Duration
@@ -42,24 +41,28 @@ type activeActor struct {
 	// Halted is set to true when the actor is halted and should not begin more work
 	halted atomic.Bool
 
-	// Channel used to signal the actor has been halted
+	// Channel that is closed when the actor is halted
+	// This is used by callers who currently have a lock to understand if they need to cancel in-flight requests
 	haltCh chan struct{}
 
-	clock clock.Clock
+	locker        locker.TurnBasedLocker
+	idleProcessor idleActorProcessor
+	clock         clock.Clock
 }
 
-func newActiveActor(ref components.ActorRef, instance actor.Actor, idleTimeout time.Duration, cl clock.Clock) *activeActor {
+func newActiveActor(ref components.ActorRef, instance actor.Actor, idleTimeout time.Duration, idleProcessor idleActorProcessor, cl clock.Clock) *activeActor {
 	if cl == nil {
 		cl = &clock.RealClock{}
 	}
 
 	a := &activeActor{
-		ref:         ref,
-		instance:    instance,
-		clock:       cl,
-		idleTimeout: idleTimeout,
-		sempahore:   make(chan struct{}, 1),
-		haltCh:      make(chan struct{}),
+		ref:           ref,
+		instance:      instance,
+		idleTimeout:   idleTimeout,
+		haltCh:        make(chan struct{}),
+		locker:        locker.TurnBasedLocker{},
+		idleProcessor: idleProcessor,
+		clock:         cl,
 	}
 	a.updateIdleAt(0)
 
@@ -70,13 +73,68 @@ func (a *activeActor) updateIdleAt(d time.Duration) {
 	if d == 0 {
 		d = a.idleTimeout
 	}
+
+	// Update the idleAt time
 	idleAt := a.clock.Now().Add(d)
 	a.idleAt.Store(&idleAt)
+
+	// (Re-)enqueue in the idle processor
+	_ = a.idleProcessor.Enqueue(a)
 }
 
-// IsBusy returns true when the actor is busy, i.e. when there are pending calls
-func (a *activeActor) IsBusy() bool {
-	return a.pendingCalls.Load() > 0
+// TryLock tries to lock the actor for turn-based concurrency, if the actor isn't already locked.
+func (a *activeActor) TryLock() (bool, chan struct{}, error) {
+	if a.halted.Load() {
+		return false, nil, errActorHalted
+	}
+
+	ok, err := a.locker.TryLock()
+	switch {
+	case errors.Is(err, locker.ErrStopped):
+		// If the locker is stopped, it means that the actor has been halted
+		return false, nil, errActorHalted
+	case err != nil:
+		return false, nil, fmt.Errorf("failed to acquire lock: %w", err)
+	}
+
+	// If we did not acquire the lock, return
+	if !ok {
+		return false, nil, nil
+	}
+
+	// Update the time the actor became idle at
+	a.updateIdleAt(0)
+
+	return true, a.haltCh, nil
+}
+
+// Lock the actor for turn-based concurrency.
+// This function blocks until the lock is acquired
+func (a *activeActor) Lock(ctx context.Context) (chan struct{}, error) {
+	if a.halted.Load() {
+		return nil, errActorHalted
+	}
+
+	err := a.locker.Lock(ctx)
+	switch {
+	case errors.Is(err, locker.ErrStopped):
+		// If the locker is stopped, it means that the actor has been halted
+		return nil, errActorHalted
+	case ctx.Err() != nil && errors.Is(err, ctx.Err()):
+		return nil, ctx.Err()
+	case err != nil:
+		return nil, fmt.Errorf("failed to acquire lock: %w", err)
+	}
+
+	// Update the time the actor became idle at
+	a.updateIdleAt(0)
+
+	return a.haltCh, nil
+}
+
+// Unlock releases the lock for turn-based concurrency
+func (a *activeActor) Unlock() {
+	a.locker.Unlock()
 }
 
 func (a *activeActor) Halt() error {
@@ -84,74 +142,17 @@ func (a *activeActor) Halt() error {
 		return errors.New("actor is already halted")
 	}
 
-	// First, try to grab a lock right away, which will succeed only if the actor is not active
-	select {
-	case a.sempahore <- struct{}{}:
-		// We got the lock
-	default:
-		// The actor is currently locked
-		// Signal the halt, which should make everyone waiting to get a lock return right away
-		close(a.haltCh)
+	// Stop the turn-based locker
+	// This will signal to all callers currently waiting to acquire the lock that the actor has stopped
+	a.locker.Stop()
 
-		// Now, grab the semaphore so no one else can lock
-		// TODO: We need to handle timeouts here
-		a.sempahore <- struct{}{}
-	}
+	// Close haltCh, which signals whoever may be owning the lock right now that the actor is shutting down
+	close(a.haltCh)
+
+	// Also remove from the idle actor processor
+	_ = a.idleProcessor.Dequeue(a.Key())
 
 	return nil
-}
-
-// Lock the actor for turn-based concurrency
-// This function blocks until the lock is acquired
-func (a *activeActor) Lock(ctx context.Context) error {
-	if a.halted.Load() {
-		return errActorHalted
-	}
-
-	pending := a.pendingCalls.Add(1)
-	if pending < 0 {
-		// Overflow
-		a.pendingCalls.Add(-1)
-		return errors.New("pending actor calls overflow")
-	}
-
-	// Blocks until the lock is acquired or context is canceled
-	select {
-	case a.sempahore <- struct{}{}:
-		// Check again to make sure actor isn't _also_ halted
-		// This could happen because of a race condition between grabbing the lock and halting
-		select {
-		case <-a.haltCh:
-			// We should not have acquired the lock
-			<-a.sempahore
-			return errActorHalted
-		default:
-			// All good, fall through
-		}
-	case <-a.haltCh:
-		// Actor is halted
-		return errActorHalted
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-
-	// Update the time the actor became idle at
-	a.updateIdleAt(0)
-
-	return nil
-}
-
-// Unlock releases the lock for turn-based concurrency
-func (a *activeActor) Unlock() {
-	_ = a.pendingCalls.Add(-1)
-
-	select {
-	case <-a.sempahore:
-		// Released lock
-	default:
-		// Indicates a development-time error: we unlocked the actor before locking it
-		panic("active actor was not locked")
-	}
 }
 
 // ActorType returns the type of the actor.

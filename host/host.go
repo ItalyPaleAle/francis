@@ -154,7 +154,7 @@ func NewHost(opts NewHostOptions) (*Host, error) {
 	h.service = actor.NewService(h)
 	h.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
 		Clock:     h.clock,
-		ExecuteFn: h.idleProcessorExecuteFn,
+		ExecuteFn: h.handleIdleActor,
 	})
 
 	return h, nil
@@ -308,47 +308,50 @@ func (h *Host) runHealthChecks(ctx context.Context) error {
 	}
 }
 
-func (h *Host) idleProcessorExecuteFn(act *activeActor) {
-	// TODO: We need to refactor this because there's a race condition
+func (h *Host) handleIdleActor(act *activeActor) {
 	key := act.Key()
 
-	// This function is outlined for testing
-	if !h.idleActorBusyCheck(act) {
+	// Just because the actor is marked as idle, doesn't mean it's inactive
+	// For example, there could be a long-running operation still in progress
+	// We need to confirm the actor isn't busy, and we need to prevent others from starting new work on it
+	// To do that, we use TryLock, which will give us a lock only if the actor isn't busy
+	// If we get the lock, it means it's safe for us to dispose of it
+	// (Note that TryLock does also reset the idleAt time, but we will ignore that)
+	ok, _, err := act.TryLock()
+	if err != nil {
+		h.log.Error("Failed to try locking idle actor for deactivation", slog.String("actorRef", act.Key()), slog.Any("error", err))
+		return
+	}
+
+	// If we did not acquire the lock, the actor is still busy.
+	// Wwe will increase its idle time and re-enqueue it
+	if !ok {
+		h.log.Debug("Actor is busy and will not be deactivated; re-enqueueing it", slog.String("actorRef", act.Key()))
+		act.updateIdleAt(actorBusyReEnqueueInterval)
 		return
 	}
 
 	// Remove the actor from the table
 	// This will prevent more state changes
-	_, ok := h.actors.GetAndDel(key)
-
-	// If nothing was loaded, the actor was probably already deactivated
+	_, ok = h.actors.GetAndDel(key)
 	if !ok {
+		// If nothing was loaded, the actor was probably already deactivated
 		return
 	}
 
-	// Also remove from the idle actor processor
-	err := h.idleActorProcessor.Dequeue(key)
+	// Halt the actor
+	err = act.Halt()
 	if err != nil {
-		// Log error
+		h.log.Error("Failed to halt idle actor", slog.String("actorRef", act.Key()), slog.Any("error", err))
 		return
 	}
 
 	// Proceed with deactivating the actor
 	err = h.deactivateActor(act)
 	if err != nil {
-		h.log.Error("Failed to deactivate actor", slog.String("actorRef", act.Key()), slog.Any("error", err))
+		h.log.Error("Failed to deactivate idle actor", slog.String("actorRef", act.Key()), slog.Any("error", err))
+		return
 	}
-}
-
-func (h *Host) idleActorBusyCheck(act *activeActor) bool {
-	// If the actor is still busy, we will increase its idle time and re-enqueue it
-	if act.IsBusy() {
-		act.updateIdleAt(actorBusyReEnqueueInterval)
-		h.idleActorProcessor.Enqueue(act)
-		return false
-	}
-
-	return true
 }
 
 func (h *Host) haltActor(act *activeActor) error {
@@ -360,19 +363,13 @@ func (h *Host) haltActor(act *activeActor) error {
 	// This will prevent more state changes
 	act, ok := h.actors.GetAndDel(key)
 
-	// If nothing was loaded, the actor was probably already deactivated
+	// If nothing was loaded, the actor was already deactivated
 	if !ok || act == nil {
 		return nil
 	}
 
-	// Also remove from the idle actor processor
-	err := h.idleActorProcessor.Dequeue(key)
-	if err != nil {
-		return fmt.Errorf("failed to dequeue actor from the idle processor: %w", err)
-	}
-
 	// Halt the actor, so it drains the current call and prevents more calls
-	err = act.Halt()
+	err := act.Halt()
 	if err != nil {
 		return fmt.Errorf("failed to halt actor: %w", err)
 	}
@@ -387,10 +384,6 @@ func (h *Host) haltActor(act *activeActor) error {
 }
 
 func (h *Host) deactivateActor(act *activeActor) error {
-	// Remove the actor from the list of active actors regardless of what happens next
-	// Note that here, the actor may already have been deleted from the active actors map by the caller
-	h.actors.Del(act.Key())
-
 	h.log.Debug("Deactivated actor", slog.String("actorRef", act.Key()))
 
 	// This uses a background context because it should be unrelated from the caller's context

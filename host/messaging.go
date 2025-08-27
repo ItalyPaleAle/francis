@@ -26,29 +26,47 @@ func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, met
 }
 
 func (h *Host) invokeLocal(ctx context.Context, ref components.ActorRef, method string, data any) (any, error) {
+	return h.lockAndInvokeFn(ctx, ref, func(ctx context.Context, act *activeActor) (any, error) {
+		// Invoke the actor
+		res, err := act.instance.Invoke(ctx, method, data)
+		if err != nil {
+			return nil, fmt.Errorf("error from actor: %w", err)
+		}
+
+		return res, nil
+	})
+}
+
+func (h *Host) lockAndInvokeFn(parentCtx context.Context, ref components.ActorRef, fn func(context.Context, *activeActor) (any, error)) (any, error) {
+	// Get the actor, which may create it
 	act, err := h.getOrCreateActor(ref)
 	if err != nil {
 		return nil, err
 	}
 
+	// Create a context for this request, which allows us to stop it in-flight if needed
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+
 	// Acquire a lock for turn-based concurrency
-	err = act.Lock(ctx)
+	haltCh, err := act.Lock(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire lock for actor: %w", err)
 	}
 	defer act.Unlock()
-	err = h.idleActorProcessor.Enqueue(act)
-	if err != nil {
-		return nil, fmt.Errorf("failed to enqueue actor in idle processor: %w", err)
-	}
 
-	// Invoke the actor
-	res, err := act.instance.Invoke(ctx, method, data)
-	if err != nil {
-		return nil, fmt.Errorf("error from actor: %w", err)
-	}
+	go func() {
+		select {
+		case <-haltCh:
+			// The actor is being halted, so we need to cancel the context
+			cancel()
+		case <-ctx.Done():
+			// The method is returning
+			return
+		}
+	}()
 
-	return res, nil
+	return fn(ctx, act)
 }
 
 func (h *Host) getOrCreateActor(ref components.ActorRef) (*activeActor, error) {
@@ -75,6 +93,6 @@ func (h *Host) createActorFn(ref components.ActorRef) (func() *activeActor, erro
 
 	return func() *activeActor {
 		instance := factoryFn(ref.ActorID, h.service)
-		return newActiveActor(ref, instance, idleTimeout, h.clock)
+		return newActiveActor(ref, instance, idleTimeout, h.idleActorProcessor, h.clock)
 	}, nil
 }

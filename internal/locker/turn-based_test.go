@@ -16,7 +16,7 @@ func TestTurnBasedLocker_Lock(t *testing.T) {
 
 		err := locker.Lock(t.Context())
 		require.NoError(t, err)
-		assert.True(t, locker.isLocked)
+		assert.True(t, locker.IsLocked())
 		assert.Equal(t, 0, locker.QueueLength())
 	})
 
@@ -64,7 +64,7 @@ func TestTurnBasedLocker_Lock(t *testing.T) {
 		}
 
 		// Queue should be empty, still locked
-		assert.True(t, locker.isLocked)
+		assert.True(t, locker.IsLocked())
 		assert.Equal(t, 0, locker.QueueLength())
 	})
 
@@ -118,13 +118,131 @@ func TestTurnBasedLocker_Lock(t *testing.T) {
 	})
 }
 
+func TestTurnBasedLocker_TryLock(t *testing.T) {
+	t.Run("succeeds when unlocked", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		acquired, err := locker.TryLock()
+		require.NoError(t, err)
+		assert.True(t, acquired)
+
+		assert.True(t, locker.IsLocked())
+	})
+
+	t.Run("fails when already locked", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		// First acquire succeeds
+		acquired, err := locker.TryLock()
+		require.NoError(t, err)
+		assert.True(t, acquired)
+
+		// Second acquire fails
+		acquired, err = locker.TryLock()
+		require.NoError(t, err)
+		assert.False(t, acquired)
+
+		assert.True(t, locker.IsLocked())
+	})
+
+	t.Run("returns error when stopped", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+		locker.Stop()
+
+		_, err := locker.TryLock()
+		require.ErrorIs(t, err, ErrStopped)
+
+		assert.False(t, locker.IsLocked())
+	})
+
+	t.Run("does not affect queue", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		// First goroutine acquires with Lock
+		err := locker.Lock(context.Background())
+		require.NoError(t, err)
+
+		// Second goroutine waits in queue
+		go func() {
+			_ = locker.Lock(context.Background())
+		}()
+
+		// Wait for the goroutine to be queued
+		assert.EventuallyWithT(t, func(c *assert.CollectT) {
+			assert.Equal(c, 1, locker.QueueLength())
+		}, 3*time.Second, 10*time.Millisecond)
+
+		// TryLock should fail and not affect the queue
+		acquired, err := locker.TryLock()
+		require.NoError(t, err)
+		assert.False(t, acquired)
+
+		assert.Equal(t, 1, locker.QueueLength())
+	})
+
+	t.Run("concurrent try locks", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		const numGoroutines = 100
+		results := make(chan bool, numGoroutines)
+		errors := make(chan error, numGoroutines)
+
+		var wg sync.WaitGroup
+		for range numGoroutines {
+			wg.Go(func() {
+				acquired, err := locker.TryLock()
+				results <- acquired
+				errors <- err
+			})
+		}
+
+		wg.Wait()
+		close(results)
+		close(errors)
+
+		// Exactly one should succeed
+		successCount := 0
+		for acquired := range results {
+			if acquired {
+				successCount++
+			}
+		}
+		assert.Equal(t, 1, successCount)
+
+		// All should have no error
+		for err := range errors {
+			require.NoError(t, err)
+		}
+	})
+
+	t.Run("unlock after try lock", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		// Acquire with TryLock
+		acquired, err := locker.TryLock()
+		require.NoError(t, err)
+		assert.True(t, acquired)
+
+		assert.True(t, locker.IsLocked())
+
+		// Unlock should work normally
+		locker.Unlock()
+		assert.False(t, locker.IsLocked())
+
+		// Another TryLock should succeed
+		acquired, err = locker.TryLock()
+		require.NoError(t, err)
+		assert.True(t, acquired)
+	})
+}
+
 func TestTurnBasedLocker_Unlock(t *testing.T) {
 	t.Run("do nothing if unlocked", func(t *testing.T) {
 		locker := &TurnBasedLocker{}
 
 		// Should not panic or cause issues
 		locker.Unlock()
-		assert.False(t, locker.isLocked)
+		assert.False(t, locker.IsLocked())
 	})
 
 	t.Run("no waiters unlocks", func(t *testing.T) {
@@ -132,10 +250,10 @@ func TestTurnBasedLocker_Unlock(t *testing.T) {
 
 		err := locker.Lock(t.Context())
 		require.NoError(t, err)
-		assert.True(t, locker.isLocked)
+		assert.True(t, locker.IsLocked())
 
 		locker.Unlock()
-		assert.False(t, locker.isLocked)
+		assert.False(t, locker.IsLocked())
 	})
 
 	t.Run("passes lock to next waiter", func(t *testing.T) {
@@ -170,7 +288,7 @@ func TestTurnBasedLocker_Unlock(t *testing.T) {
 			t.Error("Second goroutine did not acquire the lock in 3s")
 		}
 
-		assert.True(t, locker.isLocked)
+		assert.True(t, locker.IsLocked())
 		assert.Equal(t, 0, locker.QueueLength())
 	})
 }
@@ -284,7 +402,7 @@ func TestTurnBasedLocker(t *testing.T) {
 		}
 
 		// Locker should be unlocked at the end
-		assert.False(t, locker.isLocked)
+		assert.False(t, locker.IsLocked())
 		assert.Equal(t, 0, locker.QueueLength())
 	})
 
@@ -359,12 +477,12 @@ func TestTurnBasedLocker(t *testing.T) {
 
 		// First unlock should work
 		locker.Unlock()
-		assert.False(t, locker.isLocked)
+		assert.False(t, locker.IsLocked())
 
 		// Additional unlocks should not cause issues
 		locker.Unlock()
 		locker.Unlock()
-		assert.False(t, locker.isLocked)
+		assert.False(t, locker.IsLocked())
 	})
 
 	t.Run("multiple stops", func(t *testing.T) {

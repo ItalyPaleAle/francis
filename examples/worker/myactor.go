@@ -28,7 +28,7 @@ func NewMyActor(actorID string, service *actor.Service) actor.Actor {
 			slog.String("actorID", actorID),
 		)
 
-	log.Info("Actor Created")
+	log.Info("Actor created")
 
 	return &MyActor{
 		log:    log,
@@ -47,7 +47,7 @@ func (m *MyActor) Invoke(ctx context.Context, method string, data any) (any, err
 	if strings.HasSuffix(method, "-wait") {
 		method = strings.TrimSuffix(method, "-wait")
 
-		time.Sleep(time.Second)
+		time.Sleep(2500 * time.Millisecond)
 	}
 
 	switch method {
