@@ -22,7 +22,7 @@ func (s *SQLiteProvider) GetState(ctx context.Context, ref components.ActorRef) 
 			WHERE
 				actor_type = ?
 				AND actor_id = ?
-				AND (actor_state_expiration IS NULL OR actor_state_expiration < unixepoch())`,
+				AND (actor_state_expiration IS NULL OR actor_state_expiration < unixepoch('subsec') * 1000)`,
 			ref.ActorType, ref.ActorID,
 		).
 		Scan(&data)
@@ -36,21 +36,20 @@ func (s *SQLiteProvider) GetState(ctx context.Context, ref components.ActorRef) 
 }
 
 func (s *SQLiteProvider) SetState(ctx context.Context, ref components.ActorRef, data []byte, opts components.SetStateOpts) error {
-	// We do not allow precision below seconds
 	var ttl *int64
 	opts.TTL = opts.TTL.Truncate(time.Second)
 	if opts.TTL > 0 {
-		ttl = ptr.Of(int64(opts.TTL.Seconds()))
+		ttl = ptr.Of(int64(opts.TTL.Seconds()) * 1000)
 	}
 
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
 	// Performs a upsert
-	// If ttl is nil, `unixepoch() + NULL` will be NULL too
+	// If ttl is nil, `unixepoch + NULL` will be NULL too
 	_, err := s.db.ExecContext(queryCtx,
 		`REPLACE INTO actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration)
-		VALUES (?, ?, ?, unixepoch() + ?)`,
+		VALUES (?, ?, ?, (unixepoch('subsec') * 1000) + ?)`,
 		ref.ActorType, ref.ActorID, data, ttl,
 	)
 	if err != nil {
@@ -64,9 +63,14 @@ func (s *SQLiteProvider) DeleteState(ctx context.Context, ref components.ActorRe
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
+	// We exclude expired state from the deletion because we want to be able to get an appropriate count of affected rows, and return ErrNoState if nothing was deleted
+	// Expired state entries are garbage collected periodically anyways
 	res, err := s.db.ExecContext(queryCtx,
 		`DELETE FROM actor_state
-		WHERE actor_type = ? AND actor_id = ?`,
+		WHERE
+			actor_type = ?
+			AND actor_id = ?
+			AND (actor_state_expiration IS NULL OR actor_state_expiration < unixepoch('subsec') * 1000)`,
 		ref.ActorType, ref.ActorID,
 	)
 	if err != nil {

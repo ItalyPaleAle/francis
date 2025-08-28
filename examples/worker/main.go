@@ -24,7 +24,7 @@ var log *slog.Logger
 func main() {
 	log = initLogger(slog.LevelDebug)
 
-	ctx := signals.SignalContext(context.Background())
+	ctx := signals.SignalContext(context.Background(), log)
 
 	err := runWorker(ctx)
 	if err != nil {

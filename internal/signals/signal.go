@@ -19,7 +19,7 @@ var onlyOneSignalHandler = make(chan struct{})
 
 // SignalContext returns a context that is canceled when the application receives an interrupt signal.
 // A second signal forces an immediate shutdown.
-func SignalContext(parentCtx context.Context) context.Context {
+func SignalContext(parentCtx context.Context, log *slog.Logger) context.Context {
 	close(onlyOneSignalHandler) // Panics when called twice
 
 	ctx, cancel := context.WithCancel(parentCtx)
@@ -28,11 +28,11 @@ func SignalContext(parentCtx context.Context) context.Context {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		slog.Info("Received interrupt signal. Shutting down…")
+		log.Info("Received interrupt signal. Shutting down…")
 		cancel()
 
 		<-sigCh
-		slog.Warn("Received a second interrupt signal. Forcing an immediate shutdown.")
+		log.Warn("Received a second interrupt signal. Forcing an immediate shutdown.")
 		os.Exit(1)
 	}()
 

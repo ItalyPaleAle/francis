@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/italypaleale/actors/components"
 )
@@ -90,8 +89,7 @@ func (h *Host) createActorFn(ref components.ActorRef) (func() *activeActor, erro
 		return nil, errors.New("unsupported actor type")
 	}
 
-	idleTimeout := time.Duration(h.actorsConfig[ref.ActorType].IdleTimeout) * time.Second
-
+	idleTimeout := h.actorsConfig[ref.ActorType].IdleTimeout
 	return func() *activeActor {
 		instance := factoryFn(ref.ActorID, h.service)
 		return newActiveActor(ref, instance, idleTimeout, h.idleActorProcessor, h.clock)

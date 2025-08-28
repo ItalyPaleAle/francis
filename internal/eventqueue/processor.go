@@ -133,11 +133,9 @@ func (p *Processor[K, T]) process(isNext bool) {
 		return
 	}
 
-	p.wg.Add(1)
-	go func() {
-		defer p.wg.Done()
+	p.wg.Go(func() {
 		p.processLoop()
-	}()
+	})
 }
 
 // Processing loop.

@@ -25,7 +25,7 @@ import (
 
 const (
 	defaultActorsMapSize       = 128
-	defaultIdleTimeout         = 5 * 60 // 5 minutes
+	defaultIdleTimeout         = 5 * time.Minute
 	defaultDeactivationTimeout = 10 * time.Second
 	// If an idle actor is getting deactivated, but it's still busy, will be re-enqueued with its idle timeout increased by this duration
 	actorBusyReEnqueueInterval = 10 * time.Second
@@ -172,16 +172,13 @@ func (h *Host) RegisterActor(actorType string, factory actor.Factory, opts Regis
 		return errors.New("cannot call RegisterActor after host has started")
 	}
 
-	idleTimeout := int64(opts.IdleTimeout.Seconds())
 	switch {
-	case idleTimeout == 0:
+	case opts.IdleTimeout == 0:
 		// Set default idle timeout if empty
-		idleTimeout = defaultIdleTimeout
-	case idleTimeout < 0:
+		opts.IdleTimeout = defaultIdleTimeout
+	case opts.IdleTimeout < 0:
 		// A negative number means no timeout
-		idleTimeout = -1
-	case idleTimeout > math.MaxInt32:
-		return errors.New("option IdleTimeout's seconds must fit in int32 (2^31-1)")
+		opts.IdleTimeout = -1
 	}
 
 	switch {
@@ -200,13 +197,16 @@ func (h *Host) RegisterActor(actorType string, factory actor.Factory, opts Regis
 		return errors.New("option AlarmConcurrencyLimit must not be smaller than ConcurrencyLimit")
 	}
 
-	if opts.DeactivationTimeout <= 0 {
+	switch {
+	case opts.DeactivationTimeout == 0:
 		opts.DeactivationTimeout = defaultDeactivationTimeout
+	case opts.DeactivationTimeout < 0:
+		return errors.New("option DeactivationTimeout must not be negative")
 	}
 
 	h.actorsConfig[actorType] = components.ActorHostType{
 		ActorType:             actorType,
-		IdleTimeout:           int32(idleTimeout),
+		IdleTimeout:           opts.IdleTimeout,
 		ConcurrencyLimit:      int32(opts.ConcurrencyLimit),
 		AlarmConcurrencyLimit: int32(opts.AlarmConcurrencyLimit),
 		DeactivationTimeout:   opts.DeactivationTimeout,

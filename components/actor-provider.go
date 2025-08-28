@@ -42,12 +42,16 @@ type ActorProvider interface {
 	// If the actor doesn't exist, returns ErrNoActor.
 	RemoveActor(ctx context.Context, ref ActorRef) error
 
+	// GetAlarm returns an alarm.
+	// It returns ErrNoAlarm if it doesn't exist.
+	GetAlarm(ctx context.Context, ref AlarmRef) (GetAlarmRes, error)
+
 	// SetAlarm sets or replaces an alarm configured for an actor.
-	SetAlarm(ctx context.Context, ref ActorRef, name string, req SetAlarmReq) error
+	SetAlarm(ctx context.Context, ref AlarmRef, req SetAlarmReq) error
 
 	// DeleteAlarm removes an alarm configured for an actor.
 	// If the alarm doesn't exist, returns ErrNoAlarm.
-	DeleteAlarm(ctx context.Context, ref ActorRef, name string) error
+	DeleteAlarm(ctx context.Context, ref AlarmRef) error
 
 	// GetState retrieves the persistent state of an actor.
 	// If there's no state, returns ErrNoState.
@@ -126,8 +130,8 @@ type UpdateActorHostReq struct {
 type ActorHostType struct {
 	// Actor type
 	ActorType string
-	// Idle timeout for the actor type, in seconds
-	IdleTimeout int32
+	// Idle timeout for the actor type
+	IdleTimeout time.Duration
 	// Maximum number of actors of the given type active on each host
 	// Set to 0 for no limit
 	ConcurrencyLimit int32
@@ -150,6 +154,26 @@ func (r ActorRef) String() string {
 	return r.ActorType + "/" + r.ActorID
 }
 
+// AlarmRef references an alarm.
+type AlarmRef struct {
+	ActorType string
+	ActorID   string
+	Name      string
+}
+
+// ActorRef returns the actor reference for the alarm.
+func (r AlarmRef) ActorRef() ActorRef {
+	return ActorRef{
+		ActorType: r.ActorType,
+		ActorID:   r.ActorID,
+	}
+}
+
+// String implements fmt.Stringer.
+func (r AlarmRef) String() string {
+	return r.ActorType + "/" + r.ActorID + "/" + r.Name
+}
+
 // LookupActorOpts contains options for LookupActor.
 type LookupActorOpts struct {
 	// List of hosts on which the actor can be activated.
@@ -163,17 +187,31 @@ type LookupActorRes struct {
 	HostID string
 	// Host address (including port)
 	Address string
-	// Actor idle timeout, in seconds
+	// Actor idle timeout
 	// Note: this is the absolute idle timeout, and not the remaining lifetime of the actor
-	IdleTimeout int32
+	IdleTimeout time.Duration
+}
+
+// Properties for an alarm
+type AlarmProperties struct {
+	// Due time.
+	DueTime time.Time
+	// Alarm repetition interval.
+	Interval *time.Duration
+	// Deadline for repeating alarms.
+	TTL *time.Time
+	// Data associated with the alarm.
+	Data []byte
+}
+
+// GetAlarmRes is the response object for the GetAlarm method.
+type GetAlarmRes struct {
+	AlarmProperties
 }
 
 // SetAlarmReq is the request object for the SetAlarm method.
 type SetAlarmReq struct {
-	Data    []byte
-	DueTime time.Time
-	Period  time.Duration
-	TTL     time.Time
+	AlarmProperties
 }
 
 // SetStateOpts contains options for SetState
