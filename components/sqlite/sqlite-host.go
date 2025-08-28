@@ -346,31 +346,24 @@ func (s *SQLiteProvider) insertHostActorTypes(ctx context.Context, tx *sql.Tx, h
 	q := strings.Builder{}
 	q.WriteString(
 		`INSERT INTO host_actor_types
-			(host_id, actor_type, actor_idle_timeout, actor_concurrency_limit, actor_alarm_concurrency_limit)
+			(host_id, actor_type, actor_idle_timeout, actor_concurrency_limit)
 		VALUES `,
 	)
-	q.Grow(len(actorTypes) * len("(?,?,?,?,?),"))
+	q.Grow(len(actorTypes) * len("(?,?,?,?),"))
 
 	args := make([]any, 0, len(actorTypes)*3)
 	for i, t := range actorTypes {
-		// If there's a general concurrency limit but no limit for alarms, set the one for alarms to be the same
-		alarmConcurrencyLimit := t.AlarmConcurrencyLimit
-		if t.ConcurrencyLimit > 0 && alarmConcurrencyLimit == 0 {
-			alarmConcurrencyLimit = t.ConcurrencyLimit
-		}
-
 		args = append(args,
 			hostID,
 			t.ActorType,
 			t.IdleTimeout.Milliseconds(),
 			t.ConcurrencyLimit,
-			alarmConcurrencyLimit,
 		)
 
 		if i > 0 {
 			q.WriteRune(',')
 		}
-		q.WriteString("(?,?,?,?,?)")
+		q.WriteString("(?,?,?,?)")
 	}
 
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)

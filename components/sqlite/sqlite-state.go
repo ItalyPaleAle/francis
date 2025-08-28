@@ -22,7 +22,7 @@ func (s *SQLiteProvider) GetState(ctx context.Context, ref components.ActorRef) 
 			WHERE
 				actor_type = ?
 				AND actor_id = ?
-				AND (actor_state_expiration IS NULL OR actor_state_expiration < unixepoch('subsec') * 1000)`,
+				AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time < unixepoch('subsec') * 1000)`,
 			ref.ActorType, ref.ActorID,
 		).
 		Scan(&data)
@@ -48,7 +48,7 @@ func (s *SQLiteProvider) SetState(ctx context.Context, ref components.ActorRef, 
 	// Performs a upsert
 	// If ttl is nil, `unixepoch + NULL` will be NULL too
 	_, err := s.db.ExecContext(queryCtx,
-		`REPLACE INTO actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration)
+		`REPLACE INTO actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time)
 		VALUES (?, ?, ?, (unixepoch('subsec') * 1000) + ?)`,
 		ref.ActorType, ref.ActorID, data, ttl,
 	)
@@ -70,7 +70,7 @@ func (s *SQLiteProvider) DeleteState(ctx context.Context, ref components.ActorRe
 		WHERE
 			actor_type = ?
 			AND actor_id = ?
-			AND (actor_state_expiration IS NULL OR actor_state_expiration < unixepoch('subsec') * 1000)`,
+			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time < unixepoch('subsec') * 1000)`,
 		ref.ActorType, ref.ActorID,
 	)
 	if err != nil {

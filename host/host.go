@@ -62,10 +62,9 @@ type Host struct {
 
 // RegisterActorOptions is the type for the options for the RegisterActor method.
 type RegisterActorOptions struct {
-	IdleTimeout           time.Duration
-	DeactivationTimeout   time.Duration
-	ConcurrencyLimit      int
-	AlarmConcurrencyLimit int
+	IdleTimeout         time.Duration
+	DeactivationTimeout time.Duration
+	ConcurrencyLimit    int
 }
 
 type NewHostOptions struct {
@@ -189,15 +188,6 @@ func (h *Host) RegisterActor(actorType string, factory actor.Factory, opts Regis
 	}
 
 	switch {
-	case opts.AlarmConcurrencyLimit <= 0:
-		opts.AlarmConcurrencyLimit = 0
-	case opts.AlarmConcurrencyLimit > math.MaxInt32:
-		return errors.New("option AlarmConcurrencyLimit must fit in int32 (2^31-1)")
-	case opts.AlarmConcurrencyLimit < opts.ConcurrencyLimit:
-		return errors.New("option AlarmConcurrencyLimit must not be smaller than ConcurrencyLimit")
-	}
-
-	switch {
 	case opts.DeactivationTimeout == 0:
 		opts.DeactivationTimeout = defaultDeactivationTimeout
 	case opts.DeactivationTimeout < 0:
@@ -205,11 +195,10 @@ func (h *Host) RegisterActor(actorType string, factory actor.Factory, opts Regis
 	}
 
 	h.actorsConfig[actorType] = components.ActorHostType{
-		ActorType:             actorType,
-		IdleTimeout:           opts.IdleTimeout,
-		ConcurrencyLimit:      int32(opts.ConcurrencyLimit),
-		AlarmConcurrencyLimit: int32(opts.AlarmConcurrencyLimit),
-		DeactivationTimeout:   opts.DeactivationTimeout,
+		ActorType:           actorType,
+		IdleTimeout:         opts.IdleTimeout,
+		ConcurrencyLimit:    int32(opts.ConcurrencyLimit),
+		DeactivationTimeout: opts.DeactivationTimeout,
 	}
 
 	h.actorFactories[actorType] = factory

@@ -135,10 +135,6 @@ type ActorHostType struct {
 	// Maximum number of actors of the given type active on each host
 	// Set to 0 for no limit
 	ConcurrencyLimit int32
-	// Maximum number of alarms of the given type active on each host
-	// This cannot be bigger than ConcurrencyLimit
-	// Set to 0 for no limit
-	AlarmConcurrencyLimit int32
 	// Actor deactivation timeout
 	DeactivationTimeout time.Duration
 }
