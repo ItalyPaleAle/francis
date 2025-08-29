@@ -23,7 +23,7 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 	hostID := hostIDObj.String()
 
 	_, oErr = transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
-		now := time.Now().UnixMilli()
+		now := s.clock.Now().UnixMilli()
 
 		// To start, we need to delete any actor host with the same address that has not sent a health check in the maximum allotted time
 		// We need to do this because the hosts table has a unique index on the address, so two apps can't have the same address
@@ -127,7 +127,7 @@ func (s *SQLiteProvider) UpdateActorHost(ctx context.Context, hostID string, req
 }
 
 func (s *SQLiteProvider) updateActorHostLastHealthCheck(ctx context.Context, hostID string, tx *sql.Tx) error {
-	now := time.Now().UnixMilli()
+	now := s.clock.Now().UnixMilli()
 
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
@@ -165,7 +165,7 @@ func (s *SQLiteProvider) UnregisterHost(ctx context.Context, hostID string) erro
 	// Deleting from the hosts table causes all actors to be deactivate
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-	now := time.Now().UnixMilli()
+	now := s.clock.Now().UnixMilli()
 	var hostActive bool
 	err := s.db.
 		QueryRowContext(queryCtx,
@@ -197,7 +197,7 @@ func (s *SQLiteProvider) LookupActor(ctx context.Context, ref components.ActorRe
 		queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 		defer cancel()
 		var idleTimeoutMs int64
-		now := time.Now().UnixMilli()
+		now := s.clock.Now().UnixMilli()
 		err = tx.
 			QueryRowContext(queryCtx,
 				`SELECT hosts.host_id, hosts.host_address, active_actors.actor_idle_timeout

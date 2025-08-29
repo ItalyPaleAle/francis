@@ -11,6 +11,7 @@ import (
 
 	"github.com/italypaleale/actors/components"
 	"github.com/italypaleale/actors/internal/ptr"
+	"github.com/italypaleale/actors/internal/sql/transactions"
 )
 
 func (s *SQLiteProvider) GetAlarm(ctx context.Context, req components.AlarmRef) (res components.GetAlarmRes, err error) {
@@ -119,4 +120,15 @@ func (s *SQLiteProvider) DeleteAlarm(ctx context.Context, ref components.AlarmRe
 	}
 
 	return nil
+}
+
+func (s *SQLiteProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req components.FetchAndLeaseUpcomingAlarmsReq) ([]*components.AlarmLease, error) {
+	// The list of hosts is required; if there's no host, return an empty list
+	if len(req.Hosts) == 0 {
+		return nil, nil
+	}
+
+	return transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) ([]*components.AlarmLease, error) {
+		return nil, nil
+	})
 }

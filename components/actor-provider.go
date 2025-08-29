@@ -53,6 +53,9 @@ type ActorProvider interface {
 	// If the alarm doesn't exist, returns ErrNoAlarm.
 	DeleteAlarm(ctx context.Context, ref AlarmRef) error
 
+	// FetchAndLeaseUpcomingAlarms fetches the upcoming alarms, acquiring a lease on them.
+	FetchAndLeaseUpcomingAlarms(ctx context.Context, req FetchAndLeaseUpcomingAlarmsReq) ([]*AlarmLease, error)
+
 	// GetState retrieves the persistent state of an actor.
 	// If there's no state, returns ErrNoState.
 	GetState(ctx context.Context, ref ActorRef) ([]byte, error)
@@ -209,6 +212,45 @@ type GetAlarmRes struct {
 // SetAlarmReq is the request object for the SetAlarm method.
 type SetAlarmReq struct {
 	AlarmProperties
+}
+
+// FetchAndLeaseUpcomingAlarmsReq is the request object for the FetchAndLeaseUpcomingAlarms method.
+type FetchAndLeaseUpcomingAlarmsReq struct {
+	// Limits to alarms that can be fetched on these hosts.
+	Hosts []string
+}
+
+// AlarmLease indicates an alarm lease
+type AlarmLease struct {
+	key     string
+	dueTime time.Time
+	leaseID any
+}
+
+// NewAlarmLease returns a new AlarmLease object.
+func NewAlarmLease(key string, dueTime time.Time, leaseID any) AlarmLease {
+	return AlarmLease{
+		key:     key,
+		dueTime: dueTime,
+		leaseID: leaseID,
+	}
+}
+
+// Key returns the key for the alarm.
+// This is implemented to comply with the queueable interface.
+func (r AlarmLease) Key() string {
+	return r.key
+}
+
+// DueTime returns the due time for the alarm.
+// This is implemented to comply with the queueable interface.
+func (r AlarmLease) DueTime() time.Time {
+	return r.dueTime
+}
+
+// LeaseID returns the value of the leaseID property.
+func (r AlarmLease) LeaseID() any {
+	return r.leaseID
 }
 
 // SetStateOpts contains options for SetState

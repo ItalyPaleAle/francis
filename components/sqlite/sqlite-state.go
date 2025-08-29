@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/italypaleale/actors/components"
 	"github.com/italypaleale/actors/internal/ptr"
@@ -23,7 +22,7 @@ func (s *SQLiteProvider) GetState(ctx context.Context, ref components.ActorRef) 
 				actor_type = ?
 				AND actor_id = ?
 				AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time < ?)`,
-			ref.ActorType, ref.ActorID, time.Now().UnixMilli(),
+			ref.ActorType, ref.ActorID, s.clock.Now().UnixMilli(),
 		).
 		Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -38,7 +37,7 @@ func (s *SQLiteProvider) GetState(ctx context.Context, ref components.ActorRef) 
 func (s *SQLiteProvider) SetState(ctx context.Context, ref components.ActorRef, data []byte, opts components.SetStateOpts) error {
 	var ttl *int64
 	if opts.TTL > 0 {
-		ttl = ptr.Of(time.Now().Add(opts.TTL).UnixMilli())
+		ttl = ptr.Of(s.clock.Now().Add(opts.TTL).UnixMilli())
 	}
 
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
@@ -69,7 +68,7 @@ func (s *SQLiteProvider) DeleteState(ctx context.Context, ref components.ActorRe
 			actor_type = ?
 			AND actor_id = ?
 			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time < ?`,
-		ref.ActorType, ref.ActorID, time.Now().UnixMilli(),
+		ref.ActorType, ref.ActorID, s.clock.Now().UnixMilli(),
 	)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)

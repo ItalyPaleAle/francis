@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"k8s.io/utils/clock"
 	"modernc.org/sqlite"
 
 	"github.com/italypaleale/actors/components"
@@ -28,6 +29,8 @@ type SQLiteProvider struct {
 	running atomic.Bool
 	log     *slog.Logger
 	timeout time.Duration
+
+	clock clock.WithTicker
 }
 
 func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, providerConfig components.ProviderConfig) (components.ActorProvider, error) {
@@ -37,12 +40,16 @@ func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, provi
 		cfg:     providerConfig,
 		log:     log,
 		timeout: sqliteOpts.Timeout,
+		clock:   sqliteOpts.clock,
 	}
 
 	// Set default values
 	s.cfg.SetDefaults()
 	if s.timeout <= 0 {
 		s.timeout = DefaultTimeout
+	}
+	if s.clock == nil {
+		s.clock = clock.RealClock{}
 	}
 
 	// The query timeout should be greater than HostHealthCheckDeadline
@@ -79,6 +86,9 @@ type SQLiteProviderOptions struct {
 
 	// Timeout for requests to the database
 	Timeout time.Duration
+
+	// Clock, used for testing
+	clock clock.WithTicker
 }
 
 func (s *SQLiteProvider) Init(ctx context.Context) error {
