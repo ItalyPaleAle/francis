@@ -193,7 +193,8 @@ type AlarmProperties struct {
 	// Due time.
 	DueTime time.Time
 	// Alarm repetition interval.
-	Interval *time.Duration
+	// This can be an ISO-formatted duration or a Go duration string
+	Interval string
 	// Deadline for repeating alarms.
 	TTL *time.Time
 	// Data associated with the alarm.

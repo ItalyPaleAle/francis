@@ -23,6 +23,8 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 	hostID := hostIDObj.String()
 
 	_, oErr = transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
+		now := time.Now().UnixMilli()
+
 		// To start, we need to delete any actor host with the same address that has not sent a health check in the maximum allotted time
 		// We need to do this because the hosts table has a unique index on the address, so two apps can't have the same address
 		// If it's the same app that's restarted after a crash, then it will be able to re-register once the health checks have timed out
@@ -33,9 +35,9 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 			`DELETE FROM hosts
 			WHERE
 				host_address = ?
-				OR host_last_health_check < ((unixepoch('subsec') * 1000) - ?)`,
+				OR host_last_health_check < ?`,
 			req.Address,
-			s.cfg.HostHealthCheckDeadline.Milliseconds(),
+			now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
 		)
 		if err != nil {
 			return zero, fmt.Errorf("error removing failed hosts: %w", err)
@@ -47,9 +49,10 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 		defer cancel()
 		_, err = tx.ExecContext(queryCtx,
 			`INSERT INTO hosts (host_id, host_address, host_last_health_check)
-			VALUES (?, ?, unixepoch('subsec') * 1000)`,
+			VALUES (?, ?, ?)`,
 			hostID,
 			req.Address,
+			now,
 		)
 		if isConstraintError(err) {
 			return zero, components.ErrHostAlreadyRegistered
@@ -124,18 +127,21 @@ func (s *SQLiteProvider) UpdateActorHost(ctx context.Context, hostID string, req
 }
 
 func (s *SQLiteProvider) updateActorHostLastHealthCheck(ctx context.Context, hostID string, tx *sql.Tx) error {
+	now := time.Now().UnixMilli()
+
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	res, err := tx.
 		ExecContext(queryCtx,
 			`UPDATE hosts
 		SET
-			host_last_health_check = unixepoch('subsec') * 1000
+			host_last_health_check = ?
 		WHERE
 			host_id = ?
-			AND host_last_health_check >= ((unixepoch('subsec') * 1000) - ?)`,
+			AND host_last_health_check >= ?`,
 			hostID,
-			s.cfg.HostHealthCheckDeadline.Milliseconds(),
+			now,
+			now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
 		)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)
@@ -159,14 +165,15 @@ func (s *SQLiteProvider) UnregisterHost(ctx context.Context, hostID string) erro
 	// Deleting from the hosts table causes all actors to be deactivate
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
+	now := time.Now().UnixMilli()
 	var hostActive bool
 	err := s.db.
 		QueryRowContext(queryCtx,
 			`DELETE FROM hosts
 			WHERE host_id = ?
-			RETURNING host_last_health_check >= ((unixepoch('subsec') * 1000) - ?)`,
+			RETURNING host_last_health_check >= ?`,
 			hostID,
-			s.cfg.HostHealthCheckDeadline.Milliseconds(),
+			now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
 		).
 		Scan(&hostActive)
 	if err != nil {
@@ -190,6 +197,7 @@ func (s *SQLiteProvider) LookupActor(ctx context.Context, ref components.ActorRe
 		queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 		defer cancel()
 		var idleTimeoutMs int64
+		now := time.Now().UnixMilli()
 		err = tx.
 			QueryRowContext(queryCtx,
 				`SELECT hosts.host_id, hosts.host_address, active_actors.actor_idle_timeout
@@ -198,10 +206,10 @@ func (s *SQLiteProvider) LookupActor(ctx context.Context, ref components.ActorRe
 				WHERE
 					active_actors.actor_type = ?
 					AND active_actors.actor_id = ?
-					AND hosts.host_last_health_check >= ((unixepoch('subsec') * 1000) - ?)`,
+					AND hosts.host_last_health_check >= ?`,
 				ref.ActorType,
 				ref.ActorID,
-				s.cfg.HostHealthCheckDeadline.Milliseconds(),
+				now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
 			).
 			Scan(&res.HostID, &res.Address, &idleTimeoutMs)
 		res.IdleTimeout = time.Duration(idleTimeoutMs) * time.Millisecond
@@ -235,7 +243,10 @@ func (s *SQLiteProvider) LookupActor(ctx context.Context, ref components.ActorRe
 		// First, find a host that is capable of executing the actor and has capacity
 		// We start by building the host restrictions, if any
 		params := make([]any, 0, len(opts.Hosts)+2)
-		params = append(params, ref.ActorType, s.cfg.HostHealthCheckDeadline.Milliseconds())
+		params = append(params,
+			ref.ActorType,
+			now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
+		)
 		hostClause := strings.Builder{}
 		if len(opts.Hosts) > 0 {
 			hostClause.Grow(len("hosts.host_id=? OR ")*len(opts.Hosts) + len("AND ()"))
@@ -266,7 +277,7 @@ func (s *SQLiteProvider) LookupActor(ctx context.Context, ref components.ActorRe
 					AND host_actor_types.actor_type = host_active_actor_count.actor_type
 				WHERE
 					host_actor_types.actor_type = ?
-					AND hosts.host_last_health_check >= ((unixepoch('subsec') * 1000) - ?)
+					AND hosts.host_last_health_check >= ?
 					AND (
 						host_actor_types.actor_concurrency_limit = 0
 						OR host_active_actor_count.active_count < host_actor_types.actor_concurrency_limit
@@ -296,8 +307,9 @@ func (s *SQLiteProvider) LookupActor(ctx context.Context, ref components.ActorRe
 		_, err = tx.
 			ExecContext(queryCtx,
 				`REPLACE INTO active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation)
-				VALUES (?, ?, ?, ?, unixepoch('subsec') * 1000)`,
-				ref.ActorType, ref.ActorID, res.HostID, res.IdleTimeout.Milliseconds())
+				VALUES (?, ?, ?, ?, ?)`,
+				ref.ActorType, ref.ActorID, res.HostID, res.IdleTimeout.Milliseconds(), now,
+			)
 		if err != nil {
 			// Reset res
 			res = components.LookupActorRes{}

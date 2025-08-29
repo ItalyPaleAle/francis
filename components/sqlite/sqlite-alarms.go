@@ -18,15 +18,14 @@ func (s *SQLiteProvider) GetAlarm(ctx context.Context, req components.AlarmRef) 
 	defer cancel()
 
 	var (
-		dueDelay           int64
-		interval, ttlDelay *int64
+		dueTime  int64
+		ttlTime  *int64
+		interval *string
 	)
 	err = s.db.
 		QueryRowContext(queryCtx, `
 			SELECT
-				(alarm_due_time - (unixepoch('subsec') * 1000)),
-				alarm_interval, alarm_data,
-				(alarm_ttl_time - (unixepoch('subsec') * 1000))
+				alarm_due_time, alarm_interval, alarm_data, alarm_ttl_time
 			FROM alarms
 			WHERE
 				actor_type = ?
@@ -34,7 +33,7 @@ func (s *SQLiteProvider) GetAlarm(ctx context.Context, req components.AlarmRef) 
 				AND alarm_name = ?`,
 			req.ActorType, req.ActorID, req.Name,
 		).
-		Scan(&dueDelay, &interval, &res.Data, &ttlDelay)
+		Scan(&dueTime, &interval, &res.Data, &ttlTime)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		return res, components.ErrNoAlarm
@@ -42,30 +41,27 @@ func (s *SQLiteProvider) GetAlarm(ctx context.Context, req components.AlarmRef) 
 		return res, fmt.Errorf("error executing query: %w", err)
 	}
 
-	res.DueTime = time.Now().Add(time.Duration(dueDelay) * time.Millisecond)
+	res.DueTime = time.UnixMilli(dueTime)
 	if interval != nil {
-		res.Interval = ptr.Of(
-			time.Duration(*interval) * time.Millisecond,
-		)
+		res.Interval = *interval
 	}
-	if ttlDelay != nil {
-		res.TTL = ptr.Of(
-			time.Now().Add(time.Duration(*ttlDelay) * time.Millisecond),
-		)
+	if ttlTime != nil {
+		res.TTL = ptr.Of(time.UnixMilli(*ttlTime))
 	}
 
 	return res, nil
 }
 
 func (s *SQLiteProvider) SetAlarm(ctx context.Context, ref components.AlarmRef, req components.SetAlarmReq) error {
-	dueDelay := time.Until(req.DueTime).Milliseconds()
-
-	var interval, ttlDelay *int64
-	if req.Interval != nil {
-		interval = ptr.Of(req.Interval.Milliseconds())
+	var (
+		interval *string
+		ttlTime  *int64
+	)
+	if req.Interval != "" {
+		interval = ptr.Of(req.Interval)
 	}
 	if req.TTL != nil {
-		ttlDelay = ptr.Of(time.Until(*req.TTL).Milliseconds())
+		ttlTime = ptr.Of(req.TTL.UnixMilli())
 	}
 
 	if req.Data != nil && len(req.Data) == 0 {
@@ -81,7 +77,6 @@ func (s *SQLiteProvider) SetAlarm(ctx context.Context, ref components.AlarmRef, 
 	defer cancel()
 
 	// We do an upsert to replace alarms with the same actor ID, actor type, and alarm name
-	// If ttlDelay is nil, `unixepoch + NULL` will be NULL too
 	_, err = s.db.
 		ExecContext(queryCtx,
 			`REPLACE INTO alarms
@@ -90,10 +85,10 @@ func (s *SQLiteProvider) SetAlarm(ctx context.Context, ref components.AlarmRef, 
 				alarm_lease_id, alarm_lease_time, reminder_lease_pid)
 			VALUES
 				(?, ?, ?, ?,
-				(unixepoch('subsec') * 1000) + ?, ?, (unixepoch('subsec') * 1000) + ?, ?,
+				?, ?, ?, ?,
 				NULL, NULL, NULL)`,
 			alarmID, ref.ActorType, ref.ActorID, ref.Name,
-			dueDelay, interval, ttlDelay, req.Data)
+			req.DueTime.UnixMilli(), interval, ttlTime, req.Data)
 	if err != nil {
 		return fmt.Errorf("failed to create reminder: %w", err)
 	}

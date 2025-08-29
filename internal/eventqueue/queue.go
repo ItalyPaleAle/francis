@@ -13,11 +13,11 @@ import (
 type Queueable[T comparable] interface {
 	comparable
 	Key() T
-	ScheduledTime() time.Time
+	DueTime() time.Time
 }
 
-// queue implements a queue for items that are scheduled to be executed at a later time.
-// It acts as a "priority queue", in which items are added in order of when they're scheduled.
+// queue implements a queue for items that are due to be executed at a later time.
+// It acts as a "priority queue", in which items are added in order of when they're due.
 // Internally, it uses a heap (from container/heap) that allows Insert and Pop operations to be completed in O(log N) time (where N is the queue's length).
 // Note: methods in this struct are not safe for concurrent use. Callers should use locks to ensure consistency.
 type queue[K comparable, T Queueable[K]] struct {
@@ -127,7 +127,7 @@ func (pq queueHeap[K, T]) Len() int {
 }
 
 func (pq queueHeap[K, T]) Less(i, j int) bool {
-	return pq[i].value.ScheduledTime().Before(pq[j].value.ScheduledTime())
+	return pq[i].value.DueTime().Before(pq[j].value.DueTime())
 }
 
 func (pq queueHeap[K, T]) Swap(i, j int) {

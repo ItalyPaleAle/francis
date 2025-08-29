@@ -22,8 +22,8 @@ func (s *SQLiteProvider) GetState(ctx context.Context, ref components.ActorRef) 
 			WHERE
 				actor_type = ?
 				AND actor_id = ?
-				AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time < unixepoch('subsec') * 1000)`,
-			ref.ActorType, ref.ActorID,
+				AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time < ?)`,
+			ref.ActorType, ref.ActorID, time.Now().UnixMilli(),
 		).
 		Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -37,19 +37,17 @@ func (s *SQLiteProvider) GetState(ctx context.Context, ref components.ActorRef) 
 
 func (s *SQLiteProvider) SetState(ctx context.Context, ref components.ActorRef, data []byte, opts components.SetStateOpts) error {
 	var ttl *int64
-	opts.TTL = opts.TTL.Truncate(time.Second)
 	if opts.TTL > 0 {
-		ttl = ptr.Of(int64(opts.TTL.Seconds()) * 1000)
+		ttl = ptr.Of(time.Now().Add(opts.TTL).UnixMilli())
 	}
 
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
 	// Performs a upsert
-	// If ttl is nil, `unixepoch + NULL` will be NULL too
 	_, err := s.db.ExecContext(queryCtx,
 		`REPLACE INTO actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time)
-		VALUES (?, ?, ?, (unixepoch('subsec') * 1000) + ?)`,
+		VALUES (?, ?, ?, ?)`,
 		ref.ActorType, ref.ActorID, data, ttl,
 	)
 	if err != nil {
@@ -70,8 +68,8 @@ func (s *SQLiteProvider) DeleteState(ctx context.Context, ref components.ActorRe
 		WHERE
 			actor_type = ?
 			AND actor_id = ?
-			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time < unixepoch('subsec') * 1000)`,
-		ref.ActorType, ref.ActorID,
+			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time < ?`,
+		ref.ActorType, ref.ActorID, time.Now().UnixMilli(),
 	)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)

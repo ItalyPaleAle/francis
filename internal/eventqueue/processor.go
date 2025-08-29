@@ -146,11 +146,11 @@ func (p *Processor[K, T]) processLoop() {
 	}()
 
 	var (
-		r             T
-		ok            bool
-		t             kclock.Timer
-		scheduledTime time.Time
-		deadline      time.Duration
+		r        T
+		ok       bool
+		t        kclock.Timer
+		dueTime  time.Time
+		deadline time.Duration
 	)
 
 	for {
@@ -175,8 +175,8 @@ func (p *Processor[K, T]) processLoop() {
 			// Nop, proceed
 		}
 
-		scheduledTime = r.ScheduledTime()
-		deadline = scheduledTime.Sub(p.clock.Now())
+		dueTime = r.DueTime()
+		deadline = dueTime.Sub(p.clock.Now())
 
 		// If the deadline is less than 0.5ms away, execute it right away
 		// This is more efficient than creating a timer

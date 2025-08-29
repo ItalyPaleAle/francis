@@ -6,7 +6,7 @@ CREATE TABLE hosts (
     host_address text NOT NULL,
     -- Last health check received, as unix timestamp in milliseconds
     host_last_health_check integer NOT NULL DEFAULT (unixepoch('subsec') * 1000)
-);
+) WITHOUT ROWID, STRICT;
 
 CREATE UNIQUE INDEX host_address_idx ON hosts (host_address);
 CREATE INDEX host_last_health_check_idx ON hosts (host_last_health_check);
@@ -26,7 +26,7 @@ CREATE TABLE host_actor_types (
 
     PRIMARY KEY (host_id, actor_type),
     FOREIGN KEY (host_id) REFERENCES hosts (host_id) ON DELETE CASCADE
-);
+) WITHOUT ROWID, STRICT;
 
 CREATE INDEX actor_type_idx ON host_actor_types (actor_type);
 
@@ -46,12 +46,14 @@ CREATE TABLE active_actors (
 
     PRIMARY KEY (actor_type, actor_id),
     FOREIGN KEY (host_id) REFERENCES hosts (host_id) ON DELETE CASCADE
-);
+) WITHOUT ROWID, STRICT;
+
+CREATE INDEX active_actors_host_scan_idx ON active_actors (host_id, actor_type);
 
 -- Reports the active actors per each host
 CREATE VIEW host_active_actor_count
 	(host_id, actor_type, active_count)
-AS SELECT host_id, actor_type, COUNT(ROWID)
+AS SELECT host_id, actor_type, COUNT(*)
 FROM active_actors
 GROUP BY host_id, actor_type;
 
@@ -68,7 +70,7 @@ CREATE TABLE actor_state (
     actor_state_expiration_time integer,
 
     PRIMARY KEY (actor_type, actor_id)
-);
+) WITHOUT ROWID, STRICT;
 
 CREATE INDEX actor_state_expiration_time_idx ON actor_state (actor_state_expiration_time) WHERE actor_state_expiration_time IS NOT NULL;
 
@@ -99,7 +101,7 @@ CREATE TABLE alarms (
     alarm_lease_time integer,
     -- For alarms that have been fetched and have a lease, this is the "process id" of the owner of the lease
     alarm_lease_pid text
-);
+) WITHOUT ROWID, STRICT;
 
 CREATE UNIQUE INDEX alarm_ref_idx ON alarms (actor_type, actor_id, alarm_name);
 CREATE INDEX alarm_due_time_idx ON alarms (alarm_due_time);

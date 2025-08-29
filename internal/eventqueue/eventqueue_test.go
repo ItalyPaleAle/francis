@@ -20,9 +20,9 @@ func (r queueableItem) Key() string {
 	return r.Name
 }
 
-// ScheduledTime returns the time the item is scheduled to be executed at.
+// DueTime returns the time the item is due to be executed at.
 // This is implemented to comply with the queueable interface.
-func (r queueableItem) ScheduledTime() time.Time {
+func (r queueableItem) DueTime() time.Time {
 	return r.ExecutionTime
 }
 

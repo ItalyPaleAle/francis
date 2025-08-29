@@ -160,14 +160,14 @@ func (a *activeActor) ActorType() string {
 	return a.ref.ActorType
 }
 
-// Key returns the key for this unique actor.
+// Key returns the key for the actor.
 // This is implemented to comply with the queueable interface.
 func (a *activeActor) Key() string {
 	return a.ref.String()
 }
 
-// ScheduledTime returns the time the actor becomes idle at.
+// DueTime returns the time the actor becomes idle at.
 // This is implemented to comply with the queueable interface.
-func (a *activeActor) ScheduledTime() time.Time {
+func (a *activeActor) DueTime() time.Time {
 	return *a.idleAt.Load()
 }

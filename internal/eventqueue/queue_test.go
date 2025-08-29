@@ -295,7 +295,7 @@ func popAndCompare(t *testing.T, q *queue[string, *queueableItem], expectN int, 
 	require.True(t, ok)
 	require.NotNil(t, r)
 	assert.Equal(t, strconv.Itoa(expectN), r.Name)
-	assert.Equal(t, expectDueTime, r.ScheduledTime().Format(time.RFC3339))
+	assert.Equal(t, expectDueTime, r.DueTime().Format(time.RFC3339))
 }
 
 func peekAndCompare(t *testing.T, q *queue[string, *queueableItem], expectN int, expectDueTime string) {
@@ -303,5 +303,5 @@ func peekAndCompare(t *testing.T, q *queue[string, *queueableItem], expectN int,
 	require.True(t, ok)
 	require.NotNil(t, r)
 	assert.Equal(t, strconv.Itoa(expectN), r.Name)
-	assert.Equal(t, expectDueTime, r.ScheduledTime().Format(time.RFC3339))
+	assert.Equal(t, expectDueTime, r.DueTime().Format(time.RFC3339))
 }
