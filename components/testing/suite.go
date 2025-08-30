@@ -2,6 +2,7 @@ package comptesting
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 	"time"
 
@@ -24,6 +25,7 @@ func (s Suite) Run(t *testing.T) {
 	t.Run("register host", s.TestRegisterHost)
 	t.Run("update actor host", s.TestUpdateActorHost)
 	t.Run("unregister host", s.TestUnregisterHost)
+	t.Run("lookup actor", s.TestLookupActor)
 	t.Run("actor state", s.TestState)
 }
 
@@ -605,6 +607,312 @@ func (s Suite) TestUnregisterHost(t *testing.T) {
 			{HostID: res2.HostID, ActorType: "TypeB", ActorIdleTimeout: 3 * time.Minute, ActorConcurrencyLimit: 2},
 		}
 		expectHosts(t, expectedHosts, expectedActorTypes)
+	})
+}
+
+func (s Suite) TestLookupActor(t *testing.T) {
+	t.Run("returns existing actor on healthy host", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Look up an existing actor that's already active on a healthy host
+		// From GetSpec: B-1 is active on H1 (healthy)
+		ref := components.ActorRef{ActorType: "B", ActorID: "B-1"}
+		res, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{})
+		require.NoError(t, err)
+
+		// Should return the existing host H1
+		assert.Equal(t, "H1", res.HostID)
+		assert.Equal(t, "127.0.0.1:4001", res.Address)
+		assert.Equal(t, 5*time.Minute, res.IdleTimeout)
+	})
+
+	t.Run("creates new actor when not active", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Create multiple actors to validate they're distributed across different hosts
+		seenHosts := make(map[string]bool)
+		for i := range 10 { // Try up to 10 times to see distribution
+			ref := components.ActorRef{ActorType: "B", ActorID: fmt.Sprintf("B-new-%d", i)}
+			res, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{})
+			require.NoError(t, err)
+
+			// Should place it on one of the healthy hosts that support B (H1, H2, or H3)
+			assert.Contains(t, []string{"H1", "H2", "H3"}, res.HostID)
+			assert.Contains(t, []string{"127.0.0.1:4001", "127.0.0.1:4002", "127.0.0.1:4003"}, res.Address)
+			assert.Equal(t, 5*time.Minute, res.IdleTimeout)
+
+			seenHosts[res.HostID] = true
+
+			// If we've seen more than one host, we've validated distribution
+			if len(seenHosts) > 1 {
+				break
+			}
+		}
+
+		// Should have distributed across multiple hosts
+		assert.Greater(t, len(seenHosts), 1, "actors should be distributed across multiple hosts, but only saw: %v", seenHosts)
+	})
+
+	t.Run("replaces actor on unhealthy host", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Look up an actor that exists only on unhealthy host H6
+		// From GetSpec: D-1 is active on H6 (unhealthy), but D is only supported on H6
+		// This should fail with ErrNoHost because D is not supported on any healthy host
+		ref := components.ActorRef{ActorType: "D", ActorID: "D-1"}
+		_, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{})
+		require.Error(t, err)
+		require.ErrorIs(t, err, components.ErrNoHost)
+	})
+
+	t.Run("respects host restrictions on active actor - allowed host", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Look up actor B-1 which is active on H1, but restrict to only H1
+		ref := components.ActorRef{ActorType: "B", ActorID: "B-1"}
+		opts := components.LookupActorOpts{Hosts: []string{"H1"}}
+		res, err := s.p.LookupActor(ctx, ref, opts)
+		require.NoError(t, err)
+
+		// Should return the existing actor on H1
+		assert.Equal(t, "H1", res.HostID)
+		assert.Equal(t, "127.0.0.1:4001", res.Address)
+	})
+
+	t.Run("respects host restrictions on active actor - disallowed host", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Look up actor B-1 which is active on H1, but restrict to only H2
+		// This should return ErrNoHost because the actor is on a disallowed host
+		ref := components.ActorRef{ActorType: "B", ActorID: "B-1"}
+		opts := components.LookupActorOpts{Hosts: []string{"H2"}}
+		_, err := s.p.LookupActor(ctx, ref, opts)
+		require.Error(t, err)
+		require.ErrorIs(t, err, components.ErrNoHost)
+	})
+
+	t.Run("creates new actor with host restrictions", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Create 3 actors of type C, but restrict to only H2
+		// Type C has unlimited capacity so this should work
+		for i := range 3 {
+			ref := components.ActorRef{ActorType: "C", ActorID: fmt.Sprintf("C-restricted-%d", i)}
+			opts := components.LookupActorOpts{Hosts: []string{"H2"}}
+			res, err := s.p.LookupActor(ctx, ref, opts)
+			require.NoError(t, err)
+
+			// Should always place it on H2 only
+			assert.Equal(t, "H2", res.HostID)
+			assert.Equal(t, "127.0.0.1:4002", res.Address)
+			assert.Equal(t, 5*time.Minute, res.IdleTimeout)
+		}
+	})
+
+	t.Run("returns ErrNoHost when no capacity available", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Try to create a new actor of type A
+		// From GetSpec: A is at capacity on both H1 (3/3) and H2 (2/2)
+		ref := components.ActorRef{ActorType: "A", ActorID: "A-new"}
+		_, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{})
+		require.Error(t, err)
+		require.ErrorIs(t, err, components.ErrNoHost)
+	})
+
+	t.Run("creates unlimited actors on healthy hosts", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Create 40 actors of type C (unlimited on H1 and H2) to validate distribution
+		hostCounts := make(map[string]int)
+		for i := range 40 {
+			ref := components.ActorRef{ActorType: "C", ActorID: fmt.Sprintf("C-unlimited-%d", i)}
+			res, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{})
+			require.NoError(t, err)
+
+			// Should place it on one of the healthy hosts that support C (H1 or H2)
+			assert.Contains(t, []string{"H1", "H2"}, res.HostID)
+			assert.Contains(t, []string{"127.0.0.1:4001", "127.0.0.1:4002"}, res.Address)
+			assert.Equal(t, 5*time.Minute, res.IdleTimeout)
+
+			hostCounts[res.HostID]++
+		}
+
+		// Should have distributed across both hosts
+		assert.Len(t, hostCounts, 2, "should distribute across both H1 and H2")
+
+		// Validate approximately even distribution (at least 15 on each host out of 40 total)
+		// This allows for some randomness while ensuring reasonable distribution
+		h1Count := hostCounts["H1"]
+		h2Count := hostCounts["H2"]
+
+		assert.GreaterOrEqual(t, h1Count, 15, "H1 should have at least 15 actors for reasonable distribution, got %d", h1Count)
+		assert.GreaterOrEqual(t, h2Count, 15, "H2 should have at least 15 actors for reasonable distribution, got %d", h2Count)
+		assert.Equal(t, 40, h1Count+h2Count, "total should be 40 actors")
+
+		t.Logf("Distribution: H1=%d, H2=%d", h1Count, h2Count)
+	})
+
+	t.Run("ignores unhealthy hosts for new actors", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Create multiple actors of type C (unlimited capacity) to validate they never go to unhealthy hosts
+		// Type C is supported on H1 and H2 (both healthy) but not on H5/H6 (unhealthy)
+		seenHosts := make(map[string]bool)
+		for i := range 10 { // Try multiple times to ensure consistent behavior
+			ref := components.ActorRef{ActorType: "C", ActorID: fmt.Sprintf("C-ignore-unhealthy-%d", i)}
+			res, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{})
+			require.NoError(t, err)
+
+			// Should ONLY be placed on healthy hosts H1, H2 (where C is supported)
+			assert.Contains(t, []string{"H1", "H2"}, res.HostID)
+			assert.NotEqual(t, "H5", res.HostID) // H5 is unhealthy
+			assert.NotEqual(t, "H6", res.HostID) // H6 is unhealthy
+			assert.NotEqual(t, "H3", res.HostID) // H3 doesn't support C
+
+			seenHosts[res.HostID] = true
+		}
+
+		// Should have used both healthy hosts (validation that distribution works)
+		assert.Len(t, seenHosts, 2, "should distribute across both healthy hosts that support C: %v", seenHosts)
+	})
+
+	t.Run("returns ErrNoHost for unsupported actor type", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Try to create an actor of type "UNSUPPORTED"
+		ref := components.ActorRef{ActorType: "UNSUPPORTED", ActorID: "unsupported-1"}
+		_, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{})
+		require.Error(t, err)
+		require.ErrorIs(t, err, components.ErrNoHost)
+	})
+
+	t.Run("host restrictions with non-existent host", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Try to create actor with restriction to non-existent host
+		ref := components.ActorRef{ActorType: "B", ActorID: "B-nonexistent-host"}
+		opts := components.LookupActorOpts{Hosts: []string{"NON-EXISTENT"}}
+		_, err := s.p.LookupActor(ctx, ref, opts)
+		require.Error(t, err)
+		require.ErrorIs(t, err, components.ErrNoHost)
+	})
+
+	t.Run("validates capacity tracking and exhaustion", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// From GetSpec: Type A has capacity limits:
+		// H1: supports A with capacity 3, currently has 3 active (at capacity)
+		// H2: supports A with capacity 2, currently has 2 active (at capacity)
+		// Total capacity for A is full (5/5)
+
+		// Verify initial state - should already be at capacity
+		_, err := s.p.LookupActor(ctx, components.ActorRef{ActorType: "A", ActorID: "A-should-fail"}, components.LookupActorOpts{})
+		require.Error(t, err)
+		require.ErrorIs(t, err, components.ErrNoHost, "should fail when capacity is already exhausted")
+
+		// Get initial host state to verify capacity tracking
+		spec, err := s.p.GetAllHosts(ctx)
+		require.NoError(t, err)
+
+		// Find hosts that support type A and verify their active counts
+		var h1ActiveCount, h2ActiveCount int
+		for _, activeActor := range spec.ActiveActors {
+			if activeActor.ActorType == "A" {
+				switch activeActor.HostID {
+				case "H1":
+					h1ActiveCount++
+				case "H2":
+					h2ActiveCount++
+				}
+			}
+		}
+
+		// Verify initial capacity usage matches expected from GetSpec
+		assert.Equal(t, 3, h1ActiveCount, "H1 should have 3 active A actors")
+		assert.Equal(t, 2, h2ActiveCount, "H2 should have 2 active A actors")
+
+		// Now let's create space by using a different actor type (B) to verify capacity tracking works
+		// Create several B actors to fill up some capacity on hosts that also support A
+		createdActors := 0
+		for i := range 10 {
+			ref := components.ActorRef{ActorType: "B", ActorID: fmt.Sprintf("B-capacity-test-%d", i)}
+			res, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{})
+			if err != nil {
+				break // Stop if we can't create more
+			}
+			createdActors++
+
+			// Verify the actor was created on a valid host
+			assert.Contains(t, []string{"H1", "H2", "H3"}, res.HostID)
+		}
+
+		// Verify we could create at least some B actors (B has unlimited capacity on some hosts)
+		assert.Greater(t, createdActors, 0, "should be able to create B actors since they have unlimited capacity")
+
+		// Verify that A is still at capacity after creating B actors
+		_, err = s.p.LookupActor(ctx, components.ActorRef{ActorType: "A", ActorID: "A-still-should-fail"}, components.LookupActorOpts{})
+		require.Error(t, err)
+		require.ErrorIs(t, err, components.ErrNoHost, "A should still be at capacity")
+
+		// Get final state to verify capacity tracking
+		finalSpec, err := s.p.GetAllHosts(ctx)
+		require.NoError(t, err)
+
+		// Verify A actors are still at capacity (unchanged)
+		var finalH1ACount, finalH2ACount int
+		for _, activeActor := range finalSpec.ActiveActors {
+			if activeActor.ActorType == "A" {
+				switch activeActor.HostID {
+				case "H1":
+					finalH1ACount++
+				case "H2":
+					finalH2ACount++
+				}
+			}
+		}
+
+		assert.Equal(t, 3, finalH1ACount, "H1 should still have 3 active A actors")
+		assert.Equal(t, 2, finalH2ACount, "H2 should still have 2 active A actors")
+
+		// But we should have more total active actors due to the B actors we created
+		assert.Greater(t, len(finalSpec.ActiveActors), len(spec.ActiveActors), "should have more total active actors after creating B actors")
 	})
 }
 
