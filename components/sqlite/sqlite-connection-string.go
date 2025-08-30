@@ -17,6 +17,7 @@ const (
 	DefaultBusyTimeout      = 2500 * time.Millisecond
 	DefaultConnectionString = "data.db"
 	DefaultTimeout          = 5 * time.Second
+	DefaultCleanupInterval  = 10 * time.Minute
 )
 
 // IsInMemoryDB returns true if the connection string is for an in-memory database.

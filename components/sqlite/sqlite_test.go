@@ -1,0 +1,302 @@
+package sqlite
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"log/slog"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+	clocktesting "k8s.io/utils/clock/testing"
+
+	comptesting "github.com/italypaleale/actors/components/testing"
+	"github.com/italypaleale/actors/internal/ptr"
+	"github.com/italypaleale/actors/internal/sql/transactions"
+)
+
+// Connect to an in-memory database
+// Replace with the commented-out string to write to a file on disk, for debugging
+// Note: file must be deleted manually at the end of each test
+const testConnectionString = ":memory:" // "file:testdb.db"
+
+func TestSqliteProvider(t *testing.T) {
+	clock := clocktesting.NewFakeClock(time.Now())
+	h := comptesting.NewSlogClockHandler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}), clock)
+	log := slog.New(h)
+
+	providerOpts := SQLiteProviderOptions{
+		ConnectionString: testConnectionString,
+
+		// Disable automated cleanups in this test
+		// We will run the cleanups automatically
+		CleanupInterval: -1,
+
+		clock: clock,
+	}
+	providerConfig := comptesting.GetProviderConfig()
+
+	// Create the provider
+	s, err := NewSQLiteProvider(log, providerOpts, providerConfig)
+	require.NoError(t, err, "Error creating provider")
+
+	// Init the provider
+	err = s.Init(t.Context())
+	require.NoError(t, err, "Error initializing provider")
+
+	// Run the provider in background for side effects
+	go func() {
+		err = s.Run(t.Context())
+		if err != nil {
+			log.Error("Error running provider", slog.Any("error", err))
+		}
+	}()
+
+	// Run the test suite
+	suite := comptesting.NewSuite(s)
+	suite.Run(t)
+}
+
+func (s *SQLiteProvider) CleanupExpired() error {
+	return s.gc.CleanupExpired()
+}
+
+func (s *SQLiteProvider) Now() time.Time {
+	return s.clock.Now()
+}
+
+func (s *SQLiteProvider) AdvanceClock(d time.Duration) {
+	s.clock.Sleep(d)
+}
+
+func (s *SQLiteProvider) Seed(ctx context.Context, spec comptesting.Spec) error {
+	_, tErr := transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (z struct{}, err error) {
+		now := s.clock.Now()
+
+		// Truncate all data
+		for _, tbl := range []string{"active_actors", "host_actor_types", "hosts", "actor_state", "alarms"} {
+			_, err = tx.ExecContext(ctx, "DELETE FROM "+tbl)
+			if err != nil {
+				return z, fmt.Errorf("truncate '%s': %w", tbl, err)
+			}
+		}
+
+		// Hosts
+		insHost, err := tx.PrepareContext(ctx,
+			`INSERT INTO hosts (host_id, host_address, host_last_health_check)
+			VALUES (?, ?, ?)`,
+		)
+		if err != nil {
+			return z, fmt.Errorf("prep hosts: %w", err)
+		}
+		defer insHost.Close()
+		for _, h := range spec.Hosts {
+			hb := now.UnixMilli() - h.LastHealthAgo.Milliseconds()
+			_, err = insHost.ExecContext(ctx, h.HostID, h.Address, hb)
+			if err != nil {
+				return z, fmt.Errorf("insert host '%s': %w", h.HostID, err)
+			}
+		}
+		_ = insHost.Close()
+
+		// Host actor types
+		insHat, err := tx.PrepareContext(ctx,
+			`INSERT INTO host_actor_types (host_id, actor_type, actor_idle_timeout, actor_concurrency_limit)
+			VALUES (?, ?, ?, ?)`,
+		)
+		if err != nil {
+			return z, fmt.Errorf("prep host_actor_types: %w", err)
+		}
+		defer insHat.Close()
+		for _, hat := range spec.HostActorTypes {
+			_, err = insHat.ExecContext(ctx,
+				hat.HostID,
+				hat.ActorType,
+				hat.ActorIdleTimeout.Milliseconds(),
+				hat.ActorConcurrencyLimit,
+			)
+			if err != nil {
+				return z, fmt.Errorf("insert host_actor_type '%s/%s': %w", hat.HostID, hat.ActorType, err)
+			}
+		}
+		_ = insHat.Close()
+
+		// Active actors
+		insAA, err := tx.PrepareContext(ctx,
+			`INSERT INTO active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation)
+			VALUES (?, ?, ?, ?, ?)`,
+		)
+		if err != nil {
+			return z, fmt.Errorf("prep active_actors: %w", err)
+		}
+		defer insAA.Close()
+		for _, aa := range spec.ActiveActors {
+			act := now.UnixMilli() - aa.ActivationAgo.Milliseconds()
+			_, err = insAA.ExecContext(ctx,
+				aa.ActorType, aa.ActorID, aa.HostID,
+				aa.ActorIdleTimeout.Milliseconds(), act,
+			)
+			if err != nil {
+				return z, fmt.Errorf("insert active_actor '%s/%s': %w", aa.ActorType, aa.ActorID, err)
+			}
+		}
+		_ = insAA.Close()
+
+		// Alarms
+		insAlarm, err := tx.PrepareContext(ctx,
+			`INSERT INTO alarms (
+				alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
+				alarm_interval, alarm_ttl_time, alarm_data,
+				alarm_lease_id, alarm_lease_time, alarm_lease_pid
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+		)
+		if err != nil {
+			return z, fmt.Errorf("prep alarms: %w", err)
+		}
+		defer insAlarm.Close()
+		for _, a := range spec.Alarms {
+			due := now.UnixMilli() + a.DueIn.Milliseconds()
+
+			var ttl *int64
+			if a.TTL > 0 {
+				ttl = ptr.Of(now.UnixMilli() + a.TTL.Milliseconds())
+			}
+
+			_, err = insAlarm.ExecContext(ctx,
+				a.AlarmID, a.ActorType, a.ActorID, a.Name, due,
+				a.Interval, ttl, a.Data,
+			)
+			if err != nil {
+				return z, fmt.Errorf("insert alarm '%s': %w", a.AlarmID, err)
+			}
+		}
+		_ = insAlarm.Close()
+
+		return z, nil
+	})
+
+	return tErr
+}
+
+func (s *SQLiteProvider) GetAllActorState(ctx context.Context) (comptesting.ActorStateSpecCollection, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT actor_type, actor_id, actor_state_data FROM actor_state")
+	if err != nil {
+		return nil, fmt.Errorf("select actor_state: %w", err)
+	}
+	defer rows.Close()
+
+	res := make(comptesting.ActorStateSpecCollection, 0)
+	for rows.Next() {
+		var r comptesting.ActorStateSpec
+		err = rows.Scan(&r.ActorType, &r.ActorID, &r.Data)
+		if err != nil {
+			return nil, fmt.Errorf("reading actor_state row: %w", err)
+		}
+		res = append(res, r)
+	}
+
+	return res, nil
+}
+
+func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, error) {
+	return transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (res comptesting.Spec, err error) {
+		// Load all hosts
+		rows, err := tx.QueryContext(ctx, "SELECT host_id, host_address, host_last_health_check FROM hosts")
+		if err != nil {
+			return res, fmt.Errorf("select hosts: %w", err)
+		}
+
+		res.Hosts = make([]comptesting.HostSpec, 0)
+		for rows.Next() {
+			var (
+				r               comptesting.HostSpec
+				lastHealthCheck int64
+			)
+			err = rows.Scan(&r.HostID, &r.Address, &lastHealthCheck)
+			if err != nil {
+				return res, fmt.Errorf("reading host row: %w", err)
+			}
+			r.LastHealthAgo = s.clock.Since(time.UnixMilli(lastHealthCheck))
+			res.Hosts = append(res.Hosts, r)
+		}
+		rows.Close()
+
+		// Load all actor types
+		rows, err = tx.QueryContext(ctx, "SELECT host_id, actor_type, actor_idle_timeout, actor_concurrency_limit FROM host_actor_types")
+		if err != nil {
+			return res, fmt.Errorf("select host_actor_types: %w", err)
+		}
+
+		res.HostActorTypes = make([]comptesting.HostActorTypeSpec, 0)
+		for rows.Next() {
+			var (
+				r           comptesting.HostActorTypeSpec
+				idleTimeout int64
+			)
+			err = rows.Scan(&r.HostID, &r.ActorType, &idleTimeout, &r.ActorConcurrencyLimit)
+			if err != nil {
+				return res, fmt.Errorf("reading host_actor_types row: %w", err)
+			}
+			r.ActorIdleTimeout = time.Duration(idleTimeout) * time.Millisecond
+			res.HostActorTypes = append(res.HostActorTypes, r)
+		}
+		rows.Close()
+
+		// Load all active actors
+		rows, err = tx.QueryContext(ctx, "SELECT actor_type, actor_id, host_id, actor_idle_timeout, actor_activation FROM active_actors")
+		if err != nil {
+			return res, fmt.Errorf("select active_actors: %w", err)
+		}
+
+		res.ActiveActors = make([]comptesting.ActiveActorSpec, 0)
+		for rows.Next() {
+			var (
+				r                       comptesting.ActiveActorSpec
+				idleTimeout, activation int64
+			)
+			err = rows.Scan(&r.ActorType, &r.ActorID, &r.HostID, &idleTimeout, &activation)
+			if err != nil {
+				return res, fmt.Errorf("reading active_actors row: %w", err)
+			}
+			r.ActorIdleTimeout = time.Duration(idleTimeout) * time.Millisecond
+			r.ActivationAgo = s.clock.Since(time.UnixMilli(activation))
+			res.ActiveActors = append(res.ActiveActors, r)
+		}
+		rows.Close()
+
+		// Load all alarms
+		rows, err = tx.QueryContext(ctx, "SELECT alarm_id, actor_type, actor_id, alarm_name, alarm_due_time, alarm_interval, alarm_ttl_time, alarm_data, alarm_lease_id, alarm_lease_time, alarm_lease_pid FROM alarms")
+		if err != nil {
+			return res, fmt.Errorf("select alarms: %w", err)
+		}
+
+		res.Alarms = make([]comptesting.AlarmSpec, 0)
+		for rows.Next() {
+			var (
+				r              comptesting.AlarmSpec
+				due            int64
+				ttl, leaseTime *int64
+			)
+			err = rows.Scan(&r.AlarmID, &r.ActorType, &r.ActorID, &r.Name, &due, &r.Interval, &ttl, &r.Data, &r.LeaseID, &leaseTime, &r.LeasePID)
+			if err != nil {
+				return res, fmt.Errorf("reading active_actors row: %w", err)
+			}
+			r.DueIn = time.UnixMilli(due).Sub(s.clock.Now())
+			if ttl != nil {
+				r.TTL = time.Duration(*ttl) * time.Millisecond
+			}
+			if leaseTime != nil {
+				r.LeaseTime = ptr.Of(time.UnixMilli(*leaseTime))
+			}
+			res.Alarms = append(res.Alarms, r)
+		}
+		rows.Close()
+
+		return res, nil
+	})
+}

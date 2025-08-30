@@ -16,37 +16,49 @@ import (
 	"modernc.org/sqlite"
 
 	"github.com/italypaleale/actors/components"
+	"github.com/italypaleale/actors/internal/sql/cleanup"
 	"github.com/italypaleale/actors/internal/sql/migrations"
 	sqlitemigrations "github.com/italypaleale/actors/internal/sql/migrations/sqlite"
+	"github.com/italypaleale/actors/internal/sql/sqladapter"
 )
 
 //go:embed migrations
 var migrationScripts embed.FS
 
 type SQLiteProvider struct {
-	cfg     components.ProviderConfig
-	db      *sql.DB
-	running atomic.Bool
-	log     *slog.Logger
-	timeout time.Duration
-
-	clock clock.WithTicker
+	cfg             components.ProviderConfig
+	db              *sql.DB
+	running         atomic.Bool
+	log             *slog.Logger
+	timeout         time.Duration
+	cleanupInterval time.Duration
+	gc              cleanup.GarbageCollector
+	clock           clock.WithTicker
 }
 
-func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, providerConfig components.ProviderConfig) (components.ActorProvider, error) {
+func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, providerConfig components.ProviderConfig) (*SQLiteProvider, error) {
 	var err error
 
 	s := &SQLiteProvider{
-		cfg:     providerConfig,
-		log:     log,
-		timeout: sqliteOpts.Timeout,
-		clock:   sqliteOpts.clock,
+		cfg:             providerConfig,
+		log:             log,
+		timeout:         sqliteOpts.Timeout,
+		cleanupInterval: sqliteOpts.CleanupInterval,
+		clock:           sqliteOpts.clock,
+		db:              sqliteOpts.DB,
 	}
 
 	// Set default values
 	s.cfg.SetDefaults()
 	if s.timeout <= 0 {
 		s.timeout = DefaultTimeout
+	}
+	if s.cleanupInterval == 0 {
+		// A zero value means the default
+		s.cleanupInterval = DefaultCleanupInterval
+	} else if s.cleanupInterval < 0 {
+		// A negative value means disabled
+		s.cleanupInterval = 0
 	}
 	if s.clock == nil {
 		s.clock = clock.RealClock{}
@@ -60,19 +72,22 @@ func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, provi
 		s.log.Warn("The configured host health check deadline is less than 5s more than the query timeout: this could cause issues", "healthCheckDeadline", s.cfg.HostHealthCheckDeadline, "queryTimeout", s.timeout)
 	}
 
-	// Parse the connection string
-	if sqliteOpts.ConnectionString == "" {
-		sqliteOpts.ConnectionString = DefaultConnectionString
-	}
-	sqliteOpts.ConnectionString, err = ParseConnectionString(sqliteOpts.ConnectionString, s.log)
-	if err != nil {
-		return nil, fmt.Errorf("connection string for SQLite is not valid")
-	}
+	// Open a database connection unless we have one passed in already
+	if s.db == nil {
+		// Parse the connection string
+		if sqliteOpts.ConnectionString == "" {
+			sqliteOpts.ConnectionString = DefaultConnectionString
+		}
+		sqliteOpts.ConnectionString, err = ParseConnectionString(sqliteOpts.ConnectionString, s.log)
+		if err != nil {
+			return nil, fmt.Errorf("connection string for SQLite is not valid")
+		}
 
-	// Open the database
-	s.db, err = sql.Open("sqlite", sqliteOpts.ConnectionString)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
+		// Open the database
+		s.db, err = sql.Open("sqlite", sqliteOpts.ConnectionString)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open SQLite database: %w", err)
+		}
 	}
 
 	return s, nil
@@ -82,18 +97,31 @@ type SQLiteProviderOptions struct {
 	components.ProviderOptions
 
 	// Connection string or path to the SQLite database
+	// This allows the provider to establish a new database connection
 	ConnectionString string
+
+	// Connection to an existing database
+	DB *sql.DB
 
 	// Timeout for requests to the database
 	Timeout time.Duration
 
-	// Clock, used for testing
+	// Interval at which to perform garbage collection
+	CleanupInterval time.Duration
+
+	// Clock, used to pass a mock one for testing
 	clock clock.WithTicker
 }
 
 func (s *SQLiteProvider) Init(ctx context.Context) error {
+	// Validate that the connection has the required parameters
+	err := s.validateConnection(ctx)
+	if err != nil {
+		return err
+	}
+
 	// Perform schema migrations
-	err := s.performMigrations(ctx)
+	err = s.performMigrations(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to perform schema migrations: %w", err)
 	}
@@ -106,7 +134,21 @@ func (s *SQLiteProvider) Run(ctx context.Context) error {
 		return components.ErrAlreadyRunning
 	}
 
+	// Start the background garbage collection
+	err := s.initGC()
+	if err != nil {
+		return fmt.Errorf("failed to start garbage collector: %w", err)
+	}
+
+	// Wait for the context to be canceled
 	<-ctx.Done()
+
+	// Stop the garbage collector
+	err = s.gc.Close()
+	if err != nil {
+		return fmt.Errorf("failed to stop garbage collector: %w", err)
+	}
+
 	return nil
 }
 
@@ -168,6 +210,63 @@ func (s *SQLiteProvider) performMigrations(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (s *SQLiteProvider) validateConnection(ctx context.Context) error {
+	// Ensure that foreign keys are enabled
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	var fk bool
+	err := s.db.QueryRowContext(queryCtx, "PRAGMA foreign_keys").Scan(&fk)
+	if err != nil {
+		return fmt.Errorf("error checking pragma foreign_keys: %w", err)
+	}
+	if !fk {
+		return errors.New("SQLite is running with foreign keys disabled, which is not supported")
+	}
+
+	return nil
+}
+
+func (s *SQLiteProvider) initGC() (err error) {
+	s.gc, err = cleanup.ScheduleGarbageCollector(cleanup.GCOptions{
+		Logger: s.log,
+		UpdateLastCleanupQuery: func(arg any) (string, []any) {
+			now := s.clock.Now().UnixMilli()
+			return `
+				INSERT INTO metadata (key, value)
+					VALUES ('last-cleanup', ?)
+					ON CONFLICT (key)
+					DO UPDATE SET value = ?
+						WHERE (? - CAST(value AS integer)) > ?`,
+				[]any{now, now, now, arg}
+		},
+		DeleteExpiredValuesQuery: func() (string, []any) {
+			now := s.clock.Now().UnixMilli()
+
+			// In a transaction, delete all expired state and all hosts that have failed health checks
+			// Failed hosts are also automatically deleted when a new host is registered, so that query should not delete many rows
+			return `
+				BEGIN IMMEDIATE TRANSACTION;
+
+				DELETE FROM actor_state
+				WHERE
+					actor_state_expiration_time IS NOT NULL
+					AND actor_state_expiration_time < ?;
+
+				DELETE FROM hosts
+				WHERE host_last_health_check < ?;
+
+				COMMIT;`,
+				[]any{
+					now,
+					now - s.cfg.HostHealthCheckDeadline.Milliseconds(),
+				}
+		},
+		CleanupInterval: s.cleanupInterval,
+		DB:              sqladapter.AdaptDatabaseSQLConn(s.db),
+	})
+	return err
 }
 
 // Checks if an error returned by the database is a unique constraint violation error, such as a duplicate unique index or primary key.
