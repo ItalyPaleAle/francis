@@ -12,10 +12,10 @@ import (
 // Spec contains all the test data
 type Spec struct {
 	// Hosts to create
-	Hosts []HostSpec
+	Hosts HostSpecCollection
 
 	// Supported types per host
-	HostActorTypes []HostActorTypeSpec
+	HostActorTypes HostActorTypeSpecCollection
 
 	// Pre-existing active actors
 	ActiveActors []ActiveActorSpec
@@ -142,6 +142,82 @@ func (s ActorStateSpecCollection) Equal(o ActorStateSpecCollection) bool {
 
 // String implements fmt.Stringer and is used for debugging
 func (s ActorStateSpecCollection) String() string {
+	j, _ := json.Marshal(s)
+	return string(j)
+}
+
+type HostSpecCollection []HostSpec
+
+// Equal returns true if both collections represent the same logical state, ignoring the order
+// LastHealthAgo is not compared
+func (s HostSpecCollection) Equal(o HostSpecCollection) bool {
+	if len(s) != len(o) {
+		return false
+	}
+
+	visited := make([]bool, len(o))
+	for i := range len(s) {
+		found := false
+		element := s[i]
+		for j := range len(o) {
+			if visited[j] {
+				continue
+			}
+			if element.HostID == o[j].HostID && element.Address == o[j].Address {
+				visited[j] = true
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+
+	return true
+}
+
+// String implements fmt.Stringer and is used for debugging
+func (s HostSpecCollection) String() string {
+	j, _ := json.Marshal(s)
+	return string(j)
+}
+
+type HostActorTypeSpecCollection []HostActorTypeSpec
+
+// Equal returns true if both collections represent the same logical state, ignoring the order
+func (s HostActorTypeSpecCollection) Equal(o HostActorTypeSpecCollection) bool {
+	if len(s) != len(o) {
+		return false
+	}
+
+	visited := make([]bool, len(o))
+	for i := range len(s) {
+		found := false
+		element := s[i]
+		for j := range len(o) {
+			if visited[j] {
+				continue
+			}
+			if element.HostID == o[j].HostID &&
+				element.ActorType == o[j].ActorType &&
+				element.ActorIdleTimeout == o[j].ActorIdleTimeout &&
+				element.ActorConcurrencyLimit == o[j].ActorConcurrencyLimit {
+				visited[j] = true
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+
+	return true
+}
+
+// String implements fmt.Stringer and is used for debugging
+func (s HostActorTypeSpecCollection) String() string {
 	j, _ := json.Marshal(s)
 	return string(j)
 }

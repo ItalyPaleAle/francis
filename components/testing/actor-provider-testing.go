@@ -27,4 +27,7 @@ type ActorProviderTesting interface {
 
 	// GetAllActorState returns all stored actor state
 	GetAllActorState(ctx context.Context) (ActorStateSpecCollection, error)
+
+	// GetAllHosts returns all stored hosts, host actor types, active actors, and alarms
+	GetAllHosts(ctx context.Context) (Spec, error)
 }

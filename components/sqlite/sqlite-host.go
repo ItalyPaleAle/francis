@@ -33,10 +33,7 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 		defer cancel()
 		_, err = tx.ExecContext(queryCtx,
 			`DELETE FROM hosts
-			WHERE
-				host_address = ?
-				OR host_last_health_check < ?`,
-			req.Address,
+			WHERE host_last_health_check < ?`,
 			now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
 		)
 		if err != nil {
