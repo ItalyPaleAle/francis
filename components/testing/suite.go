@@ -22,6 +22,8 @@ func NewSuite(p ActorProviderTesting) *Suite {
 
 func (s Suite) Run(t *testing.T) {
 	t.Run("register host", s.TestRegisterHost)
+	t.Run("update actor host", s.TestUpdateActorHost)
+	t.Run("unregister host", s.TestUnregisterHost)
 	t.Run("actor state", s.TestState)
 }
 
@@ -230,6 +232,377 @@ func (s Suite) TestRegisterHost(t *testing.T) {
 		}
 		expectedActorTypes := HostActorTypeSpecCollection{
 			{HostID: res3.HostID, ActorType: "TypeD", ActorIdleTimeout: 4 * time.Minute, ActorConcurrencyLimit: 2},
+		}
+		expectHosts(t, expectedHosts, expectedActorTypes)
+	})
+}
+
+func (s Suite) TestUpdateActorHost(t *testing.T) {
+	expectHosts := func(t *testing.T, expectedHosts HostSpecCollection, expectedActorTypes HostActorTypeSpecCollection) {
+		t.Helper()
+		spec, err := s.p.GetAllHosts(t.Context())
+		require.NoError(t, err)
+		assert.True(t, expectedHosts.Equal(spec.Hosts), "unexpected hosts: got=%v expected=%v", spec.Hosts, expectedHosts)
+		assert.True(t, expectedActorTypes.Equal(spec.HostActorTypes), "unexpected actor types: got=%v expected=%v", spec.HostActorTypes, expectedActorTypes)
+	}
+
+	t.Run("update last health check only", func(t *testing.T) {
+		// Seed with empty database
+		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+
+		ctx := t.Context()
+
+		// Register a host
+		req := components.RegisterHostReq{
+			Address: "192.168.1.100:8080",
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "TestActor", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 5},
+			},
+		}
+		res, err := s.p.RegisterHost(ctx, req)
+		require.NoError(t, err)
+
+		// Advance time to make host appear older
+		s.p.AdvanceClock(30 * time.Second)
+
+		// Update just the health check
+		updateReq := components.UpdateActorHostReq{
+			UpdateLastHealthCheck: true,
+			ActorTypes:            nil, // Don't update actor types
+		}
+		err = s.p.UpdateActorHost(ctx, res.HostID, updateReq)
+		require.NoError(t, err)
+
+		// Verify host still exists with same actor types (health check updated internally)
+		expectedHosts := HostSpecCollection{
+			{HostID: res.HostID, Address: "192.168.1.100:8080"},
+		}
+		expectedActorTypes := HostActorTypeSpecCollection{
+			{HostID: res.HostID, ActorType: "TestActor", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 5},
+		}
+		expectHosts(t, expectedHosts, expectedActorTypes)
+	})
+
+	t.Run("update actor types only", func(t *testing.T) {
+		// Seed with empty database
+		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+
+		ctx := t.Context()
+
+		// Register a host
+		req := components.RegisterHostReq{
+			Address: "192.168.1.100:8080",
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "TestActor", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 5},
+			},
+		}
+		res, err := s.p.RegisterHost(ctx, req)
+		require.NoError(t, err)
+
+		// Update just the actor types
+		updateReq := components.UpdateActorHostReq{
+			UpdateLastHealthCheck: false, // Don't update health check
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "UpdatedActor", IdleTimeout: 10 * time.Minute, ConcurrencyLimit: 10},
+				{ActorType: "AnotherActor", IdleTimeout: 3 * time.Minute, ConcurrencyLimit: 2},
+			},
+		}
+		err = s.p.UpdateActorHost(ctx, res.HostID, updateReq)
+		require.NoError(t, err)
+
+		// Verify host exists with updated actor types
+		expectedHosts := HostSpecCollection{
+			{HostID: res.HostID, Address: "192.168.1.100:8080"},
+		}
+		expectedActorTypes := HostActorTypeSpecCollection{
+			{HostID: res.HostID, ActorType: "UpdatedActor", ActorIdleTimeout: 10 * time.Minute, ActorConcurrencyLimit: 10},
+			{HostID: res.HostID, ActorType: "AnotherActor", ActorIdleTimeout: 3 * time.Minute, ActorConcurrencyLimit: 2},
+		}
+		expectHosts(t, expectedHosts, expectedActorTypes)
+	})
+
+	t.Run("update both health check and actor types", func(t *testing.T) {
+		// Seed with empty database
+		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+
+		ctx := t.Context()
+
+		// Register a host
+		req := components.RegisterHostReq{
+			Address: "192.168.1.100:8080",
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "TestActor", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 5},
+			},
+		}
+		res, err := s.p.RegisterHost(ctx, req)
+		require.NoError(t, err)
+
+		// Advance time
+		s.p.AdvanceClock(30 * time.Second)
+
+		// Update both health check and actor types
+		updateReq := components.UpdateActorHostReq{
+			UpdateLastHealthCheck: true,
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "BothUpdatedActor", IdleTimeout: 15 * time.Minute, ConcurrencyLimit: 20},
+			},
+		}
+		err = s.p.UpdateActorHost(ctx, res.HostID, updateReq)
+		require.NoError(t, err)
+
+		// Verify host exists with updated actor types and refreshed health check
+		expectedHosts := HostSpecCollection{
+			{HostID: res.HostID, Address: "192.168.1.100:8080"},
+		}
+		expectedActorTypes := HostActorTypeSpecCollection{
+			{HostID: res.HostID, ActorType: "BothUpdatedActor", ActorIdleTimeout: 15 * time.Minute, ActorConcurrencyLimit: 20},
+		}
+		expectHosts(t, expectedHosts, expectedActorTypes)
+	})
+
+	t.Run("clear all actor types with empty slice", func(t *testing.T) {
+		// Seed with empty database
+		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+
+		ctx := t.Context()
+
+		// Register a host with actor types
+		req := components.RegisterHostReq{
+			Address: "192.168.1.100:8080",
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "TestActor", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 5},
+				{ActorType: "AnotherActor", IdleTimeout: 3 * time.Minute, ConcurrencyLimit: 2},
+			},
+		}
+		res, err := s.p.RegisterHost(ctx, req)
+		require.NoError(t, err)
+
+		// Update with empty, non-nil actor types slice (should clear all)
+		updateReq := components.UpdateActorHostReq{
+			UpdateLastHealthCheck: false,
+			ActorTypes:            []components.ActorHostType{},
+		}
+		err = s.p.UpdateActorHost(ctx, res.HostID, updateReq)
+		require.NoError(t, err)
+
+		// Verify host exists but has no actor types
+		expectedHosts := HostSpecCollection{
+			{HostID: res.HostID, Address: "192.168.1.100:8080"},
+		}
+		expectedActorTypes := HostActorTypeSpecCollection{} // Empty
+		expectHosts(t, expectedHosts, expectedActorTypes)
+	})
+
+	t.Run("returns ErrHostUnregistered if host not registered while updating last health check only", func(t *testing.T) {
+		// Seed with empty database
+		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+
+		ctx := t.Context()
+
+		// Try to update a non-existent host - only last health check
+		updateReq := components.UpdateActorHostReq{
+			UpdateLastHealthCheck: true,
+		}
+		err := s.p.UpdateActorHost(ctx, "non-existent-host-id", updateReq)
+		require.ErrorIs(t, err, components.ErrHostUnregistered)
+	})
+
+	t.Run("returns ErrHostUnregistered if host not registered while updating actor types only", func(t *testing.T) {
+		// Seed with empty database
+		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+
+		ctx := t.Context()
+
+		// Try to update a non-existent host - only actor types
+		updateReq := components.UpdateActorHostReq{
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "TestActor", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 5},
+			},
+		}
+		err := s.p.UpdateActorHost(ctx, "non-existent-host-id", updateReq)
+		require.ErrorIs(t, err, components.ErrHostUnregistered)
+	})
+
+	t.Run("returns ErrHostUnregistered if host is unhealthy while updating last health check only", func(t *testing.T) {
+		// Seed with empty database
+		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+
+		ctx := t.Context()
+
+		// Register a host
+		req := components.RegisterHostReq{
+			Address: "192.168.1.100:8080",
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "TestActor", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 5},
+			},
+		}
+		res, err := s.p.RegisterHost(ctx, req)
+		require.NoError(t, err)
+
+		// Advance time to make host unhealthy (beyond 1 minute health check deadline)
+		s.p.AdvanceClock(2 * time.Minute)
+
+		// Try to update the now-unhealthy host - only last health check
+		updateReq := components.UpdateActorHostReq{
+			UpdateLastHealthCheck: true,
+		}
+		err = s.p.UpdateActorHost(ctx, res.HostID, updateReq)
+		require.Error(t, err)
+		require.ErrorIs(t, err, components.ErrHostUnregistered)
+	})
+
+	t.Run("returns ErrHostUnregistered if host is unhealthy while updating actor types only", func(t *testing.T) {
+		// Seed with empty database
+		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+
+		ctx := t.Context()
+
+		// Register a host
+		req := components.RegisterHostReq{
+			Address: "192.168.1.100:8080",
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "TestActor", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 5},
+			},
+		}
+		res, err := s.p.RegisterHost(ctx, req)
+		require.NoError(t, err)
+
+		// Advance time to make host unhealthy (beyond 1 minute health check deadline)
+		s.p.AdvanceClock(2 * time.Minute)
+
+		// Try to update the now-unhealthy host - only actor types
+		updateReq := components.UpdateActorHostReq{
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "UpdatedActor", IdleTimeout: 10 * time.Minute, ConcurrencyLimit: 10},
+			},
+		}
+		err = s.p.UpdateActorHost(ctx, res.HostID, updateReq)
+		require.Error(t, err)
+		require.ErrorIs(t, err, components.ErrHostUnregistered)
+	})
+}
+
+func (s Suite) TestUnregisterHost(t *testing.T) {
+	expectHosts := func(t *testing.T, expectedHosts HostSpecCollection, expectedActorTypes HostActorTypeSpecCollection) {
+		t.Helper()
+		spec, err := s.p.GetAllHosts(t.Context())
+		require.NoError(t, err)
+		assert.True(t, expectedHosts.Equal(spec.Hosts), "unexpected hosts: got=%v expected=%v", spec.Hosts, expectedHosts)
+		assert.True(t, expectedActorTypes.Equal(spec.HostActorTypes), "unexpected actor types: got=%v expected=%v", spec.HostActorTypes, expectedActorTypes)
+	}
+
+	t.Run("unregister healthy host", func(t *testing.T) {
+		// Seed with empty database
+		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+
+		ctx := t.Context()
+
+		// Register a host
+		req := components.RegisterHostReq{
+			Address: "192.168.1.100:8080",
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "TestActor", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 5},
+				{ActorType: "AnotherActor", IdleTimeout: 3 * time.Minute, ConcurrencyLimit: 2},
+			},
+		}
+		res, err := s.p.RegisterHost(ctx, req)
+		require.NoError(t, err)
+
+		// Verify host was registered
+		spec, err := s.p.GetAllHosts(ctx)
+		require.NoError(t, err)
+		require.Len(t, spec.Hosts, 1, "should have one host registered")
+		require.Len(t, spec.HostActorTypes, 2, "should have two actor types registered")
+
+		// Unregister the host
+		err = s.p.UnregisterHost(ctx, res.HostID)
+		require.NoError(t, err)
+
+		// Verify host and its actor types are gone
+		expectHosts(t, HostSpecCollection{}, HostActorTypeSpecCollection{})
+	})
+
+	t.Run("returns ErrHostUnregistered if host not registered", func(t *testing.T) {
+		// Seed with empty database
+		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+
+		ctx := t.Context()
+
+		// Try to unregister a non-existent host
+		err := s.p.UnregisterHost(ctx, "non-existent-host-id")
+		require.Error(t, err)
+		require.ErrorIs(t, err, components.ErrHostUnregistered)
+	})
+
+	t.Run("returns ErrHostUnregistered but deletes unhealthy host", func(t *testing.T) {
+		// Seed with empty database
+		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+
+		ctx := t.Context()
+
+		// Register a host
+		req := components.RegisterHostReq{
+			Address: "192.168.1.100:8080",
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "TestActor", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 5},
+			},
+		}
+		res, err := s.p.RegisterHost(ctx, req)
+		require.NoError(t, err)
+
+		// Advance time to make host unhealthy (beyond 1 minute health check deadline)
+		s.p.AdvanceClock(2 * time.Minute)
+
+		// Unregister the now-unhealthy host - should return ErrHostUnregistered but still delete it
+		err = s.p.UnregisterHost(ctx, res.HostID)
+		require.Error(t, err)
+		require.ErrorIs(t, err, components.ErrHostUnregistered)
+
+		// Verify host and its actor types are still deleted despite the error
+		expectHosts(t, HostSpecCollection{}, HostActorTypeSpecCollection{})
+	})
+
+	t.Run("unregister one of multiple hosts", func(t *testing.T) {
+		// Seed with empty database
+		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+
+		ctx := t.Context()
+
+		// Register two hosts
+		req1 := components.RegisterHostReq{
+			Address: "192.168.1.100:8080",
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "TypeA", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 5},
+			},
+		}
+		res1, err := s.p.RegisterHost(ctx, req1)
+		require.NoError(t, err)
+
+		req2 := components.RegisterHostReq{
+			Address: "192.168.1.101:8080",
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "TypeB", IdleTimeout: 3 * time.Minute, ConcurrencyLimit: 2},
+			},
+		}
+		res2, err := s.p.RegisterHost(ctx, req2)
+		require.NoError(t, err)
+
+		// Verify both hosts exist
+		spec, err := s.p.GetAllHosts(ctx)
+		require.NoError(t, err)
+		require.Len(t, spec.Hosts, 2, "should have two hosts registered")
+		require.Len(t, spec.HostActorTypes, 2, "should have two actor types registered")
+
+		// Unregister the first host
+		err = s.p.UnregisterHost(ctx, res1.HostID)
+		require.NoError(t, err)
+
+		// Verify only second host remains
+		expectedHosts := HostSpecCollection{
+			{HostID: res2.HostID, Address: "192.168.1.101:8080"},
+		}
+		expectedActorTypes := HostActorTypeSpecCollection{
+			{HostID: res2.HostID, ActorType: "TypeB", ActorIdleTimeout: 3 * time.Minute, ActorConcurrencyLimit: 2},
 		}
 		expectHosts(t, expectedHosts, expectedActorTypes)
 	})

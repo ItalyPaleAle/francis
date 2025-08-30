@@ -95,6 +95,31 @@ func (s *SQLiteProvider) UpdateActorHost(ctx context.Context, hostID string, req
 		// Also update the list of supported actor types if non-nil
 		// Note that a nil list means "do not update", while an empty, non-nil list causes the removal of all supported actor types
 		if req.ActorTypes != nil {
+			// When updating actor types without updating health check, we need to verify the host exists and is healthy
+			if !req.UpdateLastHealthCheck {
+				now := s.clock.Now().UnixMilli()
+				queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+				defer cancel()
+				var ok bool
+				err = tx.QueryRowContext(queryCtx,
+					`SELECT EXISTS (
+						SELECT 1 FROM hosts 
+						WHERE
+							host_id = ?
+							AND host_last_health_check >= ?
+					)`,
+					hostID,
+					now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
+				).Scan(&ok)
+				if err != nil {
+					return zero, fmt.Errorf("error checking host health: %w", err)
+				}
+				if !ok {
+					// Host doesn't exist, or exists but is un-healthy
+					return zero, components.ErrHostUnregistered
+				}
+			}
+
 			// First, delete all supported actor types for the host
 			queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 			defer cancel()
@@ -136,8 +161,8 @@ func (s *SQLiteProvider) updateActorHostLastHealthCheck(ctx context.Context, hos
 		WHERE
 			host_id = ?
 			AND host_last_health_check >= ?`,
-			hostID,
 			now,
+			hostID,
 			now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
 		)
 	if err != nil {
@@ -173,14 +198,15 @@ func (s *SQLiteProvider) UnregisterHost(ctx context.Context, hostID string) erro
 			now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
 		).
 		Scan(&hostActive)
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
+		// Host doesn't exist
+		return components.ErrHostUnregistered
+	} else if err != nil {
 		return fmt.Errorf("error executing query: %w", err)
 	}
 
-	// If hostActive is false, it means that either:
-	// - There was no host with that ID
-	// - There was a host, but it was unhealthy
-	// In both cases, we return ErrHostUnregistered, even if the host was unhealthy (because what we just did was essentially a "garbage collection")
+	// If hostActive is false, there was a host, but it was unhealthy
+	// In this case too, we return ErrHostUnregistered, because what we just did was essentially a "garbage collection"
 	if !hostActive {
 		return components.ErrHostUnregistered
 	}
