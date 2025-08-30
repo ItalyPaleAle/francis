@@ -26,6 +26,7 @@ func (s Suite) Run(t *testing.T) {
 	t.Run("update actor host", s.TestUpdateActorHost)
 	t.Run("unregister host", s.TestUnregisterHost)
 	t.Run("lookup actor", s.TestLookupActor)
+	t.Run("remove actor", s.TestRemoveActor)
 	t.Run("actor state", s.TestState)
 }
 
@@ -913,6 +914,190 @@ func (s Suite) TestLookupActor(t *testing.T) {
 
 		// But we should have more total active actors due to the B actors we created
 		assert.Greater(t, len(finalSpec.ActiveActors), len(spec.ActiveActors), "should have more total active actors after creating B actors")
+	})
+}
+
+func (s Suite) TestRemoveActor(t *testing.T) {
+	t.Run("removes existing active actor", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Verify initial state - B-1 should be active on H1
+		spec, err := s.p.GetAllHosts(ctx)
+		require.NoError(t, err)
+
+		// Find B-1 in active actors
+		var foundActor *ActiveActorSpec
+		for _, aa := range spec.ActiveActors {
+			if aa.ActorType == "B" && aa.ActorID == "B-1" {
+				foundActor = &aa
+				break
+			}
+		}
+		require.NotNil(t, foundActor, "B-1 should exist in initial test data")
+		assert.Equal(t, "H1", foundActor.HostID)
+
+		// Remove the actor
+		ref := components.ActorRef{ActorType: "B", ActorID: "B-1"}
+		err = s.p.RemoveActor(ctx, ref)
+		require.NoError(t, err)
+
+		// Verify actor is no longer active
+		spec, err = s.p.GetAllHosts(ctx)
+		require.NoError(t, err)
+
+		// B-1 should no longer be in active actors
+		for _, aa := range spec.ActiveActors {
+			if aa.ActorType == "B" && aa.ActorID == "B-1" {
+				t.Fatalf("B-1 should have been removed but is still active on host %s", aa.HostID)
+			}
+		}
+	})
+
+	t.Run("returns ErrNoActor for non-existent actor", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Try to remove a non-existent actor
+		ref := components.ActorRef{ActorType: "B", ActorID: "NonExistent"}
+		err := s.p.RemoveActor(ctx, ref)
+		require.Error(t, err)
+		require.ErrorIs(t, err, components.ErrNoActor)
+	})
+
+	t.Run("returns ErrNoActor for non-existent actor type", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Try to remove an actor with non-existent type
+		ref := components.ActorRef{ActorType: "NonExistentType", ActorID: "SomeID"}
+		err := s.p.RemoveActor(ctx, ref)
+		require.Error(t, err)
+		require.ErrorIs(t, err, components.ErrNoActor)
+	})
+
+	t.Run("removes actor and frees up capacity", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// From GetSpec: Type A is at capacity (H1: 3/3, H2: 2/2)
+		// First verify we can't create a new A actor
+		_, err := s.p.LookupActor(ctx, components.ActorRef{ActorType: "A", ActorID: "A-should-fail"}, components.LookupActorOpts{})
+		require.Error(t, err)
+		require.ErrorIs(t, err, components.ErrNoHost, "should fail when capacity is exhausted")
+
+		// Remove one of the existing A actors (A-1 is on H1)
+		ref := components.ActorRef{ActorType: "A", ActorID: "A-1"}
+		err = s.p.RemoveActor(ctx, ref)
+		require.NoError(t, err)
+
+		// Now we should be able to create a new A actor
+		res, err := s.p.LookupActor(ctx, components.ActorRef{ActorType: "A", ActorID: "A-new-after-removal"}, components.LookupActorOpts{})
+		require.NoError(t, err)
+		assert.NotEmpty(t, res.HostID)
+		assert.Contains(t, []string{"H1", "H2"}, res.HostID, "should be placed on one of the hosts that support A")
+
+		// Verify the capacity was freed up correctly by checking final state
+		spec, err := s.p.GetAllHosts(ctx)
+		require.NoError(t, err)
+
+		// Count A actors on each host
+		var h1Count, h2Count int
+		for _, aa := range spec.ActiveActors {
+			if aa.ActorType == "A" {
+				switch aa.HostID {
+				case "H1":
+					h1Count++
+				case "H2":
+					h2Count++
+				}
+			}
+		}
+
+		// Should have same total capacity (5) but with the new actor instead of A-1
+		assert.Equal(t, 5, h1Count+h2Count, "should still have 5 A actors total")
+
+		// Verify A-1 is gone and A-new-after-removal exists
+		hasA1, hasNewA := false, false
+		for _, aa := range spec.ActiveActors {
+			if aa.ActorType != "A" {
+				continue
+			}
+
+			if aa.ActorID == "A-1" {
+				hasA1 = true
+			}
+			if aa.ActorID == "A-new-after-removal" {
+				hasNewA = true
+			}
+		}
+		assert.False(t, hasA1, "A-1 should be removed")
+		assert.True(t, hasNewA, "A-new-after-removal should exist")
+	})
+
+	t.Run("removes multiple actors", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Get initial count
+		spec, err := s.p.GetAllHosts(ctx)
+		require.NoError(t, err)
+		initialCount := len(spec.ActiveActors)
+
+		// Remove multiple actors
+		actors := []components.ActorRef{
+			{ActorType: "B", ActorID: "B-1"},
+			{ActorType: "B", ActorID: "B-2"},
+			{ActorType: "A", ActorID: "A-2"},
+		}
+
+		for _, ref := range actors {
+			err = s.p.RemoveActor(ctx, ref)
+			require.NoError(t, err, "should successfully remove actor %s", ref.String())
+		}
+
+		// Verify all actors were removed
+		spec, err = s.p.GetAllHosts(ctx)
+		require.NoError(t, err)
+
+		assert.Equal(t, initialCount-3, len(spec.ActiveActors), "should have 3 fewer active actors")
+
+		// Verify none of the removed actors are still present
+		for _, aa := range spec.ActiveActors {
+			for _, ref := range actors {
+				if aa.ActorType == ref.ActorType && aa.ActorID == ref.ActorID {
+					t.Fatalf("Actor %s should have been removed but is still active", ref.String())
+				}
+			}
+		}
+	})
+
+	t.Run("idempotent removal - removing same actor twice", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		ref := components.ActorRef{ActorType: "B", ActorID: "B-1"}
+
+		// Remove the actor first time - should succeed
+		err := s.p.RemoveActor(ctx, ref)
+		require.NoError(t, err)
+
+		// Remove the same actor second time - should return ErrNoActor
+		err = s.p.RemoveActor(ctx, ref)
+		require.Error(t, err)
+		require.ErrorIs(t, err, components.ErrNoActor)
 	})
 }
 
