@@ -252,6 +252,8 @@ func GetSpec() Spec {
 			{HostID: "H4", Address: "127.0.0.1:4004", LastHealthAgo: 10 * time.Second}, // healthy
 			{HostID: "H5", Address: "127.0.0.1:4005", LastHealthAgo: 24 * time.Hour},   // unhealthy
 			{HostID: "H6", Address: "127.0.0.1:4006", LastHealthAgo: 24 * time.Hour},   // unhealthy
+			{HostID: "H7", Address: "127.0.0.1:4007", LastHealthAgo: 2 * time.Second},  // healthy
+			{HostID: "H8", Address: "127.0.0.1:4008", LastHealthAgo: 2 * time.Second},  // healthy
 		},
 
 		// HostActorTypes:
@@ -259,7 +261,8 @@ func GetSpec() Spec {
 		// - B has room on H1 and H2
 		// - C is unlimited on H1 and H2
 		// - D is only supported on unhealthy H6, which makes D alarms unplaceable on allowed healthy hosts
-		// - H5 is unhealthy but “capable” for B and C, which should be ignored at placement time
+		// - H5 is unhealthy but capable for B and C, which should be ignored at placement time
+		// - H7 and H8 have unlimited room for X and Y
 		HostActorTypes: []HostActorTypeSpec{
 			// A on allowed healthy hosts
 			{HostID: "H1", ActorType: "A", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 3},
@@ -280,6 +283,12 @@ func GetSpec() Spec {
 			// H5 is unhealthy but still advertises support for B and C. This capacity should never be used.
 			{HostID: "H5", ActorType: "B", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 4},
 			{HostID: "H5", ActorType: "C", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+
+			// X and Y on H7 and H8 without limits
+			{HostID: "H7", ActorType: "X", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+			{HostID: "H7", ActorType: "Y", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+			{HostID: "H8", ActorType: "X", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+			{HostID: "H8", ActorType: "Y", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
 		},
 
 		ActiveActors: []ActiveActorSpec{
@@ -297,14 +306,16 @@ func GetSpec() Spec {
 			// Actors on unhealthy H6. They should be treated as inactive by the scheduler.
 			{ActorType: "D", ActorID: "D-1", HostID: "H6", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 3 * time.Minute},
 			{ActorType: "D", ActorID: "D-2", HostID: "H6", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 3 * time.Minute},
+
+			// Some X and Y actors on H7 and H8
+			{ActorType: "X", ActorID: "X-1", HostID: "H7", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
+			{ActorType: "X", ActorID: "X-2", HostID: "H8", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
+			{ActorType: "Y", ActorID: "Y-1", HostID: "H8", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
 		},
 	}
 
-	// Alarms
-	const earliestABlocked = 200
-
-	// A alarms: earliest, unplaceable on allowed hosts because A is full on H1 and H2
-	for i := 1; i <= earliestABlocked; i++ {
+	// A alarms: earliest, un-placeable on allowed hosts because A is full on H1 and H2
+	for i := 1; i <= 200; i++ {
 		spec.addAlarm(AlarmSpec{
 			AlarmID:   fmt.Sprintf("ALM-A-%04d", i),
 			ActorType: "A",
@@ -314,6 +325,32 @@ func GetSpec() Spec {
 			Data:      []byte("blocked-A"),
 		})
 	}
+
+	// A alarms for active actors: should be leased even though the hosts are at capacity
+	spec.addAlarm(AlarmSpec{
+		AlarmID:   "ALM-A-1",
+		ActorType: "A",
+		ActorID:   "A-1",
+		Name:      "Alarm-A-1",
+		DueIn:     500 * time.Millisecond,
+		Data:      []byte("active-A-1"),
+	})
+	spec.addAlarm(AlarmSpec{
+		AlarmID:   "ALM-A-2",
+		ActorType: "A",
+		ActorID:   "A-2",
+		Name:      "Alarm-A-2",
+		DueIn:     520 * time.Millisecond,
+		Data:      []byte("active-A-2"),
+	})
+	spec.addAlarm(AlarmSpec{
+		AlarmID:   "ALM-A-4",
+		ActorType: "A",
+		ActorID:   "A-4",
+		Name:      "Alarm-A-4",
+		DueIn:     500 * time.Millisecond,
+		Data:      []byte("active-A-4"),
+	})
 
 	// B alarms: due after A, should still be leased and run on H1 or H2
 	for i := 1; i <= 300; i++ {
@@ -358,6 +395,20 @@ func GetSpec() Spec {
 		DueIn:     700 * time.Millisecond,
 		Data:      []byte("rehydrate-D2"),
 	})
+
+	// X and Y alarms: unlimited type on H7 and H7
+	// Note that X-1, X-2, an Y-1 are active actors
+	for _, k := range []string{"X", "Y"} {
+		for i := 1; i <= 50; i++ {
+			spec.addAlarm(AlarmSpec{
+				AlarmID:   fmt.Sprintf("ALM-%s-%04d", k, i),
+				ActorType: k,
+				ActorID:   fmt.Sprintf("%s-%d", k, i),
+				Name:      fmt.Sprintf("%s-%d", k, i),
+				DueIn:     time.Duration(i) * 100 * time.Millisecond,
+			})
+		}
+	}
 
 	return spec
 }

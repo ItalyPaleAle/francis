@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	clocktesting "k8s.io/utils/clock/testing"
 
@@ -298,5 +299,33 @@ func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, err
 		rows.Close()
 
 		return res, nil
+	})
+}
+
+func TestGetHostPlaceholders(t *testing.T) {
+	t.Run("empty hosts", func(t *testing.T) {
+		hosts := []string{}
+		args := make([]any, 0)
+		placeholders := getHostPlaceholders(hosts, args, 0)
+		assert.Equal(t, "", placeholders)
+		assert.Empty(t, args)
+	})
+
+	t.Run("args empty", func(t *testing.T) {
+		hosts := []string{"a", "b"}
+		args := make([]any, 2)
+		placeholders := getHostPlaceholders(hosts, args, 0)
+		assert.Equal(t, "?,?", placeholders)
+		assert.Equal(t, []any{"a", "b"}, args)
+	})
+
+	t.Run("append to args", func(t *testing.T) {
+		hosts := []string{"a", "b"}
+		args := make([]any, 4)
+		args[0] = "x"
+		args[1] = "y"
+		placeholders := getHostPlaceholders(hosts, args, 2)
+		assert.Equal(t, "?,?", placeholders)
+		assert.Equal(t, []any{"x", "y", "a", "b"}, args)
 	})
 }

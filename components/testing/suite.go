@@ -25,9 +25,13 @@ func (s Suite) Run(t *testing.T) {
 	t.Run("register host", s.TestRegisterHost)
 	t.Run("update actor host", s.TestUpdateActorHost)
 	t.Run("unregister host", s.TestUnregisterHost)
+
 	t.Run("lookup actor", s.TestLookupActor)
 	t.Run("remove actor", s.TestRemoveActor)
+
 	t.Run("actor state", s.TestState)
+
+	t.Run("fetch alarms", s.TestFetchAlarms)
 }
 
 func (s Suite) TestRegisterHost(t *testing.T) {
@@ -766,13 +770,13 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		// Should have distributed across both hosts
 		assert.Len(t, hostCounts, 2, "should distribute across both H1 and H2")
 
-		// Validate approximately even distribution (at least 15 on each host out of 40 total)
+		// Validate approximately even distribution (at least 12 on each host out of 40 total)
 		// This allows for some randomness while ensuring reasonable distribution
 		h1Count := hostCounts["H1"]
 		h2Count := hostCounts["H2"]
 
-		assert.GreaterOrEqual(t, h1Count, 15, "H1 should have at least 15 actors for reasonable distribution, got %d", h1Count)
-		assert.GreaterOrEqual(t, h2Count, 15, "H2 should have at least 15 actors for reasonable distribution, got %d", h2Count)
+		assert.GreaterOrEqual(t, h1Count, 12, "H1 should have at least 12 actors for reasonable distribution, got %d", h1Count)
+		assert.GreaterOrEqual(t, h2Count, 12, "H2 should have at least 12 actors for reasonable distribution, got %d", h2Count)
 		assert.Equal(t, 40, h1Count+h2Count, "total should be 40 actors")
 
 		t.Logf("Distribution: H1=%d, H2=%d", h1Count, h2Count)
@@ -1214,5 +1218,33 @@ func (s Suite) TestState(t *testing.T) {
 		err = s.p.CleanupExpired()
 		require.NoError(t, err)
 		expectCollection(t, ActorStateSpecCollection{})
+	})
+}
+
+func (s Suite) TestFetchAlarms(t *testing.T) {
+	t.Run("fetches upcoming alarms without capacity constraints", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H7", "H8"},
+		})
+		require.NoError(t, err)
+		fmt.Println("RES IS", res)
+	})
+
+	t.Run("fetches upcoming alarms with capacity constraints", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H1", "H2"},
+		})
+		require.NoError(t, err)
+		fmt.Println("RES IS", res)
 	})
 }

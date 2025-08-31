@@ -53,9 +53,10 @@ CREATE INDEX active_actors_host_scan_idx ON active_actors (host_id, actor_type);
 -- Reports the active actors per each host
 CREATE VIEW host_active_actor_count
 	(host_id, actor_type, active_count)
-AS SELECT host_id, actor_type, COUNT(*)
-FROM active_actors
-GROUP BY host_id, actor_type;
+AS
+    SELECT host_id, actor_type, COUNT(*)
+    FROM active_actors
+    GROUP BY host_id, actor_type;
 
 -- Contains the state for each actor
 CREATE TABLE actor_state (

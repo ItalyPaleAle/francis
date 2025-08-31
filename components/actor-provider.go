@@ -72,7 +72,7 @@ type ActorProvider interface {
 }
 
 // ProviderOptions is an empty interface implemented by all options structs for providers
-type ProviderOptions interface{}
+type ProviderOptions any
 
 // ProviderConfig contains the configuration for the actor provider
 type ProviderConfig struct {
