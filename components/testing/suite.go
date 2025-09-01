@@ -1229,7 +1229,7 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, GetSpec()))
 
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{"H7"},
 		})
 		require.NoError(t, err)
 		fmt.Println("RES IS", res)

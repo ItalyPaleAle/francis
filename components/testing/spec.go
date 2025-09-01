@@ -254,6 +254,7 @@ func GetSpec() Spec {
 			{HostID: "H6", Address: "127.0.0.1:4006", LastHealthAgo: 24 * time.Hour},   // unhealthy
 			{HostID: "H7", Address: "127.0.0.1:4007", LastHealthAgo: 2 * time.Second},  // healthy
 			{HostID: "H8", Address: "127.0.0.1:4008", LastHealthAgo: 2 * time.Second},  // healthy
+			{HostID: "H9", Address: "127.0.0.1:4009", LastHealthAgo: 24 * time.Hour},   // unhealthy
 		},
 
 		// HostActorTypes:
@@ -284,11 +285,13 @@ func GetSpec() Spec {
 			{HostID: "H5", ActorType: "B", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 4},
 			{HostID: "H5", ActorType: "C", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
 
-			// X and Y on H7 and H8 without limits
+			// X and Y on H7, H8, H9 (unhealthy) without limits
 			{HostID: "H7", ActorType: "X", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
 			{HostID: "H7", ActorType: "Y", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
 			{HostID: "H8", ActorType: "X", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
 			{HostID: "H8", ActorType: "Y", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+			{HostID: "H9", ActorType: "X", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+			{HostID: "H9", ActorType: "Y", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
 		},
 
 		ActiveActors: []ActiveActorSpec{
@@ -311,6 +314,9 @@ func GetSpec() Spec {
 			{ActorType: "X", ActorID: "X-1", HostID: "H7", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
 			{ActorType: "X", ActorID: "X-2", HostID: "H8", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
 			{ActorType: "Y", ActorID: "Y-1", HostID: "H8", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
+
+			// Y-2 is active on the unhealthy H9
+			{ActorType: "Y", ActorID: "Y-2", HostID: "H9", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
 		},
 	}
 

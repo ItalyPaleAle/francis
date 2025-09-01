@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -130,29 +131,100 @@ func (s *SQLiteProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req co
 	}
 
 	return transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) ([]*components.AlarmLease, error) {
-		now := s.clock.Now()
-		//nowMs := now.UnixMilli()
-		healthCutoffMs := now.Add(-s.cfg.HostHealthCheckDeadline).UnixMilli()
-		//horizonMs := now.Add(s.cfg.AlarmsFetchAheadInterval).UnixMilli()
-		//batchSize := s.cfg.AlarmsFetchAheadBatchSize
+		fetcher := newUpcomingAlarmFetcher(tx, s, &req)
 
-		// To start, we create a temporary table in which we store the available capacities for each host and actor type
-		// This serves us multiple functions, including also having a pre-loaded list of active hosts that we can reference in queries later
-		args := make([]any, len(req.Hosts)+1)
-		args[0] = healthCutoffMs
-		hostPlaceholders := getHostPlaceholders(req.Hosts, args, 1)
+		res, err := fetcher.FetchUpcoming(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch upcoming alarms: %w", err)
+		}
 
-		queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
-		defer cancel()
-		rows, err := tx.
-			QueryContext(queryCtx,
-				// For this connection, we set "temp_store = MEMORY" to tell SQLite to keep the temporary data in-memory
-				// Then, we create the temporary table, and finally insert data in there
-				// We add the list of hosts passed as input, filtering unhealthy ones out and including available capacity for all
-				// Note that if an actor host has no limit on a given actor type, we consider it to be "limited to MaxInt32" (2147483647)
-				// Also note that we do not filter out hosts/actor_type combinations at capacity, because we can still fetch alarms for actors active on them
-				// TODO: Indexes on temp table
-				`
+		return res, nil
+	})
+}
+
+func getHostPlaceholders(hosts []string, appendArgs []any, startAppend int) string {
+	b := strings.Builder{}
+	b.Grow(len(hosts) * 2)
+	for i, h := range hosts {
+		if i > 0 {
+			b.WriteString(",?")
+		} else {
+			b.WriteRune('?')
+		}
+		appendArgs[startAppend+i] = h
+	}
+	return b.String()
+}
+
+type upcomingAlarmFetcher struct {
+	tx      *sql.Tx
+	now     time.Time
+	log     *slog.Logger
+	req     *components.FetchAndLeaseUpcomingAlarmsReq
+	timeout time.Duration
+
+	nowMs          int64
+	healthCutoffMs int64
+
+	activeHosts []string
+}
+
+func newUpcomingAlarmFetcher(tx *sql.Tx, s *SQLiteProvider, req *components.FetchAndLeaseUpcomingAlarmsReq) *upcomingAlarmFetcher {
+	now := s.clock.Now()
+
+	//horizonMs := now.Add(s.cfg.AlarmsFetchAheadInterval).UnixMilli()
+	//batchSize := s.cfg.AlarmsFetchAheadBatchSize
+
+	return &upcomingAlarmFetcher{
+		tx:      tx,
+		now:     now,
+		log:     s.log,
+		req:     req,
+		timeout: s.timeout,
+
+		nowMs:          now.UnixMilli(),
+		healthCutoffMs: now.Add(-s.cfg.HostHealthCheckDeadline).UnixMilli(),
+	}
+}
+
+func (u *upcomingAlarmFetcher) FetchUpcoming(ctx context.Context) ([]*components.AlarmLease, error) {
+	// Start by getting the list of active hosts and whether we have any capacity constraint
+	activeHosts, hasCapLimit, err := u.getActiveHosts(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get active hosts and capacities: %w", err)
+	}
+
+	fmt.Println("HERE", activeHosts, hasCapLimit)
+
+	// Check if we have any row: if there was no row returned, it means that among the hosts passed as input, either they were all un-healthy, or none had any supported actor type
+	// In this case, we can just return
+	if len(activeHosts) == 0 {
+		return nil, nil
+	}
+
+	// If none of the hosts has a capacity constraint, we can use a simpler/faster path
+
+	return nil, nil
+}
+
+func (u *upcomingAlarmFetcher) getActiveHosts(ctx context.Context) (activeHosts []string, hasCapLimit bool, err error) {
+	// To start, we create a temporary table in which we store the available capacities for each host and actor type
+	// This serves us multiple functions, including also having a pre-loaded list of active hosts that we can reference in queries later
+	args := make([]any, len(u.req.Hosts)+1)
+	args[0] = u.healthCutoffMs
+	hostPlaceholders := getHostPlaceholders(u.req.Hosts, args, 1)
+
+	queryCtx, cancel := context.WithTimeout(ctx, u.timeout)
+	defer cancel()
+	rows, err := u.tx.
+		QueryContext(queryCtx,
+			// For this connection, we set "temp_store = MEMORY" to tell SQLite to keep the temporary data in-memory
+			// Then, we create the temporary table, and finally insert data in there
+			// We add the list of hosts passed as input, filtering unhealthy ones out and including available capacity for all
+			// Note that if an actor host has no limit on a given actor type, we consider it to be "limited to MaxInt32" (2147483647)
+			// Also note that we do not filter out hosts/actor_type combinations at capacity, because we can still fetch alarms for actors active on them
+			// TODO: Indexes on temp table
+			`
 				PRAGMA temp_store = MEMORY;
 
 				CREATE TEMPORARY TABLE IF NOT EXISTS temp_capacities (
@@ -181,58 +253,40 @@ func (s *SQLiteProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req co
 				WHERE
 					hosts.host_last_health_check >= ?
 					AND hosts.host_id IN (`+hostPlaceholders+`)
-				RETURNING concurrency_limit;
+				RETURNING host_id, concurrency_limit;
 				`,
-				args...,
-			)
-		if err != nil {
-			return nil, fmt.Errorf("error querying for capacities: %w", err)
-		}
-
-		var (
-			count       int
-			hasCapLimit bool
+			args...,
 		)
-		for rows.Next() {
-			var rCap int
-			err = rows.Scan(&rCap)
-			if err != nil {
-				return nil, fmt.Errorf("error scanning capacities row: %w", err)
-			}
-			count++
-			if rCap > 0 {
-				hasCapLimit = true
-			}
-		}
-
-		err = rows.Close()
-		if err != nil {
-			return nil, fmt.Errorf("error closing capacities result: %w", err)
-		}
-
-		fmt.Println("HERE", count, hasCapLimit)
-
-		// Check if we have any row - if there's no row returned, it means that among the hosts passed as input, either they were all un-healthy, or none had any supported actor type
-		if count == 0 {
-			return nil, nil
-		}
-
-		// If none of the hosts has a capacity constraint, we can use a simpler/faster path
-
-		return nil, nil
-	})
-}
-
-func getHostPlaceholders(hosts []string, appendArgs []any, startAppend int) string {
-	b := strings.Builder{}
-	b.Grow(len(hosts) * 2)
-	for i, h := range hosts {
-		if i > 0 {
-			b.WriteString(",?")
-		} else {
-			b.WriteRune('?')
-		}
-		appendArgs[startAppend+i] = h
+	if err != nil {
+		return nil, false, fmt.Errorf("error executing query: %w", err)
 	}
-	return b.String()
+
+	defer rows.Close()
+
+	// Read from the query the list of active actor hosts (filtered down from the input list) and whether there's any capacity limit
+	activeHostsMap := make(map[string]struct{}, len(u.req.Hosts))
+	activeHosts = make([]string, 0, len(u.req.Hosts))
+	for rows.Next() {
+		var (
+			rHostID string
+			rCap    int
+		)
+		err = rows.Scan(&rHostID, &rCap)
+		if err != nil {
+			return nil, false, fmt.Errorf("error scanning row: %w", err)
+		}
+
+		_, ok := activeHostsMap[rHostID]
+		if !ok {
+			activeHostsMap[rHostID] = struct{}{}
+			activeHosts = append(activeHosts, rHostID)
+		}
+
+		if rCap > 0 {
+			hasCapLimit = true
+		}
+	}
+
+	// Return the list of active hosts and whether there's a capacity limit
+	return activeHosts, hasCapLimit, nil
 }
