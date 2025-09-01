@@ -81,6 +81,7 @@ func (s *SQLiteProvider) SetAlarm(ctx context.Context, ref components.AlarmRef, 
 	defer cancel()
 
 	// We do an upsert to replace alarms with the same actor ID, actor type, and alarm name
+	// Any upsert will cause the lease to be lost
 	_, err = s.db.
 		ExecContext(queryCtx,
 			`REPLACE INTO alarms
@@ -294,20 +295,21 @@ func (u *upcomingAlarmFetcher) getActiveHosts(ctx context.Context) (activeHosts 
 
 func (u *upcomingAlarmFetcher) fetchUpcoming(ctx context.Context, activeHosts *activeHostsList) (fetchedUpcomingAlarmsList, error) {
 	// If none of the hosts has a capacity constraint, we can use a simpler/faster path
-	var query string
+	var (
+		query string
+		args  []any
+	)
 	if activeHosts.hasCapLimit {
 		query = queryFetchUpcomingAlarmsWithConstraints
+		args = []any{u.healthCutoffMs, u.batchSize, u.horizonMs, u.nowMs, u.batchSize}
 	} else {
 		query = queryFetchUpcomingAlarmsNoConstraints
+		args = []any{u.healthCutoffMs, u.horizonMs, u.nowMs, u.batchSize}
 	}
 
 	queryCtx, cancel := context.WithTimeout(ctx, u.timeout)
 	defer cancel()
-	rows, err := u.tx.
-		QueryContext(queryCtx,
-			query,
-			u.healthCutoffMs, u.horizonMs, u.nowMs, u.batchSize,
-		)
+	rows, err := u.tx.QueryContext(queryCtx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("error executing query: %w", err)
 	}
@@ -400,9 +402,8 @@ func (u *upcomingAlarmFetcher) obtainLeases(ctx context.Context, fetchedUpcoming
 	}
 	leaseID := leaseIDObj.String()
 
-	// Build all arguments, as well as the response object
+	// Build all arguments
 	alarmIDs := make([]string, len(fetchedUpcoming))
-	res := make([]components.AlarmLease, len(fetchedUpcoming))
 	var i int
 	for _, a := range fetchedUpcoming {
 		if a.HostID == nil {
@@ -412,17 +413,9 @@ func (u *upcomingAlarmFetcher) obtainLeases(ctx context.Context, fetchedUpcoming
 		}
 
 		alarmIDs[i] = a.AlarmID
-
-		res[i] = components.NewAlarmLease(
-			a.AlarmID,
-			time.UnixMilli(a.AlarmDueTime),
-			leaseID+"_"+a.AlarmID,
-		)
-
 		i++
 	}
 	alarmIDs = alarmIDs[:i]
-	res = res[:i]
 
 	if i == 0 {
 		// Nothing to do, return early
@@ -430,38 +423,65 @@ func (u *upcomingAlarmFetcher) obtainLeases(ctx context.Context, fetchedUpcoming
 	}
 
 	// Build the arguments
-	args := make([]any, i+3)
+	args := make([]any, i+4)
 	args[0] = leaseID
 	args[1] = u.leaseExpirationMs
 	args[2] = u.pid
-	placeholders := getInPlaceholders(alarmIDs, args, 3)
+	args[3] = u.nowMs
+	placeholders := getInPlaceholders(alarmIDs, args, 4)
 
 	// Update all alarms with the matching alarm IDs
+	// We add a check to make sure no one else has acquired a (different) lease meanwhile
 	queryCtx, cancel := context.WithTimeout(ctx, u.timeout)
 	defer cancel()
-	qr, err := u.tx.
-		ExecContext(queryCtx,
-			`
-			UPDATE alarms
-			SET
-				alarm_lease_id = ? || '_' || alarm_id,
-				alarm_lease_expiration_time = ?,
-				alarm_lease_pid = ?
-			WHERE alarm_id IN (`+placeholders+`)
-			`,
-			args...,
-		)
+	rows, err := u.tx.QueryContext(queryCtx,
+		`
+		UPDATE alarms
+		SET
+			alarm_lease_id = ? || '_' || alarm_id,
+			alarm_lease_expiration_time = ?,
+			alarm_lease_pid = ?
+		WHERE
+			(
+				alarm_lease_id IS NULL
+				OR alarm_lease_expiration_time IS NULL
+				OR alarm_lease_expiration_time < ?
+			)
+			AND alarm_id IN (`+placeholders+`)
+		RETURNING alarm_id, alarm_lease_id, alarm_due_time
+		`,
+		args...,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("error updating alarms: %w", err)
 	}
+	defer rows.Close()
 
-	count, err := qr.RowsAffected()
+	// Read the results
+	// Because of the potential of race conditions, someone else may have acquired a lease for the same alarms concurrently, so some rows may not have been updated
+	res := make([]components.AlarmLease, 0, len(fetchedUpcoming))
+	for rows.Next() {
+		var (
+			rAlarmID, rLeaseID string
+			rDueTime           int64
+		)
+		err = rows.Scan(&rAlarmID, &rLeaseID, &rDueTime)
+		if err != nil {
+			return nil, fmt.Errorf("error scanning rows: %w", err)
+		}
+		res = append(res, components.NewAlarmLease(
+			rAlarmID,
+			time.UnixMilli(rDueTime),
+			rLeaseID,
+		))
+	}
+	err = rows.Err()
 	if err != nil {
-		return nil, fmt.Errorf("error counting affected rows: %w", err)
+		return nil, fmt.Errorf("error scanning rows: %w", err)
 	}
 
-	if count != int64(i) {
-		return nil, fmt.Errorf("expecting %d rows to be updated, but only %d affected", i, count)
+	if len(res) != i {
+		u.log.Warn("Could not obtain all leases", slog.Int("wanted", i), slog.Int("got", len(res)))
 	}
 
 	return res, nil

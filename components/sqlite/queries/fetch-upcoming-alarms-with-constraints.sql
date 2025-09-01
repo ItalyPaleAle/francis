@@ -4,7 +4,8 @@
 -- 1. Host health check cutoff, as UNIX timestamp with ms (int)
 -- 2. Lookahead time horizon, as UNIX timestamp with ms (int)
 -- 3. Current timestamp, as UNIX timestamp with ms (int)
--- 4. Batch size (int)
+-- 4. Capacity cap per actor type (typically batch size) (int)
+-- 5. Batch size (int)
 
 -- How the query works:
 --
@@ -60,7 +61,7 @@ WITH
             h.host_last_health_check < ?
     ),
     actor_type_capacity AS (
-        SELECT actor_type, sum(capacity) AS total_capacity
+        SELECT actor_type, min(sum(capacity), ?) AS total_capacity
         FROM temp_capacities
         GROUP BY actor_type
     ),
@@ -87,7 +88,6 @@ WITH
                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
             ) AS rownum
         FROM alarms AS a
-        -- Inner join also filters by actor types for which we have capacity
         INNER JOIN actor_type_capacity AS atc
             USING (actor_type)
         LEFT JOIN active_actors AS aa
