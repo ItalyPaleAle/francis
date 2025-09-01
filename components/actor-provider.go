@@ -2,6 +2,7 @@ package components
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -54,7 +55,7 @@ type ActorProvider interface {
 	DeleteAlarm(ctx context.Context, ref AlarmRef) error
 
 	// FetchAndLeaseUpcomingAlarms fetches the upcoming alarms, acquiring a lease on them.
-	FetchAndLeaseUpcomingAlarms(ctx context.Context, req FetchAndLeaseUpcomingAlarmsReq) ([]*AlarmLease, error)
+	FetchAndLeaseUpcomingAlarms(ctx context.Context, req FetchAndLeaseUpcomingAlarmsReq) ([]AlarmLease, error)
 
 	// GetState retrieves the persistent state of an actor.
 	// If there's no state, returns ErrNoState.
@@ -222,15 +223,15 @@ type FetchAndLeaseUpcomingAlarmsReq struct {
 
 // AlarmLease indicates an alarm lease
 type AlarmLease struct {
-	key     string
+	alarmID string
 	dueTime time.Time
 	leaseID any
 }
 
 // NewAlarmLease returns a new AlarmLease object.
-func NewAlarmLease(key string, dueTime time.Time, leaseID any) AlarmLease {
+func NewAlarmLease(alarmID string, dueTime time.Time, leaseID any) AlarmLease {
 	return AlarmLease{
-		key:     key,
+		alarmID: alarmID,
 		dueTime: dueTime,
 		leaseID: leaseID,
 	}
@@ -239,7 +240,7 @@ func NewAlarmLease(key string, dueTime time.Time, leaseID any) AlarmLease {
 // Key returns the key for the alarm.
 // This is implemented to comply with the queueable interface.
 func (r AlarmLease) Key() string {
-	return r.key
+	return r.alarmID
 }
 
 // DueTime returns the due time for the alarm.
@@ -251,6 +252,16 @@ func (r AlarmLease) DueTime() time.Time {
 // LeaseID returns the value of the leaseID property.
 func (r AlarmLease) LeaseID() any {
 	return r.leaseID
+}
+
+// String implements fmt.Stringer and it's used for debugging
+func (r AlarmLease) String() string {
+	const RFC3339MilliNoTZ = "2006-01-02T15:04:05.999"
+
+	return fmt.Sprintf(
+		"AlarmLease:[AlarmID=%q DueTime=%q DueTimeUnix=%d LeaseID=%q]",
+		r.alarmID, r.dueTime.Format(RFC3339MilliNoTZ), r.dueTime.UnixMilli(), r.leaseID,
+	)
 }
 
 // SetStateOpts contains options for SetState

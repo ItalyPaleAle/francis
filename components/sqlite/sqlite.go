@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 var migrationScripts embed.FS
 
 type SQLiteProvider struct {
+	pid             string
 	cfg             components.ProviderConfig
 	db              *sql.DB
 	running         atomic.Bool
@@ -40,6 +42,8 @@ func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, provi
 	var err error
 
 	s := &SQLiteProvider{
+		// TODO: Set a PID
+		pid:             "TODO",
 		cfg:             providerConfig,
 		log:             log,
 		timeout:         sqliteOpts.Timeout,
@@ -285,4 +289,20 @@ func isConstraintError(err error) bool {
 	}
 
 	return sqliteErr.Code()&sqliteConstraintCode != 0
+}
+
+// Returns the placeholder string for an IN clause, and also appends all arguments to appendArgs, starting at position startAppend
+// appendArgs must have sufficient length for the arguments being added
+func getInPlaceholders(vals []string, appendArgs []any, startAppend int) string {
+	b := strings.Builder{}
+	b.Grow(len(vals) * 2)
+	for i, h := range vals {
+		if i > 0 {
+			b.WriteString(",?")
+		} else {
+			b.WriteRune('?')
+		}
+		appendArgs[startAppend+i] = h
+	}
+	return b.String()
 }

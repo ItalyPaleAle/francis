@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"strings"
 	"time"
 
@@ -85,7 +86,7 @@ func (s *SQLiteProvider) SetAlarm(ctx context.Context, ref components.AlarmRef, 
 			`REPLACE INTO alarms
 				(alarm_id, actor_type, actor_id, alarm_name,
 				alarm_due_time, alarm_interval, alarm_ttl_time, alarm_data,
-				alarm_lease_id, alarm_lease_exp, reminder_lease_pid)
+				alarm_lease_id, alarm_lease_exp, alarm_lease_pid)
 			VALUES
 				(?, ?, ?, ?,
 				?, ?, ?, ?,
@@ -93,7 +94,7 @@ func (s *SQLiteProvider) SetAlarm(ctx context.Context, ref components.AlarmRef, 
 			alarmID, ref.ActorType, ref.ActorID, ref.Name,
 			req.DueTime.UnixMilli(), interval, ttlTime, req.Data)
 	if err != nil {
-		return fmt.Errorf("failed to create reminder: %w", err)
+		return fmt.Errorf("failed to create alarm: %w", err)
 	}
 	return nil
 }
@@ -124,13 +125,13 @@ func (s *SQLiteProvider) DeleteAlarm(ctx context.Context, ref components.AlarmRe
 	return nil
 }
 
-func (s *SQLiteProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req components.FetchAndLeaseUpcomingAlarmsReq) ([]*components.AlarmLease, error) {
+func (s *SQLiteProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req components.FetchAndLeaseUpcomingAlarmsReq) ([]components.AlarmLease, error) {
 	// The list of hosts is required; if there's no host, return an empty list
 	if len(req.Hosts) == 0 {
 		return nil, nil
 	}
 
-	return transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) ([]*components.AlarmLease, error) {
+	return transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) ([]components.AlarmLease, error) {
 		fetcher := newUpcomingAlarmFetcher(tx, s, &req)
 
 		res, err := fetcher.FetchUpcoming(ctx)
@@ -142,25 +143,12 @@ func (s *SQLiteProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req co
 	})
 }
 
-func getHostPlaceholders(hosts []string, appendArgs []any, startAppend int) string {
-	b := strings.Builder{}
-	b.Grow(len(hosts) * 2)
-	for i, h := range hosts {
-		if i > 0 {
-			b.WriteString(",?")
-		} else {
-			b.WriteRune('?')
-		}
-		appendArgs[startAppend+i] = h
-	}
-	return b.String()
-}
-
 type upcomingAlarmFetcher struct {
 	tx      *sql.Tx
 	now     time.Time
 	log     *slog.Logger
 	req     *components.FetchAndLeaseUpcomingAlarmsReq
+	pid     string
 	timeout time.Duration
 
 	nowMs             int64
@@ -178,6 +166,7 @@ func newUpcomingAlarmFetcher(tx *sql.Tx, s *SQLiteProvider, req *components.Fetc
 		now:     now,
 		log:     s.log,
 		req:     req,
+		pid:     s.pid,
 		timeout: s.timeout,
 
 		nowMs:             now.UnixMilli(),
@@ -188,7 +177,7 @@ func newUpcomingAlarmFetcher(tx *sql.Tx, s *SQLiteProvider, req *components.Fetc
 	}
 }
 
-func (u *upcomingAlarmFetcher) FetchUpcoming(ctx context.Context) ([]*components.AlarmLease, error) {
+func (u *upcomingAlarmFetcher) FetchUpcoming(ctx context.Context) ([]components.AlarmLease, error) {
 	// Start by getting the list of active hosts and whether we have any capacity constraint
 	activeHosts, err := u.getActiveHosts(ctx)
 	if err != nil {
@@ -223,9 +212,21 @@ func (u *upcomingAlarmFetcher) FetchUpcoming(ctx context.Context) ([]*components
 		return nil, nil
 	}
 
-	// Now that we have alarms to execute, the first thing we need to do is allocate actors for those that don't already have one
+	// Now that we have alarms to execute, we also need to allocate actors for those that don't already have one
+	err = u.allocateActors(ctx, activeHosts, fetchedUpcoming)
+	if err != nil {
+		return nil, fmt.Errorf("failed to allocate actors for alarms: %w", err)
+	}
 
-	return nil, nil
+	fmt.Println("FETCHED UPDATED", fetchedUpcoming)
+
+	// Finally, acquire the leases on the alarms
+	res, err := u.obtainLeases(ctx, fetchedUpcoming)
+	if err != nil {
+		return nil, fmt.Errorf("failed to obtain leases on alarms: %w", err)
+	}
+
+	return res, nil
 }
 
 func (u *upcomingAlarmFetcher) getActiveHosts(ctx context.Context) (activeHosts *activeHostsList, err error) {
@@ -233,7 +234,7 @@ func (u *upcomingAlarmFetcher) getActiveHosts(ctx context.Context) (activeHosts 
 	// This serves us multiple functions, including also having a pre-loaded list of active hosts that we can reference in queries later
 	args := make([]any, len(u.req.Hosts)+1)
 	args[0] = u.healthCutoffMs
-	hostPlaceholders := getHostPlaceholders(u.req.Hosts, args, 1)
+	hostPlaceholders := getInPlaceholders(u.req.Hosts, args, 1)
 
 	queryCtx, cancel := context.WithTimeout(ctx, u.timeout)
 	defer cancel()
@@ -391,6 +392,131 @@ func (u *upcomingAlarmFetcher) fetchUpcomingNoConstraints(ctx context.Context, a
 	return res, nil
 }
 
+// Allocate actors for fetches alarms that don't have an actor associated with already
+// This modifies the fetchedUpcoming parameter
+func (u *upcomingAlarmFetcher) allocateActors(ctx context.Context, activeHosts *activeHostsList, fetchedUpcoming []fetchedUpcomingAlarm) (err error) {
+	var stmt *sql.Stmt
+	for i, alarm := range fetchedUpcoming {
+		if alarm.HostID != nil {
+			// Actor is already allocated
+			continue
+		}
+
+		// Lazily prepare the statement if not already
+		if stmt == nil {
+			queryCtx, cancel := context.WithTimeout(ctx, u.timeout)
+			defer cancel()
+			// Note that we perform an upsert query here. This is because the actor (with same type and ID) may already be present in the table, where it's active on a host that has failed (but hasn't been garbage-collected yet)
+			stmt, err = u.tx.PrepareContext(queryCtx,
+				`REPLACE INTO active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation)
+				VALUES (?, ?, ?, ?, ?)`,
+			)
+			if err != nil {
+				return fmt.Errorf("error preparing statement: %w", err)
+			}
+			defer stmt.Close()
+		}
+
+		// Pick a random host with capacity
+		host := activeHosts.HostForActorType(alarm.ActorType)
+		if host == nil {
+			// This should never happen at this point...
+			u.log.Warn("Could not find a host for actor type while trying to allocate the actor for alarm", slog.String("alarmID", alarm.AlarmID), slog.String("actorType", alarm.ActorType))
+			continue
+		}
+
+		// We set the alarm's due time as actor activation time, or the current time if that's later
+		activationTime := alarm.AlarmDueTime
+		if u.nowMs > activationTime {
+			activationTime = u.nowMs
+		}
+
+		// Execute the query
+		queryCtx, cancel := context.WithTimeout(ctx, u.timeout)
+		defer cancel()
+		_, err = stmt.ExecContext(queryCtx, alarm.ActorType, alarm.ActorID, host.HostID, host.IdleTimeoutMs, activationTime)
+		if err != nil {
+			return fmt.Errorf("error inserting actor row: %w", err)
+		}
+
+		// Update the alarm in-memory
+		fetchedUpcoming[i].HostID = &host.HostID
+	}
+
+	return nil
+}
+
+func (u *upcomingAlarmFetcher) obtainLeases(ctx context.Context, fetchedUpcoming []fetchedUpcomingAlarm) ([]components.AlarmLease, error) {
+	// Because SQLite doesn't support updating multiple rows with different values, we use a deterministic lease ID
+	// This allows us to perform a single query to update all rows efficiently
+	leaseIDObj, err := uuid.NewV7()
+	if err != nil {
+		return nil, fmt.Errorf("error generating lease ID: %w", err)
+	}
+	leaseID := leaseIDObj.String()
+
+	// Build all arguments, as well as the response object
+	alarmIDs := make([]string, len(fetchedUpcoming))
+	res := make([]components.AlarmLease, len(fetchedUpcoming))
+	var i int
+	for _, a := range fetchedUpcoming {
+		if a.HostID == nil {
+			// This should never happen at this point...
+			u.log.Warn("Wanted to obtain a lease for the alarm, but no host was selected", slog.String("alarmID", a.AlarmID))
+			continue
+		}
+
+		alarmIDs[i] = a.AlarmID
+
+		res[i] = components.NewAlarmLease(
+			a.AlarmID,
+			time.UnixMilli(a.AlarmDueTime),
+			leaseID+"_"+a.AlarmID,
+		)
+
+		i++
+	}
+	alarmIDs = alarmIDs[:i]
+	res = res[:i]
+
+	// Build the arguments
+	args := make([]any, i+3)
+	args[0] = leaseID
+	args[1] = u.leaseExpirationMs
+	args[2] = u.pid
+	placeholders := getInPlaceholders(alarmIDs, args, 3)
+
+	// Update all alarms with the matching alarm IDs
+	queryCtx, cancel := context.WithTimeout(ctx, u.timeout)
+	defer cancel()
+	qr, err := u.tx.
+		ExecContext(queryCtx,
+			`
+			UPDATE alarms
+			SET
+				alarm_lease_id = CONCAT(?, '_', alarm_id),
+				alarm_lease_expiration_time = ?,
+				alarm_lease_pid = ?
+			WHERE alarm_id IN (`+placeholders+`)
+			`,
+			args...,
+		)
+	if err != nil {
+		return nil, fmt.Errorf("error updating alarms: %w", err)
+	}
+
+	count, err := qr.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("error counting affected rows: %w", err)
+	}
+
+	if count != int64(i) {
+		return nil, fmt.Errorf("expecting %d rows to be updated, but only %d affected", i, count)
+	}
+
+	return res, nil
+}
+
 type activeHost struct {
 	HostID           string
 	ActorType        string
@@ -408,44 +534,89 @@ func (ah activeHost) String() string {
 }
 
 type activeHostsList struct {
-	hosts       map[string]struct{}
-	list        []activeHost
+	hosts       map[string]*activeHost   // Host ID -> active host
+	capacities  map[string][]*activeHost // Actor Type -> []active host
+	list        []*activeHost
 	hasCapLimit bool
 }
 
-func newActiveHostsList(cap int) *activeHostsList {
+func newActiveHostsList(hostLen int) *activeHostsList {
 	return &activeHostsList{
-		hosts: make(map[string]struct{}, cap),
-		list:  make([]activeHost, 0, cap),
+		hosts:      make(map[string]*activeHost, hostLen),
+		list:       make([]*activeHost, 0, hostLen),
+		capacities: map[string][]*activeHost{},
 	}
 }
 
+// HasHost returns true if the list contains the host with the given ID
 func (ahl *activeHostsList) HasHost(hostID string) bool {
 	_, ok := ahl.hosts[hostID]
 	return ok
 }
 
-func (ahl *activeHostsList) ScanRows(rows *sql.Rows) error {
-	for rows.Next() {
-		var r activeHost
-		err := rows.Scan(&r.HostID, &r.ActorType, &r.IdleTimeoutMs, &r.ConcurrencyLimit, &r.Capacity)
-		if err != nil {
-			return err
+// HostForActorType picks a random host which has capacity to execute the actor type
+// After picking a host, it decrements the available capacity on that host
+func (ahl *activeHostsList) HostForActorType(actorType string) (host *activeHost) {
+	for len(ahl.capacities[actorType]) > 0 {
+		// Select a random index
+		idx := rand.IntN(len(ahl.capacities[actorType]))
+
+		candidate := ahl.capacities[actorType][idx]
+		if candidate.Capacity > 0 {
+			host = candidate
 		}
 
-		ahl.hosts[r.HostID] = struct{}{}
-		ahl.list = append(ahl.list, r)
+		candidate.Capacity--
+		if candidate.Capacity <= 0 {
+			// Delete if capacity is now depleted
+			delete(ahl.capacities, actorType)
+		}
 
-		if r.ConcurrencyLimit > 0 {
-			ahl.hasCapLimit = true
+		if host != nil {
+			return host
 		}
 	}
 
+	// No host found
 	return nil
 }
 
 func (ahl *activeHostsList) Len() int {
 	return len(ahl.list)
+}
+
+func (ahl *activeHostsList) Get(hostID string) *activeHost {
+	if hostID == "" {
+		return nil
+	}
+	return ahl.hosts[hostID]
+}
+
+func (ahl *activeHostsList) ScanRows(rows *sql.Rows) error {
+	for rows.Next() {
+		r := &activeHost{}
+		err := rows.Scan(&r.HostID, &r.ActorType, &r.IdleTimeoutMs, &r.ConcurrencyLimit, &r.Capacity)
+		if err != nil {
+			return err
+		}
+
+		ahl.hosts[r.HostID] = r
+		ahl.list = append(ahl.list, r)
+
+		if r.ConcurrencyLimit > 0 {
+			ahl.hasCapLimit = true
+		}
+
+		if r.Capacity > 0 {
+			if ahl.capacities[r.ActorType] == nil {
+				ahl.capacities[r.ActorType] = make([]*activeHost, 0, cap(ahl.list))
+			}
+
+			ahl.capacities[r.ActorType] = append(ahl.capacities[r.ActorType], r)
+		}
+	}
+
+	return nil
 }
 
 // String implements fmt.Stringer and it's used for debugging
@@ -466,6 +637,7 @@ func (ahl *activeHostsList) String() string {
 	if len(list) > 0 {
 		listStr = "[\n    " + strings.Join(list, "\n    ") + "\n  ]"
 	}
+
 	return fmt.Sprintf("activeHostsList:[\n  hosts=[%s]\n  hasCapLimit=%v\n  list=%s\n]", strings.Join(hosts, ","), ahl.hasCapLimit, listStr)
 }
 
@@ -479,9 +651,9 @@ type fetchedUpcomingAlarm struct {
 
 // String implements fmt.Stringer and it's used for debugging
 func (fua fetchedUpcomingAlarm) String() string {
-	const RFC3339Milli = "2006-01-02T15:04:05.999"
+	const RFC3339MilliNoTZ = "2006-01-02T15:04:05.999"
 
-	due := time.UnixMilli(fua.AlarmDueTime).Format(RFC3339Milli)
+	due := time.UnixMilli(fua.AlarmDueTime).Format(RFC3339MilliNoTZ)
 
 	if fua.HostID != nil {
 		return fmt.Sprintf(

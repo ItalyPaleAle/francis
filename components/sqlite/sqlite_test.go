@@ -302,30 +302,99 @@ func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, err
 	})
 }
 
-func TestGetHostPlaceholders(t *testing.T) {
-	t.Run("empty hosts", func(t *testing.T) {
-		hosts := []string{}
+func TestGetInPlaceholders(t *testing.T) {
+	t.Run("empty vals", func(t *testing.T) {
+		vals := []string{}
 		args := make([]any, 0)
-		placeholders := getHostPlaceholders(hosts, args, 0)
+		placeholders := getInPlaceholders(vals, args, 0)
 		assert.Equal(t, "", placeholders)
 		assert.Empty(t, args)
 	})
 
 	t.Run("args empty", func(t *testing.T) {
-		hosts := []string{"a", "b"}
+		vals := []string{"a", "b"}
 		args := make([]any, 2)
-		placeholders := getHostPlaceholders(hosts, args, 0)
+		placeholders := getInPlaceholders(vals, args, 0)
 		assert.Equal(t, "?,?", placeholders)
 		assert.Equal(t, []any{"a", "b"}, args)
 	})
 
 	t.Run("append to args", func(t *testing.T) {
-		hosts := []string{"a", "b"}
+		vals := []string{"a", "b"}
 		args := make([]any, 4)
 		args[0] = "x"
 		args[1] = "y"
-		placeholders := getHostPlaceholders(hosts, args, 2)
+		placeholders := getInPlaceholders(vals, args, 2)
 		assert.Equal(t, "?,?", placeholders)
 		assert.Equal(t, []any{"x", "y", "a", "b"}, args)
+	})
+}
+
+func TestActiveHostsList_HostForActorType(t *testing.T) {
+	t.Run("pick hosts at random", func(t *testing.T) {
+		h1 := &activeHost{HostID: "H1", ActorType: "typeA", Capacity: 10000}
+		h2 := &activeHost{HostID: "H2", ActorType: "typeA", Capacity: 10000}
+		ahl := &activeHostsList{
+			hosts: map[string]*activeHost{
+				"H1": h1,
+				"H2": h2,
+			},
+			capacities: map[string][]*activeHost{
+				"typeA": {h1, h2},
+			},
+		}
+
+		observed := map[string]int{}
+		for range 100 {
+			host := ahl.HostForActorType("typeA")
+			require.NotNil(t, host)
+			observed[host.HostID]++
+		}
+
+		// Should be roughly 50/50, but we enforce at least 30 to leave some buffer for randomness
+		assert.Len(t, observed, 2)
+		assert.GreaterOrEqual(t, observed["H1"], 30)
+		assert.GreaterOrEqual(t, observed["H2"], 30)
+	})
+
+	t.Run("single host capacity exhaustion", func(t *testing.T) {
+		h1 := &activeHost{HostID: "H1", ActorType: "typeA", Capacity: 3}
+		ahl := &activeHostsList{
+			hosts: map[string]*activeHost{
+				"H1": h1,
+			},
+			capacities: map[string][]*activeHost{
+				"typeA": {h1},
+			},
+		}
+
+		// First three calls should return the host ID; fourth should be empty
+		for range 3 {
+			host := ahl.HostForActorType("typeA")
+			require.NotNil(t, host)
+			assert.Equal(t, "H1", host.HostID)
+		}
+		assert.Nil(t, ahl.HostForActorType("typeA"))
+	})
+
+	t.Run("unsupported actor type", func(t *testing.T) {
+		ahl := &activeHostsList{
+			hosts:      map[string]*activeHost{},
+			capacities: map[string][]*activeHost{},
+		}
+		assert.Nil(t, ahl.HostForActorType("missing"))
+	})
+
+	t.Run("zero capacity host", func(t *testing.T) {
+		h1 := &activeHost{HostID: "H1", ActorType: "typeA", Capacity: 0}
+		ahl := &activeHostsList{
+			hosts: map[string]*activeHost{
+				"H1": h1,
+			},
+			capacities: map[string][]*activeHost{
+				"typeA": {h1},
+			},
+		}
+		assert.Nil(t, ahl.HostForActorType("typeA"))
 	})
 }
