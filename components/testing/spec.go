@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/italypaleale/actors/components"
+	"github.com/italypaleale/actors/internal/ptr"
 )
 
 // Spec contains all the test data
@@ -74,6 +75,9 @@ type AlarmSpec struct {
 	Interval *string
 	TTL      time.Duration // 0 means NULL
 	Data     []byte        // nil means NULL; non-nil inserted as BLOB
+
+	// Write only
+	LeaseTTL *time.Duration
 
 	// Read only
 	LeaseID  *string
@@ -399,6 +403,15 @@ func GetSpec() Spec {
 
 	// C alarms: unlimited type on H1 and H2
 	for i := 1; i <= 50; i++ {
+		// The first 5 are leased with a valid lease
+		var leaseTTL *time.Duration
+		if i <= 5 {
+			leaseTTL = ptr.Of(time.Minute)
+		}
+		// The 6th is leased but its lease has expired
+		if i == 6 {
+			leaseTTL = ptr.Of(-10 * time.Minute)
+		}
 		spec.addAlarm(AlarmSpec{
 			AlarmID:   fmt.Sprintf("ALM-C-%03d", i),
 			ActorType: "C",
@@ -406,6 +419,7 @@ func GetSpec() Spec {
 			Name:      fmt.Sprintf("C-%03d", i),
 			DueIn:     1500*time.Millisecond + time.Duration(i%5)*100*time.Millisecond,
 			Data:      []byte("ok-C"),
+			LeaseTTL:  leaseTTL,
 		})
 	}
 
@@ -442,8 +456,6 @@ func GetSpec() Spec {
 			})
 		}
 	}
-
-	// TODO: Needs test for alarms with an expired lease
 
 	return spec
 }

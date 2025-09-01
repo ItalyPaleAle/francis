@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	clocktesting "k8s.io/utils/clock/testing"
@@ -154,7 +155,7 @@ func (s *SQLiteProvider) Seed(ctx context.Context, spec comptesting.Spec) error 
 				alarm_interval, alarm_ttl_time, alarm_data,
 				alarm_lease_id, alarm_lease_expiration_time, alarm_lease_pid
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 		if err != nil {
 			return z, fmt.Errorf("prep alarms: %w", err)
@@ -168,9 +169,19 @@ func (s *SQLiteProvider) Seed(ctx context.Context, spec comptesting.Spec) error 
 				ttl = ptr.Of(now.UnixMilli() + a.TTL.Milliseconds())
 			}
 
+			var (
+				leaseID, leasePID *string
+				leaseExp          *int64
+			)
+			if a.LeaseTTL != nil {
+				leaseExp = ptr.Of(now.UnixMilli() + a.LeaseTTL.Milliseconds())
+				leaseID = ptr.Of(uuid.New().String())
+				leasePID = &s.pid
+			}
+
 			_, err = insAlarm.ExecContext(ctx,
 				a.AlarmID, a.ActorType, a.ActorID, a.Name, due,
-				a.Interval, ttl, a.Data,
+				a.Interval, ttl, a.Data, leaseID, leaseExp, leasePID,
 			)
 			if err != nil {
 				return z, fmt.Errorf("insert alarm '%s': %w", a.AlarmID, err)

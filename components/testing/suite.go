@@ -1224,6 +1224,17 @@ func (s Suite) TestState(t *testing.T) {
 }
 
 func (s Suite) TestFetchAlarms(t *testing.T) {
+	// In the seed data, ALM-C-001...ALM-C-005 are already leased with a valid lease
+	// ALM-C-006 has an expired lease
+	expectPreLeasedAlarms := func(alarmID string) bool {
+		switch alarmID {
+		case "ALM-C-001", "ALM-C-002", "ALM-C-003", "ALM-C-004", "ALM-C-005", "ALM-C-006":
+			return true
+		default:
+			return false
+		}
+	}
+
 	t.Run("fetches upcoming alarms without capacity constraints", func(t *testing.T) {
 		ctx := t.Context()
 
@@ -1239,6 +1250,7 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		// This should return a total of 24 alarms, all of types X and Y
 		// Alarms ALM-X-002 and ALM-Y-001 (for actors X-2 and Y-1) should not be returned because the actors are active on H8
 		// (and that's why we iterate till 13)
+		// Alarm ALM-Y-002 should be included even though it's active on actor Y-2, because it's on H9 which is unhealthy
 		expectAlarmIDs := make([]string, 0, 24)
 		expectAlarmIDsMap := make(map[string]bool, 24)
 		expectActorIDs := make([]string, 0, 24)
@@ -1274,8 +1286,11 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		require.NoError(t, err)
 
 		for _, a := range spec.Alarms {
+			if expectPreLeasedAlarms(a.AlarmID) {
+				continue
+			}
+
 			if !expectAlarmIDsMap[a.AlarmID] {
-				// Seed data doesn't contain any leased alarm, so we can confidently exclude others
 				assert.Emptyf(t, a.LeaseID, "expected alarm %q not to have a lease ID", a.AlarmID)
 				assert.Emptyf(t, a.LeaseExp, "expected alarm %q not to have a lease expiration", a.AlarmID)
 				assert.Emptyf(t, a.LeasePID, "expected alarm %q not to have a lease PID", a.AlarmID)
@@ -1318,12 +1333,12 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		// This should return a total of 24 alarms, all of types A, B, and C
 		// Type A doesn't have any capacity left, but actors A-1, A-2, A-4 are active on H1 and H2, so alarms ALM-A-1, ALM-A-2, ALM-A-4 should be included
 		// For type B, the combined capacity between H1 and H2 is 10, with 2 actors already active, so we should only get the earliest 8 plus ALM-B-1 and ALM-B-2 which are for the actors active on H1 and H2 (meanwhile, ALM-B-3 is active on H3 so should not be returned)
-		// There's no capacity limit on type C, so we should get 12 of them
+		// There's no capacity limit on type C, so we should get 12 of them. However, ALM-C-001...ALM-C-005 are already leased with a valid lease
 		expectAlarmIDs := []string{
 			"ALM-A-1", "ALM-A-2", "ALM-A-4",
 			"ALM-B-1", "ALM-B-2",
 			"ALM-B-001", "ALM-B-007", "ALM-B-014", "ALM-B-021", "ALM-B-028", "ALM-B-035", "ALM-B-042", "ALM-B-049",
-			"ALM-C-001", "ALM-C-005", "ALM-C-010", "ALM-C-015", "ALM-C-020", "ALM-C-025", "ALM-C-030", "ALM-C-035", "ALM-C-040", "ALM-C-045", "ALM-C-050",
+			"ALM-C-006", "ALM-C-010", "ALM-C-011", "ALM-C-015", "ALM-C-020", "ALM-C-025", "ALM-C-030", "ALM-C-035", "ALM-C-040", "ALM-C-045", "ALM-C-050",
 		}
 		expectAlarmIDsMap := make(map[string]bool, len(expectAlarmIDs))
 		expectActorIDs := make([]string, len(expectAlarmIDs))
@@ -1349,6 +1364,11 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		require.NoError(t, err)
 
 		for _, a := range spec.Alarms {
+			// ALM-C-006's leases was expired and we should have taken it over
+			if a.AlarmID != "ALM-C-006" && expectPreLeasedAlarms(a.AlarmID) {
+				continue
+			}
+
 			if !expectAlarmIDsMap[a.AlarmID] {
 				// Seed data doesn't contain any leased alarm, so we can confidently exclude others
 				assert.Emptyf(t, a.LeaseID, "expected alarm %q not to have a lease ID", a.AlarmID)
