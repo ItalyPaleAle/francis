@@ -233,6 +233,7 @@ func (u *upcomingAlarmFetcher) getActiveHosts(ctx context.Context) (activeHosts 
 		QueryContext(queryCtx,
 			// For this connection, we set "temp_store = MEMORY" to tell SQLite to keep the temporary data in-memory
 			// Then, we create the temporary table, and finally insert data in there
+			// (Note the table may already exist if it was created previously in a connection, so that's why we delete all data from it to start)
 			// We add the list of hosts passed as input, filtering unhealthy ones out and including available capacity for all
 			// Note that if an actor host has no limit on a given actor type, we consider it to be "limited to MaxInt32" (2147483647)
 			// Also note that we do not filter out hosts/actor_type combinations at capacity, because we can still fetch alarms for actors active on them
@@ -249,6 +250,8 @@ func (u *upcomingAlarmFetcher) getActiveHosts(ctx context.Context) (activeHosts 
 
 					PRIMARY KEY (host_id, actor_type)
 				) WITHOUT ROWID, STRICT;
+
+				CREATE INDEX IF NOT EXISTS temp_capacities_actor_type_idx ON temp_capacities (actor_type);
 
 				DELETE FROM temp_capacities;
 

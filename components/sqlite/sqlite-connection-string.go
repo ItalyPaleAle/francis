@@ -80,14 +80,14 @@ func ParseConnectionString(connString string, log *slog.Logger) (string, error) 
 		}
 	}
 
-	// We do not want to override a _txlock if set, but we'll show a warning if it's not "immediate"
+	// If there's a _txlock set, it needs to be "immediate" or "exclusive"
 	if len(qs["_txlock"]) > 0 {
 		// Keep the first value only
 		qs["_txlock"] = []string{
 			strings.ToLower(qs["_txlock"][0]),
 		}
-		if qs["_txlock"][0] != "immediate" {
-			log.Warn("Database connection is being created with a _txlock different from the recommended value 'immediate'")
+		if qs["_txlock"][0] != "immediate" && qs["_txlock"][0] != "exclusive" {
+			return "", errors.New("found option '_txlock' in the connection string with value different from 'immediate' or 'exclusive'")
 		}
 	} else {
 		qs["_txlock"] = []string{"immediate"}

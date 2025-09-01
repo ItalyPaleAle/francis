@@ -5,7 +5,6 @@ import (
 	"net/url"
 	"os"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -141,11 +140,24 @@ func TestSQLiteConnectionString_Parse(t *testing.T) {
 			description:    "should set journal_mode=DELETE for immutable DB",
 		},
 		{
-			name:           "database with existing _txlock",
-			input:          "test.db?_txlock=deferred",
-			expectedResult: "file:test.db?_pragma=busy_timeout%282500%29&_pragma=foreign_keys%281%29&_pragma=journal_mode%28WAL%29&_txlock=deferred",
+			name:           "database with existing _txlock immediate",
+			input:          "test.db?_txlock=immediate",
+			expectedResult: "file:test.db?_pragma=busy_timeout%282500%29&_pragma=foreign_keys%281%29&_pragma=journal_mode%28WAL%29&_txlock=immediate",
 			shouldError:    false,
-			description:    "should keep existing _txlock value",
+			description:    "_txlock immediate is kept",
+		},
+		{
+			name:           "database with existing _txlock exclusive",
+			input:          "test.db?_txlock=exclusive",
+			expectedResult: "file:test.db?_pragma=busy_timeout%282500%29&_pragma=foreign_keys%281%29&_pragma=journal_mode%28WAL%29&_txlock=exclusive",
+			shouldError:    false,
+			description:    "_txlock exclusive is kept",
+		},
+		{
+			name:        "database with other _txlock fails",
+			input:       "test.db?_txlock=deferred",
+			shouldError: true,
+			description: "cannot set _txlock besides immediate and exclusive",
 		},
 		{
 			name:           "database with existing busy_timeout pragma",
@@ -225,20 +237,6 @@ func TestSQLiteConnectionString_Parse(t *testing.T) {
 			compareConnectionStrings(t, res, tt.expectedResult)
 		})
 	}
-}
-
-func TestSQLiteConnectionString_Parse_LogWarning(t *testing.T) {
-	// Create a buffer to capture log output
-	var logOutput strings.Builder
-	logger := slog.New(slog.NewTextHandler(&logOutput, &slog.HandlerOptions{
-		Level: slog.LevelWarn,
-	}))
-
-	_, err := ParseConnectionString("test.db?_txlock=exclusive", logger)
-	require.NoError(t, err)
-
-	logContent := logOutput.String()
-	assert.Contains(t, logContent, "_txlock different from the recommended value 'immediate'", "Expected warning about _txlock not found in log output")
 }
 
 // Helper function to compare query strings (order-independent)
