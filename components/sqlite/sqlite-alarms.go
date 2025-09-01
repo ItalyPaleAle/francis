@@ -190,12 +190,12 @@ func newUpcomingAlarmFetcher(tx *sql.Tx, s *SQLiteProvider, req *components.Fetc
 
 func (u *upcomingAlarmFetcher) FetchUpcoming(ctx context.Context) ([]*components.AlarmLease, error) {
 	// Start by getting the list of active hosts and whether we have any capacity constraint
-	activeHosts, hasCapLimit, err := u.getActiveHosts(ctx)
+	activeHosts, err := u.getActiveHosts(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get active hosts and capacities: %w", err)
 	}
 
-	fmt.Println("HERE", activeHosts, hasCapLimit)
+	fmt.Println("HERE", activeHosts)
 
 	// Check if we have any row: if there was no row returned, it means that among the hosts passed as input, either they were all un-healthy, or none had any supported actor type
 	// In this case, we can just return
@@ -203,20 +203,32 @@ func (u *upcomingAlarmFetcher) FetchUpcoming(ctx context.Context) ([]*components
 		return nil, nil
 	}
 
+	var fetchedUpcoming []fetchedUpcomingAlarm
+
 	// If none of the hosts has a capacity constraint, we can use a simpler/faster path
-	if !hasCapLimit {
-		fetchedUpcoming, err := u.fetchUpcomingNoConstraints(ctx, activeHosts)
+	if !activeHosts.hasCapLimit {
+		fetchedUpcoming, err = u.fetchUpcomingNoConstraints(ctx, activeHosts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch upcoming alarms: %w", err)
 		}
-
-		fmt.Println("FETCHED", fetchedUpcoming)
+	} else {
+		// We need to use a different path because we have capacity constraints
+		// TODO
 	}
+
+	fmt.Println("FETCHED", fetchedUpcoming)
+
+	// If there's no upcoming alarm, nothing to do - just return
+	if len(fetchedUpcoming) == 0 {
+		return nil, nil
+	}
+
+	// Now that we have alarms to execute, the first thing we need to do is allocate actors for those that don't already have one
 
 	return nil, nil
 }
 
-func (u *upcomingAlarmFetcher) getActiveHosts(ctx context.Context) (activeHosts *activeHostsList, hasCapLimit bool, err error) {
+func (u *upcomingAlarmFetcher) getActiveHosts(ctx context.Context) (activeHosts *activeHostsList, err error) {
 	// To start, we create a temporary table in which we store the available capacities for each host and actor type
 	// This serves us multiple functions, including also having a pre-loaded list of active hosts that we can reference in queries later
 	args := make([]any, len(u.req.Hosts)+1)
@@ -239,6 +251,7 @@ func (u *upcomingAlarmFetcher) getActiveHosts(ctx context.Context) (activeHosts 
 				CREATE TEMPORARY TABLE IF NOT EXISTS temp_capacities (
 					host_id text NOT NULL,
 					actor_type text NOT NULL,
+					idle_timeout integer NOT NULL,
 					concurrency_limit integer NOT NULL,
 					capacity integer NOT NULL,
 
@@ -247,10 +260,11 @@ func (u *upcomingAlarmFetcher) getActiveHosts(ctx context.Context) (activeHosts 
 
 				DELETE FROM temp_capacities;
 
-				INSERT INTO temp_capacities (host_id, actor_type, concurrency_limit, capacity)
+				INSERT INTO temp_capacities (host_id, actor_type, idle_timeout, concurrency_limit, capacity)
 				SELECT
 					hat.host_id,
 					hat.actor_type,
+					hat.actor_idle_timeout,
 					COALESCE(hat.actor_concurrency_limit, 0),
 					CASE
 						WHEN hat.actor_concurrency_limit = 0 THEN 2147483647 - COALESCE(haac.active_count, 0)
@@ -262,37 +276,25 @@ func (u *upcomingAlarmFetcher) getActiveHosts(ctx context.Context) (activeHosts 
 				WHERE
 					hosts.host_last_health_check >= ?
 					AND hosts.host_id IN (`+hostPlaceholders+`)
-				RETURNING host_id, concurrency_limit;
+				RETURNING host_id, actor_type, idle_timeout, concurrency_limit, capacity
 				`,
 			args...,
 		)
 	if err != nil {
-		return nil, false, fmt.Errorf("error executing query: %w", err)
+		return nil, fmt.Errorf("error executing query: %w", err)
 	}
 
 	defer rows.Close()
 
 	// Read from the query the list of active actor hosts (filtered down from the input list) and whether there's any capacity limit
 	activeHosts = newActiveHostsList(len(u.req.Hosts))
-	for rows.Next() {
-		var (
-			rHostID string
-			rCap    int
-		)
-		err = rows.Scan(&rHostID, &rCap)
-		if err != nil {
-			return nil, false, fmt.Errorf("error scanning row: %w", err)
-		}
-
-		activeHosts.Add(rHostID)
-
-		if rCap > 0 {
-			hasCapLimit = true
-		}
+	err = activeHosts.ScanRows(rows)
+	if err != nil {
+		return nil, fmt.Errorf("error scanning rows: %w", err)
 	}
 
 	// Return the list of active hosts and whether there's a capacity limit
-	return activeHosts, hasCapLimit, nil
+	return activeHosts, nil
 }
 
 func (u *upcomingAlarmFetcher) fetchUpcomingNoConstraints(ctx context.Context, activeHosts *activeHostsList) ([]fetchedUpcomingAlarm, error) {
@@ -379,7 +381,7 @@ func (u *upcomingAlarmFetcher) fetchUpcomingNoConstraints(ctx context.Context, a
 
 		// If host ID not null, there's an active actor
 		// It may be active on a un-healthy host, however, so we need to nullify those values to have a new actor created
-		if r.HostID != nil && !activeHosts.Has(*r.HostID) {
+		if r.HostID != nil && !activeHosts.HasHost(*r.HostID) {
 			r.HostID = nil
 		}
 
@@ -389,44 +391,82 @@ func (u *upcomingAlarmFetcher) fetchUpcomingNoConstraints(ctx context.Context, a
 	return res, nil
 }
 
+type activeHost struct {
+	HostID           string
+	ActorType        string
+	IdleTimeoutMs    int64
+	ConcurrencyLimit int32
+	Capacity         int32
+}
+
+// String implements fmt.Stringer and it's used for debugging
+func (ah activeHost) String() string {
+	return fmt.Sprintf(
+		"activeHost:[HostID=%q ActorType=%q IdleTimeoutMs=%d ConcurrencyLimit=%d Capacity=%d]",
+		ah.HostID, ah.ActorType, ah.IdleTimeoutMs, ah.ConcurrencyLimit, ah.Capacity,
+	)
+}
+
 type activeHostsList struct {
-	m map[string]struct{}
-	s []string
+	hosts       map[string]struct{}
+	list        []activeHost
+	hasCapLimit bool
 }
 
 func newActiveHostsList(cap int) *activeHostsList {
 	return &activeHostsList{
-		m: make(map[string]struct{}, cap),
-		s: make([]string, 0, cap),
+		hosts: make(map[string]struct{}, cap),
+		list:  make([]activeHost, 0, cap),
 	}
 }
 
-func (ah *activeHostsList) Has(key string) bool {
-	_, ok := ah.m[key]
+func (ahl *activeHostsList) HasHost(hostID string) bool {
+	_, ok := ahl.hosts[hostID]
 	return ok
 }
 
-// Add an active host if not already present
-func (ah *activeHostsList) Add(key string) {
-	if ah.Has(key) {
-		return
+func (ahl *activeHostsList) ScanRows(rows *sql.Rows) error {
+	for rows.Next() {
+		var r activeHost
+		err := rows.Scan(&r.HostID, &r.ActorType, &r.IdleTimeoutMs, &r.ConcurrencyLimit, &r.Capacity)
+		if err != nil {
+			return err
+		}
+
+		ahl.hosts[r.HostID] = struct{}{}
+		ahl.list = append(ahl.list, r)
+
+		if r.ConcurrencyLimit > 0 {
+			ahl.hasCapLimit = true
+		}
 	}
 
-	ah.m[key] = struct{}{}
-	ah.s = append(ah.s, key)
+	return nil
 }
 
-func (ah *activeHostsList) Len() int {
-	return len(ah.s)
-}
-
-func (ah *activeHostsList) List() []string {
-	return ah.s
+func (ahl *activeHostsList) Len() int {
+	return len(ahl.list)
 }
 
 // String implements fmt.Stringer and it's used for debugging
-func (ah *activeHostsList) String() string {
-	return fmt.Sprintf("activeHostsList:[%s]", strings.Join(ah.s, ","))
+func (ahl *activeHostsList) String() string {
+	var i int
+	hosts := make([]string, len(ahl.hosts))
+	for h := range ahl.hosts {
+		hosts[i] = h
+		i++
+	}
+
+	list := make([]string, len(ahl.list))
+	for i, v := range ahl.list {
+		list[i] = v.String()
+	}
+
+	listStr := "[]"
+	if len(list) > 0 {
+		listStr = "[\n    " + strings.Join(list, "\n    ") + "\n  ]"
+	}
+	return fmt.Sprintf("activeHostsList:[\n  hosts=[%s]\n  hasCapLimit=%v\n  list=%s\n]", strings.Join(hosts, ","), ahl.hasCapLimit, listStr)
 }
 
 type fetchedUpcomingAlarm struct {
