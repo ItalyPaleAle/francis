@@ -422,6 +422,8 @@ func (u *upcomingAlarmFetcher) fetchUpcomingWithConstraints(ctx context.Context,
 			//    the time horizon and with the other filters listed above), and assigns a rank for each actor type: for example,
 			//    if we have capacity for alarms of types A and B, the earliest alarm of type A will have rank 1, and so will
 			//    the earliest of type B.
+			//    There's one exception, which is that when the alarm is for an actor that's already active on a host in the
+			//    allowlist, we assign it a rank of 0, as it doesn't use more capacity.
 			//    This "ranking" selects a lot or rows, and it's the reason why this is the "slow" path.
 			// 4. Finally, select from the ranked list, returning alarms for which there's sufficient capacity, in order of
 			//    of execution time. We do this by excluding the rows from ranked in which the row number is greater than the
@@ -450,7 +452,6 @@ func (u *upcomingAlarmFetcher) fetchUpcomingWithConstraints(ctx context.Context,
 				actor_type_capacity AS (
 					SELECT actor_type, sum(capacity) AS total_capacity
 					FROM temp_capacities
-					WHERE capacity > 0
 					GROUP BY actor_type
 				),
 				ranked AS (
@@ -458,9 +459,22 @@ func (u *upcomingAlarmFetcher) fetchUpcomingWithConstraints(ctx context.Context,
 						a.alarm_id, a.actor_type, a.actor_id, a.alarm_due_time,
 						aa.host_id,
 						atc.total_capacity,
-						ROW_NUMBER() OVER (
+						CASE
+							WHEN
+								aa.host_id IS NULL
+								OR NOT EXISTS (SELECT 1 FROM temp_capacities WHERE temp_capacities.host_id = aa.host_id)
+							THEN 0
+							ELSE 1
+						END AS active_actor,
+						SUM(1)
+						FILTER (
+							WHERE aa.host_id IS NULL
+							OR NOT EXISTS (SELECT 1 FROM temp_capacities WHERE temp_capacities.host_id = aa.host_id)
+						)
+						OVER (
 							PARTITION BY a.actor_type
-							ORDER BY a.alarm_due_time
+							ORDER BY a.alarm_due_time, a.alarm_id
+							ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
 						) AS rownum
 					FROM alarms AS a
 					-- Inner join also filters by actor types for which we have capacity
@@ -484,7 +498,8 @@ func (u *upcomingAlarmFetcher) fetchUpcomingWithConstraints(ctx context.Context,
 				alarm_id, actor_type, actor_id, alarm_due_time, host_id
 			FROM ranked
 			WHERE
-				rownum < total_capacity
+				active_actor = 1
+    			OR rownum <= total_capacity
 			ORDER BY alarm_due_time ASC
 			LIMIT ?
 			`,

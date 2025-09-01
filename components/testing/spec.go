@@ -305,6 +305,7 @@ func GetSpec() Spec {
 			// Some B actors but leave room for more
 			{ActorType: "B", ActorID: "B-1", HostID: "H1", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
 			{ActorType: "B", ActorID: "B-2", HostID: "H2", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
+			{ActorType: "B", ActorID: "B-3", HostID: "H3", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
 
 			// Actors on unhealthy H6. They should be treated as inactive by the scheduler.
 			{ActorType: "D", ActorID: "D-1", HostID: "H6", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 3 * time.Minute},
@@ -321,12 +322,12 @@ func GetSpec() Spec {
 	}
 
 	// A alarms: earliest, un-placeable on allowed hosts because A is full on H1 and H2
-	for i := 1; i <= 200; i++ {
+	for i := 1; i <= 50; i++ {
 		spec.addAlarm(AlarmSpec{
-			AlarmID:   fmt.Sprintf("ALM-A-%04d", i),
+			AlarmID:   fmt.Sprintf("ALM-A-%03d", i),
 			ActorType: "A",
-			ActorID:   fmt.Sprintf("A-%04d", i+1000),
-			Name:      fmt.Sprintf("A-%04d", i),
+			ActorID:   fmt.Sprintf("A-%03d", i+1000),
+			Name:      fmt.Sprintf("A-%03d", i),
 			DueIn:     time.Duration(i%50) * 10 * time.Millisecond, // 0..500 ms from now
 			Data:      []byte("blocked-A"),
 		})
@@ -338,7 +339,7 @@ func GetSpec() Spec {
 		ActorType: "A",
 		ActorID:   "A-1",
 		Name:      "Alarm-A-1",
-		DueIn:     500 * time.Millisecond,
+		DueIn:     100 * time.Millisecond,
 		Data:      []byte("active-A-1"),
 	})
 	spec.addAlarm(AlarmSpec{
@@ -346,7 +347,7 @@ func GetSpec() Spec {
 		ActorType: "A",
 		ActorID:   "A-2",
 		Name:      "Alarm-A-2",
-		DueIn:     520 * time.Millisecond,
+		DueIn:     120 * time.Millisecond,
 		Data:      []byte("active-A-2"),
 	})
 	spec.addAlarm(AlarmSpec{
@@ -354,29 +355,55 @@ func GetSpec() Spec {
 		ActorType: "A",
 		ActorID:   "A-4",
 		Name:      "Alarm-A-4",
-		DueIn:     500 * time.Millisecond,
+		DueIn:     100 * time.Millisecond,
 		Data:      []byte("active-A-4"),
 	})
 
 	// B alarms: due after A, should still be leased and run on H1 or H2
-	for i := 1; i <= 300; i++ {
+	for i := 1; i <= 50; i++ {
 		spec.addAlarm(AlarmSpec{
-			AlarmID:   fmt.Sprintf("ALM-B-%04d", i),
+			AlarmID:   fmt.Sprintf("ALM-B-%03d", i),
 			ActorType: "B",
-			ActorID:   fmt.Sprintf("B-%04d", i),
-			Name:      fmt.Sprintf("B-%04d", i),
+			ActorID:   fmt.Sprintf("B-%03d", i),
+			Name:      fmt.Sprintf("B-%03d", i),
 			DueIn:     1*time.Second + time.Duration(i%7)*100*time.Millisecond,
 			Data:      []byte("ok-B"),
 		})
 	}
 
+	// B alarms for active actors
+	spec.addAlarm(AlarmSpec{
+		AlarmID:   "ALM-B-1",
+		ActorType: "B",
+		ActorID:   "B-1", // Active on H1
+		Name:      "Alarm-B-1",
+		DueIn:     100 * time.Millisecond,
+		Data:      []byte("active-B-1"),
+	})
+	spec.addAlarm(AlarmSpec{
+		AlarmID:   "ALM-B-2",
+		ActorType: "B",
+		ActorID:   "B-2", // Active on H2
+		Name:      "Alarm-B-2",
+		DueIn:     100 * time.Millisecond,
+		Data:      []byte("active-B-2"),
+	})
+	spec.addAlarm(AlarmSpec{
+		AlarmID:   "ALM-B-3",
+		ActorType: "B",
+		ActorID:   "B-3", // Active on H3
+		Name:      "Alarm-B-3",
+		DueIn:     100 * time.Millisecond,
+		Data:      []byte("active-B-3"),
+	})
+
 	// C alarms: unlimited type on H1 and H2
-	for i := 1; i <= 300; i++ {
+	for i := 1; i <= 50; i++ {
 		spec.addAlarm(AlarmSpec{
-			AlarmID:   fmt.Sprintf("ALM-C-%04d", i),
+			AlarmID:   fmt.Sprintf("ALM-C-%03d", i),
 			ActorType: "C",
-			ActorID:   fmt.Sprintf("C-%04d", i),
-			Name:      fmt.Sprintf("C-%04d", i),
+			ActorID:   fmt.Sprintf("C-%03d", i),
+			Name:      fmt.Sprintf("C-%03d", i),
 			DueIn:     1500*time.Millisecond + time.Duration(i%5)*100*time.Millisecond,
 			Data:      []byte("ok-C"),
 		})
@@ -407,7 +434,7 @@ func GetSpec() Spec {
 	for _, k := range []string{"X", "Y"} {
 		for i := 1; i <= 50; i++ {
 			spec.addAlarm(AlarmSpec{
-				AlarmID:   fmt.Sprintf("ALM-%s-%04d", k, i),
+				AlarmID:   fmt.Sprintf("ALM-%s-%03d", k, i),
 				ActorType: k,
 				ActorID:   fmt.Sprintf("%s-%d", k, i),
 				Name:      fmt.Sprintf("%s-%d", k, i),
