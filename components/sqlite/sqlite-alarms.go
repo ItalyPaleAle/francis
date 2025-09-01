@@ -86,7 +86,7 @@ func (s *SQLiteProvider) SetAlarm(ctx context.Context, ref components.AlarmRef, 
 			`REPLACE INTO alarms
 				(alarm_id, actor_type, actor_id, alarm_name,
 				alarm_due_time, alarm_interval, alarm_ttl_time, alarm_data,
-				alarm_lease_id, alarm_lease_exp, alarm_lease_pid)
+				alarm_lease_id, alarm_lease_expiration_time, alarm_lease_pid)
 			VALUES
 				(?, ?, ?, ?,
 				?, ?, ?, ?,
@@ -358,7 +358,7 @@ func (u *upcomingAlarmFetcher) fetchUpcomingNoConstraints(ctx context.Context, a
 					aa.host_id IS NULL
 					OR aa.host_id IN (SELECT host_id FROM allowed_actor_hosts)
 				)
-			ORDER BY alarm_due_time ASC
+			ORDER BY alarm_due_time ASC, alarm_id
 			LIMIT ?
 			`,
 			u.healthCutoffMs, u.horizonMs, u.nowMs, u.batchSize,
@@ -374,7 +374,7 @@ func (u *upcomingAlarmFetcher) fetchUpcomingNoConstraints(ctx context.Context, a
 		var r fetchedUpcomingAlarm
 		err = rows.Scan(&r.AlarmID, &r.ActorType, &r.ActorID, &r.AlarmDueTime, &r.HostID)
 		if err != nil {
-			return nil, fmt.Errorf("error scanning row: %w", err)
+			return nil, fmt.Errorf("error scanning rows: %w", err)
 		}
 
 		// If host ID not null, there's an active actor
@@ -384,6 +384,9 @@ func (u *upcomingAlarmFetcher) fetchUpcomingNoConstraints(ctx context.Context, a
 		}
 
 		res = append(res, r)
+	}
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("error scanning rows: %w", rows.Err())
 	}
 
 	return res, nil
@@ -500,7 +503,7 @@ func (u *upcomingAlarmFetcher) fetchUpcomingWithConstraints(ctx context.Context,
 			WHERE
 				active_actor = 1
     			OR rownum <= total_capacity
-			ORDER BY alarm_due_time ASC
+			ORDER BY alarm_due_time ASC, alarm_id
 			LIMIT ?
 			`,
 			u.healthCutoffMs, u.horizonMs, u.nowMs, u.batchSize,
@@ -516,7 +519,7 @@ func (u *upcomingAlarmFetcher) fetchUpcomingWithConstraints(ctx context.Context,
 		var r fetchedUpcomingAlarm
 		err = rows.Scan(&r.AlarmID, &r.ActorType, &r.ActorID, &r.AlarmDueTime, &r.HostID)
 		if err != nil {
-			return nil, fmt.Errorf("error scanning row: %w", err)
+			return nil, fmt.Errorf("error scanning rows: %w", err)
 		}
 
 		// If host ID not null, there's an active actor
@@ -526,6 +529,9 @@ func (u *upcomingAlarmFetcher) fetchUpcomingWithConstraints(ctx context.Context,
 		}
 
 		res = append(res, r)
+	}
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("error scanning rows: %w", rows.Err())
 	}
 
 	return res, nil
@@ -572,8 +578,8 @@ func (u *upcomingAlarmFetcher) allocateActors(ctx context.Context, activeHosts *
 
 		// Execute the query
 		queryCtx, cancel := context.WithTimeout(ctx, u.timeout)
-		defer cancel()
 		_, err = stmt.ExecContext(queryCtx, alarm.ActorType, alarm.ActorID, host.HostID, host.IdleTimeoutMs, activationTime)
+		cancel()
 		if err != nil {
 			return fmt.Errorf("error inserting actor row: %w", err)
 		}
@@ -618,6 +624,11 @@ func (u *upcomingAlarmFetcher) obtainLeases(ctx context.Context, fetchedUpcoming
 	alarmIDs = alarmIDs[:i]
 	res = res[:i]
 
+	if i == 0 {
+		// Nothing to do, return early
+		return nil, nil
+	}
+
 	// Build the arguments
 	args := make([]any, i+3)
 	args[0] = leaseID
@@ -633,7 +644,7 @@ func (u *upcomingAlarmFetcher) obtainLeases(ctx context.Context, fetchedUpcoming
 			`
 			UPDATE alarms
 			SET
-				alarm_lease_id = CONCAT(?, '_', alarm_id),
+				alarm_lease_id = ? || '_' || alarm_id,
 				alarm_lease_expiration_time = ?,
 				alarm_lease_pid = ?
 			WHERE alarm_id IN (`+placeholders+`)
@@ -763,7 +774,7 @@ func (ahl *activeHostsList) ScanRows(rows *sql.Rows) error {
 		}
 	}
 
-	return nil
+	return rows.Err()
 }
 
 // String implements fmt.Stringer and it's used for debugging
