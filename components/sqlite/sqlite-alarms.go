@@ -197,8 +197,6 @@ func (u *upcomingAlarmFetcher) FetchUpcoming(ctx context.Context) ([]components.
 		return nil, fmt.Errorf("failed to fetch upcoming alarms: %w", err)
 	}
 
-	fmt.Println("FETCHED", fetchedUpcoming)
-
 	// If there's no upcoming alarm, nothing to do - just return
 	if len(fetchedUpcoming) == 0 {
 		return nil, nil
@@ -209,8 +207,6 @@ func (u *upcomingAlarmFetcher) FetchUpcoming(ctx context.Context) ([]components.
 	if err != nil {
 		return nil, fmt.Errorf("failed to allocate actors for alarms: %w", err)
 	}
-
-	fmt.Println("FETCHED UPDATED", fetchedUpcoming)
 
 	// Finally, acquire the leases on the alarms
 	res, err := u.obtainLeases(ctx, fetchedUpcoming)

@@ -238,7 +238,7 @@ func GetProviderConfig() components.ProviderConfig {
 		HostHealthCheckDeadline:   1 * time.Minute,
 		AlarmsLeaseDuration:       1 * time.Minute,
 		AlarmsFetchAheadInterval:  30 * time.Second,
-		AlarmsFetchAheadBatchSize: 10,
+		AlarmsFetchAheadBatchSize: 24,
 	}
 }
 

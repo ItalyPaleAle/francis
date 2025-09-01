@@ -3,6 +3,8 @@ package comptesting
 import (
 	"bytes"
 	"fmt"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -1228,11 +1230,77 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		// Seed with the test data
 		require.NoError(t, s.p.Seed(ctx, GetSpec()))
 
+		// Retrieve the alarms
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
 			Hosts: []string{"H7"},
 		})
 		require.NoError(t, err)
-		fmt.Println("RES IS", res)
+
+		// This should return a total of 24 alarms, all of types X and Y
+		// Alarms ALM-X-002 and ALM-Y-001 (for actors X-2 and Y-1) should not be returned because the actors are active on H8
+		// (and that's why we iterate till 13)
+		expectAlarmIDs := make([]string, 0, 24)
+		expectAlarmIDsMap := make(map[string]bool, 24)
+		expectActorIDs := make([]string, 0, 24)
+		for _, typ := range []string{"X", "Y"} {
+			for i := 1; i <= 13; i++ {
+				if (typ == "X" && i == 2) || (typ == "Y" && i == 1) {
+					continue
+				}
+
+				alarmID := fmt.Sprintf("ALM-%s-%03d", typ, i)
+				actorID := fmt.Sprintf("%s-%d", typ, i)
+
+				expectAlarmIDs = append(expectAlarmIDs, alarmID)
+				expectAlarmIDsMap[alarmID] = true
+				expectActorIDs = append(expectActorIDs, actorID)
+			}
+		}
+
+		// Collect all alarm IDs
+		gotIDs := make([]string, 0, 24)
+		for _, a := range res {
+			gotIDs = append(gotIDs, a.Key())
+			assert.NotEmpty(t, a.LeaseID())
+		}
+
+		// Order doesn't matter
+		slices.Sort(expectAlarmIDs)
+		slices.Sort(gotIDs)
+		assert.Equal(t, expectAlarmIDs, gotIDs)
+
+		// Ensure that the alarms' leases were acquired in the database, and only for the alarms we retrieved
+		spec, err := s.p.GetAllHosts(t.Context())
+		require.NoError(t, err)
+
+		for _, a := range spec.Alarms {
+			if !expectAlarmIDsMap[a.AlarmID] {
+				// Seed data doesn't contain any leased alarm, so we can confidently exclude others
+				assert.Emptyf(t, a.LeaseID, "expected alarm %q not to have a lease ID", a.AlarmID)
+				assert.Emptyf(t, a.LeaseExp, "expected alarm %q not to have a lease expiration", a.AlarmID)
+				assert.Emptyf(t, a.LeasePID, "expected alarm %q not to have a lease PID", a.AlarmID)
+				continue
+			}
+
+			_ = assert.NotNil(t, a.LeaseID, "expected alarm %q to have a lease ID", a.AlarmID) &&
+				assert.NotEmpty(t, *a.LeaseID, "expected alarm %q to have a lease ID", a.AlarmID)
+			_ = assert.NotNil(t, a.LeaseExp, "expected alarm %q to have a lease expiration", a.AlarmID) &&
+				assert.Greater(t, *a.LeaseExp, s.p.Now(), "expected alarm's %q lease expiration to be in the future", a.AlarmID)
+			_ = assert.NotNil(t, a.LeasePID, "expected alarm %q to have a lease PID", a.AlarmID) &&
+				assert.NotEmpty(t, *a.LeasePID, "expected alarm %q to have a lease PID", a.AlarmID)
+		}
+
+		// Also ensure that all actors were activated on H7
+		// Note that seed data contains active actors already
+		gotActiveActorIDs := make(map[string]string, len(spec.ActiveActors))
+		for _, a := range spec.ActiveActors {
+			gotActiveActorIDs[a.ActorID] = a.HostID
+		}
+
+		for _, id := range expectActorIDs {
+			_ = assert.NotEmptyf(t, gotActiveActorIDs[id], "expected actor %q to be active on host H7, but it was not active", id) &&
+				assert.Equalf(t, "H7", gotActiveActorIDs[id], "expected actor %q to be active on host H7, but it was active on host %q", id, gotActiveActorIDs[id])
+		}
 	})
 
 	t.Run("fetches upcoming alarms with capacity constraints", func(t *testing.T) {
@@ -1241,10 +1309,91 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		// Seed with the test data
 		require.NoError(t, s.p.Seed(ctx, GetSpec()))
 
+		// Retrieve the alarms
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
 			Hosts: []string{"H1", "H2"},
 		})
 		require.NoError(t, err)
-		fmt.Println("RES IS", res)
+
+		// This should return a total of 24 alarms, all of types A, B, and C
+		// Type A doesn't have any capacity left, but actors A-1, A-2, A-4 are active on H1 and H2, so alarms ALM-A-1, ALM-A-2, ALM-A-4 should be included
+		// For type B, the combined capacity between H1 and H2 is 10, with 2 actors already active, so we should only get the earliest 8 plus ALM-B-1 and ALM-B-2 which are for the actors active on H1 and H2 (meanwhile, ALM-B-3 is active on H3 so should not be returned)
+		// There's no capacity limit on type C, so we should get 12 of them
+		expectAlarmIDs := []string{
+			"ALM-A-1", "ALM-A-2", "ALM-A-4",
+			"ALM-B-1", "ALM-B-2",
+			"ALM-B-001", "ALM-B-007", "ALM-B-014", "ALM-B-021", "ALM-B-028", "ALM-B-035", "ALM-B-042", "ALM-B-049",
+			"ALM-C-001", "ALM-C-005", "ALM-C-010", "ALM-C-015", "ALM-C-020", "ALM-C-025", "ALM-C-030", "ALM-C-035", "ALM-C-040", "ALM-C-045", "ALM-C-050",
+		}
+		expectAlarmIDsMap := make(map[string]bool, len(expectAlarmIDs))
+		expectActorIDs := make([]string, len(expectAlarmIDs))
+		for i, id := range expectAlarmIDs {
+			expectAlarmIDsMap[id] = true
+			expectActorIDs[i] = strings.TrimPrefix(id, "ALM-")
+		}
+
+		// Collect all alarm IDs
+		gotIDs := make([]string, 0, 24)
+		for _, a := range res {
+			gotIDs = append(gotIDs, a.Key())
+			assert.NotEmpty(t, a.LeaseID())
+		}
+
+		// Order doesn't matter
+		slices.Sort(expectAlarmIDs)
+		slices.Sort(gotIDs)
+		assert.Equal(t, expectAlarmIDs, gotIDs)
+
+		// Ensure that the alarms' leases were acquired in the database, and only for the alarms we retrieved
+		spec, err := s.p.GetAllHosts(t.Context())
+		require.NoError(t, err)
+
+		for _, a := range spec.Alarms {
+			if !expectAlarmIDsMap[a.AlarmID] {
+				// Seed data doesn't contain any leased alarm, so we can confidently exclude others
+				assert.Emptyf(t, a.LeaseID, "expected alarm %q not to have a lease ID", a.AlarmID)
+				assert.Emptyf(t, a.LeaseExp, "expected alarm %q not to have a lease expiration", a.AlarmID)
+				assert.Emptyf(t, a.LeasePID, "expected alarm %q not to have a lease PID", a.AlarmID)
+				continue
+			}
+
+			_ = assert.NotNil(t, a.LeaseID, "expected alarm %q to have a lease ID", a.AlarmID) &&
+				assert.NotEmpty(t, *a.LeaseID, "expected alarm %q to have a lease ID", a.AlarmID)
+			_ = assert.NotNil(t, a.LeaseExp, "expected alarm %q to have a lease expiration", a.AlarmID) &&
+				assert.Greater(t, *a.LeaseExp, s.p.Now(), "expected alarm's %q lease expiration to be in the future", a.AlarmID)
+			_ = assert.NotNil(t, a.LeasePID, "expected alarm %q to have a lease PID", a.AlarmID) &&
+				assert.NotEmpty(t, *a.LeasePID, "expected alarm %q to have a lease PID", a.AlarmID)
+		}
+
+		// Also ensure that all actors were activated on H1 or H2
+		// Note that seed data contains active actors already
+		gotActiveActorIDs := make(map[string]string, len(spec.ActiveActors))
+		for _, a := range spec.ActiveActors {
+			gotActiveActorIDs[a.ActorID] = a.HostID
+		}
+
+		hostCounts := make(map[string]int, 2)
+		for _, id := range expectActorIDs {
+			if !assert.NotEmptyf(t, gotActiveActorIDs[id], "expected actor %q to be active on a host, but it was not active", id) {
+				continue
+			}
+
+			switch id {
+			// These actors were already active in the seed data
+			case "A-1", "A-2", "B-1":
+				assert.Equalf(t, "H1", gotActiveActorIDs[id], "expected actor %q to be active on host H1, but it was active on host %q", id, gotActiveActorIDs[id])
+			case "A-4", "B-2":
+				assert.Equalf(t, "H2", gotActiveActorIDs[id], "expected actor %q to be active on host H2, but it was active on host %q", id, gotActiveActorIDs[id])
+			default:
+				assert.Contains(t, []string{"H1", "H2"}, gotActiveActorIDs[id], "expected actor %q to be active on host H1 or H2, but it was active on host %q", id, gotActiveActorIDs[id])
+				hostCounts[gotActiveActorIDs[id]]++
+			}
+		}
+
+		// There should be some level of distribution for actors that were just activated
+		// It doesn't have to be 50/50 since there's randomness involved
+		assert.Len(t, hostCounts, 2)
+		assert.GreaterOrEqual(t, hostCounts["H1"], 4)
+		assert.GreaterOrEqual(t, hostCounts["H2"], 4)
 	})
 }
