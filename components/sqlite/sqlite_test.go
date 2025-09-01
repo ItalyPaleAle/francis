@@ -152,7 +152,7 @@ func (s *SQLiteProvider) Seed(ctx context.Context, spec comptesting.Spec) error 
 			`INSERT INTO alarms (
 				alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
 				alarm_interval, alarm_ttl_time, alarm_data,
-				alarm_lease_id, alarm_lease_time, alarm_lease_pid
+				alarm_lease_id, alarm_lease_expiration_time, alarm_lease_pid
 			)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
 		)
@@ -271,7 +271,7 @@ func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, err
 		rows.Close()
 
 		// Load all alarms
-		rows, err = tx.QueryContext(ctx, "SELECT alarm_id, actor_type, actor_id, alarm_name, alarm_due_time, alarm_interval, alarm_ttl_time, alarm_data, alarm_lease_id, alarm_lease_time, alarm_lease_pid FROM alarms")
+		rows, err = tx.QueryContext(ctx, "SELECT alarm_id, actor_type, actor_id, alarm_name, alarm_due_time, alarm_interval, alarm_ttl_time, alarm_data, alarm_lease_id, alarm_lease_expiration_time, alarm_lease_pid FROM alarms")
 		if err != nil {
 			return res, fmt.Errorf("select alarms: %w", err)
 		}
@@ -279,11 +279,11 @@ func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, err
 		res.Alarms = make([]comptesting.AlarmSpec, 0)
 		for rows.Next() {
 			var (
-				r              comptesting.AlarmSpec
-				due            int64
-				ttl, leaseTime *int64
+				r             comptesting.AlarmSpec
+				due           int64
+				ttl, leaseExp *int64
 			)
-			err = rows.Scan(&r.AlarmID, &r.ActorType, &r.ActorID, &r.Name, &due, &r.Interval, &ttl, &r.Data, &r.LeaseID, &leaseTime, &r.LeasePID)
+			err = rows.Scan(&r.AlarmID, &r.ActorType, &r.ActorID, &r.Name, &due, &r.Interval, &ttl, &r.Data, &r.LeaseID, &leaseExp, &r.LeasePID)
 			if err != nil {
 				return res, fmt.Errorf("reading active_actors row: %w", err)
 			}
@@ -291,8 +291,8 @@ func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, err
 			if ttl != nil {
 				r.TTL = time.Duration(*ttl) * time.Millisecond
 			}
-			if leaseTime != nil {
-				r.LeaseTime = ptr.Of(time.UnixMilli(*leaseTime))
+			if leaseExp != nil {
+				r.LeaseExp = ptr.Of(time.UnixMilli(*leaseExp))
 			}
 			res.Alarms = append(res.Alarms, r)
 		}

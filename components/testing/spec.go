@@ -76,9 +76,9 @@ type AlarmSpec struct {
 	Data     []byte        // nil means NULL; non-nil inserted as BLOB
 
 	// Read only
-	LeaseID   *string
-	LeaseTime *time.Time
-	LeasePID  *string
+	LeaseID  *string
+	LeaseExp *time.Time
+	LeasePID *string
 }
 
 // String implements fmt.Stringer and is used for debugging
@@ -415,6 +415,8 @@ func GetSpec() Spec {
 			})
 		}
 	}
+
+	// TODO: Needs test for alarms with an expired lease
 
 	return spec
 }

@@ -85,7 +85,7 @@ func (s *SQLiteProvider) SetAlarm(ctx context.Context, ref components.AlarmRef, 
 			`REPLACE INTO alarms
 				(alarm_id, actor_type, actor_id, alarm_name,
 				alarm_due_time, alarm_interval, alarm_ttl_time, alarm_data,
-				alarm_lease_id, alarm_lease_time, reminder_lease_pid)
+				alarm_lease_id, alarm_lease_exp, reminder_lease_pid)
 			VALUES
 				(?, ?, ?, ?,
 				?, ?, ?, ?,
@@ -163,17 +163,15 @@ type upcomingAlarmFetcher struct {
 	req     *components.FetchAndLeaseUpcomingAlarmsReq
 	timeout time.Duration
 
-	nowMs          int64
-	healthCutoffMs int64
-
-	activeHosts []string
+	nowMs             int64
+	horizonMs         int64
+	healthCutoffMs    int64
+	leaseExpirationMs int64
+	batchSize         int
 }
 
 func newUpcomingAlarmFetcher(tx *sql.Tx, s *SQLiteProvider, req *components.FetchAndLeaseUpcomingAlarmsReq) *upcomingAlarmFetcher {
 	now := s.clock.Now()
-
-	//horizonMs := now.Add(s.cfg.AlarmsFetchAheadInterval).UnixMilli()
-	//batchSize := s.cfg.AlarmsFetchAheadBatchSize
 
 	return &upcomingAlarmFetcher{
 		tx:      tx,
@@ -182,8 +180,11 @@ func newUpcomingAlarmFetcher(tx *sql.Tx, s *SQLiteProvider, req *components.Fetc
 		req:     req,
 		timeout: s.timeout,
 
-		nowMs:          now.UnixMilli(),
-		healthCutoffMs: now.Add(-s.cfg.HostHealthCheckDeadline).UnixMilli(),
+		nowMs:             now.UnixMilli(),
+		horizonMs:         now.Add(s.cfg.AlarmsFetchAheadInterval).UnixMilli(),
+		healthCutoffMs:    now.Add(-s.cfg.HostHealthCheckDeadline).UnixMilli(),
+		leaseExpirationMs: now.Add(s.cfg.AlarmsLeaseDuration).UnixMilli(),
+		batchSize:         s.cfg.AlarmsFetchAheadBatchSize,
 	}
 }
 
@@ -198,16 +199,24 @@ func (u *upcomingAlarmFetcher) FetchUpcoming(ctx context.Context) ([]*components
 
 	// Check if we have any row: if there was no row returned, it means that among the hosts passed as input, either they were all un-healthy, or none had any supported actor type
 	// In this case, we can just return
-	if len(activeHosts) == 0 {
+	if activeHosts.Len() == 0 {
 		return nil, nil
 	}
 
 	// If none of the hosts has a capacity constraint, we can use a simpler/faster path
+	if !hasCapLimit {
+		fetchedUpcoming, err := u.fetchUpcomingNoConstraints(ctx, activeHosts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch upcoming alarms: %w", err)
+		}
+
+		fmt.Println("FETCHED", fetchedUpcoming)
+	}
 
 	return nil, nil
 }
 
-func (u *upcomingAlarmFetcher) getActiveHosts(ctx context.Context) (activeHosts []string, hasCapLimit bool, err error) {
+func (u *upcomingAlarmFetcher) getActiveHosts(ctx context.Context) (activeHosts *activeHostsList, hasCapLimit bool, err error) {
 	// To start, we create a temporary table in which we store the available capacities for each host and actor type
 	// This serves us multiple functions, including also having a pre-loaded list of active hosts that we can reference in queries later
 	args := make([]any, len(u.req.Hosts)+1)
@@ -264,8 +273,7 @@ func (u *upcomingAlarmFetcher) getActiveHosts(ctx context.Context) (activeHosts 
 	defer rows.Close()
 
 	// Read from the query the list of active actor hosts (filtered down from the input list) and whether there's any capacity limit
-	activeHostsMap := make(map[string]struct{}, len(u.req.Hosts))
-	activeHosts = make([]string, 0, len(u.req.Hosts))
+	activeHosts = newActiveHostsList(len(u.req.Hosts))
 	for rows.Next() {
 		var (
 			rHostID string
@@ -276,11 +284,7 @@ func (u *upcomingAlarmFetcher) getActiveHosts(ctx context.Context) (activeHosts 
 			return nil, false, fmt.Errorf("error scanning row: %w", err)
 		}
 
-		_, ok := activeHostsMap[rHostID]
-		if !ok {
-			activeHostsMap[rHostID] = struct{}{}
-			activeHosts = append(activeHosts, rHostID)
-		}
+		activeHosts.Add(rHostID)
 
 		if rCap > 0 {
 			hasCapLimit = true
@@ -289,4 +293,165 @@ func (u *upcomingAlarmFetcher) getActiveHosts(ctx context.Context) (activeHosts 
 
 	// Return the list of active hosts and whether there's a capacity limit
 	return activeHosts, hasCapLimit, nil
+}
+
+func (u *upcomingAlarmFetcher) fetchUpcomingNoConstraints(ctx context.Context, activeHosts *activeHostsList) ([]fetchedUpcomingAlarm, error) {
+	// This method implements the "fast path", which looks up alarms when there are no capacity constraints on any of the hosts we selected/filtered
+
+	queryCtx, cancel := context.WithTimeout(ctx, u.timeout)
+	defer cancel()
+	rows, err := u.tx.
+		QueryContext(queryCtx,
+			// How the query works:
+			//
+			// 1. allowed_actor_hosts:
+			//    This CTE is necessary to look up what hosts are ok when we see that the actor mapped to an alarm is active.
+			//    Some alarms are for actors that are not active, but some may be mapped to actors that are already active.
+			//    We accept alarms mapping to an active actor if they either:
+			//      - Map to an actor that's active on a host in the allowlist
+			//      - Map to an actor that's active on an unhealthy host
+			//    The CTE loads host IDs both from the pre-filtered allowlist (the temp_capacities table), and from the
+			//    active_actors table, looking at all the actors of the types we care about (those that can be executed on
+			//    the hosts in the allowlist).
+			// 2. Look up alarms:
+			//    Next, we can look up the list of alarms, looking at the N-most alarms that are coming up the soonest.
+			//    We filter the alarms by:
+			//      - Limiting to the actor types that can be executed on the hosts in the request
+			//        (this is done with the INNER JOIN on temp_capacities)
+			//      - Ensuring their due time is within the horizon we are considering
+			//      - Selecting alarms that aren't leased, or whose lease has expired
+			//      - Selecting alarms that are not tied to an active actor, or whose actor is in the allowed_actor_hosts list
+			//
+			// Alarms that have an active actor will have host_id non-null. However, that will be non-null also for actors that
+			// are on un-healthy hosts; we will need to filter them out in the Go code later.
+			`
+			WITH
+				allowed_actor_hosts AS (
+					SELECT DISTINCT host_id
+					FROM temp_capacities
+
+					UNION
+
+					SELECT DISTINCT aa.host_id
+					FROM active_actors AS aa
+					INNER JOIN temp_capacities AS cap
+						USING (actor_type)
+					INNER JOIN hosts AS h
+						USING (host_id)
+					WHERE
+						h.host_last_health_check < ?
+				)
+			SELECT a.alarm_id, a.actor_type, a.actor_id, a.alarm_due_time, aa.host_id
+			FROM alarms AS a
+			INNER JOIN temp_capacities AS cap
+				USING (actor_type)
+			LEFT JOIN active_actors AS aa
+				ON a.actor_type = aa.actor_type AND a.actor_id = aa.actor_id
+			WHERE 
+				a.alarm_due_time <= ?
+				AND (
+					a.alarm_lease_id IS NULL
+					OR a.alarm_lease_expiration_time IS NULL
+					OR a.alarm_lease_expiration_time < ?
+				)
+				AND (
+					aa.host_id IS NULL
+					OR aa.host_id IN (SELECT host_id FROM allowed_actor_hosts)
+				)
+			ORDER BY alarm_due_time ASC
+			LIMIT ?
+			`,
+			u.healthCutoffMs, u.horizonMs, u.nowMs, u.batchSize,
+		)
+	if err != nil {
+		return nil, fmt.Errorf("error executing query: %w", err)
+	}
+
+	defer rows.Close()
+
+	res := make([]fetchedUpcomingAlarm, 0, u.batchSize)
+	for rows.Next() {
+		var r fetchedUpcomingAlarm
+		err = rows.Scan(&r.AlarmID, &r.ActorType, &r.ActorID, &r.AlarmDueTime, &r.HostID)
+		if err != nil {
+			return nil, fmt.Errorf("error scanning row: %w", err)
+		}
+
+		// If host ID not null, there's an active actor
+		// It may be active on a un-healthy host, however, so we need to nullify those values to have a new actor created
+		if r.HostID != nil && !activeHosts.Has(*r.HostID) {
+			r.HostID = nil
+		}
+
+		res = append(res, r)
+	}
+
+	return res, nil
+}
+
+type activeHostsList struct {
+	m map[string]struct{}
+	s []string
+}
+
+func newActiveHostsList(cap int) *activeHostsList {
+	return &activeHostsList{
+		m: make(map[string]struct{}, cap),
+		s: make([]string, 0, cap),
+	}
+}
+
+func (ah *activeHostsList) Has(key string) bool {
+	_, ok := ah.m[key]
+	return ok
+}
+
+// Add an active host if not already present
+func (ah *activeHostsList) Add(key string) {
+	if ah.Has(key) {
+		return
+	}
+
+	ah.m[key] = struct{}{}
+	ah.s = append(ah.s, key)
+}
+
+func (ah *activeHostsList) Len() int {
+	return len(ah.s)
+}
+
+func (ah *activeHostsList) List() []string {
+	return ah.s
+}
+
+// String implements fmt.Stringer and it's used for debugging
+func (ah *activeHostsList) String() string {
+	return fmt.Sprintf("activeHostsList:[%s]", strings.Join(ah.s, ","))
+}
+
+type fetchedUpcomingAlarm struct {
+	AlarmID      string
+	ActorType    string
+	ActorID      string
+	AlarmDueTime int64
+	HostID       *string
+}
+
+// String implements fmt.Stringer and it's used for debugging
+func (fua fetchedUpcomingAlarm) String() string {
+	const RFC3339Milli = "2006-01-02T15:04:05.999"
+
+	due := time.UnixMilli(fua.AlarmDueTime).Format(RFC3339Milli)
+
+	if fua.HostID != nil {
+		return fmt.Sprintf(
+			"fetchedUpcomingAlarm:[ID=%q ActorType=%q ActorID=%q DueTime=%q DueTimeUnix=%d HostID=%q]",
+			fua.AlarmID, fua.ActorType, fua.ActorID, due, fua.AlarmDueTime, *fua.HostID,
+		)
+	}
+
+	return fmt.Sprintf(
+		"fetchedUpcomingAlarm:[ID=%q ActorType=%q ActorID=%q DueTime=%q DueTimeUnix=%d HostID=nil]",
+		fua.AlarmID, fua.ActorType, fua.ActorID, due, fua.AlarmDueTime,
+	)
 }

@@ -97,9 +97,10 @@ CREATE TABLE alarms (
     alarm_data blob,
     -- For alarms that have been fetched and have a lease, this is a unique ID for the lease
     alarm_lease_id text,
-    -- For alarms that have been fetched and have a lease, indicates the time the lease was obtained or last renewed at
+    -- For alarms that have been fetched and have a lease, indicates the time the lease expires
+    -- Note that leases can be renewed
     -- This is a unix timestamp in millisecond
-    alarm_lease_time integer,
+    alarm_lease_expiration_time integer,
     -- For alarms that have been fetched and have a lease, this is the "process id" of the owner of the lease
     alarm_lease_pid text
 ) WITHOUT ROWID, STRICT;
