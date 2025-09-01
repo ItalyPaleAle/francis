@@ -23,8 +23,16 @@ import (
 	"github.com/italypaleale/actors/internal/sql/sqladapter"
 )
 
-//go:embed migrations
-var migrationScripts embed.FS
+var (
+	//go:embed migrations
+	migrationScripts embed.FS
+
+	//go:embed queries/fetch-upcoming-alarms-no-constraints.sql
+	queryFetchUpcomingAlarmsNoConstraints string
+
+	//go:embed queries/fetch-upcoming-alarms-with-constraints.sql
+	queryFetchUpcomingAlarmsWithConstraints string
+)
 
 type SQLiteProvider struct {
 	pid             string

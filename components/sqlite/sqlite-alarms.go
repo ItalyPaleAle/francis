@@ -190,14 +190,8 @@ func (u *upcomingAlarmFetcher) FetchUpcoming(ctx context.Context) ([]components.
 		return nil, nil
 	}
 
-	var fetchedUpcoming fetchedUpcomingAlarmsList
-
-	// If none of the hosts has a capacity constraint, we can use a simpler/faster path
-	if !activeHosts.hasCapLimit {
-		fetchedUpcoming, err = u.fetchUpcomingNoConstraints(ctx, activeHosts)
-	} else {
-		fetchedUpcoming, err = u.fetchUpcomingWithConstraints(ctx, activeHosts)
-	}
+	// Fetch the upcoming alarms
+	fetchedUpcoming, err := u.fetchUpcoming(ctx, activeHosts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch upcoming alarms: %w", err)
 	}
@@ -295,217 +289,20 @@ func (u *upcomingAlarmFetcher) getActiveHosts(ctx context.Context) (activeHosts 
 	return activeHosts, nil
 }
 
-func (u *upcomingAlarmFetcher) fetchUpcomingNoConstraints(ctx context.Context, activeHosts *activeHostsList) (fetchedUpcomingAlarmsList, error) {
-	// This method implements the "fast path", which looks up alarms when there are no capacity constraints on any of the hosts we selected/filtered
+func (u *upcomingAlarmFetcher) fetchUpcoming(ctx context.Context, activeHosts *activeHostsList) (fetchedUpcomingAlarmsList, error) {
+	// If none of the hosts has a capacity constraint, we can use a simpler/faster path
+	var query string
+	if activeHosts.hasCapLimit {
+		query = queryFetchUpcomingAlarmsWithConstraints
+	} else {
+		query = queryFetchUpcomingAlarmsNoConstraints
+	}
 
 	queryCtx, cancel := context.WithTimeout(ctx, u.timeout)
 	defer cancel()
 	rows, err := u.tx.
 		QueryContext(queryCtx,
-			// How the query works:
-			//
-			// 1. allowed_actor_hosts:
-			//    This CTE is necessary to look up what hosts are ok when we see that the actor mapped to an alarm is active.
-			//    Some alarms are for actors that are not active, but some may be mapped to actors that are already active.
-			//    We accept alarms mapping to an active actor if they either:
-			//      - Map to an actor that's active on a host in the allowlist
-			//      - Map to an actor that's active on an unhealthy host
-			//    The CTE loads host IDs both from the pre-filtered allowlist (the temp_capacities table), and from the
-			//    active_actors table, looking at all the actors of the types we care about (those that can be executed on
-			//    the hosts in the allowlist).
-			// 2. Look up alarms:
-			//    Next, we can look up the list of alarms, looking at the N-most alarms that are coming up the soonest.
-			//    We filter the alarms by:
-			//      - Limiting to the actor types that can be executed on the hosts in the request
-			//        (this is done with the INNER JOIN on temp_capacities)
-			//      - Ensuring their due time is within the horizon we are considering
-			//      - Selecting alarms that aren't leased, or whose lease has expired
-			//      - Selecting alarms that are not tied to an active actor, or whose actor is in the allowed_actor_hosts list
-			//
-			// Alarms that have an active actor will have host_id non-null. However, that will be non-null also for actors that
-			// are on un-healthy hosts; we will need to filter them out in the Go code later.
-			`
-			WITH
-				allowed_actor_hosts AS (
-					SELECT DISTINCT host_id
-					FROM temp_capacities
-
-					UNION
-
-					SELECT DISTINCT aa.host_id
-					FROM active_actors AS aa
-					INNER JOIN temp_capacities AS cap
-						USING (actor_type)
-					INNER JOIN hosts AS h
-						USING (host_id)
-					WHERE
-						h.host_last_health_check < ?
-				)
-			SELECT a.alarm_id, a.actor_type, a.actor_id, a.alarm_due_time, aa.host_id
-			FROM alarms AS a
-			INNER JOIN temp_capacities AS cap
-				USING (actor_type)
-			LEFT JOIN active_actors AS aa
-				USING (actor_type, actor_id)
-			WHERE 
-				a.alarm_due_time <= ?
-				AND (
-					a.alarm_lease_id IS NULL
-					OR a.alarm_lease_expiration_time IS NULL
-					OR a.alarm_lease_expiration_time < ?
-				)
-				AND (
-					aa.host_id IS NULL
-					OR aa.host_id IN (SELECT host_id FROM allowed_actor_hosts)
-				)
-			ORDER BY alarm_due_time ASC, alarm_id
-			LIMIT ?
-			`,
-			u.healthCutoffMs, u.horizonMs, u.nowMs, u.batchSize,
-		)
-	if err != nil {
-		return nil, fmt.Errorf("error executing query: %w", err)
-	}
-
-	defer rows.Close()
-
-	res := make(fetchedUpcomingAlarmsList, 0, u.batchSize)
-	for rows.Next() {
-		var r fetchedUpcomingAlarm
-		err = rows.Scan(&r.AlarmID, &r.ActorType, &r.ActorID, &r.AlarmDueTime, &r.HostID)
-		if err != nil {
-			return nil, fmt.Errorf("error scanning rows: %w", err)
-		}
-
-		// If host ID not null, there's an active actor
-		// It may be active on a un-healthy host, however, so we need to nullify those values to have a new actor created
-		if r.HostID != nil && !activeHosts.HasHost(*r.HostID) {
-			r.HostID = nil
-		}
-
-		res = append(res, r)
-	}
-	if rows.Err() != nil {
-		return nil, fmt.Errorf("error scanning rows: %w", rows.Err())
-	}
-
-	return res, nil
-}
-
-func (u *upcomingAlarmFetcher) fetchUpcomingWithConstraints(ctx context.Context, activeHosts *activeHostsList) (fetchedUpcomingAlarmsList, error) {
-	// This method fetches upcoming alarms but keeping into accounts capacity constraints
-
-	queryCtx, cancel := context.WithTimeout(ctx, u.timeout)
-	defer cancel()
-	rows, err := u.tx.
-		QueryContext(queryCtx,
-			// How the query works:
-			//
-			// 1. allowed_actor_hosts:
-			//    This CTE is necessary to look up what hosts are ok when we see that the actor mapped to an alarm is active.
-			//    Some alarms are for actors that are not active, but some may be mapped to actors that are already active.
-			//    We accept alarms mapping to an active actor if they either:
-			//      - Map to an actor that's active on a host in the allowlist
-			//      - Map to an actor that's active on an unhealthy host
-			//    The CTE loads host IDs both from the pre-filtered allowlist (the temp_capacities table), and from the
-			//    active_actors table, looking at all the actors of the types we care about (those that can be executed on
-			//    the hosts in the allowlist).
-			// 2. actor_type_capacity:
-			//    This CTE computes the sum of the available capacity for each actor type, across all hosts in the allowlist.
-			// 3. ranked:
-			//    This CTE looks up the list of alarms and assigns a "rank".
-			//    Alarms are filtered by:
-			//      - Limiting to the actor types that can be executed on the hosts in the request and for which we have any
-			//        capacity (this is done with the INNER JOIN on actor_type_capacity)
-			//      - Ensuring their due time is within the horizon we are considering
-			//      - Selecting alarms that aren't leased, or whose lease has expired
-			//      - Selecting alarms that are not tied to an active actor, or whose actor is in the allowed_actor_hosts list
-			//    Among all the filtered alarms, it assigns a "rank" which is the ROW_NUMBER(). This is sorted by the due time
-			//    and partitioned by actor type. It looks at all filtered alarms (more than the batch size, but still within
-			//    the time horizon and with the other filters listed above), and assigns a rank for each actor type: for example,
-			//    if we have capacity for alarms of types A and B, the earliest alarm of type A will have rank 1, and so will
-			//    the earliest of type B.
-			//    There's one exception, which is that when the alarm is for an actor that's already active on a host in the
-			//    allowlist, we assign it a rank of 0, as it doesn't use more capacity.
-			//    This "ranking" selects a lot or rows, and it's the reason why this is the "slow" path.
-			// 4. Finally, select from the ranked list, returning alarms for which there's sufficient capacity, in order of
-			//    of execution time. We do this by excluding the rows from ranked in which the row number is greater than the
-			//    capacity left (e.g. if we have capacity for only 4 actors of type A, ranked rows for type A with row number
-			//    greater than 4 are excluded).
-			//
-			// Alarms that have an active actor will have host_id non-null. However, that will be non-null also for actors that
-			// are on un-healthy hosts; we will need to filter them out in the Go code later.
-			`
-			WITH
-				allowed_actor_hosts AS (
-					SELECT DISTINCT host_id
-					FROM temp_capacities
-
-					UNION
-
-					SELECT DISTINCT aa.host_id
-					FROM active_actors AS aa
-					INNER JOIN temp_capacities AS cap
-						USING (actor_type)
-					INNER JOIN hosts AS h
-						USING (host_id)
-					WHERE
-						h.host_last_health_check < ?
-				),
-				actor_type_capacity AS (
-					SELECT actor_type, sum(capacity) AS total_capacity
-					FROM temp_capacities
-					GROUP BY actor_type
-				),
-				ranked AS (
-					SELECT
-						a.alarm_id, a.actor_type, a.actor_id, a.alarm_due_time,
-						aa.host_id,
-						atc.total_capacity,
-						CASE
-							WHEN
-								aa.host_id IS NULL
-								OR NOT EXISTS (SELECT 1 FROM temp_capacities WHERE temp_capacities.host_id = aa.host_id)
-							THEN 0
-							ELSE 1
-						END AS active_actor,
-						SUM(1)
-						FILTER (
-							WHERE aa.host_id IS NULL
-							OR NOT EXISTS (SELECT 1 FROM temp_capacities WHERE temp_capacities.host_id = aa.host_id)
-						)
-						OVER (
-							PARTITION BY a.actor_type
-							ORDER BY a.alarm_due_time, a.alarm_id
-							ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-						) AS rownum
-					FROM alarms AS a
-					-- Inner join also filters by actor types for which we have capacity
-					INNER JOIN actor_type_capacity AS atc
-						USING (actor_type)
-					LEFT JOIN active_actors AS aa
-						USING (actor_type, actor_id)
-					WHERE 
-						a.alarm_due_time <= ?
-						AND (
-							a.alarm_lease_id IS NULL
-							OR a.alarm_lease_expiration_time IS NULL
-							OR a.alarm_lease_expiration_time < ?
-						)
-						AND (
-							aa.host_id IS NULL
-							OR aa.host_id IN (SELECT host_id FROM allowed_actor_hosts)
-						)
-				)
-			SELECT
-				alarm_id, actor_type, actor_id, alarm_due_time, host_id
-			FROM ranked
-			WHERE
-				active_actor = 1
-    			OR rownum <= total_capacity
-			ORDER BY alarm_due_time ASC, alarm_id
-			LIMIT ?
-			`,
+			query,
 			u.healthCutoffMs, u.horizonMs, u.nowMs, u.batchSize,
 		)
 	if err != nil {
