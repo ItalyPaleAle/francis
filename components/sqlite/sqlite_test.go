@@ -377,6 +377,32 @@ func TestActiveHostsList_HostForActorType(t *testing.T) {
 		assert.Nil(t, ahl.HostForActorType("typeA"))
 	})
 
+	t.Run("multiple hosts capacity exhaustion", func(t *testing.T) {
+		h1 := &activeHost{HostID: "H1", ActorType: "typeA", Capacity: 5}
+		h2 := &activeHost{HostID: "H2", ActorType: "typeA", Capacity: 10000}
+		ahl := &activeHostsList{
+			hosts: map[string]*activeHost{
+				"H1": h1,
+				"H2": h2,
+			},
+			capacities: map[string][]*activeHost{
+				"typeA": {h1, h2},
+			},
+		}
+
+		observed := map[string]int{}
+		for range 100 {
+			host := ahl.HostForActorType("typeA")
+			require.NotNil(t, host)
+			observed[host.HostID]++
+		}
+
+		// Should have depleted all capacity in H1 (5), and the rest should be H2
+		assert.Len(t, observed, 2)
+		assert.Equal(t, 5, observed["H1"])
+		assert.Equal(t, 95, observed["H2"])
+	})
+
 	t.Run("unsupported actor type", func(t *testing.T) {
 		ahl := &activeHostsList{
 			hosts:      map[string]*activeHost{},
