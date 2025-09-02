@@ -57,8 +57,12 @@ type ActorProvider interface {
 	// FetchAndLeaseUpcomingAlarms fetches the upcoming alarms, acquiring a lease on them.
 	FetchAndLeaseUpcomingAlarms(ctx context.Context, req FetchAndLeaseUpcomingAlarmsReq) ([]AlarmLease, error)
 
+	// ReleaseAlarmLease releases an active lease on an alarm.
+	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
+	ReleaseAlarmLease(ctx context.Context, req AlarmLease) error
+
 	// GetLeasedAlarm retrieves an alarm from an alarm lease object.
-	// If the alarm doesn't exist or the lease is not valid, returns ErrNoAlarm.
+	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
 	GetLeasedAlarm(ctx context.Context, req AlarmLease) (GetLeasedAlarmRes, error)
 
 	// GetState retrieves the persistent state of an actor.

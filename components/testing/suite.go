@@ -36,6 +36,7 @@ func (s Suite) Run(t *testing.T) {
 
 	t.Run("fetch alarms", s.TestFetchAlarms)
 	t.Run("get leased alarm", s.TestGetLeasedAlarm)
+	t.Run("release alarm lease", s.TestReleaseAlarmLease)
 }
 
 func (s Suite) TestRegisterHost(t *testing.T) {
@@ -1666,5 +1667,195 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 		assert.Nil(t, alarmRes.Data, "data should be nil when not set")
 		assert.Empty(t, alarmRes.Interval, "interval should be empty when not set")
 		assert.Nil(t, alarmRes.TTL, "TTL should be nil when not set")
+	})
+}
+
+func (s Suite) TestReleaseAlarmLease(t *testing.T) {
+	t.Run("releases valid lease successfully", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Fetch some alarms to create valid leases
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H7", "H8"},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, res, "should have fetched and leased some alarms")
+
+		// Pick the first leased alarm to test with
+		lease := res[0]
+
+		// Verify the alarm is leased
+		alarmRes, err := s.p.GetLeasedAlarm(ctx, lease)
+		require.NoError(t, err)
+		assert.NotEmpty(t, alarmRes.ActorType)
+
+		// Release the lease
+		err = s.p.ReleaseAlarmLease(ctx, lease)
+		require.NoError(t, err)
+
+		// Verify the lease is no longer valid
+		_, err = s.p.GetLeasedAlarm(ctx, lease)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
+	})
+
+	t.Run("returns ErrNoAlarm for non-existent alarm", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with empty database
+		require.NoError(t, s.p.Seed(ctx, Spec{}))
+
+		// Try to release a non-existent alarm lease
+		nonExistentLease := components.NewAlarmLease("non-existent-alarm", time.Now(), "fake-lease-id")
+		err := s.p.ReleaseAlarmLease(ctx, nonExistentLease)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
+	})
+
+	t.Run("returns ErrNoAlarm for alarm with no lease", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Create a custom test spec with an unleased alarm
+		customSpec := Spec{
+			Hosts: []HostSpec{
+				{HostID: "H1", Address: "127.0.0.1:4001", LastHealthAgo: 2 * time.Second},
+			},
+			HostActorTypes: []HostActorTypeSpec{
+				{HostID: "H1", ActorType: "TestType", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+			},
+			Alarms: []AlarmSpec{
+				{
+					AlarmID:   "test-alarm-no-lease",
+					ActorType: "TestType",
+					ActorID:   "test-actor",
+					Name:      "test-alarm",
+					DueIn:     time.Second,
+					Data:      []byte("test-data"),
+				},
+			},
+		}
+
+		// Seed with custom data
+		require.NoError(t, s.p.Seed(ctx, customSpec))
+
+		// Try to release a lease for an alarm that was never leased
+		fakeLease := components.NewAlarmLease("test-alarm-no-lease", time.Now(), "fake-lease-id")
+		err := s.p.ReleaseAlarmLease(ctx, fakeLease)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
+	})
+
+	t.Run("returns ErrNoAlarm for wrong lease ID", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Fetch some alarms to create valid leases
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H7", "H8"},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, res, "should have fetched and leased some alarms")
+
+		// Pick the first leased alarm
+		lease := res[0]
+
+		// Create a fake lease with wrong lease ID
+		fakeLease := components.NewAlarmLease(lease.Key(), lease.DueTime(), "wrong-lease-id")
+
+		// Try to release with wrong lease ID
+		err = s.p.ReleaseAlarmLease(ctx, fakeLease)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
+
+		// Verify original lease is still valid
+		_, err = s.p.GetLeasedAlarm(ctx, lease)
+		require.NoError(t, err, "original lease should still be valid")
+	})
+
+	t.Run("returns ErrNoAlarm for expired lease", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Fetch some alarms to create valid leases
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H7", "H8"},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, res, "should have fetched and leased some alarms")
+
+		// Pick the first leased alarm
+		lease := res[0]
+
+		// Advance time beyond lease expiration (lease duration is 1 minute from GetProviderConfig)
+		s.p.AdvanceClock(2 * time.Minute)
+
+		// Try to release the now-expired lease
+		err = s.p.ReleaseAlarmLease(ctx, lease)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
+	})
+
+	t.Run("idempotent release - releasing same lease twice", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Fetch some alarms to create valid leases
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H7", "H8"},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, res, "should have fetched and leased some alarms")
+
+		// Pick the first leased alarm
+		lease := res[0]
+
+		// Release the lease first time - should succeed
+		err = s.p.ReleaseAlarmLease(ctx, lease)
+		require.NoError(t, err)
+
+		// Release the same lease second time - should return ErrNoAlarm
+		err = s.p.ReleaseAlarmLease(ctx, lease)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
+	})
+
+	t.Run("multiple releases work independently", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Fetch multiple alarms to create valid leases
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H7", "H8"},
+		})
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(res), 3, "should have fetched at least 3 alarms for this test")
+
+		// Take the first 3 leases
+		lease1 := res[0]
+		lease2 := res[1]
+		lease3 := res[2]
+
+		// Release lease1 and lease3, but leave lease2
+		err = s.p.ReleaseAlarmLease(ctx, lease1)
+		require.NoError(t, err)
+
+		err = s.p.ReleaseAlarmLease(ctx, lease3)
+		require.NoError(t, err)
+
+		// Verify lease1 and lease3 are no longer valid
+		_, err = s.p.GetLeasedAlarm(ctx, lease1)
+		require.ErrorIs(t, err, components.ErrNoAlarm, "lease1 should be released")
+
+		_, err = s.p.GetLeasedAlarm(ctx, lease3)
+		require.ErrorIs(t, err, components.ErrNoAlarm, "lease3 should be released")
+
+		// Verify lease2 is still valid
+		_, err = s.p.GetLeasedAlarm(ctx, lease2)
+		require.NoError(t, err, "lease2 should still be valid")
 	})
 }

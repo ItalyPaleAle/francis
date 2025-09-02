@@ -189,6 +189,39 @@ func (s *SQLiteProvider) GetLeasedAlarm(ctx context.Context, req components.Alar
 	return res, nil
 }
 
+func (s *SQLiteProvider) ReleaseAlarmLease(ctx context.Context, req components.AlarmLease) error {
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+
+	res, err := s.db.ExecContext(queryCtx, `
+		UPDATE alarms
+		SET
+			alarm_lease_id = NULL,
+			alarm_lease_expiration_time = NULL,
+			alarm_lease_pid = NULL
+		WHERE
+			alarm_id = ?
+			AND alarm_lease_id = ?
+			AND alarm_lease_pid = ?
+			AND alarm_lease_expiration_time IS NOT NULL
+			AND alarm_lease_expiration_time >= ?`,
+		req.Key(), req.LeaseID(), s.pid, s.clock.Now().UnixMilli(),
+	)
+	if err != nil {
+		return fmt.Errorf("error executing query: %w", err)
+	}
+
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("error counting affected rows: %w", err)
+	}
+	if affected == 0 {
+		return components.ErrNoAlarm
+	}
+
+	return nil
+}
+
 type upcomingAlarmFetcher struct {
 	tx      *sql.Tx
 	now     time.Time
