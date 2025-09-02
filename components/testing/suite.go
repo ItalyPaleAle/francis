@@ -1419,6 +1419,234 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		assert.GreaterOrEqual(t, hostCounts["H1"], 4)
 		assert.GreaterOrEqual(t, hostCounts["H2"], 4)
 	})
+
+	t.Run("returns empty slice when no hosts provided", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Fetch alarms with empty hosts list
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{},
+		})
+		require.NoError(t, err)
+		assert.Empty(t, res)
+	})
+
+	t.Run("returns empty slice when all hosts are unhealthy", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Fetch alarms only from unhealthy hosts
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			// Both unhealthy in seed data
+			Hosts: []string{"H5", "H6"},
+		})
+		require.NoError(t, err)
+		assert.Empty(t, res)
+	})
+
+	t.Run("returns empty slice when hosts don't exist", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Fetch alarms from non-existent hosts
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"NON-EXISTENT-1", "NON-EXISTENT-2"},
+		})
+		require.NoError(t, err)
+		assert.Empty(t, res)
+	})
+
+	t.Run("returns empty slice when no upcoming alarms", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with hosts but no alarms
+		customSpec := Spec{
+			Hosts: []HostSpec{
+				{HostID: "H1", Address: "127.0.0.1:4001", LastHealthAgo: 2 * time.Second},
+			},
+			HostActorTypes: []HostActorTypeSpec{
+				{HostID: "H1", ActorType: "TestType", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+			},
+			Alarms: []AlarmSpec{},
+		}
+		require.NoError(t, s.p.Seed(ctx, customSpec))
+
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H1"},
+		})
+		require.NoError(t, err)
+		assert.Empty(t, res, "should return empty slice when no upcoming alarms")
+	})
+
+	t.Run("doesn't return already leased alarms with valid leases", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// First fetch should get some alarms and lease them
+		res1, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H7"},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, res1)
+
+		// Second fetch immediately should not return the same alarms (they're already leased)
+		res2, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H7"},
+		})
+		require.NoError(t, err)
+
+		// Verify no overlap between the two batches
+		leased1 := make(map[string]bool)
+		for _, lease := range res1 {
+			leased1[lease.Key()] = true
+		}
+
+		for _, lease := range res2 {
+			assert.False(t, leased1[lease.Key()], "alarm %s should not appear in both batches", lease.Key())
+		}
+	})
+
+	t.Run("takes over expired leases", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data (contains ALM-C-006 with expired lease)
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Fetch alarms from H1 and H2 where C type is supported
+		// This should include ALM-C-006 which has an expired lease
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H1", "H2"},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, res)
+
+		// Check if we got the expired lease ALM-C-006 and gave it a new lease
+		foundExpiredAlarm := false
+		for _, lease := range res {
+			if lease.Key() == "ALM-C-006" {
+				// Should have a lease ID (new lease was created)
+				assert.NotEmpty(t, lease.LeaseID(), "ALM-C-006 should have been given a new lease")
+				foundExpiredAlarm = true
+				break
+			}
+		}
+		assert.True(t, foundExpiredAlarm, "should have found and taken over the expired lease ALM-C-006")
+	})
+
+	t.Run("fetches overdue alarms", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Create a custom test spec with overdue alarms
+		customSpec := Spec{
+			Hosts: []HostSpec{
+				{HostID: "H1", Address: "127.0.0.1:4001", LastHealthAgo: 2 * time.Second}, // healthy
+			},
+			HostActorTypes: []HostActorTypeSpec{
+				{HostID: "H1", ActorType: "TestOverdue", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+			},
+			Alarms: []AlarmSpec{
+				{
+					AlarmID:   "ALM-OVERDUE-1",
+					ActorType: "TestOverdue",
+					ActorID:   "overdue-actor-1",
+					Name:      "overdue-alarm-1",
+					DueIn:     -5 * time.Minute, // Due 5 minutes ago (overdue)
+					Data:      []byte("overdue-data-1"),
+				},
+				{
+					AlarmID:   "ALM-OVERDUE-2",
+					ActorType: "TestOverdue",
+					ActorID:   "overdue-actor-2",
+					Name:      "overdue-alarm-2",
+					DueIn:     -30 * time.Second, // Due 30 seconds ago (overdue)
+					Data:      []byte("overdue-data-2"),
+				},
+			},
+		}
+
+		// Seed with overdue alarms
+		require.NoError(t, s.p.Seed(ctx, customSpec))
+
+		// Fetch alarms - should include overdue ones
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H1"},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, res, "should fetch overdue alarms")
+
+		// Verify both overdue alarms were fetched
+		foundOverdue1 := false
+		foundOverdue2 := false
+		for _, lease := range res {
+			if lease.Key() == "ALM-OVERDUE-1" {
+				foundOverdue1 = true
+				// Verify the alarm is in the past
+				assert.True(t, lease.DueTime().Before(s.p.Now()), "ALM-OVERDUE-1 should be overdue")
+			}
+			if lease.Key() == "ALM-OVERDUE-2" {
+				foundOverdue2 = true
+				// Verify the alarm is in the past
+				assert.True(t, lease.DueTime().Before(s.p.Now()), "ALM-OVERDUE-2 should be overdue")
+			}
+		}
+		assert.True(t, foundOverdue1, "should have found overdue alarm ALM-OVERDUE-1")
+		assert.True(t, foundOverdue2, "should have found overdue alarm ALM-OVERDUE-2")
+
+		// Verify the leased overdue alarms can be retrieved
+		for _, lease := range res {
+			if lease.Key() == "ALM-OVERDUE-1" || lease.Key() == "ALM-OVERDUE-2" {
+				alarmRes, err := s.p.GetLeasedAlarm(ctx, lease)
+				require.NoError(t, err, "overdue alarm %s should be properly leased", lease.Key())
+				assert.Equal(t, "TestOverdue", alarmRes.ActorType)
+			}
+		}
+	})
+
+	t.Run("mixed healthy and unhealthy hosts filters correctly", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Request from mix of healthy and unhealthy hosts
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H7", "H5", "H8", "H6"}, // H7,H8 healthy, H5,H6 unhealthy
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, res, "should return alarms from healthy hosts")
+
+		// Verify all returned alarms can be retrieved (meaning they were properly leased)
+		for _, lease := range res {
+			alarmRes, err := s.p.GetLeasedAlarm(ctx, lease)
+			require.NoError(t, err, "alarm %s should be properly leased", lease.Key())
+			assert.Contains(t, []string{"X", "Y"}, alarmRes.ActorType, "should only have X/Y type alarms from H7/H8")
+		}
+
+		// Verify actors were only placed on healthy hosts
+		spec, err := s.p.GetAllHosts(ctx)
+		require.NoError(t, err)
+
+		gotActiveActorIDs := make(map[string]string)
+		for _, a := range spec.ActiveActors {
+			gotActiveActorIDs[a.ActorID] = a.HostID
+		}
+
+		for _, lease := range res {
+			alarmRes, _ := s.p.GetLeasedAlarm(ctx, lease)
+			if hostID, exists := gotActiveActorIDs[alarmRes.ActorID]; exists {
+				assert.Contains(t, []string{"H7", "H8"}, hostID, "actor %s should only be placed on healthy hosts", alarmRes.ActorID)
+			}
+		}
+	})
 }
 
 func (s Suite) TestGetLeasedAlarm(t *testing.T) {
