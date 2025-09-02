@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/italypaleale/actors/components"
+	"github.com/italypaleale/actors/internal/ptr"
 )
 
 // Suite implements a test suite for actor provider components.
@@ -34,6 +35,7 @@ func (s Suite) Run(t *testing.T) {
 	t.Run("actor state", s.TestState)
 
 	t.Run("fetch alarms", s.TestFetchAlarms)
+	t.Run("get leased alarm", s.TestGetLeasedAlarm)
 }
 
 func (s Suite) TestRegisterHost(t *testing.T) {
@@ -1415,5 +1417,254 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		assert.Len(t, hostCounts, 2)
 		assert.GreaterOrEqual(t, hostCounts["H1"], 4)
 		assert.GreaterOrEqual(t, hostCounts["H2"], 4)
+	})
+}
+
+func (s Suite) TestGetLeasedAlarm(t *testing.T) {
+	t.Run("returns alarm with valid lease", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Fetch some alarms to create valid leases
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H7", "H8"},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, res, "should have fetched and leased some alarms")
+
+		// Pick the first leased alarm to test with
+		lease := res[0]
+
+		// Get the leased alarm details
+		alarmRes, err := s.p.GetLeasedAlarm(ctx, lease)
+		require.NoError(t, err)
+
+		// Verify the alarm details
+		assert.NotEmpty(t, alarmRes.ActorType)
+		assert.NotEmpty(t, alarmRes.ActorID)
+		assert.NotEmpty(t, alarmRes.Name)
+		assert.Equal(t, lease.DueTime(), alarmRes.DueTime)
+
+		// The alarm should be of type X or Y based on our test data
+		assert.Contains(t, []string{"X", "Y"}, alarmRes.ActorType)
+	})
+
+	t.Run("returns ErrNoAlarm if alarm doesn't exist", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with empty database
+		require.NoError(t, s.p.Seed(ctx, Spec{}))
+
+		// Try to get a non-existent alarm
+		nonExistentLease := components.NewAlarmLease("not-exists", time.Now(), "fake-lease-id")
+		_, err := s.p.GetLeasedAlarm(ctx, nonExistentLease)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
+	})
+
+	t.Run("returns ErrNoAlarm if alarm isn't leased", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data (has un-leased alarms)
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Try to get an alarm that exists but isn't leased
+		// From spec, ALM-B-007 and later B alarms should not be pre-leased
+		unleaedAlarmLease := components.NewAlarmLease("ALM-B-007", time.Now(), "fake-lease-id")
+		_, err := s.p.GetLeasedAlarm(ctx, unleaedAlarmLease)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
+	})
+
+	t.Run("returns ErrNoAlarm if alarm's lease belongs to others", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Fetch some alarms to create valid leases
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H7", "H8"},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, res, "should have fetched and leased some alarms")
+
+		// Pick the first leased alarm
+		lease := res[0]
+
+		// Create a fake lease with the same alarm ID but different lease ID
+		fakeLease := components.NewAlarmLease(lease.Key(), lease.DueTime(), "bad-lease-id")
+
+		// Try to get the alarm with the wrong lease ID
+		_, err = s.p.GetLeasedAlarm(ctx, fakeLease)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
+	})
+
+	t.Run("returns ErrNoAlarm if alarm's lease has expired", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Fetch some alarms to create valid leases
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H7", "H8"},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, res, "should have fetched and leased some alarms")
+
+		// Pick the first leased alarm
+		lease := res[0]
+
+		// Advance time beyond lease expiration (lease duration is 1 minute from GetProviderConfig)
+		s.p.AdvanceClock(2 * time.Minute)
+
+		// Try to get the alarm with the now-expired lease
+		_, err = s.p.GetLeasedAlarm(ctx, lease)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
+	})
+
+	t.Run("returns alarm data correctly", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Fetch some alarms to create valid leases
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H1", "H2"},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, res, "should have fetched and leased some alarms")
+
+		// Find an alarm with known data - look for one of the active actor alarms
+		var targetLease components.AlarmLease
+		var found bool
+		for _, lease := range res {
+			// ALM-A-1, ALM-A-2, ALM-A-4, ALM-B-1, ALM-B-2 should have specific data
+			if lease.Key() == "ALM-A-1" || lease.Key() == "ALM-B-1" {
+				targetLease = lease
+				found = true
+				break
+			}
+		}
+		require.True(t, found, "should have found a known alarm with data")
+
+		// Get the leased alarm details
+		alarmRes, err := s.p.GetLeasedAlarm(ctx, targetLease)
+		require.NoError(t, err)
+
+		// Verify the alarm data matches expected values from GetSpec
+		switch targetLease.Key() {
+		case "ALM-A-1":
+			assert.Equal(t, "A", alarmRes.ActorType)
+			assert.Equal(t, "A-1", alarmRes.ActorID)
+			assert.Equal(t, "Alarm-A-1", alarmRes.Name)
+			assert.Equal(t, []byte("active-A-1"), alarmRes.Data)
+		case "ALM-B-1":
+			assert.Equal(t, "B", alarmRes.ActorType)
+			assert.Equal(t, "B-1", alarmRes.ActorID)
+			assert.Equal(t, "Alarm-B-1", alarmRes.Name)
+			assert.Equal(t, []byte("active-B-1"), alarmRes.Data)
+		}
+	})
+
+	t.Run("returns alarm with interval and TTL correctly", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Create a custom test spec with an alarm that has interval and TTL
+		customSpec := Spec{
+			Hosts: []HostSpec{
+				{HostID: "H1", Address: "127.0.0.1:4001", LastHealthAgo: 2 * time.Second},
+			},
+			HostActorTypes: []HostActorTypeSpec{
+				{HostID: "H1", ActorType: "TestType", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+			},
+			Alarms: []AlarmSpec{
+				{
+					AlarmID:   "test-alarm-with-extras",
+					ActorType: "TestType",
+					ActorID:   "test-actor",
+					Name:      "test-alarm",
+					DueIn:     time.Second,
+					Interval:  ptr.Of("PT1H"), // 1 hour interval
+					TTL:       24 * time.Hour, // 24 hour TTL
+					Data:      []byte("test-data-with-extras"),
+				},
+			},
+		}
+
+		// Seed with custom data
+		require.NoError(t, s.p.Seed(ctx, customSpec))
+
+		// Fetch the alarm to create a lease
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H1"},
+		})
+		require.NoError(t, err)
+		require.Len(t, res, 1, "should have fetched exactly one alarm")
+
+		lease := res[0]
+
+		// Get the leased alarm details
+		alarmRes, err := s.p.GetLeasedAlarm(ctx, lease)
+		require.NoError(t, err)
+
+		// Verify all fields including interval and TTL
+		assert.Equal(t, "TestType", alarmRes.ActorType)
+		assert.Equal(t, "test-actor", alarmRes.ActorID)
+		assert.Equal(t, "test-alarm", alarmRes.Name)
+		assert.Equal(t, []byte("test-data-with-extras"), alarmRes.Data)
+		assert.Equal(t, "PT1H", alarmRes.Interval)
+		assert.NotNil(t, alarmRes.TTL)
+
+		// TTL should be approximately 24 hours from now (allowing some tolerance for execution time)
+		expectedTTL := s.p.Now().Add(24 * time.Hour)
+		assert.WithinDuration(t, expectedTTL, *alarmRes.TTL, 10*time.Second, "TTL should be approximately 24 hours from now")
+	})
+
+	t.Run("handles nil data correctly", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Create a custom test spec with an alarm that has no data
+		customSpec := Spec{
+			Hosts: []HostSpec{
+				{HostID: "H1", Address: "127.0.0.1:4001", LastHealthAgo: 2 * time.Second},
+			},
+			HostActorTypes: []HostActorTypeSpec{
+				{HostID: "H1", ActorType: "TestType", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+			},
+			Alarms: []AlarmSpec{
+				{
+					AlarmID:   "test-alarm-no-data",
+					ActorType: "TestType",
+					ActorID:   "test-actor",
+					Name:      "test-alarm",
+					DueIn:     time.Second,
+					Data:      nil, // No data
+				},
+			},
+		}
+
+		// Seed with custom data
+		require.NoError(t, s.p.Seed(ctx, customSpec))
+
+		// Fetch the alarm to create a lease
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H1"},
+		})
+		require.NoError(t, err)
+		require.Len(t, res, 1, "should have fetched exactly one alarm")
+
+		lease := res[0]
+
+		// Get the leased alarm details
+		alarmRes, err := s.p.GetLeasedAlarm(ctx, lease)
+		require.NoError(t, err)
+
+		// Verify data is nil
+		assert.Nil(t, alarmRes.Data, "data should be nil when not set")
+		assert.Empty(t, alarmRes.Interval, "interval should be empty when not set")
+		assert.Nil(t, alarmRes.TTL, "TTL should be nil when not set")
 	})
 }

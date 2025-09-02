@@ -57,6 +57,10 @@ type ActorProvider interface {
 	// FetchAndLeaseUpcomingAlarms fetches the upcoming alarms, acquiring a lease on them.
 	FetchAndLeaseUpcomingAlarms(ctx context.Context, req FetchAndLeaseUpcomingAlarmsReq) ([]AlarmLease, error)
 
+	// GetLeasedAlarm retrieves an alarm from an alarm lease object.
+	// If the alarm doesn't exist or the lease is not valid, returns ErrNoAlarm.
+	GetLeasedAlarm(ctx context.Context, req AlarmLease) (GetLeasedAlarmRes, error)
+
 	// GetState retrieves the persistent state of an actor.
 	// If there's no state, returns ErrNoState.
 	GetState(ctx context.Context, ref ActorRef) ([]byte, error)
@@ -226,6 +230,12 @@ type AlarmLease struct {
 	alarmID string
 	dueTime time.Time
 	leaseID any
+}
+
+// GetLeasedAlarmRes is the response object for the GetLeasedAlarm method.
+type GetLeasedAlarmRes struct {
+	AlarmRef
+	AlarmProperties
 }
 
 // NewAlarmLease returns a new AlarmLease object.

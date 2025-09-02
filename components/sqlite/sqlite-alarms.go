@@ -144,6 +144,51 @@ func (s *SQLiteProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req co
 	})
 }
 
+func (s *SQLiteProvider) GetLeasedAlarm(ctx context.Context, req components.AlarmLease) (res components.GetLeasedAlarmRes, err error) {
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+
+	var (
+		dueTime  int64
+		ttlTime  *int64
+		interval *string
+	)
+	err = s.db.
+		QueryRowContext(queryCtx, `
+			SELECT
+				actor_type, actor_id, alarm_name, alarm_data,
+				alarm_due_time, alarm_interval, alarm_ttl_time
+			FROM alarms
+			WHERE
+				alarm_id = ?
+				AND alarm_lease_id = ?
+				AND alarm_lease_pid = ?
+				AND alarm_lease_expiration_time IS NOT NULL
+				AND alarm_lease_expiration_time >= ?`,
+			req.Key(), req.LeaseID(), s.pid, s.clock.Now().UnixMilli(),
+		).
+		Scan(
+			&res.ActorType, &res.ActorID, &res.Name, &res.Data,
+			&dueTime, &interval, &ttlTime,
+		)
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return res, components.ErrNoAlarm
+	} else if err != nil {
+		return res, fmt.Errorf("error executing query: %w", err)
+	}
+
+	res.DueTime = time.UnixMilli(dueTime)
+	if interval != nil {
+		res.Interval = *interval
+	}
+	if ttlTime != nil {
+		res.TTL = ptr.Of(time.UnixMilli(*ttlTime))
+	}
+
+	return res, nil
+}
+
 type upcomingAlarmFetcher struct {
 	tx      *sql.Tx
 	now     time.Time
