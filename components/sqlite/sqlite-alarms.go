@@ -144,7 +144,7 @@ func (s *SQLiteProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req co
 	})
 }
 
-func (s *SQLiteProvider) GetLeasedAlarm(ctx context.Context, req components.AlarmLease) (res components.GetLeasedAlarmRes, err error) {
+func (s *SQLiteProvider) GetLeasedAlarm(ctx context.Context, lease components.AlarmLease) (res components.GetLeasedAlarmRes, err error) {
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
@@ -165,7 +165,7 @@ func (s *SQLiteProvider) GetLeasedAlarm(ctx context.Context, req components.Alar
 				AND alarm_lease_pid = ?
 				AND alarm_lease_expiration_time IS NOT NULL
 				AND alarm_lease_expiration_time >= ?`,
-			req.Key(), req.LeaseID(), s.pid, s.clock.Now().UnixMilli(),
+			lease.Key(), lease.LeaseID(), s.pid, s.clock.Now().UnixMilli(),
 		).
 		Scan(
 			&res.ActorType, &res.ActorID, &res.Name, &res.Data,
@@ -189,7 +189,7 @@ func (s *SQLiteProvider) GetLeasedAlarm(ctx context.Context, req components.Alar
 	return res, nil
 }
 
-func (s *SQLiteProvider) ReleaseAlarmLease(ctx context.Context, req components.AlarmLease) error {
+func (s *SQLiteProvider) ReleaseAlarmLease(ctx context.Context, lease components.AlarmLease) error {
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
@@ -205,7 +205,105 @@ func (s *SQLiteProvider) ReleaseAlarmLease(ctx context.Context, req components.A
 			AND alarm_lease_pid = ?
 			AND alarm_lease_expiration_time IS NOT NULL
 			AND alarm_lease_expiration_time >= ?`,
-		req.Key(), req.LeaseID(), s.pid, s.clock.Now().UnixMilli(),
+		lease.Key(), lease.LeaseID(), s.pid, s.clock.Now().UnixMilli(),
+	)
+	if err != nil {
+		return fmt.Errorf("error executing query: %w", err)
+	}
+
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("error counting affected rows: %w", err)
+	}
+	if affected == 0 {
+		return components.ErrNoAlarm
+	}
+
+	return nil
+}
+
+func (s *SQLiteProvider) UpdateLeasedAlarm(ctx context.Context, lease components.AlarmLease, req components.UpdateLeasedAlarmReq) (err error) {
+	var (
+		interval *string
+		ttlTime  *int64
+	)
+	if req.Interval != "" {
+		interval = ptr.Of(req.Interval)
+	}
+	if req.TTL != nil {
+		ttlTime = ptr.Of(req.TTL.UnixMilli())
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+
+	whereClause := `WHERE
+		alarm_id = ?
+		AND alarm_lease_id = ?
+		AND alarm_lease_pid = ?
+		AND alarm_lease_expiration_time IS NOT NULL
+		AND alarm_lease_expiration_time >= ?`
+
+	now := s.clock.Now()
+
+	// If we want to refresh the lease...
+	var res sql.Result
+	if req.RefreshLease {
+		res, err = s.db.ExecContext(queryCtx, `
+			UPDATE alarms
+			SET
+				alarm_lease_expiration_time = ?,
+				alarm_due_time = ?,
+				alarm_interval = ?,
+				alarm_ttl_time = ?
+			`+whereClause,
+			now.Add(s.cfg.AlarmsLeaseDuration).UnixMilli(),
+			req.DueTime.UnixMilli(), interval, ttlTime,
+			lease.Key(), lease.LeaseID(), s.pid, now.UnixMilli(),
+		)
+	} else {
+		res, err = s.db.ExecContext(queryCtx, `
+			UPDATE alarms
+			SET
+				alarm_lease_id = NULL,
+				alarm_lease_expiration_time = NULL,
+				alarm_lease_pid = NULL,
+				alarm_due_time = ?,
+				alarm_interval = ?,
+				alarm_ttl_time = ?
+			`+whereClause,
+			req.DueTime.UnixMilli(), interval, ttlTime,
+			lease.Key(), lease.LeaseID(), s.pid, now.UnixMilli(),
+		)
+	}
+	if err != nil {
+		return fmt.Errorf("error executing query: %w", err)
+	}
+
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("error counting affected rows: %w", err)
+	}
+	if affected == 0 {
+		return components.ErrNoAlarm
+	}
+
+	return nil
+}
+
+func (s *SQLiteProvider) DeleteLeasedAlarm(ctx context.Context, lease components.AlarmLease) error {
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+
+	res, err := s.db.ExecContext(queryCtx, `
+		DELETE FROM alarms
+		WHERE
+			alarm_id = ?
+			AND alarm_lease_id = ?
+			AND alarm_lease_pid = ?
+			AND alarm_lease_expiration_time IS NOT NULL
+			AND alarm_lease_expiration_time >= ?`,
+		lease.Key(), lease.LeaseID(), s.pid, s.clock.Now().UnixMilli(),
 	)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)

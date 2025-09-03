@@ -2,7 +2,6 @@ package components
 
 import (
 	"context"
-	"fmt"
 	"time"
 )
 
@@ -57,13 +56,25 @@ type ActorProvider interface {
 	// FetchAndLeaseUpcomingAlarms fetches the upcoming alarms, acquiring a lease on them.
 	FetchAndLeaseUpcomingAlarms(ctx context.Context, req FetchAndLeaseUpcomingAlarmsReq) ([]AlarmLease, error)
 
+	// RenewAlarmLeases renews the leases for the alarms in the request.
+	// The method can renew specific alarm leases and/or those tied to specific hosts.
+	RenewAlarmLeases(ctx context.Context, req RenewAlarmLeasesReq) (RenewAlarmLeasesRes, error)
+
 	// ReleaseAlarmLease releases an active lease on an alarm.
 	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
-	ReleaseAlarmLease(ctx context.Context, req AlarmLease) error
+	ReleaseAlarmLease(ctx context.Context, lease AlarmLease) error
 
-	// GetLeasedAlarm retrieves an alarm from an alarm lease object.
+	// GetLeasedAlarm retrieves an alarm using an alarm lease object.
 	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
-	GetLeasedAlarm(ctx context.Context, req AlarmLease) (GetLeasedAlarmRes, error)
+	GetLeasedAlarm(ctx context.Context, lease AlarmLease) (GetLeasedAlarmRes, error)
+
+	// UpdateLeasedAlarm updates an alarm using an alarm lease object.
+	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
+	UpdateLeasedAlarm(ctx context.Context, lease AlarmLease, req UpdateLeasedAlarmReq) error
+
+	// DeleteLeasedAlarm deletes an alarm using an alarm lease object.
+	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
+	DeleteLeasedAlarm(ctx context.Context, lease AlarmLease) error
 
 	// GetState retrieves the persistent state of an actor.
 	// If there's no state, returns ErrNoState.
@@ -205,7 +216,7 @@ type AlarmProperties struct {
 	// Due time.
 	DueTime time.Time
 	// Alarm repetition interval.
-	// This can be an ISO-formatted duration or a Go duration string
+	// This can be an ISO-formatted duration or a Go duration string.
 	Interval string
 	// Deadline for repeating alarms.
 	TTL *time.Time
@@ -229,6 +240,23 @@ type FetchAndLeaseUpcomingAlarmsReq struct {
 	Hosts []string
 }
 
+// RenewAlarmLeasesReq is the request object for the RenewAlarmLeases method.
+type RenewAlarmLeasesReq struct {
+	// Limits to alarms owned by these hosts.
+	// If both Hosts and Leases are set, both conditions must apply.
+	Hosts []string
+
+	// List of Leases to renew.
+	// If both Hosts and Leases are set, both conditions must apply.
+	Leases []AlarmLease
+}
+
+// RenewAlarmLeasesRes is the response object for the RenewAlarmLeases method.
+type RenewAlarmLeasesRes struct {
+	// List of leases that were successfully renewed.
+	Leases []AlarmLease
+}
+
 // AlarmLease indicates an alarm lease
 type AlarmLease struct {
 	alarmID string
@@ -242,40 +270,18 @@ type GetLeasedAlarmRes struct {
 	AlarmProperties
 }
 
-// NewAlarmLease returns a new AlarmLease object.
-func NewAlarmLease(alarmID string, dueTime time.Time, leaseID any) AlarmLease {
-	return AlarmLease{
-		alarmID: alarmID,
-		dueTime: dueTime,
-		leaseID: leaseID,
-	}
-}
-
-// Key returns the key for the alarm.
-// This is implemented to comply with the queueable interface.
-func (r AlarmLease) Key() string {
-	return r.alarmID
-}
-
-// DueTime returns the due time for the alarm.
-// This is implemented to comply with the queueable interface.
-func (r AlarmLease) DueTime() time.Time {
-	return r.dueTime
-}
-
-// LeaseID returns the value of the leaseID property.
-func (r AlarmLease) LeaseID() any {
-	return r.leaseID
-}
-
-// String implements fmt.Stringer and it's used for debugging
-func (r AlarmLease) String() string {
-	const RFC3339MilliNoTZ = "2006-01-02T15:04:05.999"
-
-	return fmt.Sprintf(
-		"AlarmLease:[AlarmID=%q DueTime=%q DueTimeUnix=%d LeaseID=%q]",
-		r.alarmID, r.dueTime.Format(RFC3339MilliNoTZ), r.dueTime.UnixMilli(), r.leaseID,
-	)
+// UpdateLeasedAlarmReq is the request object for the UpdateLeasedAlarm method.
+type UpdateLeasedAlarmReq struct {
+	// Due time.
+	DueTime time.Time
+	// Alarm repetition interval.
+	// This can be an ISO-formatted duration or a Go duration string.
+	Interval string
+	// Deadline for repeating alarms.
+	TTL *time.Time
+	// When true, preserves and refreshes the lease on the alarm.
+	// The default behavior is to release the lease.
+	RefreshLease bool
 }
 
 // SetStateOpts contains options for SetState

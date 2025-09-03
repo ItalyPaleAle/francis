@@ -107,4 +107,5 @@ CREATE TABLE alarms (
 
 CREATE UNIQUE INDEX alarm_ref_idx ON alarms (actor_type, actor_id, alarm_name);
 CREATE INDEX alarm_due_time_idx ON alarms (alarm_due_time);
+CREATE UNIQUE INDEX alarm_lease_id_idx ON alarms (alarm_lease_id);
 CREATE INDEX alarm_lease_pid_idx ON alarms (alarm_lease_pid);
