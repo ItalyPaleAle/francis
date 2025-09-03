@@ -143,7 +143,6 @@ type UpdateActorHostReq struct {
 	// Updates last health check time
 	// If true, will update the value in the database with the current time
 	UpdateLastHealthCheck bool
-
 	// List of supported actor types
 	// If non-nil, will replace all existing, registered actor types (an empty, non-nil slice indicates no supported actor types)
 	ActorTypes []ActorHostType
@@ -243,11 +242,9 @@ type FetchAndLeaseUpcomingAlarmsReq struct {
 // RenewAlarmLeasesReq is the request object for the RenewAlarmLeases method.
 type RenewAlarmLeasesReq struct {
 	// Limits to alarms owned by these hosts.
-	// If both Hosts and Leases are set, both conditions must apply.
 	Hosts []string
-
-	// List of Leases to renew.
-	// If both Hosts and Leases are set, both conditions must apply.
+	// Optional list of leases to renew.
+	// If this is empty, renews the lease for all alarms on the host.
 	Leases []AlarmLease
 }
 

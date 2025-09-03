@@ -36,6 +36,7 @@ func (s Suite) Run(t *testing.T) {
 
 	t.Run("fetch alarms", s.TestFetchAlarms)
 	t.Run("get leased alarm", s.TestGetLeasedAlarm)
+	t.Run("renew alarm leases", s.TestRenewAlarmLeases)
 	t.Run("release alarm lease", s.TestReleaseAlarmLease)
 	t.Run("update leased alarm", s.TestUpdateLeasedAlarm)
 	t.Run("delete leased alarm", s.TestDeleteLeasedAlarm)
@@ -1897,6 +1898,230 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 		assert.Nil(t, alarmRes.Data, "data should be nil when not set")
 		assert.Empty(t, alarmRes.Interval, "interval should be empty when not set")
 		assert.Nil(t, alarmRes.TTL, "TTL should be nil when not set")
+	})
+}
+
+func (s Suite) TestRenewAlarmLeases(t *testing.T) {
+	t.Run("renews leases for specific hosts", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Fetch some alarms to create valid leases
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H7", "H8"},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, res, "should have fetched and leased some alarms")
+
+		// Advance time partway through lease duration to simulate renewal scenario
+		s.p.AdvanceClock(30 * time.Second)
+
+		// Renew leases for H7 only
+		renewReq := components.RenewAlarmLeasesReq{
+			Hosts: []string{"H7"},
+		}
+		renewRes, err := s.p.RenewAlarmLeases(ctx, renewReq)
+		require.NoError(t, err)
+		require.NotEmpty(t, renewRes.Leases, "should have renewed some leases")
+
+		// Verify all returned leases are still valid
+		for _, lease := range renewRes.Leases {
+			_, err := s.p.GetLeasedAlarm(ctx, lease)
+			require.NoError(t, err, "renewed lease should be valid")
+		}
+
+		// Advance time beyond original lease expiration
+		// Total: 75 seconds (beyond original 60s lease)
+		s.p.AdvanceClock(45 * time.Second)
+
+		// Renewed leases should still be valid (they were extended)
+		for _, lease := range renewRes.Leases {
+			_, err := s.p.GetLeasedAlarm(ctx, lease)
+			require.NoError(t, err, "renewed lease should still be valid after original expiration")
+		}
+	})
+
+	t.Run("renews specific leases only", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Fetch some alarms to create valid leases
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H7", "H8"},
+		})
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(res), 3, "need at least 3 leases for this test")
+
+		// Select first 2 leases for renewal
+		leasesToRenew := []components.AlarmLease{res[0], res[1]}
+		leaseNotRenewed := res[2]
+
+		// Advance time partway through lease duration
+		s.p.AdvanceClock(30 * time.Second)
+
+		// Renew only specific leases
+		renewReq := components.RenewAlarmLeasesReq{
+			Hosts:  []string{"H7", "H8"},
+			Leases: leasesToRenew,
+		}
+		renewRes, err := s.p.RenewAlarmLeases(ctx, renewReq)
+		require.NoError(t, err)
+		require.Len(t, renewRes.Leases, 2, "should have renewed exactly 2 leases")
+
+		// Verify the specific leases were renewed
+		renewedLeaseKeys := make(map[string]bool)
+		for _, lease := range renewRes.Leases {
+			renewedLeaseKeys[lease.Key()] = true
+		}
+		assert.True(t, renewedLeaseKeys[leasesToRenew[0].Key()], "first lease should be renewed")
+		assert.True(t, renewedLeaseKeys[leasesToRenew[1].Key()], "second lease should be renewed")
+
+		// Advance time beyond original lease expiration
+		// Total: 75 seconds
+		s.p.AdvanceClock(45 * time.Second)
+
+		// Renewed leases should still be valid
+		for _, lease := range renewRes.Leases {
+			_, err := s.p.GetLeasedAlarm(ctx, lease)
+			require.NoError(t, err, "renewed lease should still be valid")
+		}
+
+		// Non-renewed lease should have expired
+		_, err = s.p.GetLeasedAlarm(ctx, leaseNotRenewed)
+		require.ErrorIs(t, err, components.ErrNoAlarm, "non-renewed lease should have expired")
+	})
+
+	t.Run("returns empty result when no matching leases", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Try to renew leases for hosts with no active leases
+		renewReq := components.RenewAlarmLeasesReq{
+			// These hosts don't have any leases in the initial seed
+			Hosts: []string{"H1", "H2"},
+		}
+		renewRes, err := s.p.RenewAlarmLeases(ctx, renewReq)
+		require.NoError(t, err)
+		assert.Empty(t, renewRes.Leases, "should return empty result when no matching leases")
+	})
+
+	t.Run("returns empty result for non-existent hosts", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Try to renew leases for non-existent hosts
+		renewReq := components.RenewAlarmLeasesReq{
+			Hosts: []string{"NON-EXISTENT-1", "NON-EXISTENT-2"},
+		}
+		renewRes, err := s.p.RenewAlarmLeases(ctx, renewReq)
+		require.NoError(t, err)
+		assert.Empty(t, renewRes.Leases, "should return empty result for non-existent hosts")
+	})
+
+	t.Run("ignores expired leases", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Fetch some alarms to create valid leases
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H7", "H8"},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, res, "should have fetched and leased some alarms")
+
+		// Advance time beyond lease expiration (1 minute)
+		s.p.AdvanceClock(2 * time.Minute)
+
+		// Try to renew expired leases
+		renewReq := components.RenewAlarmLeasesReq{
+			Hosts: []string{"H7", "H8"},
+		}
+		renewRes, err := s.p.RenewAlarmLeases(ctx, renewReq)
+		require.NoError(t, err)
+		assert.Empty(t, renewRes.Leases, "should not renew expired leases")
+	})
+
+	t.Run("handles mixed valid and invalid lease IDs", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Fetch some alarms to create valid leases
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H7", "H8"},
+		})
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(res), 2, "need at least 2 leases for this test")
+
+		// Create a mix of valid and invalid lease IDs
+		validLease := res[0]
+		invalidLease := components.NewAlarmLease("non-existent-alarm", time.Now(), "fake-lease-id")
+
+		// Advance time partway through lease duration
+		s.p.AdvanceClock(30 * time.Second)
+
+		// Try to renew mix of valid and invalid leases
+		renewReq := components.RenewAlarmLeasesReq{
+			Hosts:  []string{"H7", "H8"},
+			Leases: []components.AlarmLease{validLease, invalidLease},
+		}
+		renewRes, err := s.p.RenewAlarmLeases(ctx, renewReq)
+		require.NoError(t, err)
+
+		// Should only renew the valid lease
+		require.Len(t, renewRes.Leases, 1, "should renew only the valid lease")
+		assert.Equal(t, validLease.Key(), renewRes.Leases[0].Key(), "should renew the correct lease")
+	})
+
+	t.Run("renews all leases for multiple hosts", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Fetch alarms from H7
+		res1, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H7"},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, res1)
+
+		// Fetch alarms from H8
+		res2, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{"H8"},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, res2)
+
+		totalExpectedLeases := len(res1) + len(res2)
+
+		// Advance time partway through lease duration
+		s.p.AdvanceClock(30 * time.Second)
+
+		// Renew all leases for both hosts
+		renewReq := components.RenewAlarmLeasesReq{
+			Hosts: []string{"H7", "H8"},
+		}
+		renewRes, err := s.p.RenewAlarmLeases(ctx, renewReq)
+		require.NoError(t, err)
+		assert.Equal(t, totalExpectedLeases, len(renewRes.Leases), "should renew all leases from both hosts")
+
+		// Verify all renewed leases are valid
+		for _, lease := range renewRes.Leases {
+			_, err := s.p.GetLeasedAlarm(ctx, lease)
+			require.NoError(t, err, "all renewed leases should be valid")
+		}
 	})
 }
 

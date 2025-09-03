@@ -189,6 +189,89 @@ func (s *SQLiteProvider) GetLeasedAlarm(ctx context.Context, lease components.Al
 	return res, nil
 }
 
+func (s *SQLiteProvider) RenewAlarmLeases(ctx context.Context, req components.RenewAlarmLeasesReq) (res components.RenewAlarmLeasesRes, err error) {
+	now := s.clock.Now()
+	expTime := now.Add(s.cfg.AlarmsLeaseDuration).UnixMilli()
+
+	var leaseIdCondition string
+
+	args := make([]any, 3+len(req.Leases)+len(req.Hosts))
+	args[0] = expTime
+	args[1] = s.pid
+	args[2] = now.UnixMilli()
+
+	// If we have a list of leases, we restrict by them too
+	if len(req.Leases) > 0 {
+		// Add lease conditions
+		b := strings.Builder{}
+		b.Grow(len(req.Leases)*2 + len(" AND alarm_lease_id IN ()"))
+		b.WriteString(" AND alarm_lease_id IN (")
+		for i, lease := range req.Leases {
+			if i == 0 {
+				b.WriteRune('?')
+			} else {
+				b.WriteString(",?")
+			}
+			args[3+i] = lease.LeaseID()
+		}
+		b.WriteRune(')')
+
+		leaseIdCondition = b.String()
+	}
+
+	// Add host conditions
+	hostPlaceholders := getInPlaceholders(req.Hosts, args, 3+len(req.Leases))
+
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	rows, err := s.db.QueryContext(queryCtx,
+		`
+		UPDATE alarms
+		SET alarm_lease_expiration_time = ?
+		WHERE
+			alarm_lease_pid = ?
+			AND alarm_lease_expiration_time IS NOT NULL
+			AND alarm_lease_expiration_time >= ?
+			`+leaseIdCondition+`
+			AND alarm_id IN (
+				SELECT alarm_id FROM alarms a
+				JOIN active_actors aa ON a.actor_type = aa.actor_type AND a.actor_id = aa.actor_id
+				WHERE aa.host_id IN (`+hostPlaceholders+`)
+			)
+		RETURNING alarm_id, alarm_lease_id, alarm_due_time`,
+		args...)
+	if err != nil {
+		return res, fmt.Errorf("query error: %w", err)
+	}
+	defer rows.Close()
+
+	var renewedLeases []components.AlarmLease
+	for rows.Next() {
+		var (
+			alarmID, leaseID string
+			dueTime          int64
+		)
+		err = rows.Scan(&alarmID, &leaseID, &dueTime)
+		if err != nil {
+			return res, fmt.Errorf("error scanning rows: %w", err)
+		}
+
+		renewedLeases = append(renewedLeases, components.NewAlarmLease(
+			alarmID,
+			time.UnixMilli(dueTime),
+			leaseID,
+		))
+	}
+
+	err = rows.Err()
+	if err != nil {
+		return res, fmt.Errorf("error scanning rows: %w", err)
+	}
+
+	res.Leases = renewedLeases
+	return res, nil
+}
+
 func (s *SQLiteProvider) ReleaseAlarmLease(ctx context.Context, lease components.AlarmLease) error {
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
