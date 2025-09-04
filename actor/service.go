@@ -25,6 +25,14 @@ func (s Service) Invoke(ctx context.Context, actorType string, actorID string, m
 	return s.host.Invoke(ctx, actorType, actorID, method, data)
 }
 
+func (s Service) HaltAll() error {
+	return s.host.HaltAll()
+}
+
+func (s Service) Halt(actorType string, actorID string) error {
+	return s.host.Halt(actorType, actorID)
+}
+
 // setState saves the state for an actor.
 func (s Service) setState(ctx context.Context, actorType string, actorID string, state any) error {
 	return s.host.SetState(ctx, actorType, actorID, state)
@@ -65,6 +73,10 @@ func (s Service) deleteAlarm(ctx context.Context, actorType string, actorID stri
 
 type Host interface {
 	Invoke(ctx context.Context, actorType string, actorID string, method string, data any) (any, error)
+
+	HaltAll() error
+	Halt(actorType string, actorID string) error
+
 	SetState(ctx context.Context, actorType string, actorID string, state any) error
 	GetState(ctx context.Context, actorType string, actorID string, dest any) error
 	DeleteState(ctx context.Context, actorType string, actorID string) error

@@ -65,9 +65,21 @@ func (h *Host) lockAndInvokeFn(parentCtx context.Context, ref components.ActorRe
 		select {
 		case <-haltCh:
 			// The actor is being halted, so we need to cancel the context
-			cancel()
+			t := h.clock.NewTimer(h.shutdownGracePeriod)
+			select {
+			case <-t.C():
+				// Graceful timeout has passed: forcefully cancel the context
+				cancel()
+				return
+			case <-ctx.Done():
+				// The method is returning (either fn() is done, or context was canceled)
+				if !t.Stop() {
+					<-t.C()
+				}
+				return
+			}
 		case <-ctx.Done():
-			// The method is returning
+			// The method is returning (either fn() is done, or context was canceled)
 			return
 		}
 	}()

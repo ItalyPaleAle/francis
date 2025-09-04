@@ -58,6 +58,7 @@ func runWorker(ctx context.Context) error {
 		ProviderOptions: host.SQLiteProviderOptions{
 			ConnectionString: "data.db",
 		},
+		ShutdownGracePeriod: 10 * time.Second,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create actor host: %w", err)
@@ -90,6 +91,7 @@ func runWorker(ctx context.Context) error {
 func runControlServer(actorService *actor.Service) func(ctx context.Context) error {
 	return func(ctx context.Context) error {
 		mux := http.NewServeMux()
+
 		mux.HandleFunc("POST /invoke/{actorType}/{actorID}/{method}", func(w http.ResponseWriter, r *http.Request) {
 			defer r.Body.Close()
 
@@ -115,6 +117,26 @@ func runControlServer(actorService *actor.Service) func(ctx context.Context) err
 				enc.Encode(resp)
 			} else {
 				w.WriteHeader(http.StatusNoContent)
+			}
+		})
+
+		mux.HandleFunc("POST /halt/{actorType}/{actorId}", func(w http.ResponseWriter, r *http.Request) {
+			err := actorService.Halt(r.PathValue("actorType"), r.PathValue("actorID"))
+			if err != nil {
+				log.ErrorContext(r.Context(), "Error halting actor", slog.Any("error", err))
+				w.WriteHeader(http.StatusInternalServerError)
+				fmt.Fprint(w, err.Error())
+				return
+			}
+		})
+
+		mux.HandleFunc("POST /halt-all", func(w http.ResponseWriter, r *http.Request) {
+			err := actorService.HaltAll()
+			if err != nil {
+				log.ErrorContext(r.Context(), "Error halting all actors", slog.Any("error", err))
+				w.WriteHeader(http.StatusInternalServerError)
+				fmt.Fprint(w, err.Error())
+				return
 			}
 		})
 

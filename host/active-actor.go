@@ -19,8 +19,6 @@ import (
 // Copyright (C) 2024 The Dapr Authors
 // License: Apache2
 
-var errActorHalted = errors.New("actor is halted")
-
 type idleActorProcessor = *eventqueue.Processor[string, *activeActor]
 
 // activeActor references an actor that is currently active on this host
@@ -69,6 +67,8 @@ func newActiveActor(ref components.ActorRef, instance actor.Actor, idleTimeout t
 	return a
 }
 
+// Updates the idle timeout property (i.e. time the actor becomes idle at)
+// d allows overriding the idle interval; if zero, uses the default for the actor type
 func (a *activeActor) updateIdleAt(d time.Duration) {
 	if d == 0 {
 		d = a.idleTimeout
@@ -151,6 +151,9 @@ func (a *activeActor) Halt() error {
 
 	// Also remove from the idle actor processor
 	_ = a.idleProcessor.Dequeue(a.Key())
+
+	// Call StopAndWait on the locker, which now makes sure no one is holding the lock
+	a.locker.StopAndWait()
 
 	return nil
 }

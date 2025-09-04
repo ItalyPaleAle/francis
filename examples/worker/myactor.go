@@ -47,13 +47,15 @@ func (m *MyActor) Invoke(ctx context.Context, method string, data any) (any, err
 	if strings.HasSuffix(method, "-wait") {
 		method = strings.TrimSuffix(method, "-wait")
 
-		const waitTime = 2500 * time.Millisecond
+		fmt.Println("INVOKE START")
+		const waitTime = 25000 * time.Millisecond
 		select {
 		case <-time.After(waitTime):
 			// All good
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
+		fmt.Println("INVOKE END")
 	}
 
 	switch method {
@@ -79,6 +81,7 @@ func (m *MyActor) Alarm(ctx context.Context, name string, data any) error {
 }
 
 func (m *MyActor) Deactivate(ctx context.Context) error {
+	time.Sleep(2 * time.Second)
 	m.log.InfoContext(ctx, "Actor deactivated", "invocations", m.invocations)
 	return nil
 }
