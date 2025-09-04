@@ -7,6 +7,15 @@ type AlarmRef struct {
 	Name      string
 }
 
+// NewAlarmRef returns a new AlarmRef object.
+func NewAlarmRef(actorType string, actorID string, name string) AlarmRef {
+	return AlarmRef{
+		ActorType: actorType,
+		ActorID:   actorID,
+		Name:      name,
+	}
+}
+
 // ActorRef returns the actor reference for the alarm.
 func (r AlarmRef) ActorRef() ActorRef {
 	return ActorRef{

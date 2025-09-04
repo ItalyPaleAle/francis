@@ -1134,7 +1134,7 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 			Name:      "test-alarm",
 		}
 		alarmReq := components.SetAlarmReq{
-			AlarmProperties: components.AlarmProperties{
+			AlarmProperties: ref.AlarmProperties{
 				// Overdue so it's fetched right away
 				DueTime: s.p.Now().Add(-time.Second),
 			},

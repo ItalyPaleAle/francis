@@ -4,24 +4,23 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/italypaleale/actors/actor"
+	"github.com/italypaleale/actors/components"
 	"github.com/italypaleale/actors/internal/ref"
 )
 
-func (h *Host) executeAlarm(ctx context.Context, ref ref.ActorRef, name string, data any) error {
-	_, err := h.lockAndInvokeFn(ctx, ref, func(ctx context.Context, act *activeActor) (any, error) {
-		obj, ok := act.instance.(actor.ActorAlarm)
-		if !ok {
-			return nil, fmt.Errorf("actor of type '%s' does not implement the Alarm method", act.ActorType())
-		}
+// TODO: Make data "any" and use msgpak
+type SetAlarmOpts = ref.AlarmProperties
 
-		// Invoke the actor
-		err := obj.Alarm(ctx, name, data)
-		if err != nil {
-			return nil, fmt.Errorf("error from actor: %w", err)
-		}
+func (h *Host) SetAlarm(ctx context.Context, actorType string, actorID string, name string, opts *SetAlarmOpts) error {
+	req := components.SetAlarmReq{}
+	if opts != nil {
+		req.AlarmProperties = *opts
+	}
 
-		return nil, nil
-	})
-	return err
+	err := h.actorProvider.SetAlarm(ctx, ref.NewAlarmRef(actorType, actorID, name), req)
+	if err != nil {
+		return fmt.Errorf("failed to set alarm: %w", err)
+	}
+
+	return nil
 }

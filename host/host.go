@@ -345,8 +345,8 @@ func (h *Host) HaltAll() error {
 func (h *Host) Halt(actorType string, actorID string) error {
 	// Get the active actor object
 	// Only actors that are active on the current host can be halted here
-	ref := actorRef(actorType, actorID)
-	act, ok := h.actors.Get(ref.String())
+	aRef := ref.NewActorRef(actorType, actorID)
+	act, ok := h.actors.Get(aRef.String())
 	if !ok || act == nil {
 		return errActorNotHosted
 	}
@@ -502,11 +502,4 @@ func (h *Host) deactivateActor(act *activeActor) error {
 	}
 
 	return nil
-}
-
-func actorRef(actorType string, actorID string) ref.ActorRef {
-	return ref.ActorRef{
-		ActorType: actorType,
-		ActorID:   actorID,
-	}
 }

@@ -151,27 +151,14 @@ type LookupActorRes struct {
 	IdleTimeout time.Duration
 }
 
-// Properties for an alarm
-type AlarmProperties struct {
-	// Due time.
-	DueTime time.Time
-	// Alarm repetition interval.
-	// This can be an ISO-formatted duration or a Go duration string.
-	Interval string
-	// Deadline for repeating alarms.
-	TTL *time.Time
-	// Data associated with the alarm.
-	Data []byte
-}
-
 // GetAlarmRes is the response object for the GetAlarm method.
 type GetAlarmRes struct {
-	AlarmProperties
+	ref.AlarmProperties
 }
 
 // SetAlarmReq is the request object for the SetAlarm method.
 type SetAlarmReq struct {
-	AlarmProperties
+	ref.AlarmProperties
 }
 
 // FetchAndLeaseUpcomingAlarmsReq is the request object for the FetchAndLeaseUpcomingAlarms method.
@@ -198,7 +185,7 @@ type RenewAlarmLeasesRes struct {
 // GetLeasedAlarmRes is the response object for the GetLeasedAlarm method.
 type GetLeasedAlarmRes struct {
 	ref.AlarmRef
-	AlarmProperties
+	ref.AlarmProperties
 }
 
 // UpdateLeasedAlarmReq is the request object for the UpdateLeasedAlarm method.

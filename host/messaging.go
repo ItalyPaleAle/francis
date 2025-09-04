@@ -12,10 +12,10 @@ import (
 
 func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, method string, data any) (any, error) {
 	// Look up the actor
-	ref := actorRef(actorType, actorID)
-	res, err := h.actorProvider.LookupActor(ctx, ref, components.LookupActorOpts{})
+	aRef := ref.NewActorRef(actorType, actorID)
+	res, err := h.actorProvider.LookupActor(ctx, aRef, components.LookupActorOpts{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to look up actor '%s': %w", ref, err)
+		return nil, fmt.Errorf("failed to look up actor '%s': %w", aRef, err)
 	}
 
 	// TODO: Check if actor is not local
@@ -24,7 +24,7 @@ func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, met
 	}
 
 	// TODO: Handle errActorHalted and retry, actor could be on a separate host
-	return h.invokeLocal(ctx, ref, method, data)
+	return h.invokeLocal(ctx, aRef, method, data)
 }
 
 func (h *Host) invokeLocal(ctx context.Context, ref ref.ActorRef, method string, data any) (any, error) {
@@ -86,6 +86,24 @@ func (h *Host) lockAndInvokeFn(parentCtx context.Context, ref ref.ActorRef, fn f
 	}()
 
 	return fn(ctx, act)
+}
+
+func (h *Host) executeAlarm(ctx context.Context, ref ref.AlarmRef, data any) error {
+	_, err := h.lockAndInvokeFn(ctx, ref.ActorRef(), func(ctx context.Context, act *activeActor) (any, error) {
+		obj, ok := act.instance.(actor.ActorAlarm)
+		if !ok {
+			return nil, fmt.Errorf("actor of type '%s' does not implement the Alarm method", act.ActorType())
+		}
+
+		// Invoke the actor
+		err := obj.Alarm(ctx, ref.Name, data)
+		if err != nil {
+			return nil, fmt.Errorf("error from actor: %w", err)
+		}
+
+		return nil, nil
+	})
+	return err
 }
 
 func (h *Host) getOrCreateActor(ref ref.ActorRef) (*activeActor, error) {
