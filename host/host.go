@@ -17,6 +17,7 @@ import (
 	"github.com/italypaleale/actors/components"
 	"github.com/italypaleale/actors/components/sqlite"
 	"github.com/italypaleale/actors/internal/eventqueue"
+	"github.com/italypaleale/actors/internal/ref"
 	"github.com/italypaleale/actors/internal/servicerunner"
 )
 
@@ -503,8 +504,8 @@ func (h *Host) deactivateActor(act *activeActor) error {
 	return nil
 }
 
-func actorRef(actorType string, actorID string) components.ActorRef {
-	return components.ActorRef{
+func actorRef(actorType string, actorID string) ref.ActorRef {
+	return ref.ActorRef{
 		ActorType: actorType,
 		ActorID:   actorID,
 	}

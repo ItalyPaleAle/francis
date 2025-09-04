@@ -10,9 +10,9 @@ import (
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/actors/actor"
-	"github.com/italypaleale/actors/components"
 	"github.com/italypaleale/actors/internal/eventqueue"
 	"github.com/italypaleale/actors/internal/locker"
+	"github.com/italypaleale/actors/internal/ref"
 )
 
 // This file contains code adapted from https://github.com/dapr/dapr/tree/v1.14.5/
@@ -24,7 +24,7 @@ type idleActorProcessor = *eventqueue.Processor[string, *activeActor]
 // activeActor references an actor that is currently active on this host
 type activeActor struct {
 	// Actor reference
-	ref components.ActorRef
+	ref ref.ActorRef
 
 	// Actor object
 	instance actor.Actor
@@ -48,7 +48,7 @@ type activeActor struct {
 	clock         clock.Clock
 }
 
-func newActiveActor(ref components.ActorRef, instance actor.Actor, idleTimeout time.Duration, idleProcessor idleActorProcessor, cl clock.Clock) *activeActor {
+func newActiveActor(ref ref.ActorRef, instance actor.Actor, idleTimeout time.Duration, idleProcessor idleActorProcessor, cl clock.Clock) *activeActor {
 	if cl == nil {
 		cl = &clock.RealClock{}
 	}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/italypaleale/actors/components"
 	"github.com/italypaleale/actors/internal/ptr"
+	"github.com/italypaleale/actors/internal/ref"
 )
 
 // Suite implements a test suite for actor provider components.
@@ -630,7 +631,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 
 		// Look up an existing actor that's already active on a healthy host
 		// From GetSpec: B-1 is active on H1 (healthy)
-		ref := components.ActorRef{ActorType: "B", ActorID: "B-1"}
+		ref := ref.ActorRef{ActorType: "B", ActorID: "B-1"}
 		res, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{})
 		require.NoError(t, err)
 
@@ -649,7 +650,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		// Create multiple actors to validate they're distributed across different hosts
 		seenHosts := make(map[string]bool)
 		for i := range 10 { // Try up to 10 times to see distribution
-			ref := components.ActorRef{ActorType: "B", ActorID: fmt.Sprintf("B-new-%d", i)}
+			ref := ref.ActorRef{ActorType: "B", ActorID: fmt.Sprintf("B-new-%d", i)}
 			res, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{})
 			require.NoError(t, err)
 
@@ -679,7 +680,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		// Look up an actor that exists only on unhealthy host H6
 		// From GetSpec: D-1 is active on H6 (unhealthy), but D is only supported on H6
 		// This should fail with ErrNoHost because D is not supported on any healthy host
-		ref := components.ActorRef{ActorType: "D", ActorID: "D-1"}
+		ref := ref.ActorRef{ActorType: "D", ActorID: "D-1"}
 		_, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{})
 		require.Error(t, err)
 		require.ErrorIs(t, err, components.ErrNoHost)
@@ -692,7 +693,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, GetSpec()))
 
 		// Look up actor B-1 which is active on H1, but restrict to only H1
-		ref := components.ActorRef{ActorType: "B", ActorID: "B-1"}
+		ref := ref.ActorRef{ActorType: "B", ActorID: "B-1"}
 		opts := components.LookupActorOpts{Hosts: []string{"H1"}}
 		res, err := s.p.LookupActor(ctx, ref, opts)
 		require.NoError(t, err)
@@ -710,7 +711,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 
 		// Look up actor B-1 which is active on H1, but restrict to only H2
 		// This should return ErrNoHost because the actor is on a disallowed host
-		ref := components.ActorRef{ActorType: "B", ActorID: "B-1"}
+		ref := ref.ActorRef{ActorType: "B", ActorID: "B-1"}
 		opts := components.LookupActorOpts{Hosts: []string{"H2"}}
 		_, err := s.p.LookupActor(ctx, ref, opts)
 		require.Error(t, err)
@@ -726,7 +727,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		// Create 3 actors of type C, but restrict to only H2
 		// Type C has unlimited capacity so this should work
 		for i := range 3 {
-			ref := components.ActorRef{ActorType: "C", ActorID: fmt.Sprintf("C-restricted-%d", i)}
+			ref := ref.ActorRef{ActorType: "C", ActorID: fmt.Sprintf("C-restricted-%d", i)}
 			opts := components.LookupActorOpts{Hosts: []string{"H2"}}
 			res, err := s.p.LookupActor(ctx, ref, opts)
 			require.NoError(t, err)
@@ -746,7 +747,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 
 		// Try to create a new actor of type A
 		// From GetSpec: A is at capacity on both H1 (3/3) and H2 (2/2)
-		ref := components.ActorRef{ActorType: "A", ActorID: "A-new"}
+		ref := ref.ActorRef{ActorType: "A", ActorID: "A-new"}
 		_, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{})
 		require.Error(t, err)
 		require.ErrorIs(t, err, components.ErrNoHost)
@@ -761,7 +762,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		// Create 40 actors of type C (unlimited on H1 and H2) to validate distribution
 		hostCounts := make(map[string]int)
 		for i := range 40 {
-			ref := components.ActorRef{ActorType: "C", ActorID: fmt.Sprintf("C-unlimited-%d", i)}
+			ref := ref.ActorRef{ActorType: "C", ActorID: fmt.Sprintf("C-unlimited-%d", i)}
 			res, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{})
 			require.NoError(t, err)
 
@@ -798,7 +799,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		// Type C is supported on H1 and H2 (both healthy) but not on H5/H6 (unhealthy)
 		seenHosts := make(map[string]bool)
 		for i := range 10 { // Try multiple times to ensure consistent behavior
-			ref := components.ActorRef{ActorType: "C", ActorID: fmt.Sprintf("C-ignore-unhealthy-%d", i)}
+			ref := ref.ActorRef{ActorType: "C", ActorID: fmt.Sprintf("C-ignore-unhealthy-%d", i)}
 			res, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{})
 			require.NoError(t, err)
 
@@ -822,7 +823,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, GetSpec()))
 
 		// Try to create an actor of type "UNSUPPORTED"
-		ref := components.ActorRef{ActorType: "UNSUPPORTED", ActorID: "unsupported-1"}
+		ref := ref.ActorRef{ActorType: "UNSUPPORTED", ActorID: "unsupported-1"}
 		_, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{})
 		require.Error(t, err)
 		require.ErrorIs(t, err, components.ErrNoHost)
@@ -835,7 +836,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, GetSpec()))
 
 		// Try to create actor with restriction to non-existent host
-		ref := components.ActorRef{ActorType: "B", ActorID: "B-nonexistent-host"}
+		ref := ref.ActorRef{ActorType: "B", ActorID: "B-nonexistent-host"}
 		opts := components.LookupActorOpts{Hosts: []string{"NON-EXISTENT"}}
 		_, err := s.p.LookupActor(ctx, ref, opts)
 		require.Error(t, err)
@@ -854,7 +855,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		// Total capacity for A is full (5/5)
 
 		// Verify initial state - should already be at capacity
-		_, err := s.p.LookupActor(ctx, components.ActorRef{ActorType: "A", ActorID: "A-should-fail"}, components.LookupActorOpts{})
+		_, err := s.p.LookupActor(ctx, ref.ActorRef{ActorType: "A", ActorID: "A-should-fail"}, components.LookupActorOpts{})
 		require.Error(t, err)
 		require.ErrorIs(t, err, components.ErrNoHost, "should fail when capacity is already exhausted")
 
@@ -883,7 +884,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		// Create several B actors to fill up some capacity on hosts that also support A
 		createdActors := 0
 		for i := range 10 {
-			ref := components.ActorRef{ActorType: "B", ActorID: fmt.Sprintf("B-capacity-test-%d", i)}
+			ref := ref.ActorRef{ActorType: "B", ActorID: fmt.Sprintf("B-capacity-test-%d", i)}
 			res, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{})
 			if err != nil {
 				break // Stop if we can't create more
@@ -898,7 +899,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		assert.Greater(t, createdActors, 0, "should be able to create B actors since they have unlimited capacity")
 
 		// Verify that A is still at capacity after creating B actors
-		_, err = s.p.LookupActor(ctx, components.ActorRef{ActorType: "A", ActorID: "A-still-should-fail"}, components.LookupActorOpts{})
+		_, err = s.p.LookupActor(ctx, ref.ActorRef{ActorType: "A", ActorID: "A-still-should-fail"}, components.LookupActorOpts{})
 		require.Error(t, err)
 		require.ErrorIs(t, err, components.ErrNoHost, "A should still be at capacity")
 
@@ -950,7 +951,7 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 		assert.Equal(t, "H1", foundActor.HostID)
 
 		// Remove the actor
-		ref := components.ActorRef{ActorType: "B", ActorID: "B-1"}
+		ref := ref.ActorRef{ActorType: "B", ActorID: "B-1"}
 		err = s.p.RemoveActor(ctx, ref)
 		require.NoError(t, err)
 
@@ -973,7 +974,7 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, GetSpec()))
 
 		// Try to remove a non-existent actor
-		ref := components.ActorRef{ActorType: "B", ActorID: "NonExistent"}
+		ref := ref.ActorRef{ActorType: "B", ActorID: "NonExistent"}
 		err := s.p.RemoveActor(ctx, ref)
 		require.Error(t, err)
 		require.ErrorIs(t, err, components.ErrNoActor)
@@ -986,7 +987,7 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, GetSpec()))
 
 		// Try to remove an actor with non-existent type
-		ref := components.ActorRef{ActorType: "NonExistentType", ActorID: "SomeID"}
+		ref := ref.ActorRef{ActorType: "NonExistentType", ActorID: "SomeID"}
 		err := s.p.RemoveActor(ctx, ref)
 		require.Error(t, err)
 		require.ErrorIs(t, err, components.ErrNoActor)
@@ -1000,17 +1001,17 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 
 		// From GetSpec: Type A is at capacity (H1: 3/3, H2: 2/2)
 		// First verify we can't create a new A actor
-		_, err := s.p.LookupActor(ctx, components.ActorRef{ActorType: "A", ActorID: "A-should-fail"}, components.LookupActorOpts{})
+		_, err := s.p.LookupActor(ctx, ref.ActorRef{ActorType: "A", ActorID: "A-should-fail"}, components.LookupActorOpts{})
 		require.Error(t, err)
 		require.ErrorIs(t, err, components.ErrNoHost, "should fail when capacity is exhausted")
 
 		// Remove one of the existing A actors (A-1 is on H1)
-		ref := components.ActorRef{ActorType: "A", ActorID: "A-1"}
-		err = s.p.RemoveActor(ctx, ref)
+		aRef := ref.ActorRef{ActorType: "A", ActorID: "A-1"}
+		err = s.p.RemoveActor(ctx, aRef)
 		require.NoError(t, err)
 
 		// Now we should be able to create a new A actor
-		res, err := s.p.LookupActor(ctx, components.ActorRef{ActorType: "A", ActorID: "A-new-after-removal"}, components.LookupActorOpts{})
+		res, err := s.p.LookupActor(ctx, ref.ActorRef{ActorType: "A", ActorID: "A-new-after-removal"}, components.LookupActorOpts{})
 		require.NoError(t, err)
 		assert.NotEmpty(t, res.HostID)
 		assert.Contains(t, []string{"H1", "H2"}, res.HostID, "should be placed on one of the hosts that support A")
@@ -1065,7 +1066,7 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 		initialCount := len(spec.ActiveActors)
 
 		// Remove multiple actors
-		actors := []components.ActorRef{
+		actors := []ref.ActorRef{
 			{ActorType: "B", ActorID: "B-1"},
 			{ActorType: "B", ActorID: "B-2"},
 			{ActorType: "A", ActorID: "A-2"},
@@ -1098,7 +1099,7 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 		// Seed with the test data
 		require.NoError(t, s.p.Seed(ctx, GetSpec()))
 
-		ref := components.ActorRef{ActorType: "B", ActorID: "B-1"}
+		ref := ref.ActorRef{ActorType: "B", ActorID: "B-1"}
 
 		// Remove the actor first time - should succeed
 		err := s.p.RemoveActor(ctx, ref)
@@ -1117,19 +1118,19 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, GetSpec()))
 
 		// Create a new actor and set an alarm for it
-		ref := components.ActorRef{ActorType: "X", ActorID: "X-lease-test"}
+		aRef := ref.ActorRef{ActorType: "X", ActorID: "X-lease-test"}
 
 		// First create the actor by looking it up (this activates it)
-		lookupRes, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{
+		lookupRes, err := s.p.LookupActor(ctx, aRef, components.LookupActorOpts{
 			Hosts: []string{"H7", "H8"},
 		})
 		require.NoError(t, err)
 		assert.Contains(t, []string{"H7", "H8"}, lookupRes.HostID)
 
 		// Set an alarm for this actor
-		alarmRef := components.AlarmRef{
-			ActorType: ref.ActorType,
-			ActorID:   ref.ActorID,
+		alarmRef := ref.AlarmRef{
+			ActorType: aRef.ActorType,
+			ActorID:   aRef.ActorID,
 			Name:      "test-alarm",
 		}
 		alarmReq := components.SetAlarmReq{
@@ -1149,12 +1150,12 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 
 		// Find our specific alarm lease
 		var (
-			targetLease components.AlarmLease
+			targetLease ref.AlarmLease
 			found       bool
 		)
 		for _, lease := range fetchRes {
 			alarmDetails, err := s.p.GetLeasedAlarm(ctx, lease)
-			if err == nil && alarmDetails.ActorType == ref.ActorType && alarmDetails.ActorID == ref.ActorID {
+			if err == nil && alarmDetails.ActorType == aRef.ActorType && alarmDetails.ActorID == aRef.ActorID {
 				targetLease = lease
 				found = true
 				break
@@ -1167,7 +1168,7 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 		require.NoError(t, err, "alarm should be properly leased before actor removal")
 
 		// Remove the actor: this should automatically cancel any alarm leases via the database trigger
-		err = s.p.RemoveActor(ctx, ref)
+		err = s.p.RemoveActor(ctx, aRef)
 		require.NoError(t, err)
 
 		// Verify the alarm lease has been automatically canceled
@@ -1181,7 +1182,7 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 		// Find the alarm in the database
 		var foundAlarm *AlarmSpec
 		for _, alarm := range spec.Alarms {
-			if alarm.ActorType == ref.ActorType && alarm.ActorID == ref.ActorID && alarm.Name == "test-alarm" {
+			if alarm.ActorType == aRef.ActorType && alarm.ActorID == aRef.ActorID && alarm.Name == "test-alarm" {
 				foundAlarm = &alarm
 				break
 			}
@@ -1207,18 +1208,18 @@ func (s Suite) TestState(t *testing.T) {
 	require.NoError(t, s.p.Seed(t.Context(), Spec{}))
 
 	t.Run("get returns ErrNoState if no state", func(t *testing.T) {
-		_, err := s.p.GetState(t.Context(), components.ActorRef{ActorType: "TestType", ActorID: "actor-1"})
+		_, err := s.p.GetState(t.Context(), ref.ActorRef{ActorType: "TestType", ActorID: "actor-1"})
 		require.ErrorIs(t, err, components.ErrNoState)
 	})
 
 	t.Run("delete returns ErrNoState if no state", func(t *testing.T) {
-		err := s.p.DeleteState(t.Context(), components.ActorRef{ActorType: "TestType", ActorID: "actor-1"})
+		err := s.p.DeleteState(t.Context(), ref.ActorRef{ActorType: "TestType", ActorID: "actor-1"})
 		require.ErrorIs(t, err, components.ErrNoState)
 	})
 
 	t.Run("set get overwrite delete", func(t *testing.T) {
 		ctx := t.Context()
-		ref := components.ActorRef{ActorType: "TestType", ActorID: "actor-1"}
+		ref := ref.ActorRef{ActorType: "TestType", ActorID: "actor-1"}
 
 		data1 := []byte("hello world")
 		err := s.p.SetState(ctx, ref, data1, components.SetStateOpts{})
@@ -1259,7 +1260,7 @@ func (s Suite) TestState(t *testing.T) {
 
 	t.Run("ttl expiration", func(t *testing.T) {
 		ctx := t.Context()
-		ref2 := components.ActorRef{ActorType: "TestType", ActorID: "actor-ttl-1"}
+		ref2 := ref.ActorRef{ActorType: "TestType", ActorID: "actor-ttl-1"}
 		data := []byte("with-ttl")
 
 		err := s.p.SetState(ctx, ref2, data, components.SetStateOpts{TTL: time.Second})
@@ -1280,7 +1281,7 @@ func (s Suite) TestState(t *testing.T) {
 
 	t.Run("ttl extension on overwrite", func(t *testing.T) {
 		ctx := t.Context()
-		ref3 := components.ActorRef{ActorType: "TestType", ActorID: "actor-ttl-extend"}
+		ref3 := ref.ActorRef{ActorType: "TestType", ActorID: "actor-ttl-extend"}
 		data1 := []byte("first")
 		data2 := []byte("second")
 
@@ -1772,7 +1773,7 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, Spec{}))
 
 		// Try to get a non-existent alarm
-		nonExistentLease := components.NewAlarmLease("not-exists", time.Now(), "fake-lease-id")
+		nonExistentLease := ref.NewAlarmLease("not-exists", time.Now(), "fake-lease-id")
 		_, err := s.p.GetLeasedAlarm(ctx, nonExistentLease)
 		require.ErrorIs(t, err, components.ErrNoAlarm)
 	})
@@ -1785,7 +1786,7 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 
 		// Try to get an alarm that exists but isn't leased
 		// From spec, ALM-B-007 and later B alarms should not be pre-leased
-		unleaedAlarmLease := components.NewAlarmLease("ALM-B-007", time.Now(), "fake-lease-id")
+		unleaedAlarmLease := ref.NewAlarmLease("ALM-B-007", time.Now(), "fake-lease-id")
 		_, err := s.p.GetLeasedAlarm(ctx, unleaedAlarmLease)
 		require.ErrorIs(t, err, components.ErrNoAlarm)
 	})
@@ -1807,7 +1808,7 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 		lease := res[0]
 
 		// Create a fake lease with the same alarm ID but different lease ID
-		fakeLease := components.NewAlarmLease(lease.Key(), lease.DueTime(), "bad-lease-id")
+		fakeLease := ref.NewAlarmLease(lease.Key(), lease.DueTime(), "bad-lease-id")
 
 		// Try to get the alarm with the wrong lease ID
 		_, err = s.p.GetLeasedAlarm(ctx, fakeLease)
@@ -1852,7 +1853,7 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
 
 		// Find an alarm with known data - look for one of the active actor alarms
-		var targetLease components.AlarmLease
+		var targetLease ref.AlarmLease
 		var found bool
 		for _, lease := range res {
 			// ALM-A-1, ALM-A-2, ALM-A-4, ALM-B-1, ALM-B-2 should have specific data
@@ -2039,7 +2040,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 		require.GreaterOrEqual(t, len(res), 3, "need at least 3 leases for this test")
 
 		// Select first 2 leases for renewal
-		leasesToRenew := []components.AlarmLease{res[0], res[1]}
+		leasesToRenew := []ref.AlarmLease{res[0], res[1]}
 		leaseNotRenewed := res[2]
 
 		// Advance time partway through lease duration
@@ -2148,7 +2149,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 
 		// Create a mix of valid and invalid lease IDs
 		validLease := res[0]
-		invalidLease := components.NewAlarmLease("non-existent-alarm", time.Now(), "fake-lease-id")
+		invalidLease := ref.NewAlarmLease("non-existent-alarm", time.Now(), "fake-lease-id")
 
 		// Advance time partway through lease duration
 		s.p.AdvanceClock(30 * time.Second)
@@ -2156,7 +2157,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 		// Try to renew mix of valid and invalid leases
 		renewReq := components.RenewAlarmLeasesReq{
 			Hosts:  []string{"H7", "H8"},
-			Leases: []components.AlarmLease{validLease, invalidLease},
+			Leases: []ref.AlarmLease{validLease, invalidLease},
 		}
 		renewRes, err := s.p.RenewAlarmLeases(ctx, renewReq)
 		require.NoError(t, err)
@@ -2245,7 +2246,7 @@ func (s Suite) TestReleaseAlarmLease(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, Spec{}))
 
 		// Try to release a non-existent alarm lease
-		nonExistentLease := components.NewAlarmLease("non-existent-alarm", time.Now(), "fake-lease-id")
+		nonExistentLease := ref.NewAlarmLease("non-existent-alarm", time.Now(), "fake-lease-id")
 		err := s.p.ReleaseAlarmLease(ctx, nonExistentLease)
 		require.ErrorIs(t, err, components.ErrNoAlarm)
 	})
@@ -2277,7 +2278,7 @@ func (s Suite) TestReleaseAlarmLease(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, customSpec))
 
 		// Try to release a lease for an alarm that was never leased
-		fakeLease := components.NewAlarmLease("test-alarm-no-lease", time.Now(), "fake-lease-id")
+		fakeLease := ref.NewAlarmLease("test-alarm-no-lease", time.Now(), "fake-lease-id")
 		err := s.p.ReleaseAlarmLease(ctx, fakeLease)
 		require.ErrorIs(t, err, components.ErrNoAlarm)
 	})
@@ -2299,7 +2300,7 @@ func (s Suite) TestReleaseAlarmLease(t *testing.T) {
 		lease := res[0]
 
 		// Create a fake lease with wrong lease ID
-		fakeLease := components.NewAlarmLease(lease.Key(), lease.DueTime(), "wrong-lease-id")
+		fakeLease := ref.NewAlarmLease(lease.Key(), lease.DueTime(), "wrong-lease-id")
 
 		// Try to release with wrong lease ID
 		err = s.p.ReleaseAlarmLease(ctx, fakeLease)
@@ -2525,7 +2526,7 @@ func (s Suite) TestUpdateLeasedAlarm(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, Spec{}))
 
 		// Try to update a non-existent alarm
-		nonExistentLease := components.NewAlarmLease("non-existent", time.Now(), "fake-lease-id")
+		nonExistentLease := ref.NewAlarmLease("non-existent", time.Now(), "fake-lease-id")
 		updateReq := components.UpdateLeasedAlarmReq{
 			DueTime:      time.Now().Add(1 * time.Hour),
 			RefreshLease: true,
@@ -2550,7 +2551,7 @@ func (s Suite) TestUpdateLeasedAlarm(t *testing.T) {
 
 		// Pick the first leased alarm and create fake lease with wrong ID
 		validLease := res[0]
-		fakeLease := components.NewAlarmLease(validLease.Key(), validLease.DueTime(), "wrong-lease-id")
+		fakeLease := ref.NewAlarmLease(validLease.Key(), validLease.DueTime(), "wrong-lease-id")
 
 		updateReq := components.UpdateLeasedAlarmReq{
 			DueTime:      time.Now().Add(1 * time.Hour),
@@ -2626,7 +2627,7 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 		require.ErrorIs(t, err, components.ErrNoAlarm)
 
 		// Also verify using standard GetAlarm that it's completely gone
-		alarmRef := components.AlarmRef{
+		alarmRef := ref.AlarmRef{
 			ActorType: alarmRes.ActorType,
 			ActorID:   alarmRes.ActorID,
 			Name:      alarmRes.Name,
@@ -2642,7 +2643,7 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, Spec{}))
 
 		// Try to delete a non-existent alarm
-		nonExistentLease := components.NewAlarmLease("non-existent", time.Now(), "fake-lease-id")
+		nonExistentLease := ref.NewAlarmLease("non-existent", time.Now(), "fake-lease-id")
 		err := s.p.DeleteLeasedAlarm(ctx, nonExistentLease)
 		require.ErrorIs(t, err, components.ErrNoAlarm)
 	})
@@ -2674,12 +2675,12 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, customSpec))
 
 		// Try to delete an alarm that was never leased
-		fakeLease := components.NewAlarmLease("test-alarm-no-lease", time.Now(), "fake-lease-id")
+		fakeLease := ref.NewAlarmLease("test-alarm-no-lease", time.Now(), "fake-lease-id")
 		err := s.p.DeleteLeasedAlarm(ctx, fakeLease)
 		require.ErrorIs(t, err, components.ErrNoAlarm)
 
 		// Verify the unleased alarm still exists via GetAlarm
-		alarmRef := components.AlarmRef{ActorType: "TestType", ActorID: "test-actor", Name: "test-alarm"}
+		alarmRef := ref.AlarmRef{ActorType: "TestType", ActorID: "test-actor", Name: "test-alarm"}
 		_, err = s.p.GetAlarm(ctx, alarmRef)
 		require.NoError(t, err, "unleased alarm should still exist")
 	})
@@ -2701,7 +2702,7 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 		validLease := res[0]
 
 		// Create a fake lease with wrong lease ID
-		fakeLease := components.NewAlarmLease(validLease.Key(), validLease.DueTime(), "wrong-lease-id")
+		fakeLease := ref.NewAlarmLease(validLease.Key(), validLease.DueTime(), "wrong-lease-id")
 
 		// Try to delete with wrong lease ID
 		err = s.p.DeleteLeasedAlarm(ctx, fakeLease)

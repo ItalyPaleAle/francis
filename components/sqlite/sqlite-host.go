@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/italypaleale/actors/components"
+	"github.com/italypaleale/actors/internal/ref"
 	"github.com/italypaleale/actors/internal/sql/transactions"
 )
 
@@ -214,7 +215,7 @@ func (s *SQLiteProvider) UnregisterHost(ctx context.Context, hostID string) erro
 	return nil
 }
 
-func (s *SQLiteProvider) LookupActor(ctx context.Context, ref components.ActorRef, opts components.LookupActorOpts) (components.LookupActorRes, error) {
+func (s *SQLiteProvider) LookupActor(ctx context.Context, ref ref.ActorRef, opts components.LookupActorOpts) (components.LookupActorRes, error) {
 	res, err := transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (res components.LookupActorRes, err error) {
 		// Perform a lookup to check if the actor is already active on _any_ host
 		queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
@@ -349,7 +350,7 @@ func (s *SQLiteProvider) LookupActor(ctx context.Context, ref components.ActorRe
 	return res, nil
 }
 
-func (s *SQLiteProvider) RemoveActor(ctx context.Context, ref components.ActorRef) error {
+func (s *SQLiteProvider) RemoveActor(ctx context.Context, ref ref.ActorRef) error {
 	queryCtx, queryCancel := context.WithTimeout(ctx, s.timeout)
 	defer queryCancel()
 	res, err := s.db.

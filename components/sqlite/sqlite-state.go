@@ -8,9 +8,10 @@ import (
 
 	"github.com/italypaleale/actors/components"
 	"github.com/italypaleale/actors/internal/ptr"
+	"github.com/italypaleale/actors/internal/ref"
 )
 
-func (s *SQLiteProvider) GetState(ctx context.Context, ref components.ActorRef) (data []byte, err error) {
+func (s *SQLiteProvider) GetState(ctx context.Context, ref ref.ActorRef) (data []byte, err error) {
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
@@ -34,7 +35,7 @@ func (s *SQLiteProvider) GetState(ctx context.Context, ref components.ActorRef) 
 	return data, nil
 }
 
-func (s *SQLiteProvider) SetState(ctx context.Context, ref components.ActorRef, data []byte, opts components.SetStateOpts) error {
+func (s *SQLiteProvider) SetState(ctx context.Context, ref ref.ActorRef, data []byte, opts components.SetStateOpts) error {
 	var exp *int64
 	if opts.TTL > 0 {
 		exp = ptr.Of(s.clock.Now().Add(opts.TTL).UnixMilli())
@@ -57,7 +58,7 @@ func (s *SQLiteProvider) SetState(ctx context.Context, ref components.ActorRef, 
 	return nil
 }
 
-func (s *SQLiteProvider) DeleteState(ctx context.Context, ref components.ActorRef) error {
+func (s *SQLiteProvider) DeleteState(ctx context.Context, ref ref.ActorRef) error {
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 

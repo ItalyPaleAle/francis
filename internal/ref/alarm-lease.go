@@ -1,9 +1,16 @@
-package components
+package ref
 
 import (
 	"fmt"
 	"time"
 )
+
+// AlarmLease indicates an alarm lease
+type AlarmLease struct {
+	alarmID string
+	dueTime time.Time
+	leaseID any
+}
 
 // NewAlarmLease returns a new AlarmLease object.
 func NewAlarmLease(alarmID string, dueTime time.Time, leaseID any) AlarmLease {

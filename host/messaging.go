@@ -7,6 +7,7 @@ import (
 
 	"github.com/italypaleale/actors/actor"
 	"github.com/italypaleale/actors/components"
+	"github.com/italypaleale/actors/internal/ref"
 )
 
 func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, method string, data any) (any, error) {
@@ -26,7 +27,7 @@ func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, met
 	return h.invokeLocal(ctx, ref, method, data)
 }
 
-func (h *Host) invokeLocal(ctx context.Context, ref components.ActorRef, method string, data any) (any, error) {
+func (h *Host) invokeLocal(ctx context.Context, ref ref.ActorRef, method string, data any) (any, error) {
 	return h.lockAndInvokeFn(ctx, ref, func(ctx context.Context, act *activeActor) (any, error) {
 		obj, ok := act.instance.(actor.ActorInvoke)
 		if !ok {
@@ -43,7 +44,7 @@ func (h *Host) invokeLocal(ctx context.Context, ref components.ActorRef, method 
 	})
 }
 
-func (h *Host) lockAndInvokeFn(parentCtx context.Context, ref components.ActorRef, fn func(context.Context, *activeActor) (any, error)) (any, error) {
+func (h *Host) lockAndInvokeFn(parentCtx context.Context, ref ref.ActorRef, fn func(context.Context, *activeActor) (any, error)) (any, error) {
 	// Get the actor, which may create it
 	act, err := h.getOrCreateActor(ref)
 	if err != nil {
@@ -87,7 +88,7 @@ func (h *Host) lockAndInvokeFn(parentCtx context.Context, ref components.ActorRe
 	return fn(ctx, act)
 }
 
-func (h *Host) getOrCreateActor(ref components.ActorRef) (*activeActor, error) {
+func (h *Host) getOrCreateActor(ref ref.ActorRef) (*activeActor, error) {
 	// Get the factory function
 	fn, err := h.createActorFn(ref)
 	if err != nil {
@@ -100,7 +101,7 @@ func (h *Host) getOrCreateActor(ref components.ActorRef) (*activeActor, error) {
 	return actor, nil
 }
 
-func (h *Host) createActorFn(ref components.ActorRef) (func() *activeActor, error) {
+func (h *Host) createActorFn(ref ref.ActorRef) (func() *activeActor, error) {
 	// We don't need a locking mechanism here as these maps are "locked" after the service has started
 	factoryFn := h.actorFactories[ref.ActorType]
 	if factoryFn == nil {

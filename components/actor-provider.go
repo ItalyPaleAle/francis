@@ -3,6 +3,8 @@ package components
 import (
 	"context"
 	"time"
+
+	"github.com/italypaleale/actors/internal/ref"
 )
 
 const (
@@ -36,25 +38,25 @@ type ActorProvider interface {
 
 	// LookupActor returns the address of the actor host for a given actor type and ID.
 	// If the actor is not currently active on any host, a new actor is created and assigned to a random host; if it's not possible to find an instance capable of hosting the given actor, ErrNoHost is returned instead.
-	LookupActor(ctx context.Context, ref ActorRef, opts LookupActorOpts) (LookupActorRes, error)
+	LookupActor(ctx context.Context, ref ref.ActorRef, opts LookupActorOpts) (LookupActorRes, error)
 
 	// RemoveActor removes an actor from the collection of active actors.
 	// If the actor doesn't exist, returns ErrNoActor.
-	RemoveActor(ctx context.Context, ref ActorRef) error
+	RemoveActor(ctx context.Context, ref ref.ActorRef) error
 
 	// GetAlarm returns an alarm.
 	// It returns ErrNoAlarm if it doesn't exist.
-	GetAlarm(ctx context.Context, ref AlarmRef) (GetAlarmRes, error)
+	GetAlarm(ctx context.Context, ref ref.AlarmRef) (GetAlarmRes, error)
 
 	// SetAlarm sets or replaces an alarm configured for an actor.
-	SetAlarm(ctx context.Context, ref AlarmRef, req SetAlarmReq) error
+	SetAlarm(ctx context.Context, ref ref.AlarmRef, req SetAlarmReq) error
 
 	// DeleteAlarm removes an alarm configured for an actor.
 	// If the alarm doesn't exist, returns ErrNoAlarm.
-	DeleteAlarm(ctx context.Context, ref AlarmRef) error
+	DeleteAlarm(ctx context.Context, ref ref.AlarmRef) error
 
 	// FetchAndLeaseUpcomingAlarms fetches the upcoming alarms, acquiring a lease on them.
-	FetchAndLeaseUpcomingAlarms(ctx context.Context, req FetchAndLeaseUpcomingAlarmsReq) ([]AlarmLease, error)
+	FetchAndLeaseUpcomingAlarms(ctx context.Context, req FetchAndLeaseUpcomingAlarmsReq) ([]ref.AlarmLease, error)
 
 	// RenewAlarmLeases renews the leases for the alarms in the request.
 	// The method can renew specific alarm leases and/or those tied to specific hosts.
@@ -62,30 +64,30 @@ type ActorProvider interface {
 
 	// ReleaseAlarmLease releases an active lease on an alarm.
 	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
-	ReleaseAlarmLease(ctx context.Context, lease AlarmLease) error
+	ReleaseAlarmLease(ctx context.Context, lease ref.AlarmLease) error
 
 	// GetLeasedAlarm retrieves an alarm using an alarm lease object.
 	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
-	GetLeasedAlarm(ctx context.Context, lease AlarmLease) (GetLeasedAlarmRes, error)
+	GetLeasedAlarm(ctx context.Context, lease ref.AlarmLease) (GetLeasedAlarmRes, error)
 
 	// UpdateLeasedAlarm updates an alarm using an alarm lease object.
 	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
-	UpdateLeasedAlarm(ctx context.Context, lease AlarmLease, req UpdateLeasedAlarmReq) error
+	UpdateLeasedAlarm(ctx context.Context, lease ref.AlarmLease, req UpdateLeasedAlarmReq) error
 
 	// DeleteLeasedAlarm deletes an alarm using an alarm lease object.
 	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
-	DeleteLeasedAlarm(ctx context.Context, lease AlarmLease) error
+	DeleteLeasedAlarm(ctx context.Context, lease ref.AlarmLease) error
 
 	// GetState retrieves the persistent state of an actor.
 	// If there's no state, returns ErrNoState.
-	GetState(ctx context.Context, ref ActorRef) ([]byte, error)
+	GetState(ctx context.Context, ref ref.ActorRef) ([]byte, error)
 
 	// SetState sets the persistent state of an actor.
-	SetState(ctx context.Context, ref ActorRef, data []byte, opts SetStateOpts) error
+	SetState(ctx context.Context, ref ref.ActorRef, data []byte, opts SetStateOpts) error
 
 	// DeleteState deletes the persistent state of an actor.
 	// If there's no state, returns ErrNoState.
-	DeleteState(ctx context.Context, ref ActorRef) error
+	DeleteState(ctx context.Context, ref ref.ActorRef) error
 
 	// HealthCheckInterval returns the recommended health check interval for hosts.
 	HealthCheckInterval() time.Duration
@@ -93,36 +95,6 @@ type ActorProvider interface {
 
 // ProviderOptions is an empty interface implemented by all options structs for providers
 type ProviderOptions any
-
-// ProviderConfig contains the configuration for the actor provider
-type ProviderConfig struct {
-	// Maximum interval between pings received from an actor host.
-	HostHealthCheckDeadline time.Duration
-
-	// Alarms lease duration
-	AlarmsLeaseDuration time.Duration
-
-	// Pre-fetch interval for alarms
-	AlarmsFetchAheadInterval time.Duration
-
-	// Batch size for pre-fetching alarms
-	AlarmsFetchAheadBatchSize int
-}
-
-func (o *ProviderConfig) SetDefaults() {
-	if o.HostHealthCheckDeadline < time.Second {
-		o.HostHealthCheckDeadline = DefaultHostHealthCheckDeadline
-	}
-	if o.AlarmsLeaseDuration < time.Second {
-		o.AlarmsLeaseDuration = DefaultAlarmsLeaseDuration
-	}
-	if o.AlarmsFetchAheadInterval < 100*time.Millisecond {
-		o.AlarmsFetchAheadInterval = DefaultAlarmsFetchAheadInterval
-	}
-	if o.AlarmsFetchAheadBatchSize <= 0 {
-		o.AlarmsFetchAheadBatchSize = DefaultAlarmsFetchAheadBatch
-	}
-}
 
 // RegisterHostReq is the request object for the RegisterHost method.
 type RegisterHostReq struct {
@@ -159,37 +131,6 @@ type ActorHostType struct {
 	ConcurrencyLimit int32
 	// Actor deactivation timeout
 	DeactivationTimeout time.Duration
-}
-
-// ActorRef references an actor (type and ID).
-type ActorRef struct {
-	ActorType string
-	ActorID   string
-}
-
-// String implements fmt.Stringer.
-func (r ActorRef) String() string {
-	return r.ActorType + "/" + r.ActorID
-}
-
-// AlarmRef references an alarm.
-type AlarmRef struct {
-	ActorType string
-	ActorID   string
-	Name      string
-}
-
-// ActorRef returns the actor reference for the alarm.
-func (r AlarmRef) ActorRef() ActorRef {
-	return ActorRef{
-		ActorType: r.ActorType,
-		ActorID:   r.ActorID,
-	}
-}
-
-// String implements fmt.Stringer.
-func (r AlarmRef) String() string {
-	return r.ActorType + "/" + r.ActorID + "/" + r.Name
 }
 
 // LookupActorOpts contains options for LookupActor.
@@ -245,25 +186,18 @@ type RenewAlarmLeasesReq struct {
 	Hosts []string
 	// Optional list of leases to renew.
 	// If this is empty, renews the lease for all alarms on the host.
-	Leases []AlarmLease
+	Leases []ref.AlarmLease
 }
 
 // RenewAlarmLeasesRes is the response object for the RenewAlarmLeases method.
 type RenewAlarmLeasesRes struct {
 	// List of leases that were successfully renewed.
-	Leases []AlarmLease
-}
-
-// AlarmLease indicates an alarm lease
-type AlarmLease struct {
-	alarmID string
-	dueTime time.Time
-	leaseID any
+	Leases []ref.AlarmLease
 }
 
 // GetLeasedAlarmRes is the response object for the GetLeasedAlarm method.
 type GetLeasedAlarmRes struct {
-	AlarmRef
+	ref.AlarmRef
 	AlarmProperties
 }
 

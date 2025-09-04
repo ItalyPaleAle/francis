@@ -5,10 +5,10 @@ import (
 	"fmt"
 
 	"github.com/italypaleale/actors/actor"
-	"github.com/italypaleale/actors/components"
+	"github.com/italypaleale/actors/internal/ref"
 )
 
-func (h *Host) executeAlarm(ctx context.Context, ref components.ActorRef, name string, data any) error {
+func (h *Host) executeAlarm(ctx context.Context, ref ref.ActorRef, name string, data any) error {
 	_, err := h.lockAndInvokeFn(ctx, ref, func(ctx context.Context, act *activeActor) (any, error) {
 		obj, ok := act.instance.(actor.ActorAlarm)
 		if !ok {
