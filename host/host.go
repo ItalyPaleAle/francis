@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/alphadose/haxmap"
+	backoff "github.com/cenkalti/backoff/v5"
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/actors/actor"
@@ -26,7 +27,7 @@ import (
 const (
 	defaultActorsMapSize       = 128
 	defaultIdleTimeout         = 5 * time.Minute
-	defaultDeactivationTimeout = 10 * time.Second
+	defaultDeactivationTimeout = 5 * time.Second
 	// If an idle actor is getting deactivated, but it's still busy, will be re-enqueued with its idle timeout increased by this duration
 	actorBusyReEnqueueInterval = 10 * time.Second
 )
@@ -319,13 +320,29 @@ func (h *Host) runHealthChecks(ctx context.Context) error {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 
+	retryOpts := []backoff.RetryOption{
+		backoff.WithBackOff(backoff.NewConstantBackOff(500 * time.Millisecond)),
+		backoff.WithMaxTries(3),
+	}
+
 	for {
 		select {
 		case <-t.C:
 			h.log.DebugContext(ctx, "Sending health check to the provider")
-			err = h.actorProvider.UpdateActorHost(ctx, h.hostID, components.UpdateActorHostReq{UpdateLastHealthCheck: true})
+			_, err = backoff.Retry(ctx, func() (r struct{}, rErr error) {
+				rErr = h.actorProvider.UpdateActorHost(ctx, h.hostID, components.UpdateActorHostReq{UpdateLastHealthCheck: true})
+				switch {
+				case errors.Is(rErr, components.ErrHostUnregistered):
+					// Registration has expired, so no point in retrying anymore
+					return r, backoff.Permanent(rErr)
+				case rErr != nil:
+					h.log.WarnContext(ctx, "Health check error; will retry", slog.Any("error", rErr))
+					return r, rErr
+				default:
+					return r, nil
+				}
+			}, retryOpts...)
 			if err != nil {
-				// TODO: Should we retry once in case of errors?
 				h.log.ErrorContext(ctx, "Health check failed", slog.Any("error", err))
 				return fmt.Errorf("failed to perform health check: %w", err)
 			}
@@ -413,13 +430,26 @@ func (h *Host) haltActor(act *activeActor) error {
 func (h *Host) deactivateActor(act *activeActor) error {
 	h.log.Debug("Deactivated actor", slog.String("actorRef", act.Key()))
 
+	// Check if the actor implements the Deactivate method
+	obj, ok := act.instance.(actor.ActorDeactivate)
+	if !ok {
+		// Not an error - this is an optional interface
+		return nil
+	}
+
+	// If the timeout is empty, there's nothing to do
+	timeout := h.actorsConfig[act.ActorType()].DeactivationTimeout
+	if timeout <= 0 {
+		return nil
+	}
+
 	// This uses a background context because it should be unrelated from the caller's context
 	// Once the decision to deactivate an actor has been made, we must go through with it or we could have an inconsistent state
-	ctx, cancel := context.WithTimeout(context.Background(), h.actorsConfig[act.ActorType()].DeactivationTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	// Call the Deactivate method on the actor
-	err := act.instance.Deactivate(ctx)
+	err := obj.Deactivate(ctx)
 	if err != nil {
 		return fmt.Errorf("error from actor: %w", err)
 	}

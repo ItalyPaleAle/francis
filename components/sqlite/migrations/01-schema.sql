@@ -73,7 +73,8 @@ CREATE TABLE actor_state (
     PRIMARY KEY (actor_type, actor_id)
 ) WITHOUT ROWID, STRICT;
 
-CREATE INDEX actor_state_expiration_time_idx ON actor_state (actor_state_expiration_time) WHERE actor_state_expiration_time IS NOT NULL;
+CREATE INDEX actor_state_expiration_time_idx ON actor_state (actor_state_expiration_time)
+    WHERE actor_state_expiration_time IS NOT NULL;
 
 -- Contains the list of alarms created
 CREATE TABLE alarms (
@@ -107,5 +108,23 @@ CREATE TABLE alarms (
 
 CREATE UNIQUE INDEX alarm_ref_idx ON alarms (actor_type, actor_id, alarm_name);
 CREATE INDEX alarm_due_time_idx ON alarms (alarm_due_time);
-CREATE UNIQUE INDEX alarm_lease_id_idx ON alarms (alarm_lease_id);
-CREATE INDEX alarm_lease_pid_idx ON alarms (alarm_lease_pid);
+CREATE UNIQUE INDEX alarm_lease_id_idx ON alarms (alarm_lease_id)
+    WHERE alarm_lease_id IS NOT NULL;
+CREATE INDEX alarm_lease_pid_idx ON alarms (alarm_lease_pid)
+    WHERE alarm_lease_pid IS NOT NULL;
+
+-- Trigger that nullifies the leases on the alarms table when an actor is deactivated
+-- (deleted from the active_actors table)
+CREATE TRIGGER active_actors_delete_update_alarms
+AFTER DELETE ON active_actors
+BEGIN
+    UPDATE alarms
+    SET
+        alarm_lease_id = NULL,
+        alarm_lease_expiration_time = NULL,
+        alarm_lease_pid = NULL
+    WHERE
+        actor_type = OLD.actor_type
+        AND actor_id = OLD.actor_id
+        AND alarm_lease_id IS NOT NULL;
+END;

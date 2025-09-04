@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/italypaleale/actors/actor"
 	"github.com/italypaleale/actors/components"
 )
 
@@ -27,8 +28,13 @@ func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, met
 
 func (h *Host) invokeLocal(ctx context.Context, ref components.ActorRef, method string, data any) (any, error) {
 	return h.lockAndInvokeFn(ctx, ref, func(ctx context.Context, act *activeActor) (any, error) {
+		obj, ok := act.instance.(actor.ActorInvoke)
+		if !ok {
+			return nil, fmt.Errorf("actor of type '%s' does not implement the Invoke method", act.ActorType())
+		}
+
 		// Invoke the actor
-		res, err := act.instance.Invoke(ctx, method, data)
+		res, err := obj.Invoke(ctx, method, data)
 		if err != nil {
 			return nil, fmt.Errorf("error from actor: %w", err)
 		}

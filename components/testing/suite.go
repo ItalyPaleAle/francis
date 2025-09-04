@@ -65,16 +65,14 @@ func (s Suite) TestRegisterHost(t *testing.T) {
 			Address: "192.168.1.100:8080",
 			ActorTypes: []components.ActorHostType{
 				{
-					ActorType:           "TestActor",
-					IdleTimeout:         5 * time.Minute,
-					ConcurrencyLimit:    10,
-					DeactivationTimeout: 30 * time.Second,
+					ActorType:        "TestActor",
+					IdleTimeout:      5 * time.Minute,
+					ConcurrencyLimit: 10,
 				},
 				{
-					ActorType:           "AnotherActor",
-					IdleTimeout:         2 * time.Minute,
-					ConcurrencyLimit:    0, // unlimited
-					DeactivationTimeout: 15 * time.Second,
+					ActorType:        "AnotherActor",
+					IdleTimeout:      2 * time.Minute,
+					ConcurrencyLimit: 0, // unlimited
 				},
 			},
 		}
@@ -1110,6 +1108,90 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 		err = s.p.RemoveActor(ctx, ref)
 		require.Error(t, err)
 		require.ErrorIs(t, err, components.ErrNoActor)
+	})
+
+	t.Run("automatically cancels alarm leases when actor is removed", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Create a new actor and set an alarm for it
+		ref := components.ActorRef{ActorType: "X", ActorID: "X-lease-test"}
+
+		// First create the actor by looking it up (this activates it)
+		lookupRes, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{
+			Hosts: []string{"H7", "H8"},
+		})
+		require.NoError(t, err)
+		assert.Contains(t, []string{"H7", "H8"}, lookupRes.HostID)
+
+		// Set an alarm for this actor
+		alarmRef := components.AlarmRef{
+			ActorType: ref.ActorType,
+			ActorID:   ref.ActorID,
+			Name:      "test-alarm",
+		}
+		alarmReq := components.SetAlarmReq{
+			AlarmProperties: components.AlarmProperties{
+				// Overdue so it's fetched right away
+				DueTime: s.p.Now().Add(-time.Second),
+			},
+		}
+		err = s.p.SetAlarm(ctx, alarmRef, alarmReq)
+		require.NoError(t, err)
+
+		// Fetch and lease the alarm
+		fetchRes, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{lookupRes.HostID},
+		})
+		require.NoError(t, err)
+
+		// Find our specific alarm lease
+		var (
+			targetLease components.AlarmLease
+			found       bool
+		)
+		for _, lease := range fetchRes {
+			alarmDetails, err := s.p.GetLeasedAlarm(ctx, lease)
+			if err == nil && alarmDetails.ActorType == ref.ActorType && alarmDetails.ActorID == ref.ActorID {
+				targetLease = lease
+				found = true
+				break
+			}
+		}
+		require.True(t, found, "should have found and leased the alarm for our test actor")
+
+		// Verify the alarm is properly leased before removal
+		_, err = s.p.GetLeasedAlarm(ctx, targetLease)
+		require.NoError(t, err, "alarm should be properly leased before actor removal")
+
+		// Remove the actor: this should automatically cancel any alarm leases via the database trigger
+		err = s.p.RemoveActor(ctx, ref)
+		require.NoError(t, err)
+
+		// Verify the alarm lease has been automatically canceled
+		_, err = s.p.GetLeasedAlarm(ctx, targetLease)
+		require.ErrorIs(t, err, components.ErrNoAlarm, "alarm lease should be automatically canceled after actor removal")
+
+		// Verify the alarm still exists but is no longer leased by checking the database state
+		spec, err := s.p.GetAllHosts(ctx)
+		require.NoError(t, err)
+
+		// Find the alarm in the database
+		var foundAlarm *AlarmSpec
+		for _, alarm := range spec.Alarms {
+			if alarm.ActorType == ref.ActorType && alarm.ActorID == ref.ActorID && alarm.Name == "test-alarm" {
+				foundAlarm = &alarm
+				break
+			}
+		}
+		require.NotNil(t, foundAlarm, "alarm should still exist in database")
+
+		// But it should not have lease information anymore
+		assert.Nil(t, foundAlarm.LeaseID, "alarm should not have lease ID after actor removal")
+		assert.Nil(t, foundAlarm.LeaseExp, "alarm should not have lease expiration after actor removal")
+		assert.Nil(t, foundAlarm.LeasePID, "alarm should not have lease PID after actor removal")
 	})
 }
 
