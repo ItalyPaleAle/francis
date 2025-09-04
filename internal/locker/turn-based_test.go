@@ -47,7 +47,7 @@ func TestTurnBasedLocker_Lock(t *testing.T) {
 
 		// Wait for the 2 goroutines to be queued
 		assert.EventuallyWithT(t, func(c *assert.CollectT) {
-			assert.Len(c, locker.queue, 2)
+			assert.Equal(c, 2, locker.QueueLength())
 		}, 3*time.Second, 10*time.Millisecond, "Queue's length was not 1 before the deadline")
 
 		// Cancel the context
@@ -97,7 +97,7 @@ func TestTurnBasedLocker_Lock(t *testing.T) {
 
 		// Wait for all goroutines to queue up
 		assert.EventuallyWithTf(t, func(c *assert.CollectT) {
-			assert.Len(c, locker.queue, numWaiters)
+			assert.Equal(c, numWaiters, locker.QueueLength())
 		}, 3*time.Second, 50*time.Millisecond, "Queue's length was not %d before the deadline", numWaiters)
 
 		// Release the initial lock
@@ -274,7 +274,7 @@ func TestTurnBasedLocker_Unlock(t *testing.T) {
 
 		// Wait for the second goroutine to be queued
 		assert.EventuallyWithT(t, func(c *assert.CollectT) {
-			assert.Len(c, locker.queue, 1)
+			assert.Equal(c, 1, locker.QueueLength())
 		}, 3*time.Second, 10*time.Millisecond, "Queue's length was not 1 before the deadline")
 
 		// Release the lock
@@ -322,7 +322,7 @@ func TestTurnBasedLocker_Stop(t *testing.T) {
 
 		// Wait for goroutines to queue up
 		assert.EventuallyWithTf(t, func(c *assert.CollectT) {
-			assert.Len(c, locker.queue, numWaiters)
+			assert.Equal(c, numWaiters, locker.QueueLength())
 		}, 3*time.Second, 50*time.Millisecond, "Queue's length was not %d before the deadline", numWaiters)
 
 		// Stop the locker
@@ -340,6 +340,358 @@ func TestTurnBasedLocker_Stop(t *testing.T) {
 
 		assert.True(t, locker.stopped)
 		assert.Equal(t, 0, locker.QueueLength())
+	})
+}
+
+func TestTurnBasedLocker_StopAndWait(t *testing.T) {
+	t.Run("sets stopped", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		assert.False(t, locker.IsStopped())
+		locker.StopAndWait()
+		assert.True(t, locker.IsStopped())
+	})
+
+	t.Run("cancels all waiters", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		// First goroutine acquires the lock
+		err := locker.Lock(t.Context())
+		require.NoError(t, err)
+
+		const numWaiters = 3
+		results := make([]chan error, numWaiters)
+
+		// Start multiple waiting goroutines
+		for i := range numWaiters {
+			results[i] = make(chan error, 1)
+			go func(resultChan chan error) {
+				resultChan <- locker.Lock(t.Context())
+			}(results[i])
+		}
+
+		// Wait for goroutines to queue up
+		assert.EventuallyWithTf(t, func(c *assert.CollectT) {
+			assert.Equal(c, numWaiters, locker.QueueLength())
+		}, 3*time.Second, 50*time.Millisecond, "Queue's length was not %d before the deadline", numWaiters)
+
+		// Call StopAndWait in a background goroutine
+		go locker.StopAndWait()
+
+		// All waiters should receive ErrStopped
+		for i := range numWaiters {
+			select {
+			case err := <-results[i]:
+				require.ErrorIs(t, err, ErrStopped)
+			case <-time.After(3 * time.Second):
+				t.Errorf("Waiter %d did not receive error in 3s", i)
+			}
+		}
+
+		assert.True(t, locker.stopped)
+		assert.Equal(t, 0, locker.QueueLength())
+	})
+
+	t.Run("waits for current lock holder to unlock", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		// First goroutine acquires the lock and holds it
+		lockHeld := make(chan struct{})
+		unlockSignal := make(chan struct{})
+		lockReleased := make(chan struct{})
+
+		go func() {
+			err := locker.Lock(t.Context())
+			require.NoError(t, err)
+			close(lockHeld)
+
+			// Wait for signal to unlock
+			<-unlockSignal
+			locker.Unlock()
+			close(lockReleased)
+		}()
+
+		// Wait for the lock to be acquired
+		<-lockHeld
+
+		// Start StopAndWait in another goroutine
+		stopCompleted := make(chan struct{})
+		go func() {
+			locker.StopAndWait()
+			close(stopCompleted)
+		}()
+
+		// Give StopAndWait some time to start, but it shouldn't complete yet
+		select {
+		case <-stopCompleted:
+			t.Error("StopAndWait completed before lock was released")
+		case <-time.After(100 * time.Millisecond):
+			// Expected - StopAndWait should be waiting
+		}
+
+		// Signal the lock holder to unlock
+		close(unlockSignal)
+
+		// Wait for the lock to be released
+		<-lockReleased
+
+		// Now StopAndWait should complete
+		select {
+		case <-stopCompleted:
+			// Expected
+		case <-time.After(3 * time.Second):
+			t.Error("StopAndWait did not complete after lock was released")
+		}
+
+		assert.True(t, locker.IsStopped())
+		assert.False(t, locker.IsLocked())
+		assert.Equal(t, 0, locker.QueueLength())
+	})
+
+	t.Run("waits for current lock holder with waiters in queue", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		// First goroutine acquires the lock
+		unlockSignal := make(chan struct{})
+		lockReleased := make(chan struct{})
+
+		err := locker.Lock(t.Context())
+		require.NoError(t, err)
+
+		go func() {
+			// Wait for signal to unlock
+			<-unlockSignal
+			locker.Unlock()
+			close(lockReleased)
+		}()
+
+		const numWaiters = 3
+		results := make([]chan error, numWaiters)
+
+		// Start multiple waiting goroutines
+		for i := range numWaiters {
+			results[i] = make(chan error, 1)
+			go func(resultChan chan error) {
+				resultChan <- locker.Lock(t.Context())
+			}(results[i])
+		}
+
+		// Wait for goroutines to queue up
+		assert.EventuallyWithTf(t, func(c *assert.CollectT) {
+			assert.Equal(c, numWaiters, locker.QueueLength())
+		}, 3*time.Second, 50*time.Millisecond, "Queue's length was not %d before the deadline", numWaiters)
+
+		// Start StopAndWait in another goroutine
+		stopCompleted := make(chan struct{})
+		go func() {
+			locker.StopAndWait()
+			close(stopCompleted)
+		}()
+
+		// Give StopAndWait some time to start, but it shouldn't complete yet
+		select {
+		case <-stopCompleted:
+			t.Error("StopAndWait completed before lock was released")
+		case <-time.After(100 * time.Millisecond):
+			// Expected - StopAndWait should be waiting
+		}
+
+		// All waiters should receive ErrStopped immediately (they don't need to wait for unlock)
+		for i := range numWaiters {
+			select {
+			case err := <-results[i]:
+				require.ErrorIs(t, err, ErrStopped)
+			case <-time.After(3 * time.Second):
+				t.Errorf("Waiter %d did not receive error in 3s", i)
+			}
+		}
+
+		// StopAndWait should still be waiting for the lock holder
+		select {
+		case <-stopCompleted:
+			t.Error("StopAndWait completed before lock was released")
+		case <-time.After(100 * time.Millisecond):
+			// Expected
+		}
+
+		// Signal the lock holder to unlock
+		close(unlockSignal)
+
+		// Wait for the lock to be released
+		<-lockReleased
+
+		// Now StopAndWait should complete
+		select {
+		case <-stopCompleted:
+			// Expected
+		case <-time.After(3 * time.Second):
+			t.Error("StopAndWait did not complete after lock was released")
+		}
+
+		assert.True(t, locker.IsStopped())
+		assert.False(t, locker.IsLocked())
+		assert.Equal(t, 0, locker.QueueLength())
+	})
+
+	t.Run("returns immediately when not locked", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		// Add some waiters to the queue
+		const numWaiters = 2
+		results := make([]chan error, numWaiters)
+
+		for i := range numWaiters {
+			results[i] = make(chan error, 1)
+			go func(resultChan chan error) {
+				resultChan <- locker.Lock(t.Context())
+			}(results[i])
+		}
+
+		// Wait for goroutines to queue up
+		assert.EventuallyWithTf(t, func(c *assert.CollectT) {
+			assert.Equal(c, numWaiters-1, locker.QueueLength())
+		}, 3*time.Second, 50*time.Millisecond, "Queue's length was not %d before the deadline", numWaiters-1)
+
+		// Now unlock both so the locker is free
+		locker.Unlock()
+		locker.Unlock()
+
+		// StopAndWait should complete immediately and should not set any closing waiter
+		locker.StopAndWait()
+
+		assert.Nil(t, locker.closingWaiter)
+		assert.True(t, locker.IsStopped())
+		assert.False(t, locker.IsLocked())
+	})
+
+	t.Run("multiple StopAndWait calls", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		// First StopAndWait
+		locker.StopAndWait()
+		assert.True(t, locker.IsStopped())
+
+		// Second StopAndWait should not cause issues
+		locker.StopAndWait()
+		assert.True(t, locker.IsStopped())
+	})
+
+	t.Run("concurrent StopAndWait calls", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		// First goroutine acquires the lock
+		lockHeld := make(chan struct{})
+		unlockSignal := make(chan struct{})
+
+		go func() {
+			err := locker.Lock(t.Context())
+			require.NoError(t, err)
+			close(lockHeld)
+
+			// Wait for signal to unlock
+			<-unlockSignal
+			locker.Unlock()
+		}()
+
+		// Wait for the lock to be acquired
+		<-lockHeld
+
+		// Start multiple StopAndWait calls concurrently
+		const numStoppers = 3
+		stopCompleted := make([]chan struct{}, numStoppers)
+
+		for i := range numStoppers {
+			stopCompleted[i] = make(chan struct{})
+			go func(completeChan chan struct{}) {
+				locker.StopAndWait()
+				close(completeChan)
+			}(stopCompleted[i])
+		}
+
+		// Give all StopAndWait calls time to start
+		assert.EventuallyWithT(t, func(c *assert.CollectT) {
+			locker.mu.Lock()
+			defer locker.mu.Unlock()
+			assert.NotNil(c, locker.closingWaiter)
+		}, 3*time.Second, 50*time.Millisecond, "Closing waiter channel was not set within the deadline")
+
+		// Signal the lock holder to unlock
+		close(unlockSignal)
+
+		// All StopAndWait calls should complete
+		for i := range numStoppers {
+			select {
+			case <-stopCompleted[i]:
+				// Expected
+			case <-time.After(3 * time.Second):
+				t.Errorf("StopAndWait %d did not complete in 3s", i)
+			}
+		}
+
+		assert.True(t, locker.IsStopped())
+		assert.False(t, locker.IsLocked())
+	})
+
+	t.Run("call StopAndWait after Stop", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		// Call Stop
+		locker.Stop()
+
+		start := time.Now()
+		locker.StopAndWait()
+
+		// Should return immediately
+		assert.Less(t, time.Since(start), 100*time.Millisecond)
+	})
+
+	t.Run("call StopAndWait after Stop and Unlock", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		// Acquire a lock
+		err := locker.Lock(t.Context())
+		require.NoError(t, err)
+
+		// Wait for signal to unlock
+		unlockSignal := make(chan struct{})
+		lockReleased := make(chan struct{})
+		go func() {
+			<-unlockSignal
+			locker.Unlock()
+			close(lockReleased)
+		}()
+
+		// Call Stop
+		locker.Stop()
+
+		// Start StopAndWait in another goroutine
+		stopCompleted := make(chan struct{})
+		go func() {
+			locker.StopAndWait()
+			close(stopCompleted)
+		}()
+
+		// StopAndWait should still be waiting for the lock holder
+		select {
+		case <-stopCompleted:
+			t.Error("StopAndWait completed before lock was released")
+		case <-time.After(100 * time.Millisecond):
+			// Expected
+		}
+
+		// Signal the lock holder to unlock
+		close(unlockSignal)
+
+		// Wait for the lock to be released
+		<-lockReleased
+
+		// Now StopAndWait should complete
+		select {
+		case <-stopCompleted:
+			// Expected
+		case <-time.After(3 * time.Second):
+			t.Error("StopAndWait did not complete after lock was released")
+		}
 	})
 }
 
@@ -424,7 +776,7 @@ func TestTurnBasedLocker(t *testing.T) {
 
 		// Wait for goroutine to be queued
 		assert.EventuallyWithT(t, func(c *assert.CollectT) {
-			assert.Len(c, locker.queue, 1)
+			assert.Equal(c, 1, locker.QueueLength())
 		}, 3*time.Second, 10*time.Millisecond, "Queue's length was not 1 before the deadline")
 
 		// Wait for context timeout in real time since locker doesn't use fake clock
@@ -454,7 +806,7 @@ func TestTurnBasedLocker(t *testing.T) {
 
 		// Wait for second goroutine to queue up
 		assert.EventuallyWithT(t, func(c *assert.CollectT) {
-			assert.Len(c, locker.queue, 1)
+			assert.Equal(c, 1, locker.QueueLength())
 		}, 3*time.Second, 10*time.Millisecond, "Queue's length was not 1 before the deadline")
 
 		// Stop the locker
