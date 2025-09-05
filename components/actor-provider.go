@@ -91,6 +91,9 @@ type ActorProvider interface {
 
 	// HealthCheckInterval returns the recommended health check interval for hosts.
 	HealthCheckInterval() time.Duration
+
+	// HealthCheckInterval returns the recommended lease renewal interval for hosts.
+	RenewLeaseInterval() time.Duration
 }
 
 // ProviderOptions is an empty interface implemented by all options structs for providers

@@ -303,6 +303,9 @@ func (h *Host) Run(parentCtx context.Context) error {
 			// Perform health checks in background
 			h.runHealthChecks,
 
+			// In background also renew leases
+			h.runLeaseRenewal,
+
 			// Run the actor provider
 			h.actorProvider.Run,
 		).
@@ -397,6 +400,39 @@ func (h *Host) runHealthChecks(parentCtx context.Context) error {
 			if err != nil {
 				h.log.ErrorContext(parentCtx, "Health check failed", slog.Any("error", err))
 				return fmt.Errorf("failed to perform health check: %w", err)
+			}
+		case <-parentCtx.Done():
+			// Stop when the context is canceled
+			return parentCtx.Err()
+		}
+	}
+}
+
+func (h *Host) runLeaseRenewal(parentCtx context.Context) (err error) {
+	var res components.RenewAlarmLeasesRes
+
+	// Renew the alarm leases on a loop
+	interval := h.actorProvider.RenewLeaseInterval()
+	h.log.DebugContext(parentCtx, "Starting background alarm lease renewal", slog.Any("interval", interval))
+
+	t := time.NewTicker(interval)
+	defer t.Stop()
+
+	hostList := []string{h.hostID}
+	for {
+		select {
+		case <-t.C:
+			ctx, cancel := context.WithTimeout(parentCtx, h.providerRequestTimeout)
+			defer cancel()
+			res, err = h.actorProvider.RenewAlarmLeases(ctx, components.RenewAlarmLeasesReq{
+				Hosts: hostList,
+			})
+			if err != nil {
+				// Log the error only
+				h.log.ErrorContext(parentCtx, "Error while renewing leases for alarms", slog.Any("error", err))
+			} else if len(res.Leases) > 0 {
+				// Use the list of leases just for logging, to avoid potential issues with race conditions alongside execution of alarms
+				h.log.DebugContext(parentCtx, "Renewed alarm leases", slog.Int("count", len(res.Leases)))
 			}
 		case <-parentCtx.Done():
 			// Stop when the context is canceled

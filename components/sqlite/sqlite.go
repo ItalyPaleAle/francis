@@ -176,6 +176,15 @@ func (s *SQLiteProvider) HealthCheckInterval() time.Duration {
 	return interval
 }
 
+func (s *SQLiteProvider) RenewLeaseInterval() time.Duration {
+	// The recommended interval is the bigger of: the lease duration less 10s, or half of the lease duration
+	if s.cfg.AlarmsLeaseDuration < 20*time.Second {
+		return s.cfg.AlarmsLeaseDuration / 2
+	}
+
+	return s.cfg.AlarmsLeaseDuration - 10*time.Second
+}
+
 func (s *SQLiteProvider) performMigrations(ctx context.Context) error {
 	m := sqlitemigrations.Migrations{
 		Pool:              s.db,
@@ -302,6 +311,10 @@ func isConstraintError(err error) bool {
 // Returns the placeholder string for an IN clause, and also appends all arguments to appendArgs, starting at position startAppend
 // appendArgs must have sufficient length for the arguments being added
 func getInPlaceholders(vals []string, appendArgs []any, startAppend int) string {
+	if len(vals) == 1 {
+		return "?"
+	}
+
 	b := strings.Builder{}
 	b.Grow(len(vals) * 2)
 	for i, h := range vals {
