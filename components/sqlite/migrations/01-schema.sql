@@ -88,8 +88,7 @@ CREATE TABLE alarms (
     alarm_name text NOT NULL,
     -- Due time for the alarm, as a unix timestamp in milliseconds
     alarm_due_time integer NOT NULL,
-    -- For repeating alarms, string indicating the interval
-    -- This could be an ISO duration or Go duration
+    -- For repeating alarms, as an ISO8601-formatted duration string.
     alarm_interval text,
     -- For repeating alarms, time at which to stop repeating
     -- This is a unix timestamp in millisecond

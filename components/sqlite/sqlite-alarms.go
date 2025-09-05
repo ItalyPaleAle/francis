@@ -24,8 +24,8 @@ func (s *SQLiteProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res co
 
 	var (
 		dueTime  int64
-		ttlTime  *int64
 		interval *string
+		ttlTime  *int64
 	)
 	err = s.db.
 		QueryRowContext(queryCtx, `
@@ -151,8 +151,8 @@ func (s *SQLiteProvider) GetLeasedAlarm(ctx context.Context, lease ref.AlarmLeas
 
 	var (
 		dueTime  int64
-		ttlTime  *int64
 		interval *string
+		ttlTime  *int64
 	)
 	err = s.db.
 		QueryRowContext(queryCtx, `

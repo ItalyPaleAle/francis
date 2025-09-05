@@ -16,7 +16,7 @@ func (h *Host) SetState(ctx context.Context, actorType string, actorID string, s
 	// Encode the state using msgpack
 	data, err := msgpack.Marshal(state)
 	if err != nil {
-		return fmt.Errorf("failed serializing state using msgpack: %w", err)
+		return fmt.Errorf("failed to serialize state using msgpack: %w", err)
 	}
 
 	err = h.actorProvider.SetState(ctx, ref.NewActorRef(actorType, actorID), data, components.SetStateOpts{
@@ -40,7 +40,7 @@ func (h *Host) GetState(ctx context.Context, actorType string, actorID string, d
 
 	err = msgpack.Unmarshal(data, dest)
 	if err != nil {
-		return fmt.Errorf("failed unserializing state using msgpack: %w", err)
+		return fmt.Errorf("failed to unserialize state using msgpack: %w", err)
 	}
 
 	return nil

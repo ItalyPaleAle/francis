@@ -140,6 +140,28 @@ func runControlServer(actorService *actor.Service) func(ctx context.Context) err
 			}
 		})
 
+		mux.HandleFunc("POST /alarm/{actorType}/{actorID}/{name}", func(w http.ResponseWriter, r *http.Request) {
+			defer r.Body.Close()
+
+			properties := actor.AlarmProperties{}
+			err := json.NewDecoder(r.Body).Decode(&properties)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprint(w, "failed to read body as JSON")
+				return
+			}
+
+			err = actorService.SetAlarm(r.Context(), r.PathValue("actorType"), r.PathValue("actorID"), r.PathValue("name"), properties)
+			if err != nil {
+				log.ErrorContext(r.Context(), "Error invoking actor", slog.Any("error", err))
+				w.WriteHeader(http.StatusInternalServerError)
+				fmt.Fprint(w, err.Error())
+				return
+			}
+
+			w.WriteHeader(http.StatusNoContent)
+		})
+
 		server := &http.Server{
 			Addr:    "127.0.0.1:8081",
 			Handler: mux,

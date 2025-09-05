@@ -72,7 +72,7 @@ type AlarmSpec struct {
 	DueIn     time.Duration // now + DueIn
 
 	// Optional fields
-	Interval *string
+	Interval string
 	TTL      time.Duration // 0 means NULL
 	Data     []byte        // nil means NULL; non-nil inserted as BLOB
 

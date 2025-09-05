@@ -12,7 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/italypaleale/actors/components"
-	"github.com/italypaleale/actors/internal/ptr"
 	"github.com/italypaleale/actors/internal/ref"
 )
 
@@ -1902,8 +1901,8 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 					ActorID:   "test-actor",
 					Name:      "test-alarm",
 					DueIn:     time.Second,
-					Interval:  ptr.Of("PT1H"), // 1 hour interval
-					TTL:       24 * time.Hour, // 24 hour TTL
+					Interval:  "PT1H",
+					TTL:       24 * time.Hour,
 					Data:      []byte("test-data-with-extras"),
 				},
 			},

@@ -14,7 +14,7 @@ type Client[T any] interface {
 	// DeleteState deletes the actor's state.
 	DeleteState(ctx context.Context) error
 	// SetAlarm creates or replaces an alarm.
-	SetAlarm(ctx context.Context, alarmName string, opts AlarmOptions) error
+	SetAlarm(ctx context.Context, alarmName string, properties AlarmProperties) error
 	// DeleteAlarm deletes an alarm.
 	DeleteAlarm(ctx context.Context, alarmName string) error
 }
@@ -38,7 +38,7 @@ func NewActorClient[T any](actorType string, actorID string, service *Service) C
 
 // SetState saves the actor's state.
 func (c *client[T]) SetState(ctx context.Context, state T) error {
-	err := c.service.setState(ctx, c.actorType, c.actorID, state)
+	err := c.service.SetState(ctx, c.actorType, c.actorID, state)
 	if err != nil {
 		return err
 	}
@@ -56,7 +56,7 @@ func (c *client[T]) GetState(ctx context.Context) (state T, err error) {
 		return c.state, nil
 	}
 
-	err = c.service.getState(ctx, c.actorType, c.actorID, &state)
+	err = c.service.GetState(ctx, c.actorType, c.actorID, &state)
 	// Ignore the error indicating the state can't be found, and return a zero state
 	if err != nil && !errors.Is(err, ErrStateNotFound) {
 		return state, err
@@ -76,15 +76,15 @@ func (c *client[T]) DeleteState(ctx context.Context) error {
 	c.hasState = true
 	c.state = zero
 
-	return c.service.deleteState(ctx, c.actorType, c.actorID)
+	return c.service.DeleteState(ctx, c.actorType, c.actorID)
 }
 
 // SetAlarm creates or replaces an alarm.
-func (c *client[T]) SetAlarm(ctx context.Context, alarmName string, opts AlarmOptions) error {
-	return c.service.setAlarm(ctx, c.actorType, c.actorID, alarmName, opts)
+func (c *client[T]) SetAlarm(ctx context.Context, alarmName string, properties AlarmProperties) error {
+	return c.service.SetAlarm(ctx, c.actorType, c.actorID, alarmName, properties)
 }
 
 // DeleteAlarm deletes an alarm.
 func (c *client[T]) DeleteAlarm(ctx context.Context, alarmName string) error {
-	return c.service.deleteAlarm(ctx, c.actorType, c.actorID, alarmName)
+	return c.service.DeleteAlarm(ctx, c.actorType, c.actorID, alarmName)
 }

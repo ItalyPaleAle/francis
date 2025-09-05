@@ -164,7 +164,13 @@ func (s *SQLiteProvider) Seed(ctx context.Context, spec comptesting.Spec) error 
 		for _, a := range spec.Alarms {
 			due := now.UnixMilli() + a.DueIn.Milliseconds()
 
-			var ttl *int64
+			var (
+				ttl      *int64
+				interval *string
+			)
+			if a.Interval != "" {
+				interval = ptr.Of(a.Interval)
+			}
 			if a.TTL > 0 {
 				ttl = ptr.Of(now.UnixMilli() + a.TTL.Milliseconds())
 			}
@@ -181,7 +187,7 @@ func (s *SQLiteProvider) Seed(ctx context.Context, spec comptesting.Spec) error 
 
 			_, err = insAlarm.ExecContext(ctx,
 				a.AlarmID, a.ActorType, a.ActorID, a.Name, due,
-				a.Interval, ttl, a.Data, leaseID, leaseExp, leasePID,
+				interval, ttl, a.Data, leaseID, leaseExp, leasePID,
 			)
 			if err != nil {
 				return z, fmt.Errorf("insert alarm '%s': %w", a.AlarmID, err)
@@ -292,13 +298,17 @@ func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, err
 			var (
 				r             comptesting.AlarmSpec
 				due           int64
+				interval      *string
 				ttl, leaseExp *int64
 			)
-			err = rows.Scan(&r.AlarmID, &r.ActorType, &r.ActorID, &r.Name, &due, &r.Interval, &ttl, &r.Data, &r.LeaseID, &leaseExp, &r.LeasePID)
+			err = rows.Scan(&r.AlarmID, &r.ActorType, &r.ActorID, &r.Name, &due, &interval, &ttl, &r.Data, &r.LeaseID, &leaseExp, &r.LeasePID)
 			if err != nil {
 				return res, fmt.Errorf("reading active_actors row: %w", err)
 			}
 			r.DueIn = time.UnixMilli(due).Sub(s.clock.Now())
+			if interval != nil {
+				r.Interval = *interval
+			}
 			if ttl != nil {
 				r.TTL = time.Duration(*ttl) * time.Millisecond
 			}

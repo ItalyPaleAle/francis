@@ -192,8 +192,7 @@ type GetLeasedAlarmRes struct {
 type UpdateLeasedAlarmReq struct {
 	// Due time.
 	DueTime time.Time
-	// Alarm repetition interval.
-	// This can be an ISO-formatted duration or a Go duration string.
+	// Alarm repetition interval, as a ISO8601-formatted duration string.
 	Interval string
 	// Deadline for repeating alarms.
 	TTL *time.Time
