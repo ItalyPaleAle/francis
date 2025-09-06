@@ -25,8 +25,8 @@ func NewService(host Host) *Service {
 }
 
 // Invoke an actor
-func (s Service) Invoke(ctx context.Context, actorType string, actorID string, method string, data any) (any, error) {
-	return s.host.Invoke(ctx, actorType, actorID, method, data)
+func (s Service) Invoke(ctx context.Context, actorType string, actorID string, method string, data any, out any) error {
+	return s.host.Invoke(ctx, actorType, actorID, method, data, out)
 }
 
 // SetState saves the state for an actor.

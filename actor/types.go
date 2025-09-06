@@ -12,7 +12,7 @@ import (
 type Duration = timeutils.Duration
 
 type Host interface {
-	Invoke(ctx context.Context, actorType string, actorID string, method string, data any) (any, error)
+	Invoke(ctx context.Context, actorType string, actorID string, method string, data any, out any) error
 
 	HaltAll() error
 	Halt(actorType string, actorID string) error

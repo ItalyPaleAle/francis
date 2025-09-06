@@ -4,30 +4,164 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"reflect"
+
+	msgpack "github.com/vmihailenco/msgpack/v5"
 
 	"github.com/italypaleale/actors/actor"
 	"github.com/italypaleale/actors/components"
 	"github.com/italypaleale/actors/internal/ref"
 )
 
-func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, method string, data any) (any, error) {
-	// Look up the actor
-	aRef := ref.NewActorRef(actorType, actorID)
-	res, err := h.actorProvider.LookupActor(ctx, aRef, components.LookupActorOpts{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to look up actor '%s': %w", aRef, err)
-	}
+const (
+	userAgentValue      = "actors/v1"
+	contentTypeMsgpack  = "application/vnd.msgpack"
+	headerHostID        = "X-Host-ID"
+	headerContentType   = "Content-Type"
+	headerContentLength = "Content-Length"
+	headerUserAgent     = "User-Agent"
+)
 
-	// TODO: Check if actor is not local
-	if res.Address != h.address {
-		return nil, errors.New("invoking remote actors not yet implemented")
-	}
-
-	// TODO: Handle errActorHalted and retry, actor could be on a separate host
-	return h.invokeLocal(ctx, aRef, method, data)
+// Invoke performs the synchronous invocation of an actor running anywhere.
+func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, method string, data any, out any) error {
+	return h.doInvoke(ctx, ref.NewActorRef(actorType, actorID), method, data, out, false)
 }
 
-func (h *Host) invokeLocal(ctx context.Context, ref ref.ActorRef, method string, data any) (any, error) {
+// InvokeLocal performs the synchronous invocation of an actor running on the current node.
+// It returns ErrActorNotHosted if the actor is active on a different node.
+func (h *Host) InvokeLocal(ctx context.Context, actorType string, actorID string, method string, data any, out any) error {
+	return h.doInvoke(ctx, ref.NewActorRef(actorType, actorID), method, data, out, true)
+}
+
+func (h *Host) doInvoke(ctx context.Context, aRef ref.ActorRef, method string, data any, out any, local bool) error {
+	// Look up the actor
+	lar, err := h.actorProvider.LookupActor(ctx, aRef, components.LookupActorOpts{})
+	if err != nil {
+		return fmt.Errorf("failed to look up actor '%s': %w", aRef, err)
+	}
+
+	// If the host ID is different from the current, the invocation is for a remote actor
+	if lar.HostID != h.hostID {
+		if local {
+			// Caller wanted to invoke a local actor only
+			return ErrActorNotHosted
+		}
+
+		// Invoke the remote actor
+		return h.doInvokeRemote(ctx, aRef, lar, method, data, out)
+	}
+
+	// TODO: Handle ErrActorHalted:
+	// - If local=false, retry: actor could be on a separate host
+	// - If local=true, return ErrActorNotHosted
+	res, err := h.doInvokeLocal(ctx, aRef, method, data)
+	if err != nil {
+		return err
+	}
+
+	// Assign res to out if not nil
+	if out != nil {
+		outVal := reflect.ValueOf(out)
+		if outVal.IsNil() {
+			// Caller doesn't care about return value
+			return nil
+		}
+		if outVal.Kind() != reflect.Ptr {
+			return errors.New("parameter out must be a non-nil pointer")
+		}
+		resVal := reflect.ValueOf(res)
+		if !resVal.Type().AssignableTo(outVal.Elem().Type()) {
+			return fmt.Errorf("cannot assign result of type %T to out of type %T", res, out)
+		}
+		outVal.Elem().Set(resVal)
+	}
+
+	return nil
+}
+
+func (h *Host) doInvokeRemote(ctx context.Context, aRef ref.ActorRef, lar components.LookupActorRes, method string, data any, out any) error {
+	// Request URL
+	u := url.URL{}
+	u.Scheme = "https:"
+	u.Host = lar.Address
+	u.Path = "/v1/invoke/" + aRef.String() + "/" + method
+
+	// Encode the body using msgpack
+	var br *io.PipeReader
+	if data != nil {
+		var bw *io.PipeWriter
+		br, bw = io.Pipe()
+		go func() {
+			enc := msgpack.GetEncoder()
+			defer msgpack.PutEncoder(enc)
+			enc.Reset(bw)
+			be := enc.Encode(data)
+			if be != nil {
+				bw.CloseWithError(be)
+			}
+		}()
+	}
+
+	// TODO: retry in case of errors?
+	// TODO: Set timeout in context
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), br)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// TODO: Auth
+	req.Header.Set(headerUserAgent, userAgentValue)
+	req.Header.Set(headerHostID, lar.HostID)
+
+	res, err := h.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer res.Body.Close()
+
+	dec := msgpack.GetDecoder()
+	dec.Reset(res.Body)
+	defer msgpack.PutDecoder(dec)
+
+	// Handle API errors
+	// The response must have status 2XX in case of success
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		// Parse the error in the body
+		// First, check if it's encoded with msgpack
+		if res.Header.Get(headerContentType) == contentTypeMsgpack {
+			var apiErr apiError
+			err = dec.Decode(&apiErr)
+			if err != nil {
+				return fmt.Errorf("request failed with status code %d and failed to read msgpack response body with error: %w", res.StatusCode, err)
+			}
+			return fmt.Errorf("request failed with status code %d and API error: %w", res.StatusCode, apiErr)
+		}
+
+		// Return the error as-is
+		var body []byte
+		body, err = io.ReadAll(res.Body)
+		if err != nil {
+			return fmt.Errorf("request failed with status code %d and failed to read raw response body with error: %w", res.StatusCode, err)
+		}
+
+		return fmt.Errorf("request failed with status code %d and raw error: %s", res.StatusCode, string(body))
+	}
+
+	// Parse the response body unless the status code is 204 No Content
+	if res.StatusCode != http.StatusNoContent {
+		err = dec.Decode(&out)
+		if err != nil {
+			return fmt.Errorf("failed to decode response body into output object: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (h *Host) doInvokeLocal(ctx context.Context, ref ref.ActorRef, method string, data any) (any, error) {
 	return h.lockAndInvokeFn(ctx, ref, func(ctx context.Context, act *activeActor) (any, error) {
 		obj, ok := act.instance.(actor.ActorInvoke)
 		if !ok {

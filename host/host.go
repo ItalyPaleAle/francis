@@ -2,15 +2,22 @@ package host
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
+	"net/http"
+	"strconv"
 	"sync/atomic"
 	"time"
 
 	"github.com/alphadose/haxmap"
 	backoff "github.com/cenkalti/backoff/v5"
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/actors/actor"
@@ -26,6 +33,8 @@ import (
 // License: Apache2
 
 const (
+	defaultBindPort               = 7577
+	defaultBindAddress            = "127.0.0.1"
 	defaultShutdownGracePeriod    = 30 * time.Second
 	defaultActorsMapSize          = 128
 	defaultIdleTimeout            = 5 * time.Minute
@@ -33,6 +42,8 @@ const (
 	defaultProviderRequestTimeout = 15 * time.Second
 	// If an idle actor is getting deactivated, but it's still busy, will be re-enqueued with its idle timeout increased by this duration
 	actorBusyReEnqueueInterval = 10 * time.Second
+
+	minTLSVersion = tls.VersionTLS13
 )
 
 // Re-export provider options
@@ -49,6 +60,7 @@ type Host struct {
 	running       atomic.Bool
 	actorProvider components.ActorProvider
 	service       *actor.Service
+	client        *http.Client
 
 	// Actor factory methods; key is actor type
 	actorFactories map[string]actor.Factory
@@ -60,6 +72,8 @@ type Host struct {
 	// Map of actor configuration objects; key is actor type
 	actorsConfig map[string]components.ActorHostType
 
+	bind                   string
+	serverTLSConfig        *tls.Config
 	providerRequestTimeout time.Duration
 	shutdownGracePeriod    time.Duration
 
@@ -75,9 +89,31 @@ type RegisterActorOptions struct {
 	ConcurrencyLimit    int
 }
 
+// HostTLSOptions contains the options for the host's TLS configuration.
+// All fields are optional
+type HostTLSOptions struct {
+	// CA Certificate, used by all nodes in the cluster
+	CACertificate *x509.Certificate
+	// TLS certificate and key for the server
+	// If empty, uses a self-signed certificate
+	ServerCertificate *tls.Certificate
+	// If true, skips validating TLS certificates presented by other hosts
+	// This is required when using self-signed certificates
+	InsecureSkipTLSValidation bool
+}
+
 type NewHostOptions struct {
 	// Address where the host can be reached at
 	Address string
+
+	// Port for the server to listen on (default: 7577)
+	BindPort int
+
+	// Address to bind the server to (default: "127.0.0.1")
+	BindAddress string
+
+	// TLS options
+	TLSOptions *HostTLSOptions
 
 	// Instance of a slog.Logger
 	Logger *slog.Logger
@@ -117,7 +153,7 @@ func (o NewHostOptions) getProviderConfig() components.ProviderConfig {
 }
 
 // NewHost returns a new actor host.
-func NewHost(opts NewHostOptions) (*Host, error) {
+func NewHost(opts NewHostOptions) (h *Host, err error) {
 	// Validate the options passed
 	if opts.Address == "" {
 		return nil, errors.New("option Address is required")
@@ -129,6 +165,12 @@ func NewHost(opts NewHostOptions) (*Host, error) {
 	}
 
 	// Set other default values
+	if opts.BindAddress == "" {
+		opts.BindAddress = defaultBindAddress
+	}
+	if opts.BindPort <= 0 {
+		opts.BindPort = defaultBindPort
+	}
 	if opts.ShutdownGracePeriod <= 0 {
 		opts.ShutdownGracePeriod = defaultShutdownGracePeriod
 	}
@@ -142,10 +184,7 @@ func NewHost(opts NewHostOptions) (*Host, error) {
 	}
 
 	// Get the provider
-	var (
-		actorProvider components.ActorProvider
-		err           error
-	)
+	var actorProvider components.ActorProvider
 	switch x := opts.ProviderOptions.(type) {
 	case sqlite.SQLiteProviderOptions:
 		actorProvider, err = sqlite.NewSQLiteProvider(opts.Logger, x, opts.getProviderConfig())
@@ -163,7 +202,7 @@ func NewHost(opts NewHostOptions) (*Host, error) {
 		return nil, fmt.Errorf("unsupported value for ProviderOptions: %T", opts.ProviderOptions)
 	}
 
-	h := &Host{
+	h = &Host{
 		address:                opts.Address,
 		actorProvider:          actorProvider,
 		actorsConfig:           map[string]components.ActorHostType{},
@@ -171,6 +210,7 @@ func NewHost(opts NewHostOptions) (*Host, error) {
 		actors:                 haxmap.New[string, *activeActor](defaultActorsMapSize),
 		shutdownGracePeriod:    opts.ShutdownGracePeriod,
 		providerRequestTimeout: opts.ProviderRequestTimeout,
+		bind:                   net.JoinHostPort(opts.BindAddress, strconv.Itoa(opts.BindPort)),
 		logSource:              opts.Logger,
 		clock:                  opts.clock,
 	}
@@ -179,6 +219,22 @@ func NewHost(opts NewHostOptions) (*Host, error) {
 		Clock:     h.clock,
 		ExecuteFn: h.handleIdleActor,
 	})
+
+	// Init the TLS certificate for the server
+	clientTLSConfig, err := h.initTLS(opts.TLSOptions)
+	if err != nil {
+		return nil, err
+	}
+
+	// Init the HTTP client for the host
+	// This is configured with HTTP3 support
+	// TODO: Allow passing a client that is configured with OTel tracing
+	h.client = &http.Client{
+		Transport: &http3.Transport{
+			TLSClientConfig: clientTLSConfig,
+			QUICConfig:      &quic.Config{},
+		},
+	}
 
 	return h, nil
 }
@@ -306,6 +362,9 @@ func (h *Host) Run(parentCtx context.Context) error {
 			// In background also renew leases
 			h.runLeaseRenewal,
 
+			// Run the server that allows receiving requests from other nodes
+			h.runServer,
+
 			// Run the actor provider
 			h.actorProvider.Run,
 		).
@@ -351,7 +410,7 @@ func (h *Host) Halt(actorType string, actorID string) error {
 	aRef := ref.NewActorRef(actorType, actorID)
 	act, ok := h.actors.Get(aRef.String())
 	if !ok || act == nil {
-		return errActorNotHosted
+		return ErrActorNotHosted
 	}
 
 	// Gracefully halt the actor

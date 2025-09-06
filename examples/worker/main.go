@@ -102,7 +102,8 @@ func runControlServer(actorService *actor.Service) func(ctx context.Context) err
 				return
 			}
 
-			resp, err := actorService.Invoke(r.Context(), r.PathValue("actorType"), r.PathValue("actorID"), r.PathValue("method"), body)
+			var resp any
+			err = actorService.Invoke(r.Context(), r.PathValue("actorType"), r.PathValue("actorID"), r.PathValue("method"), body, &resp)
 			if err != nil {
 				log.ErrorContext(r.Context(), "Error invoking actor", slog.Any("error", err))
 				w.WriteHeader(http.StatusInternalServerError)
