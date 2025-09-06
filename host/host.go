@@ -33,8 +33,6 @@ import (
 // License: Apache2
 
 const (
-	defaultBindPort               = 7577
-	defaultBindAddress            = "127.0.0.1"
 	defaultShutdownGracePeriod    = 30 * time.Second
 	defaultActorsMapSize          = 128
 	defaultIdleTimeout            = 5 * time.Minute
@@ -106,10 +104,12 @@ type NewHostOptions struct {
 	// Address where the host can be reached at
 	Address string
 
-	// Port for the server to listen on (default: 7577)
+	// Port for the server to listen on
+	// If empty, will be extracted from Address
 	BindPort int
 
-	// Address to bind the server to (default: "127.0.0.1")
+	// Address to bind the server to
+	// If empty, will be extracted from Address
 	BindAddress string
 
 	// TLS options
@@ -158,6 +158,14 @@ func NewHost(opts NewHostOptions) (h *Host, err error) {
 	if opts.Address == "" {
 		return nil, errors.New("option Address is required")
 	}
+	addrHost, addrPortStr, err := net.SplitHostPort(opts.Address)
+	if err != nil {
+		return nil, fmt.Errorf("option Address is invalid: cannot split host and port: %w", err)
+	}
+	addrPort, err := strconv.Atoi(addrPortStr)
+	if err != nil || addrPort == 0 {
+		return nil, errors.New("option Address is invalid: port is invalid")
+	}
 
 	// Set a default logger, which sends logs to /dev/null, if none is passed
 	if opts.Logger == nil {
@@ -166,10 +174,10 @@ func NewHost(opts NewHostOptions) (h *Host, err error) {
 
 	// Set other default values
 	if opts.BindAddress == "" {
-		opts.BindAddress = defaultBindAddress
+		opts.BindAddress = addrHost
 	}
 	if opts.BindPort <= 0 {
-		opts.BindPort = defaultBindPort
+		opts.BindPort = addrPort
 	}
 	if opts.ShutdownGracePeriod <= 0 {
 		opts.ShutdownGracePeriod = defaultShutdownGracePeriod

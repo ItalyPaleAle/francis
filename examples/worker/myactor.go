@@ -47,7 +47,6 @@ func (m *MyActor) Invoke(ctx context.Context, method string, data any) (any, err
 	if strings.HasSuffix(method, "-wait") {
 		method = strings.TrimSuffix(method, "-wait")
 
-		fmt.Println("INVOKE START")
 		const waitTime = 25000 * time.Millisecond
 		select {
 		case <-time.After(waitTime):
@@ -55,7 +54,6 @@ func (m *MyActor) Invoke(ctx context.Context, method string, data any) (any, err
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
-		fmt.Println("INVOKE END")
 	}
 
 	switch method {

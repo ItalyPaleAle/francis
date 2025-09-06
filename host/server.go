@@ -75,8 +75,9 @@ func (h *Host) getServerMux() *http.ServeMux {
 		defer r.Body.Close()
 
 		var (
-			apiErr           *apiError
-			err              error
+			apiErr *apiError
+			err    error
+
 			reqData, outData any
 		)
 

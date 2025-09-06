@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,9 +20,17 @@ import (
 	"github.com/italypaleale/actors/internal/signals"
 )
 
-var log *slog.Logger
+var (
+	log              *slog.Logger
+	actorHostAddress string
+	workerAddress    string
+)
 
 func main() {
+	flag.StringVar(&actorHostAddress, "actor-host-address", "127.0.0.1:7571", "Address and port for the actor host to bind to")
+	flag.StringVar(&workerAddress, "worker-address", "127.0.0.1:8081", "Address and port for the example worker to bind to")
+	flag.Parse()
+
 	log = initLogger(slog.LevelDebug)
 
 	ctx := signals.SignalContext(context.Background(), log)
@@ -53,12 +62,15 @@ func initLogger(level slog.Level) *slog.Logger {
 func runWorker(ctx context.Context) error {
 	// Create a new actor host
 	h, err := host.NewHost(host.NewHostOptions{
-		Address: "todo",
+		Address: actorHostAddress,
 		Logger:  log.With("scope", "actor-host"),
 		ProviderOptions: host.SQLiteProviderOptions{
 			ConnectionString: "data.db",
 		},
 		ShutdownGracePeriod: 10 * time.Second,
+		TLSOptions: &host.HostTLSOptions{
+			InsecureSkipTLSValidation: true,
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create actor host: %w", err)
@@ -164,7 +176,7 @@ func runControlServer(actorService *actor.Service) func(ctx context.Context) err
 		})
 
 		server := &http.Server{
-			Addr:    "127.0.0.1:8081",
+			Addr:    workerAddress,
 			Handler: mux,
 		}
 		serveErrCh := make(chan error, 1)

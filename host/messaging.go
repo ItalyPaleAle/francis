@@ -85,7 +85,7 @@ func (h *Host) doInvoke(ctx context.Context, aRef ref.ActorRef, method string, d
 func (h *Host) doInvokeRemote(ctx context.Context, aRef ref.ActorRef, lar components.LookupActorRes, method string, data any, out any) error {
 	// Request URL
 	u := url.URL{}
-	u.Scheme = "https:"
+	u.Scheme = "https"
 	u.Host = lar.Address
 	u.Path = "/v1/invoke/" + aRef.String() + "/" + method
 
