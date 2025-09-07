@@ -6,10 +6,15 @@ import (
 )
 
 var (
-	// ErrStateNotFound is returned by getState and deleteState when the object cannot be found.
+	// ErrStateNotFound is returned by GetState and DeleteState when the object cannot be found.
 	ErrStateNotFound = errors.New("state not found for actor")
-	// ErrAlarmNotFound is returned by deleteAlarm when the alarm cannot be found.
+	// ErrAlarmNotFound is returned by DeleteAlarm when the alarm cannot be found.
 	ErrAlarmNotFound = errors.New("alarm not found")
+	// ErrActorNotHosted is returned by Halt when the actor is not active on the current host.
+	ErrActorNotHosted = errors.New("actor is not active on the current host")
+	// ErrActorHalted is returned by methods that perform invocation when the actor is halted on the current host.
+	// Callers should retry after a delay.
+	ErrActorHalted = errors.New("actor is halted")
 )
 
 // Service allows interacting with the actor host, to invoke actors and perform operations on state and alarms.
@@ -58,10 +63,12 @@ func (s Service) DeleteAlarm(ctx context.Context, actorType string, actorID stri
 	return s.host.DeleteAlarm(ctx, actorType, actorID, alarmName)
 }
 
+// HaltAll halts all actors currently active on the host.
 func (s Service) HaltAll() error {
 	return s.host.HaltAll()
 }
 
+// Halt halts one actor currently active on the host.
 func (s Service) Halt(actorType string, actorID string) error {
 	return s.host.Halt(actorType, actorID)
 }

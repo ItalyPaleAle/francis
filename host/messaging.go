@@ -47,7 +47,7 @@ func (h *Host) doInvoke(ctx context.Context, aRef ref.ActorRef, method string, d
 	if lar.HostID != h.hostID {
 		if local {
 			// Caller wanted to invoke a local actor only
-			return ErrActorNotHosted
+			return actor.ErrActorNotHosted
 		}
 
 		// Invoke the remote actor
@@ -137,6 +137,8 @@ func (h *Host) doInvokeRemote(ctx context.Context, aRef ref.ActorRef, lar compon
 			if err != nil {
 				return fmt.Errorf("request failed with status code %d and failed to read msgpack response body with error: %w", res.StatusCode, err)
 			}
+			// TODO: Check API errors
+			// Some errors to consider include "req_invoke_hostid_mismatch" (re-fetch cached address and retry)
 			return fmt.Errorf("request failed with status code %d and API error: %w", res.StatusCode, apiErr)
 		}
 

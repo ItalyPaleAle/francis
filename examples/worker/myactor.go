@@ -70,7 +70,7 @@ func (m *MyActor) Invoke(ctx context.Context, method string, data any) (any, err
 
 	m.log.InfoContext(ctx, "Actor invoked", "method", method, "counter", state.Counter, "invocations", m.invocations)
 
-	return state.Counter, nil
+	return state, nil
 }
 
 func (m *MyActor) Alarm(ctx context.Context, name string, data any) error {

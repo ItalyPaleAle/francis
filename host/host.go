@@ -418,7 +418,7 @@ func (h *Host) Halt(actorType string, actorID string) error {
 	aRef := ref.NewActorRef(actorType, actorID)
 	act, ok := h.actors.Get(aRef.String())
 	if !ok || act == nil {
-		return ErrActorNotHosted
+		return actor.ErrActorNotHosted
 	}
 
 	// Gracefully halt the actor

@@ -85,14 +85,14 @@ func (a *activeActor) updateIdleAt(d time.Duration) {
 // TryLock tries to lock the actor for turn-based concurrency, if the actor isn't already locked.
 func (a *activeActor) TryLock() (bool, chan struct{}, error) {
 	if a.halted.Load() {
-		return false, nil, ErrActorHalted
+		return false, nil, actor.ErrActorHalted
 	}
 
 	ok, err := a.locker.TryLock()
 	switch {
 	case errors.Is(err, locker.ErrStopped):
 		// If the locker is stopped, it means that the actor has been halted
-		return false, nil, ErrActorHalted
+		return false, nil, actor.ErrActorHalted
 	case err != nil:
 		return false, nil, fmt.Errorf("failed to acquire lock: %w", err)
 	}
@@ -112,14 +112,14 @@ func (a *activeActor) TryLock() (bool, chan struct{}, error) {
 // This function blocks until the lock is acquired
 func (a *activeActor) Lock(ctx context.Context) (chan struct{}, error) {
 	if a.halted.Load() {
-		return nil, ErrActorHalted
+		return nil, actor.ErrActorHalted
 	}
 
 	err := a.locker.Lock(ctx)
 	switch {
 	case errors.Is(err, locker.ErrStopped):
 		// If the locker is stopped, it means that the actor has been halted
-		return nil, ErrActorHalted
+		return nil, actor.ErrActorHalted
 	case ctx.Err() != nil && errors.Is(err, ctx.Err()):
 		return nil, ctx.Err()
 	case err != nil:

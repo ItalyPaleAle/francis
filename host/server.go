@@ -19,6 +19,8 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	msgpack "github.com/vmihailenco/msgpack/v5"
+
+	"github.com/italypaleale/actors/actor"
 )
 
 func (h *Host) runServer(ctx context.Context) (err error) {
@@ -81,6 +83,19 @@ func (h *Host) getServerMux() *http.ServeMux {
 			reqData, outData any
 		)
 
+		// Validate the request is for the correct host
+		// It can happen that clients make calls to incorrect hosts if the app just (re-)started and their cached data is stale
+		hostID := r.Header.Get(headerHostID)
+		if hostID == "" {
+			apiErr = newApiErrorf(http.StatusBadRequest, "req_invoke_hostid_empty", "%s header is missing in the request", headerHostID)
+			apiErr.WriteResponse(w)
+			return
+		} else if hostID != h.hostID {
+			apiErr = newApiErrorf(http.StatusConflict, "req_invoke_hostid_mismatch", "Request is for host ID '%s', but current host ID is '%s'", hostID, h.hostID)
+			apiErr.WriteResponse(w)
+			return
+		}
+
 		// Read the request body
 		ct := r.Header.Get(headerContentType)
 		switch ct {
@@ -105,9 +120,9 @@ func (h *Host) getServerMux() *http.ServeMux {
 		// Invoke the actor
 		err = h.InvokeLocal(r.Context(), r.PathValue("actorType"), r.PathValue("actorID"), r.PathValue("method"), reqData, &outData)
 		switch {
-		case errors.Is(err, ErrActorNotHosted):
+		case errors.Is(err, actor.ErrActorNotHosted):
 			apiErr = newApiError(http.StatusNotFound, "actor_not_hosted", "Actor is not active on the current host")
-		case errors.Is(err, ErrActorHalted):
+		case errors.Is(err, actor.ErrActorHalted):
 			apiErr = newApiError(http.StatusConflict, "actor_halted", "Actor is halted")
 		case err != nil:
 			apiErr = newApiErrorf(http.StatusInternalServerError, "invoke_error", "Actor invocation error: %v", err)

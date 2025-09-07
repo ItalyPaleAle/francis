@@ -2,18 +2,12 @@ package host
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 
 	msgpack "github.com/vmihailenco/msgpack/v5"
-)
-
-var (
-	ErrActorHalted    = errors.New("actor is halted")
-	ErrActorNotHosted = errors.New("actor is not active on the current host")
 )
 
 type apiError struct {
