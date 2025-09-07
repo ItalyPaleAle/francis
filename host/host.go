@@ -33,11 +33,17 @@ import (
 // License: Apache2
 
 const (
-	defaultShutdownGracePeriod    = 30 * time.Second
-	defaultActorsMapSize          = 128
-	defaultIdleTimeout            = 5 * time.Minute
-	defaultDeactivationTimeout    = 5 * time.Second
-	defaultProviderRequestTimeout = 15 * time.Second
+	defaultShutdownGracePeriod      = 30 * time.Second
+	defaultActorsMapSize            = 128
+	defaultIdleTimeout              = 5 * time.Minute
+	defaultDeactivationTimeout      = 5 * time.Second
+	defaultProviderRequestTimeout   = 15 * time.Second
+	defaultHostHealthCheckDeadline  = 20 * time.Second
+	defaultAlarmsPollInterval       = 1500 * time.Millisecond
+	defaultAlarmsLeaseDuration      = 20 * time.Second
+	defaultAlarmsFetchAheadInterval = 2500 * time.Millisecond
+	defaultAlarmsFetchAheadBatch    = 25
+
 	// If an idle actor is getting deactivated, but it's still busy, will be re-enqueued with its idle timeout increased by this duration
 	actorBusyReEnqueueInterval = 10 * time.Second
 
@@ -72,6 +78,7 @@ type Host struct {
 
 	bind                   string
 	serverTLSConfig        *tls.Config
+	alarmsPollInterval     time.Duration
 	providerRequestTimeout time.Duration
 	shutdownGracePeriod    time.Duration
 
@@ -121,8 +128,11 @@ type NewHostOptions struct {
 	// Options for the provider
 	ProviderOptions components.ProviderOptions
 
-	// Maximum interval between pings received from an actor host.
+	// Maximum interval between pings received from an actor host
 	HostHealthCheckDeadline time.Duration
+
+	// Interval for polling alarms
+	AlarmsPollInterval time.Duration
 
 	// Alarms lease duration
 	AlarmsLeaseDuration time.Duration
@@ -154,7 +164,7 @@ func (o NewHostOptions) getProviderConfig() components.ProviderConfig {
 
 // NewHost returns a new actor host.
 func NewHost(opts NewHostOptions) (h *Host, err error) {
-	// Validate the options passed
+	// Validate the address
 	if opts.Address == "" {
 		return nil, errors.New("option Address is required")
 	}
@@ -184,6 +194,21 @@ func NewHost(opts NewHostOptions) (h *Host, err error) {
 	}
 	if opts.ProviderRequestTimeout <= 0 {
 		opts.ProviderRequestTimeout = defaultProviderRequestTimeout
+	}
+	if opts.HostHealthCheckDeadline < time.Second {
+		opts.HostHealthCheckDeadline = defaultHostHealthCheckDeadline
+	}
+	if opts.AlarmsPollInterval <= 100*time.Millisecond {
+		opts.AlarmsLeaseDuration = defaultAlarmsPollInterval
+	}
+	if opts.AlarmsLeaseDuration < time.Second {
+		opts.AlarmsLeaseDuration = defaultAlarmsLeaseDuration
+	}
+	if opts.AlarmsFetchAheadInterval < 100*time.Millisecond {
+		opts.AlarmsFetchAheadInterval = defaultAlarmsFetchAheadInterval
+	}
+	if opts.AlarmsFetchAheadBatchSize <= 0 {
+		opts.AlarmsFetchAheadBatchSize = defaultAlarmsFetchAheadBatch
 	}
 
 	// Init a real clock if none is passed
@@ -216,6 +241,7 @@ func NewHost(opts NewHostOptions) (h *Host, err error) {
 		actorsConfig:           map[string]components.ActorHostType{},
 		actorFactories:         map[string]actor.Factory{},
 		actors:                 haxmap.New[string, *activeActor](defaultActorsMapSize),
+		alarmsPollInterval:     opts.AlarmsPollInterval,
 		shutdownGracePeriod:    opts.ShutdownGracePeriod,
 		providerRequestTimeout: opts.ProviderRequestTimeout,
 		bind:                   net.JoinHostPort(opts.BindAddress, strconv.Itoa(opts.BindPort)),
@@ -437,7 +463,7 @@ func (h *Host) runHealthChecks(parentCtx context.Context) error {
 	interval := h.actorProvider.HealthCheckInterval()
 	h.log.DebugContext(parentCtx, "Starting background health checks", slog.Any("interval", interval))
 
-	t := time.NewTicker(interval)
+	t := h.clock.NewTicker(interval)
 	defer t.Stop()
 
 	retryOpts := []backoff.RetryOption{
@@ -447,7 +473,7 @@ func (h *Host) runHealthChecks(parentCtx context.Context) error {
 
 	for {
 		select {
-		case <-t.C:
+		case <-t.C():
 			h.log.DebugContext(parentCtx, "Sending health check to the provider")
 			_, err = backoff.Retry(parentCtx, func() (r struct{}, rErr error) {
 				ctx, cancel := context.WithTimeout(parentCtx, h.providerRequestTimeout)
@@ -482,13 +508,13 @@ func (h *Host) runLeaseRenewal(parentCtx context.Context) (err error) {
 	interval := h.actorProvider.RenewLeaseInterval()
 	h.log.DebugContext(parentCtx, "Starting background alarm lease renewal", slog.Any("interval", interval))
 
-	t := time.NewTicker(interval)
+	t := h.clock.NewTicker(interval)
 	defer t.Stop()
 
 	hostList := []string{h.hostID}
 	for {
 		select {
-		case <-t.C:
+		case <-t.C():
 			ctx, cancel := context.WithTimeout(parentCtx, h.providerRequestTimeout)
 			defer cancel()
 			res, err = h.actorProvider.RenewAlarmLeases(ctx, components.RenewAlarmLeasesReq{

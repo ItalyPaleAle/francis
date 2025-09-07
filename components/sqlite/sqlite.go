@@ -47,7 +47,10 @@ type SQLiteProvider struct {
 }
 
 func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, providerConfig components.ProviderConfig) (*SQLiteProvider, error) {
-	var err error
+	err := providerConfig.Validate()
+	if err != nil {
+		return nil, fmt.Errorf("provider configuration is not valid: %w", err)
+	}
 
 	s := &SQLiteProvider{
 		// TODO: Set a PID
@@ -61,7 +64,6 @@ func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, provi
 	}
 
 	// Set default values
-	s.cfg.SetDefaults()
 	if s.timeout <= 0 {
 		s.timeout = DefaultTimeout
 	}

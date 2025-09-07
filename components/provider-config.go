@@ -1,6 +1,7 @@
 package components
 
 import (
+	"errors"
 	"time"
 )
 
@@ -19,17 +20,18 @@ type ProviderConfig struct {
 	AlarmsFetchAheadBatchSize int
 }
 
-func (o *ProviderConfig) SetDefaults() {
+func (o *ProviderConfig) Validate() error {
 	if o.HostHealthCheckDeadline < time.Second {
-		o.HostHealthCheckDeadline = DefaultHostHealthCheckDeadline
+		return errors.New("property HostHealthCheckDeadline is not valid: must be at least 1s")
 	}
 	if o.AlarmsLeaseDuration < time.Second {
-		o.AlarmsLeaseDuration = DefaultAlarmsLeaseDuration
+		return errors.New("property AlarmsLeaseDuration is not valid: must be at least 1s")
 	}
 	if o.AlarmsFetchAheadInterval < 100*time.Millisecond {
-		o.AlarmsFetchAheadInterval = DefaultAlarmsFetchAheadInterval
+		return errors.New("property AlarmsFetchAheadInterval is not valid: must be at least 100ms")
 	}
 	if o.AlarmsFetchAheadBatchSize <= 0 {
-		o.AlarmsFetchAheadBatchSize = DefaultAlarmsFetchAheadBatch
+		return errors.New("property AlarmsFetchAheadBatchSize is not valid: must be greater than 0")
 	}
+	return nil
 }

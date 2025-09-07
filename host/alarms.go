@@ -4,40 +4,28 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/italypaleale/actors/actor"
 	"github.com/italypaleale/actors/components"
 	"github.com/italypaleale/actors/internal/ref"
 )
 
-func alarmPropertiesFromAlarmRes(res components.GetAlarmRes) (actor.AlarmProperties, error) {
-	o := actor.AlarmProperties{
-		DueTime:  res.DueTime,
-		Interval: res.Interval,
-		Data:     res.Data,
+func (h *Host) runAlarmFetcher(parentCtx context.Context) error {
+	h.log.DebugContext(parentCtx, "Starting background alarm fetching", slog.Any("interval", h.alarmsPollInterval))
+
+	t := h.clock.NewTicker(h.alarmsPollInterval)
+	defer t.Stop()
+
+	for {
+		select {
+		case <-t.C():
+			// TODO
+		case <-parentCtx.Done():
+			// Stop when the context is canceled
+			return parentCtx.Err()
+		}
 	}
-
-	if res.TTL != nil {
-		o.TTL = *res.TTL
-	}
-
-	return o, nil
-}
-
-func alarmPropertiesToAlarmReq(o actor.AlarmProperties) (components.SetAlarmReq, error) {
-	req := components.SetAlarmReq{
-		AlarmProperties: ref.AlarmProperties{
-			DueTime:  o.DueTime,
-			Interval: o.Interval,
-			Data:     o.Data,
-		},
-	}
-
-	if !o.TTL.IsZero() {
-		req.TTL = &o.TTL
-	}
-
-	return req, nil
 }
 
 func (h *Host) GetAlarm(ctx context.Context, actorType string, actorID string, name string) (actor.AlarmProperties, error) {
@@ -79,4 +67,34 @@ func (h *Host) DeleteAlarm(ctx context.Context, actorType string, actorID string
 	}
 
 	return nil
+}
+
+func alarmPropertiesFromAlarmRes(res components.GetAlarmRes) (actor.AlarmProperties, error) {
+	o := actor.AlarmProperties{
+		DueTime:  res.DueTime,
+		Interval: res.Interval,
+		Data:     res.Data,
+	}
+
+	if res.TTL != nil {
+		o.TTL = *res.TTL
+	}
+
+	return o, nil
+}
+
+func alarmPropertiesToAlarmReq(o actor.AlarmProperties) (components.SetAlarmReq, error) {
+	req := components.SetAlarmReq{
+		AlarmProperties: ref.AlarmProperties{
+			DueTime:  o.DueTime,
+			Interval: o.Interval,
+			Data:     o.Data,
+		},
+	}
+
+	if !o.TTL.IsZero() {
+		req.TTL = &o.TTL
+	}
+
+	return req, nil
 }
