@@ -605,7 +605,10 @@ func (h *Host) haltActiveActor(act *activeActor) error {
 	ctx, cancel := context.WithTimeout(context.Background(), h.providerRequestTimeout)
 	defer cancel()
 	err = h.actorProvider.RemoveActor(ctx, act.ref)
-	if err != nil {
+	if errors.Is(err, components.ErrNoActor) {
+		// If the error is ErrNoActor, it means that the actor was already deactivated on the provider, so we can just ignore the erro
+		return nil
+	} else if err != nil {
 		return fmt.Errorf("failed to remove actor from the provider: %w", err)
 	}
 

@@ -85,6 +85,7 @@ func (h *Host) executeAlarm(lease *ref.AlarmLease) {
 	h.log.Debug("Executing alarm", slog.String("id", lease.Key()), slog.Any("due", lease.DueTime()))
 
 	// Get and lock the actor
+	// TODO: Need to remove the completed alarm
 	_, err := h.lockAndInvokeFn(context.Background(), lease.ActorRef(), func(parentCtx context.Context, act *activeActor) (any, error) {
 		// Before we execute an alarm we need to fetch it again using the lease
 		// This is because alarms we have in-memory could have been here for a few seconds, and they may not represent the accurate
