@@ -56,7 +56,7 @@ type ActorProvider interface {
 	DeleteAlarm(ctx context.Context, ref ref.AlarmRef) error
 
 	// FetchAndLeaseUpcomingAlarms fetches the upcoming alarms, acquiring a lease on them.
-	FetchAndLeaseUpcomingAlarms(ctx context.Context, req FetchAndLeaseUpcomingAlarmsReq) ([]ref.AlarmLease, error)
+	FetchAndLeaseUpcomingAlarms(ctx context.Context, req FetchAndLeaseUpcomingAlarmsReq) ([]*ref.AlarmLease, error)
 
 	// RenewAlarmLeases renews the leases for the alarms in the request.
 	// The method can renew specific alarm leases and/or those tied to specific hosts.
@@ -64,19 +64,19 @@ type ActorProvider interface {
 
 	// ReleaseAlarmLease releases an active lease on an alarm.
 	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
-	ReleaseAlarmLease(ctx context.Context, lease ref.AlarmLease) error
+	ReleaseAlarmLease(ctx context.Context, lease *ref.AlarmLease) error
 
 	// GetLeasedAlarm retrieves an alarm using an alarm lease object.
 	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
-	GetLeasedAlarm(ctx context.Context, lease ref.AlarmLease) (GetLeasedAlarmRes, error)
+	GetLeasedAlarm(ctx context.Context, lease *ref.AlarmLease) (GetLeasedAlarmRes, error)
 
 	// UpdateLeasedAlarm updates an alarm using an alarm lease object.
 	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
-	UpdateLeasedAlarm(ctx context.Context, lease ref.AlarmLease, req UpdateLeasedAlarmReq) error
+	UpdateLeasedAlarm(ctx context.Context, lease *ref.AlarmLease, req UpdateLeasedAlarmReq) error
 
 	// DeleteLeasedAlarm deletes an alarm using an alarm lease object.
 	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
-	DeleteLeasedAlarm(ctx context.Context, lease ref.AlarmLease) error
+	DeleteLeasedAlarm(ctx context.Context, lease *ref.AlarmLease) error
 
 	// GetState retrieves the persistent state of an actor.
 	// If there's no state, returns ErrNoState.
@@ -176,13 +176,13 @@ type RenewAlarmLeasesReq struct {
 	Hosts []string
 	// Optional list of leases to renew.
 	// If this is empty, renews the lease for all alarms on the host.
-	Leases []ref.AlarmLease
+	Leases []*ref.AlarmLease
 }
 
 // RenewAlarmLeasesRes is the response object for the RenewAlarmLeases method.
 type RenewAlarmLeasesRes struct {
 	// List of leases that were successfully renewed.
-	Leases []ref.AlarmLease
+	Leases []*ref.AlarmLease
 }
 
 // GetLeasedAlarmRes is the response object for the GetLeasedAlarm method.

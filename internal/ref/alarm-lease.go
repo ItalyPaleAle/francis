@@ -13,8 +13,8 @@ type AlarmLease struct {
 }
 
 // NewAlarmLease returns a new AlarmLease object.
-func NewAlarmLease(alarmID string, dueTime time.Time, leaseID any) AlarmLease {
-	return AlarmLease{
+func NewAlarmLease(alarmID string, dueTime time.Time, leaseID any) *AlarmLease {
+	return &AlarmLease{
 		alarmID: alarmID,
 		dueTime: dueTime,
 		leaseID: leaseID,

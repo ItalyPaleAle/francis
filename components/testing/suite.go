@@ -1148,19 +1148,15 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 		require.NoError(t, err)
 
 		// Find our specific alarm lease
-		var (
-			targetLease ref.AlarmLease
-			found       bool
-		)
+		var targetLease *ref.AlarmLease
 		for _, lease := range fetchRes {
 			alarmDetails, err := s.p.GetLeasedAlarm(ctx, lease)
 			if err == nil && alarmDetails.ActorType == aRef.ActorType && alarmDetails.ActorID == aRef.ActorID {
 				targetLease = lease
-				found = true
 				break
 			}
 		}
-		require.True(t, found, "should have found and leased the alarm for our test actor")
+		require.NotNil(t, targetLease, "should have found and leased the alarm for our test actor")
 
 		// Verify the alarm is properly leased before removal
 		_, err = s.p.GetLeasedAlarm(ctx, targetLease)
@@ -1852,7 +1848,7 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
 
 		// Find an alarm with known data - look for one of the active actor alarms
-		var targetLease ref.AlarmLease
+		targetLease := &ref.AlarmLease{}
 		var found bool
 		for _, lease := range res {
 			// ALM-A-1, ALM-A-2, ALM-A-4, ALM-B-1, ALM-B-2 should have specific data
@@ -2039,7 +2035,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 		require.GreaterOrEqual(t, len(res), 3, "need at least 3 leases for this test")
 
 		// Select first 2 leases for renewal
-		leasesToRenew := []ref.AlarmLease{res[0], res[1]}
+		leasesToRenew := []*ref.AlarmLease{res[0], res[1]}
 		leaseNotRenewed := res[2]
 
 		// Advance time partway through lease duration
@@ -2156,7 +2152,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 		// Try to renew mix of valid and invalid leases
 		renewReq := components.RenewAlarmLeasesReq{
 			Hosts:  []string{"H7", "H8"},
-			Leases: []ref.AlarmLease{validLease, invalidLease},
+			Leases: []*ref.AlarmLease{validLease, invalidLease},
 		}
 		renewRes, err := s.p.RenewAlarmLeases(ctx, renewReq)
 		require.NoError(t, err)

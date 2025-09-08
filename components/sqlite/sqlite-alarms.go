@@ -127,13 +127,13 @@ func (s *SQLiteProvider) DeleteAlarm(ctx context.Context, ref ref.AlarmRef) erro
 	return nil
 }
 
-func (s *SQLiteProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req components.FetchAndLeaseUpcomingAlarmsReq) ([]ref.AlarmLease, error) {
+func (s *SQLiteProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req components.FetchAndLeaseUpcomingAlarmsReq) ([]*ref.AlarmLease, error) {
 	// The list of hosts is required; if there's no host, return an empty list
 	if len(req.Hosts) == 0 {
 		return nil, nil
 	}
 
-	return transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) ([]ref.AlarmLease, error) {
+	return transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) ([]*ref.AlarmLease, error) {
 		fetcher := newUpcomingAlarmFetcher(tx, s, &req)
 
 		res, err := fetcher.FetchUpcoming(ctx)
@@ -145,7 +145,7 @@ func (s *SQLiteProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req co
 	})
 }
 
-func (s *SQLiteProvider) GetLeasedAlarm(ctx context.Context, lease ref.AlarmLease) (res components.GetLeasedAlarmRes, err error) {
+func (s *SQLiteProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmLease) (res components.GetLeasedAlarmRes, err error) {
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
@@ -246,7 +246,7 @@ func (s *SQLiteProvider) RenewAlarmLeases(ctx context.Context, req components.Re
 	}
 	defer rows.Close()
 
-	var renewedLeases []ref.AlarmLease
+	var renewedLeases []*ref.AlarmLease
 	for rows.Next() {
 		var (
 			alarmID, leaseID string
@@ -273,7 +273,7 @@ func (s *SQLiteProvider) RenewAlarmLeases(ctx context.Context, req components.Re
 	return res, nil
 }
 
-func (s *SQLiteProvider) ReleaseAlarmLease(ctx context.Context, lease ref.AlarmLease) error {
+func (s *SQLiteProvider) ReleaseAlarmLease(ctx context.Context, lease *ref.AlarmLease) error {
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
@@ -306,7 +306,7 @@ func (s *SQLiteProvider) ReleaseAlarmLease(ctx context.Context, lease ref.AlarmL
 	return nil
 }
 
-func (s *SQLiteProvider) UpdateLeasedAlarm(ctx context.Context, lease ref.AlarmLease, req components.UpdateLeasedAlarmReq) (err error) {
+func (s *SQLiteProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.AlarmLease, req components.UpdateLeasedAlarmReq) (err error) {
 	var (
 		interval *string
 		ttlTime  *int64
@@ -375,7 +375,7 @@ func (s *SQLiteProvider) UpdateLeasedAlarm(ctx context.Context, lease ref.AlarmL
 	return nil
 }
 
-func (s *SQLiteProvider) DeleteLeasedAlarm(ctx context.Context, lease ref.AlarmLease) error {
+func (s *SQLiteProvider) DeleteLeasedAlarm(ctx context.Context, lease *ref.AlarmLease) error {
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
@@ -438,7 +438,7 @@ func newUpcomingAlarmFetcher(tx *sql.Tx, s *SQLiteProvider, req *components.Fetc
 	}
 }
 
-func (u *upcomingAlarmFetcher) FetchUpcoming(ctx context.Context) ([]ref.AlarmLease, error) {
+func (u *upcomingAlarmFetcher) FetchUpcoming(ctx context.Context) ([]*ref.AlarmLease, error) {
 	// Start by getting the list of active hosts and whether we have any capacity constraint
 	activeHosts, err := u.getActiveHosts(ctx)
 	if err != nil {
@@ -649,7 +649,7 @@ func (u *upcomingAlarmFetcher) allocateActors(ctx context.Context, activeHosts *
 	return nil
 }
 
-func (u *upcomingAlarmFetcher) obtainLeases(ctx context.Context, fetchedUpcoming fetchedUpcomingAlarmsList) ([]ref.AlarmLease, error) {
+func (u *upcomingAlarmFetcher) obtainLeases(ctx context.Context, fetchedUpcoming fetchedUpcomingAlarmsList) ([]*ref.AlarmLease, error) {
 	// Because SQLite doesn't support updating multiple rows with different values, we use a deterministic lease ID
 	// This allows us to perform a single query to update all rows efficiently
 	leaseIDObj, err := uuid.NewV7()
@@ -715,7 +715,7 @@ func (u *upcomingAlarmFetcher) obtainLeases(ctx context.Context, fetchedUpcoming
 
 	// Read the results
 	// Because of the potential of race conditions, someone else may have acquired a lease for the same alarms concurrently, so some rows may not have been updated
-	res := make([]ref.AlarmLease, 0, len(fetchedUpcoming))
+	res := make([]*ref.AlarmLease, 0, len(fetchedUpcoming))
 	for rows.Next() {
 		var (
 			rAlarmID, rLeaseID string

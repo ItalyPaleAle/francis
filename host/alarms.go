@@ -8,24 +8,66 @@ import (
 
 	"github.com/italypaleale/actors/actor"
 	"github.com/italypaleale/actors/components"
+	"github.com/italypaleale/actors/internal/eventqueue"
 	"github.com/italypaleale/actors/internal/ref"
 )
 
-func (h *Host) runAlarmFetcher(parentCtx context.Context) error {
-	h.log.DebugContext(parentCtx, "Starting background alarm fetching", slog.Any("interval", h.alarmsPollInterval))
+func (h *Host) runAlarmFetcher(ctx context.Context) error {
+	h.log.DebugContext(ctx, "Starting background alarm fetcher", slog.Any("interval", h.alarmsPollInterval))
+	defer h.log.Debug("Stopped background alarm fetcher")
+
+	// Start the processor
+	h.alarmProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ref.AlarmLease]{
+		ExecuteFn: func(r *ref.AlarmLease) {},
+	})
+	defer func() {
+		apErr := h.alarmProcessor.Close()
+		if apErr != nil {
+			h.log.Error("Failed to close alarm processor", slog.Any("error", apErr))
+		}
+		h.alarmProcessor = nil
+	}()
 
 	t := h.clock.NewTicker(h.alarmsPollInterval)
 	defer t.Stop()
 
+	var err error
+	hostList := []string{h.hostID}
 	for {
 		select {
 		case <-t.C():
-			// TODO
-		case <-parentCtx.Done():
+			err = h.fetchAndEnqueueAlarms(ctx, hostList)
+			if err != nil {
+				// Log the error only
+				h.log.ErrorContext(ctx, "Failed to fetch alarms", slog.Any("error", err))
+			}
+		case <-ctx.Done():
 			// Stop when the context is canceled
-			return parentCtx.Err()
+			return ctx.Err()
 		}
 	}
+}
+
+func (h *Host) fetchAndEnqueueAlarms(ctx context.Context, hostList []string) error {
+	// Fetch all upcoming alarms
+	res, err := h.actorProvider.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+		Hosts: hostList,
+	})
+	if err != nil {
+		return fmt.Errorf("error fetching alarms: %w", err)
+	}
+
+	// Enqueue all alarms
+	if len(res) == 0 {
+		return nil
+	}
+
+	err = h.alarmProcessor.Enqueue(res...)
+	if err != nil {
+		return fmt.Errorf("error enqueueing alarms: %w", err)
+	}
+
+	return nil
 }
 
 func (h *Host) GetAlarm(ctx context.Context, actorType string, actorID string, name string) (actor.AlarmProperties, error) {

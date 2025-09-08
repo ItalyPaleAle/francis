@@ -72,6 +72,7 @@ type Host struct {
 	// Active actors; key is "actorType/actorID"
 	actors             *haxmap.Map[string, *activeActor]
 	idleActorProcessor *eventqueue.Processor[string, *activeActor]
+	alarmProcessor     *eventqueue.Processor[string, *ref.AlarmLease]
 
 	// Map of actor configuration objects; key is actor type
 	actorsConfig map[string]components.ActorHostType
@@ -393,6 +394,9 @@ func (h *Host) Run(parentCtx context.Context) error {
 			// Perform health checks in background
 			h.runHealthChecks,
 
+			// Run the alarm fetcher in background
+			h.runAlarmFetcher,
+
 			// In background also renew leases
 			h.runLeaseRenewal,
 
@@ -462,6 +466,7 @@ func (h *Host) runHealthChecks(parentCtx context.Context) error {
 	// Perform periodic health checks
 	interval := h.actorProvider.HealthCheckInterval()
 	h.log.DebugContext(parentCtx, "Starting background health checks", slog.Any("interval", interval))
+	defer h.log.Debug("Stopped background health checks")
 
 	t := h.clock.NewTicker(interval)
 	defer t.Stop()
@@ -507,6 +512,7 @@ func (h *Host) runLeaseRenewal(parentCtx context.Context) (err error) {
 	// Renew the alarm leases on a loop
 	interval := h.actorProvider.RenewLeaseInterval()
 	h.log.DebugContext(parentCtx, "Starting background alarm lease renewal", slog.Any("interval", interval))
+	defer h.log.Debug("Stopped background lease renewal")
 
 	t := h.clock.NewTicker(interval)
 	defer t.Stop()
