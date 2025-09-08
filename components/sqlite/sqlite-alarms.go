@@ -239,7 +239,7 @@ func (s *SQLiteProvider) RenewAlarmLeases(ctx context.Context, req components.Re
 				JOIN active_actors aa ON a.actor_type = aa.actor_type AND a.actor_id = aa.actor_id
 				WHERE aa.host_id IN (`+hostPlaceholders+`)
 			)
-		RETURNING alarm_id, alarm_lease_id, alarm_due_time`,
+		RETURNING actor_type, actor_id, alarm_id, alarm_lease_id, alarm_due_time`,
 		args...)
 	if err != nil {
 		return res, fmt.Errorf("query error: %w", err)
@@ -249,15 +249,17 @@ func (s *SQLiteProvider) RenewAlarmLeases(ctx context.Context, req components.Re
 	var renewedLeases []*ref.AlarmLease
 	for rows.Next() {
 		var (
+			aRef             ref.ActorRef
 			alarmID, leaseID string
 			dueTime          int64
 		)
-		err = rows.Scan(&alarmID, &leaseID, &dueTime)
+		err = rows.Scan(&aRef.ActorType, &aRef.ActorID, &alarmID, &leaseID, &dueTime)
 		if err != nil {
 			return res, fmt.Errorf("error scanning rows: %w", err)
 		}
 
 		renewedLeases = append(renewedLeases, ref.NewAlarmLease(
+			aRef,
 			alarmID,
 			time.UnixMilli(dueTime),
 			leaseID,
@@ -704,7 +706,7 @@ func (u *upcomingAlarmFetcher) obtainLeases(ctx context.Context, fetchedUpcoming
 				OR alarm_lease_expiration_time < ?
 			)
 			AND alarm_id IN (`+placeholders+`)
-		RETURNING alarm_id, alarm_lease_id, alarm_due_time
+		RETURNING actor_type, actor_id, alarm_id, alarm_lease_id, alarm_due_time
 		`,
 		args...,
 	)
@@ -718,14 +720,16 @@ func (u *upcomingAlarmFetcher) obtainLeases(ctx context.Context, fetchedUpcoming
 	res := make([]*ref.AlarmLease, 0, len(fetchedUpcoming))
 	for rows.Next() {
 		var (
+			aRef               ref.ActorRef
 			rAlarmID, rLeaseID string
 			rDueTime           int64
 		)
-		err = rows.Scan(&rAlarmID, &rLeaseID, &rDueTime)
+		err = rows.Scan(&aRef.ActorType, &aRef.ActorID, &rAlarmID, &rLeaseID, &rDueTime)
 		if err != nil {
 			return nil, fmt.Errorf("error scanning rows: %w", err)
 		}
 		res = append(res, ref.NewAlarmLease(
+			aRef,
 			rAlarmID,
 			time.UnixMilli(rDueTime),
 			rLeaseID,

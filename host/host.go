@@ -200,7 +200,7 @@ func NewHost(opts NewHostOptions) (h *Host, err error) {
 		opts.HostHealthCheckDeadline = defaultHostHealthCheckDeadline
 	}
 	if opts.AlarmsPollInterval <= 100*time.Millisecond {
-		opts.AlarmsLeaseDuration = defaultAlarmsPollInterval
+		opts.AlarmsPollInterval = defaultAlarmsPollInterval
 	}
 	if opts.AlarmsLeaseDuration < time.Second {
 		opts.AlarmsLeaseDuration = defaultAlarmsLeaseDuration
@@ -578,7 +578,10 @@ func (h *Host) haltActiveActor(act *activeActor) error {
 	// First, signal the actor's instance to halt, so it drains the current call and prevents more calls
 	// Note that this call blocks until the current in-process request stops
 	err := act.Halt()
-	if err != nil {
+	if errors.Is(err, errActiveActorAlreadyHalted) {
+		// The actor is already halting, so nothing else to do here...
+		return nil
+	} else if err != nil {
 		return fmt.Errorf("failed to halt actor: %w", err)
 	}
 

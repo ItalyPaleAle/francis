@@ -224,24 +224,6 @@ func (h *Host) lockAndInvokeFn(parentCtx context.Context, ref ref.ActorRef, fn f
 	return fn(ctx, act)
 }
 
-func (h *Host) executeAlarm(ctx context.Context, ref ref.AlarmRef, data any) error {
-	_, err := h.lockAndInvokeFn(ctx, ref.ActorRef(), func(ctx context.Context, act *activeActor) (any, error) {
-		obj, ok := act.instance.(actor.ActorAlarm)
-		if !ok {
-			return nil, fmt.Errorf("actor of type '%s' does not implement the Alarm method", act.ActorType())
-		}
-
-		// Invoke the actor
-		err := obj.Alarm(ctx, ref.Name, data)
-		if err != nil {
-			return nil, fmt.Errorf("error from actor: %w", err)
-		}
-
-		return nil, nil
-	})
-	return err
-}
-
 func (h *Host) getOrCreateActor(ref ref.ActorRef) (*activeActor, error) {
 	// Get the factory function
 	fn, err := h.createActorFn(ref)

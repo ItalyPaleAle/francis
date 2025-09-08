@@ -7,14 +7,16 @@ import (
 
 // AlarmLease indicates an alarm lease
 type AlarmLease struct {
+	actor   ActorRef
 	alarmID string
 	dueTime time.Time
 	leaseID any
 }
 
 // NewAlarmLease returns a new AlarmLease object.
-func NewAlarmLease(alarmID string, dueTime time.Time, leaseID any) *AlarmLease {
+func NewAlarmLease(actor ActorRef, alarmID string, dueTime time.Time, leaseID any) *AlarmLease {
 	return &AlarmLease{
+		actor:   actor,
 		alarmID: alarmID,
 		dueTime: dueTime,
 		leaseID: leaseID,
@@ -36,6 +38,11 @@ func (r AlarmLease) DueTime() time.Time {
 // LeaseID returns the value of the leaseID property.
 func (r AlarmLease) LeaseID() any {
 	return r.leaseID
+}
+
+// ActorRef returns the actor reference for the alarm.
+func (r AlarmLease) ActorRef() ActorRef {
+	return r.actor
 }
 
 // String implements fmt.Stringer and it's used for debugging

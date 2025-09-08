@@ -21,6 +21,8 @@ import (
 
 type idleActorProcessor = *eventqueue.Processor[string, *activeActor]
 
+var errActiveActorAlreadyHalted = errors.New("actor is already halted")
+
 // activeActor references an actor that is currently active on this host
 type activeActor struct {
 	// Actor reference
@@ -139,7 +141,7 @@ func (a *activeActor) Unlock() {
 
 func (a *activeActor) Halt() error {
 	if !a.halted.CompareAndSwap(false, true) {
-		return errors.New("actor is already halted")
+		return errActiveActorAlreadyHalted
 	}
 
 	// Stop the turn-based locker

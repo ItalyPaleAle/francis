@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/italypaleale/actors/actor"
 	"github.com/italypaleale/actors/components"
@@ -18,7 +19,7 @@ func (h *Host) runAlarmFetcher(ctx context.Context) error {
 
 	// Start the processor
 	h.alarmProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ref.AlarmLease]{
-		ExecuteFn: func(r *ref.AlarmLease) {},
+		ExecuteFn: h.executeAlarm,
 	})
 	defer func() {
 		apErr := h.alarmProcessor.Close()
@@ -58,16 +59,68 @@ func (h *Host) fetchAndEnqueueAlarms(ctx context.Context, hostList []string) err
 	}
 
 	// Enqueue all alarms
-	if len(res) == 0 {
-		return nil
+	var i int
+	for _, a := range res {
+		// If the alarm is to be executed immediately (within the next 0.1ms), skip enqueuing it and execute it right away
+		if a.DueTime().Sub(h.clock.Now()) < 100*time.Microsecond {
+			go h.executeAlarm(a)
+			continue
+		}
+
+		res[i] = a
+		i++
 	}
 
-	err = h.alarmProcessor.Enqueue(res...)
+	// Enqueue the alarms all at once as this is more efficient (we lock the processor only once)
+	err = h.alarmProcessor.Enqueue(res[:i]...)
 	if err != nil {
 		return fmt.Errorf("error enqueueing alarms: %w", err)
 	}
 
 	return nil
+}
+
+// Callback for the alarm processor
+func (h *Host) executeAlarm(lease *ref.AlarmLease) {
+	h.log.Debug("Executing alarm", slog.String("id", lease.Key()), slog.Any("due", lease.DueTime()))
+
+	// Get and lock the actor
+	_, err := h.lockAndInvokeFn(context.Background(), lease.ActorRef(), func(parentCtx context.Context, act *activeActor) (any, error) {
+		// Before we execute an alarm we need to fetch it again using the lease
+		// This is because alarms we have in-memory could have been here for a few seconds, and they may not represent the accurate
+		// state of the data in the provider. For example, it could have been edited or deleted, or the lease could have been broken.
+		// Note we do this after we acquired the lock on the actor, since that operation can take time.
+		ctx, cancel := context.WithTimeout(parentCtx, h.providerRequestTimeout)
+		defer cancel()
+		a, err := h.actorProvider.GetLeasedAlarm(ctx, lease)
+		if errors.Is(err, components.ErrNoAlarm) {
+			// If we get ErrNoAlarm, the alarm was modified/deleted, or the lease was canceled for other reasons
+			// We log this, and return
+			h.log.Warn("Lease was lost for alarm - skipping execution", slog.String("id", lease.Key()), slog.Any("due", lease.DueTime()))
+			return nil, nil
+		} else if err != nil {
+			return nil, fmt.Errorf("error retrieving alarm from provider: %w", err)
+		}
+
+		obj, ok := act.instance.(actor.ActorAlarm)
+		if !ok {
+			return nil, fmt.Errorf("actor of type '%s' does not implement the Alarm method", act.ActorType())
+		}
+
+		// Invoke the actor
+		err = obj.Alarm(parentCtx, a.Name, a.Data)
+		if err != nil {
+			return nil, fmt.Errorf("error from actor: %w", err)
+		}
+
+		return nil, nil
+	})
+
+	if err != nil {
+		// Log the error - we are in a background task
+		h.log.Error("Error executing alarm", slog.String("id", lease.Key()), slog.Any("due", lease.DueTime()), slog.Any("error", err))
+		return
+	}
 }
 
 func (h *Host) GetAlarm(ctx context.Context, actorType string, actorID string, name string) (actor.AlarmProperties, error) {
