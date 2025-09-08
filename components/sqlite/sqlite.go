@@ -313,19 +313,24 @@ func isConstraintError(err error) bool {
 // Returns the placeholder string for an IN clause, and also appends all arguments to appendArgs, starting at position startAppend
 // appendArgs must have sufficient length for the arguments being added
 func getInPlaceholders(vals []string, appendArgs []any, startAppend int) string {
-	if len(vals) == 1 {
+	l := len(vals)
+	switch l {
+	case 0:
+		return ""
+	case 1:
+		appendArgs[startAppend] = vals[0]
 		return "?"
-	}
-
-	b := strings.Builder{}
-	b.Grow(len(vals) * 2)
-	for i, h := range vals {
-		if i > 0 {
-			b.WriteString(",?")
-		} else {
-			b.WriteRune('?')
+	default:
+		b := strings.Builder{}
+		b.Grow(len(vals) * 2)
+		for i, h := range vals {
+			if i > 0 {
+				b.WriteString(",?")
+			} else {
+				b.WriteRune('?')
+			}
+			appendArgs[startAppend+i] = h
 		}
-		appendArgs[startAppend+i] = h
+		return b.String()
 	}
-	return b.String()
 }
