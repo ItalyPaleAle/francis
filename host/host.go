@@ -7,10 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -35,8 +35,6 @@ import (
 const (
 	defaultShutdownGracePeriod      = 30 * time.Second
 	defaultActorsMapSize            = 128
-	defaultIdleTimeout              = 5 * time.Minute
-	defaultDeactivationTimeout      = 5 * time.Second
 	defaultProviderRequestTimeout   = 15 * time.Second
 	defaultHostHealthCheckDeadline  = 20 * time.Second
 	defaultAlarmsPollInterval       = 1500 * time.Millisecond
@@ -77,6 +75,10 @@ type Host struct {
 	// Map of actor configuration objects; key is actor type
 	actorsConfig map[string]components.ActorHostType
 
+	// List of currently-active alarms
+	activeAlarmsLock *sync.Mutex
+	activeAlarms     map[string]struct{}
+
 	bind                   string
 	serverTLSConfig        *tls.Config
 	alarmsPollInterval     time.Duration
@@ -86,13 +88,6 @@ type Host struct {
 	logSource *slog.Logger
 	log       *slog.Logger
 	clock     clock.WithTicker
-}
-
-// RegisterActorOptions is the type for the options for the RegisterActor method.
-type RegisterActorOptions struct {
-	IdleTimeout         time.Duration
-	DeactivationTimeout time.Duration
-	ConcurrencyLimit    int
 }
 
 // HostTLSOptions contains the options for the host's TLS configuration.
@@ -242,6 +237,8 @@ func NewHost(opts NewHostOptions) (h *Host, err error) {
 		actorsConfig:           map[string]components.ActorHostType{},
 		actorFactories:         map[string]actor.Factory{},
 		actors:                 haxmap.New[string, *activeActor](defaultActorsMapSize),
+		activeAlarmsLock:       &sync.Mutex{},
+		activeAlarms:           map[string]struct{}{},
 		alarmsPollInterval:     opts.AlarmsPollInterval,
 		shutdownGracePeriod:    opts.ShutdownGracePeriod,
 		providerRequestTimeout: opts.ProviderRequestTimeout,
@@ -277,48 +274,6 @@ func NewHost(opts NewHostOptions) (h *Host, err error) {
 // Service returns a Service object configured to interact with this host.
 func (h *Host) Service() *actor.Service {
 	return h.service
-}
-
-// RegisterActor registers a new actor in the host.
-// Must be called before Run.
-func (h *Host) RegisterActor(actorType string, factory actor.Factory, opts RegisterActorOptions) error {
-	if h.running.Load() {
-		return errors.New("cannot call RegisterActor after host has started")
-	}
-
-	switch {
-	case opts.IdleTimeout == 0:
-		// Set default idle timeout if empty
-		opts.IdleTimeout = defaultIdleTimeout
-	case opts.IdleTimeout < 0:
-		// A negative number means no timeout
-		opts.IdleTimeout = -1
-	}
-
-	switch {
-	case opts.ConcurrencyLimit <= 0:
-		opts.ConcurrencyLimit = 0
-	case opts.ConcurrencyLimit > math.MaxInt32:
-		return errors.New("option ConcurrencyLimit must fit in int32 (2^31-1)")
-	}
-
-	switch {
-	case opts.DeactivationTimeout == 0:
-		opts.DeactivationTimeout = defaultDeactivationTimeout
-	case opts.DeactivationTimeout < 0:
-		return errors.New("option DeactivationTimeout must not be negative")
-	}
-
-	h.actorsConfig[actorType] = components.ActorHostType{
-		ActorType:           actorType,
-		IdleTimeout:         opts.IdleTimeout,
-		ConcurrencyLimit:    int32(opts.ConcurrencyLimit),
-		DeactivationTimeout: opts.DeactivationTimeout,
-	}
-
-	h.actorFactories[actorType] = factory
-
-	return nil
 }
 
 // Run the host service.
@@ -530,8 +485,14 @@ func (h *Host) runLeaseRenewal(parentCtx context.Context) (err error) {
 				// Log the error only
 				h.log.ErrorContext(parentCtx, "Error while renewing leases for alarms", slog.Any("error", err))
 			} else if len(res.Leases) > 0 {
-				// Use the list of leases just for logging, to avoid potential issues with race conditions alongside execution of alarms
 				h.log.DebugContext(parentCtx, "Renewed alarm leases", slog.Int("count", len(res.Leases)))
+
+				// Re-enqueue all leases
+				// The method is safe for concurrent access
+				err = h.enqueueAlarms(res.Leases)
+				if err != nil {
+					h.log.ErrorContext(parentCtx, "Error while re-enqueueing alarms", slog.Any("error", err))
+				}
 			}
 		case <-parentCtx.Done():
 			// Stop when the context is canceled

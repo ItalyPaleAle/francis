@@ -128,12 +128,17 @@ type ActorHostType struct {
 	// Actor type
 	ActorType string
 	// Idle timeout for the actor type
+	// A negative value means no timeout
 	IdleTimeout time.Duration
-	// Maximum number of actors of the given type active on each host
+	// Maximum number of actors of the given type active on the current host
 	// Set to 0 for no limit
 	ConcurrencyLimit int32
 	// Actor deactivation timeout
 	DeactivationTimeout time.Duration
+	// Maximum number of attempts when invoking the actor or executing alarms
+	MaxAttempts int
+	// Initial retry delay after failed invocation attempts
+	InitialRetryDelay time.Duration
 }
 
 // LookupActorOpts contains options for LookupActor.
@@ -195,10 +200,6 @@ type GetLeasedAlarmRes struct {
 type UpdateLeasedAlarmReq struct {
 	// Due time.
 	DueTime time.Time
-	// Alarm repetition interval, as a ISO8601-formatted duration string.
-	Interval string
-	// Deadline for repeating alarms.
-	TTL *time.Time
 	// When true, preserves and refreshes the lease on the alarm.
 	// The default behavior is to release the lease.
 	RefreshLease bool

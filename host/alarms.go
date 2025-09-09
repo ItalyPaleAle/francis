@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/italypaleale/actors/actor"
@@ -59,34 +60,83 @@ func (h *Host) fetchAndEnqueueAlarms(ctx context.Context, hostList []string) err
 	}
 
 	// Enqueue all alarms
+	return h.enqueueAlarms(res)
+}
+
+func (h *Host) enqueueAlarms(leases []*ref.AlarmLease) (err error) {
+	// Get the lock
+	h.activeAlarmsLock.Lock()
+
 	var i int
-	for _, a := range res {
-		// If the alarm is to be executed immediately (within the next 0.1ms), skip enqueuing it and execute it right away
-		if a.DueTime().Sub(h.clock.Now()) < 100*time.Microsecond {
-			go h.executeAlarm(a)
+	for _, a := range leases {
+		// If the alarm is already active, skip it
+		_, active := h.activeAlarms[a.Key()]
+		if active {
 			continue
 		}
 
-		res[i] = a
+		// If the alarm is to be executed immediately (within the next 0.1ms), skip enqueuing it and execute it right away
+		if a.DueTime().Sub(h.clock.Now()) < 100*time.Microsecond {
+			h.activeAlarms[a.Key()] = struct{}{}
+			go h.executeActiveAlarm(a)
+			continue
+		}
+
+		leases[i] = a
 		i++
 	}
 
-	// Enqueue the alarms all at once as this is more efficient (we lock the processor only once)
-	err = h.alarmProcessor.Enqueue(res[:i]...)
-	if err != nil {
-		return fmt.Errorf("error enqueueing alarms: %w", err)
+	// Unlock
+	h.activeAlarmsLock.Unlock()
+
+	if i > 0 {
+		// Enqueue the alarms all at once as this is more efficient (we lock the processor only once)
+		err = h.alarmProcessor.Enqueue(leases[:i]...)
+		if err != nil {
+			return fmt.Errorf("error enqueueing alarms: %w", err)
+		}
 	}
 
 	return nil
 }
 
+const (
+	executeAlarmStatusCompleted = iota
+	executeAlarmStatusFatal
+	executeAlarmStatusRetryable
+	executeAlarmStatusAbandoned
+)
+
 // Callback for the alarm processor
 func (h *Host) executeAlarm(lease *ref.AlarmLease) {
-	h.log.Debug("Executing alarm", slog.String("id", lease.Key()), slog.Any("due", lease.DueTime()))
+	// Mark the alarm as active
+	h.activeAlarmsLock.Lock()
+	_, active := h.activeAlarms[lease.Key()]
+	if active {
+		// Already active, so nothing to do
+		h.activeAlarmsLock.Unlock()
+		return
+	}
+	h.activeAlarms[lease.Key()] = struct{}{}
+	h.activeAlarmsLock.Unlock()
+
+	// Now we can execute the alarm
+	h.executeActiveAlarm(lease)
+}
+
+// Executes an active alarm, that is already in the activeAlarms map
+func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
+	ctx := context.Background()
+
+	log := h.log.With(
+		slog.String("id", lease.Key()),
+		slog.Any("due", lease.DueTime()),
+	)
+	log.Debug("Executing alarm")
 
 	// Get and lock the actor
-	// TODO: Need to remove the completed alarm
-	_, err := h.lockAndInvokeFn(context.Background(), lease.ActorRef(), func(parentCtx context.Context, act *activeActor) (any, error) {
+	ref := lease.ActorRef()
+	statusAny, err := h.lockAndInvokeFn(ctx, ref, func(parentCtx context.Context, act *activeActor) (any, error) {
 		// Before we execute an alarm we need to fetch it again using the lease
 		// This is because alarms we have in-memory could have been here for a few seconds, and they may not represent the accurate
 		// state of the data in the provider. For example, it could have been edited or deleted, or the lease could have been broken.
@@ -96,32 +146,163 @@ func (h *Host) executeAlarm(lease *ref.AlarmLease) {
 		a, err := h.actorProvider.GetLeasedAlarm(ctx, lease)
 		if errors.Is(err, components.ErrNoAlarm) {
 			// If we get ErrNoAlarm, the alarm was modified/deleted, or the lease was canceled for other reasons
-			// We log this, and return
-			h.log.Warn("Lease was lost for alarm - skipping execution", slog.String("id", lease.Key()), slog.Any("due", lease.DueTime()))
-			return nil, nil
+			// We return executeAlarmAbandoned, indicating there's nothing else left to do
+			return executeAlarmStatusAbandoned, nil
 		} else if err != nil {
-			return nil, fmt.Errorf("error retrieving alarm from provider: %w", err)
+			// This is a retryable error, possibly something transient with the component, and it could be retried later
+			return executeAlarmStatusRetryable, fmt.Errorf("error retrieving alarm from provider: %w", err)
 		}
 
+		// Ensure the actor implements the Alarm method
 		obj, ok := act.instance.(actor.ActorAlarm)
 		if !ok {
-			return nil, fmt.Errorf("actor of type '%s' does not implement the Alarm method", act.ActorType())
+			// This is a fatal error, which causes us to drop the alarm since there's no way it can be completed
+			return executeAlarmStatusFatal, fmt.Errorf("actor of type '%s' does not implement the Alarm method", act.ActorType())
 		}
+
+		// Mark the alarm as executed now
+		lease.SetExecutionTime(h.clock.Now())
 
 		// Invoke the actor
 		err = obj.Alarm(parentCtx, a.Name, a.Data)
 		if err != nil {
-			return nil, fmt.Errorf("error from actor: %w", err)
+			// Consider this as a retryable condition unless we've exceeded the max attempts
+			code := executeAlarmStatusRetryable
+			maxAttempts := h.actorsConfig[ref.ActorType].MaxAttempts
+			if lease.Attempts() > maxAttempts {
+				code = executeAlarmStatusFatal
+			}
+			return code, fmt.Errorf("error from actor (attempt %d of %d): %w", lease.Attempts(), maxAttempts, err)
 		}
 
-		return nil, nil
+		return executeAlarmStatusCompleted, nil
 	})
 
-	if err != nil {
-		// Log the error - we are in a background task
-		h.log.Error("Error executing alarm", slog.String("id", lease.Key()), slog.Any("due", lease.DueTime()), slog.Any("error", err))
-		return
+	// Remove from the list of active alarms now
+	h.activeAlarmsLock.Lock()
+	delete(h.activeAlarms, lease.Key())
+	h.activeAlarmsLock.Unlock()
+
+	status, ok := statusAny.(int)
+	if !ok {
+		// If result was not int, it means that something failed getting the actor
+		// We'll retry
+		status = executeAlarmStatusRetryable
 	}
+	switch status {
+	case executeAlarmStatusAbandoned:
+		// Nothing to do here - the alarm was abandoned (either edited, or we lost the lease)
+		// Whatever the case, we don't need to do anything else
+		log.Warn("Lease was lost for alarm - skipping execution")
+		return
+
+	case executeAlarmStatusFatal:
+		// Fatal error - we delete the alarm
+		log.Error("Fatal error executing alarm - alarm will be removed", slog.Any("error", err))
+		err = h.actorProvider.DeleteLeasedAlarm(ctx, lease)
+		if err != nil && !errors.Is(err, components.ErrNoAlarm) {
+			// Log the error only - we are in background goroutine
+			// Note we ignore ErrNoAlarm since that means the lease was lost or the alarm was deleted in the meanwhile
+			log.Error("Error deleting leased alarm after fatal error", slog.Any("error", err))
+		}
+
+	case executeAlarmStatusRetryable:
+		// We can retry this
+		// We still hold the lease, so just increment the due time and add re-add it to the queue
+		// We increment it by taking the initial retry delay and multiplying it by 1.5^attempts, with a max of 10
+		multiplier := min(math.Pow(1.5, float64(lease.Attempts())), 10)
+		delay := h.actorsConfig[ref.ActorType].InitialRetryDelay * time.Duration(multiplier)
+		lease.IncreaseAttempts(h.clock.Now().Add(delay))
+		err = h.alarmProcessor.Enqueue(lease)
+		if err != nil {
+			// Log the error only - we are in background goroutine
+			log.Error("Error re-enqueueing alarm", slog.Any("error", err))
+		}
+
+	case executeAlarmStatusCompleted:
+		// Complete the alarm
+		err = h.completeAlarm(ctx, lease, log)
+		if err != nil {
+			// Log the error only - we are in background goroutine
+			log.Error("Error completing alarm", slog.Any("error", err))
+		}
+
+	default:
+		// Indicates a development-time error
+		panic(fmt.Errorf("unknown alarm completion status: %v", statusAny))
+	}
+}
+
+func (h *Host) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, log *slog.Logger) error {
+	// First, retrieve the alarm again
+	// We do this again first to check that the alarm is repeating, and second to make sure our lease is still valid
+	// In fact, the actor itself may have modified the alarm after executing it
+	ctx, cancel := context.WithTimeout(parentCtx, h.providerRequestTimeout)
+	defer cancel()
+	alarm, err := h.actorProvider.GetLeasedAlarm(ctx, lease)
+	if errors.Is(err, components.ErrNoAlarm) {
+		// If we get ErrNoAlarm, the alarm was modified/deleted, or the lease was canceled for other reasons
+		// Let's just return no error
+		return nil
+	} else if err != nil {
+		// Something went wrong
+		return fmt.Errorf("error retrieving alarm from provider: %w", err)
+	}
+
+	// Check if the alarm repeats
+	next := alarm.NextExecution(lease.ExecutionTime())
+	if next.IsZero() {
+		log.Debug("Removing completed alarm")
+
+		// Alarm doesn't repeat, delete it as it's completed
+		ctx, cancel = context.WithTimeout(parentCtx, h.providerRequestTimeout)
+		defer cancel()
+		err = h.actorProvider.DeleteLeasedAlarm(ctx, lease)
+		if err != nil && !errors.Is(err, components.ErrNoAlarm) {
+			// If we get ErrNoAlarm, the alarm was modified/deleted, or the lease was canceled for other reasons
+			// We can ignore that error
+			return fmt.Errorf("error removing completed alarm in provider: %w", err)
+		}
+
+		// We're done!
+		return nil
+	}
+
+	// If we're here, the alarm repeats, so we need to update it instead
+	updateReq := components.UpdateLeasedAlarmReq{
+		DueTime: next,
+	}
+
+	// If the due time is within alarmsPollInterval, we can preserve the lease
+	if next.Sub(h.clock.Now()) <= h.alarmsPollInterval {
+		updateReq.RefreshLease = true
+	}
+
+	log.Debug("Re-scheduling alarm for next iteration", slog.Any("due", next), slog.Bool("leased", updateReq.RefreshLease))
+
+	// Do the update
+	ctx, cancel = context.WithTimeout(parentCtx, h.providerRequestTimeout)
+	defer cancel()
+	err = h.actorProvider.UpdateLeasedAlarm(ctx, lease, updateReq)
+	if errors.Is(err, components.ErrNoAlarm) {
+		// If we get ErrNoAlarm, the alarm was modified/deleted, or the lease was canceled for other reasons
+		// Let's just return no error
+		return nil
+	} else if err != nil {
+		// Something went wrong
+		return fmt.Errorf("error updating alarm in provider: %w", err)
+	}
+
+	// If we kept the lease, re-enqueue the alarm
+	if updateReq.RefreshLease {
+		err = h.enqueueAlarms([]*ref.AlarmLease{lease})
+		if err != nil {
+			return fmt.Errorf("error re-enqueueing leased alarm: %w", err)
+		}
+	}
+
+	// All done here too
+	return nil
 }
 
 func (h *Host) GetAlarm(ctx context.Context, actorType string, actorID string, name string) (actor.AlarmProperties, error) {

@@ -7,10 +7,12 @@ import (
 
 // AlarmLease indicates an alarm lease
 type AlarmLease struct {
-	actor   ActorRef
-	alarmID string
-	dueTime time.Time
-	leaseID any
+	actor         ActorRef
+	alarmID       string
+	dueTime       time.Time
+	leaseID       any
+	attempts      int
+	executionTime time.Time
 }
 
 // NewAlarmLease returns a new AlarmLease object.
@@ -45,7 +47,31 @@ func (r AlarmLease) ActorRef() ActorRef {
 	return r.actor
 }
 
-// String implements fmt.Stringer and it's used for debugging
+// Attempts returns the number of attempts for this alarm.
+func (r AlarmLease) Attempts() int {
+	return r.attempts
+}
+
+// IncreaseAttempts increases the attempts counter for the alarm, also delaying the execution to a new due time.
+func (r *AlarmLease) IncreaseAttempts(dueTime time.Time) {
+	r.attempts++
+	r.dueTime = dueTime
+
+	// Reset the execution time too
+	r.executionTime = time.Time{}
+}
+
+// SetExecutionTime sets the time the alarm was executed at
+func (r *AlarmLease) SetExecutionTime(t time.Time) {
+	r.executionTime = t
+}
+
+// ExecutionTime returns the time the alarm was executed at
+func (r AlarmLease) ExecutionTime() time.Time {
+	return r.executionTime
+}
+
+// String implements fmt.Stringer and it's used for debugging.
 func (r AlarmLease) String() string {
 	const RFC3339MilliNoTZ = "2006-01-02T15:04:05.999"
 

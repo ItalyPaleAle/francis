@@ -309,17 +309,6 @@ func (s *SQLiteProvider) ReleaseAlarmLease(ctx context.Context, lease *ref.Alarm
 }
 
 func (s *SQLiteProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.AlarmLease, req components.UpdateLeasedAlarmReq) (err error) {
-	var (
-		interval *string
-		ttlTime  *int64
-	)
-	if req.Interval != "" {
-		interval = ptr.Of(req.Interval)
-	}
-	if req.TTL != nil {
-		ttlTime = ptr.Of(req.TTL.UnixMilli())
-	}
-
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
@@ -339,12 +328,9 @@ func (s *SQLiteProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Alarm
 			UPDATE alarms
 			SET
 				alarm_lease_expiration_time = ?,
-				alarm_due_time = ?,
-				alarm_interval = ?,
-				alarm_ttl_time = ?
+				alarm_due_time = ?
 			`+whereClause,
-			now.Add(s.cfg.AlarmsLeaseDuration).UnixMilli(),
-			req.DueTime.UnixMilli(), interval, ttlTime,
+			now.Add(s.cfg.AlarmsLeaseDuration).UnixMilli(), req.DueTime.UnixMilli(),
 			lease.Key(), lease.LeaseID(), s.pid, now.UnixMilli(),
 		)
 	} else {
@@ -354,11 +340,9 @@ func (s *SQLiteProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Alarm
 				alarm_lease_id = NULL,
 				alarm_lease_expiration_time = NULL,
 				alarm_lease_pid = NULL,
-				alarm_due_time = ?,
-				alarm_interval = ?,
-				alarm_ttl_time = ?
+				alarm_due_time = ?
 			`+whereClause,
-			req.DueTime.UnixMilli(), interval, ttlTime,
+			req.DueTime.UnixMilli(),
 			lease.Key(), lease.LeaseID(), s.pid, now.UnixMilli(),
 		)
 	}

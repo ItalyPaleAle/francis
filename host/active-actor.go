@@ -72,6 +72,11 @@ func newActiveActor(ref ref.ActorRef, instance actor.Actor, idleTimeout time.Dur
 // Updates the idle timeout property (i.e. time the actor becomes idle at)
 // d allows overriding the idle interval; if zero, uses the default for the actor type
 func (a *activeActor) updateIdleAt(d time.Duration) {
+	if a.idleTimeout <= 0 {
+		// Actor doesn't have an idle timeout
+		return
+	}
+
 	if d == 0 {
 		d = a.idleTimeout
 	}
@@ -152,7 +157,9 @@ func (a *activeActor) Halt() error {
 	close(a.haltCh)
 
 	// Also remove from the idle actor processor
-	_ = a.idleProcessor.Dequeue(a.Key())
+	if a.idleTimeout > 0 {
+		_ = a.idleProcessor.Dequeue(a.Key())
+	}
 
 	// Call StopAndWait on the locker, which now makes sure no one is holding the lock
 	a.locker.StopAndWait()

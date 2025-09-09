@@ -2420,11 +2420,8 @@ func (s Suite) TestUpdateLeasedAlarm(t *testing.T) {
 
 		// Update the alarm with new details and refresh lease
 		newDueTime := time.Now().Add(2 * time.Hour)
-		newTTL := time.Now().Add(48 * time.Hour)
 		updateReq := components.UpdateLeasedAlarmReq{
 			DueTime:      newDueTime,
-			Interval:     "PT30M",
-			TTL:          &newTTL,
 			RefreshLease: true,
 		}
 
@@ -2437,14 +2434,19 @@ func (s Suite) TestUpdateLeasedAlarm(t *testing.T) {
 
 		// Check updated fields
 		assert.Equal(t, newDueTime.UnixMilli(), updatedAlarm.DueTime.UnixMilli())
-		assert.Equal(t, "PT30M", updatedAlarm.Interval)
-		assert.Equal(t, newTTL.UnixMilli(), updatedAlarm.TTL.UnixMilli())
 
 		// Verify other fields remain unchanged
 		assert.Equal(t, originalAlarm.ActorType, updatedAlarm.ActorType)
 		assert.Equal(t, originalAlarm.ActorID, updatedAlarm.ActorID)
 		assert.Equal(t, originalAlarm.Name, updatedAlarm.Name)
 		assert.Equal(t, originalAlarm.Data, updatedAlarm.Data)
+		assert.Equal(t, originalAlarm.Interval, updatedAlarm.Interval)
+		if originalAlarm.TTL == nil {
+			require.Nil(t, updatedAlarm.TTL)
+		} else {
+			require.NotNil(t, updatedAlarm.TTL)
+			assert.Equal(t, originalAlarm.TTL.UnixMilli(), updatedAlarm.TTL.UnixMilli())
+		}
 	})
 
 	t.Run("updates alarm without refresh lease", func(t *testing.T) {
@@ -2468,8 +2470,6 @@ func (s Suite) TestUpdateLeasedAlarm(t *testing.T) {
 		newDueTime := time.Now().Add(3 * time.Hour)
 		updateReq := components.UpdateLeasedAlarmReq{
 			DueTime:      newDueTime,
-			Interval:     "PT1H",
-			TTL:          nil,
 			RefreshLease: false,
 		}
 
@@ -2479,43 +2479,6 @@ func (s Suite) TestUpdateLeasedAlarm(t *testing.T) {
 		// Verify the lease is no longer valid (was released)
 		_, err = s.p.GetLeasedAlarm(ctx, lease)
 		require.ErrorIs(t, err, components.ErrNoAlarm, "lease should be released")
-	})
-
-	t.Run("updates alarm with empty interval", func(t *testing.T) {
-		ctx := t.Context()
-
-		// Seed with the test data
-		require.NoError(t, s.p.Seed(ctx, GetSpec()))
-
-		// Fetch some alarms to create valid leases
-		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
-		})
-		require.NoError(t, err)
-		require.NotEmpty(t, res, "should have fetched and leased some alarms")
-
-		// Pick the first leased alarm
-		lease := res[0]
-
-		// Update with empty interval (should clear it)
-		newDueTime := time.Now().Add(1 * time.Hour)
-		updateReq := components.UpdateLeasedAlarmReq{
-			DueTime:      newDueTime,
-			Interval:     "",
-			TTL:          nil,
-			RefreshLease: true,
-		}
-
-		err = s.p.UpdateLeasedAlarm(ctx, lease, updateReq)
-		require.NoError(t, err)
-
-		// Verify the alarm was updated
-		updatedAlarm, err := s.p.GetLeasedAlarm(ctx, lease)
-		require.NoError(t, err)
-
-		assert.Equal(t, newDueTime.UnixMilli(), updatedAlarm.DueTime.UnixMilli())
-		assert.Empty(t, updatedAlarm.Interval, "interval should be empty")
-		assert.Nil(t, updatedAlarm.TTL, "TTL should be nil")
 	})
 
 	t.Run("returns ErrNoAlarm for non-existent alarm", func(t *testing.T) {
