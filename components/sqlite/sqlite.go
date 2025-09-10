@@ -264,27 +264,30 @@ func (s *SQLiteProvider) initGC() (err error) {
 						WHERE (? - CAST(value AS integer)) > ?`,
 				[]any{now, now, now, arg}
 		},
-		DeleteExpiredValuesQuery: func() (string, []any) {
-			now := s.clock.Now().UnixMilli()
-
-			// In a transaction, delete all expired state and all hosts that have failed health checks
-			// Failed hosts are also automatically deleted when a new host is registered, so that query should not delete many rows
-			return `
-				BEGIN IMMEDIATE TRANSACTION;
-
+		DeleteExpiredValuesQueries: map[string]cleanup.DeleteExpiredValuesQueryFn{
+			"hosts": func() (string, func() []any) {
+				q := `DELETE FROM hosts WHERE host_last_health_check < ?`
+				return q, func() []any {
+					now := s.clock.Now()
+					return []any{
+						now.Add(-1 * s.cfg.HostHealthCheckDeadline).UnixMilli(),
+					}
+				}
+			},
+			"actor_state": func() (string, func() []any) {
+				q := `
 				DELETE FROM actor_state
 				WHERE
 					actor_state_expiration_time IS NOT NULL
-					AND actor_state_expiration_time < ?;
-
-				DELETE FROM hosts
-				WHERE host_last_health_check < ?;
-
-				COMMIT;`,
-				[]any{
-					now,
-					now - s.cfg.HostHealthCheckDeadline.Milliseconds(),
+					AND actor_state_expiration_time < ?
+				`
+				return q, func() []any {
+					now := s.clock.Now()
+					return []any{
+						now.UnixMilli(),
+					}
 				}
+			},
 		},
 		CleanupInterval: s.cleanupInterval,
 		DB:              sqladapter.AdaptDatabaseSQLConn(s.db),

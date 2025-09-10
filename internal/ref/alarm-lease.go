@@ -7,7 +7,7 @@ import (
 
 // AlarmLease indicates an alarm lease
 type AlarmLease struct {
-	actor         ActorRef
+	ref           AlarmRef
 	alarmID       string
 	dueTime       time.Time
 	leaseID       any
@@ -16,9 +16,9 @@ type AlarmLease struct {
 }
 
 // NewAlarmLease returns a new AlarmLease object.
-func NewAlarmLease(actor ActorRef, alarmID string, dueTime time.Time, leaseID any) *AlarmLease {
+func NewAlarmLease(ref AlarmRef, alarmID string, dueTime time.Time, leaseID any) *AlarmLease {
 	return &AlarmLease{
-		actor:   actor,
+		ref:     ref,
 		alarmID: alarmID,
 		dueTime: dueTime,
 		leaseID: leaseID,
@@ -42,9 +42,14 @@ func (r AlarmLease) LeaseID() any {
 	return r.leaseID
 }
 
+// AlarmRef returns the alarm reference for the alarm.
+func (r AlarmLease) AlarmRef() AlarmRef {
+	return r.ref
+}
+
 // ActorRef returns the actor reference for the alarm.
 func (r AlarmLease) ActorRef() ActorRef {
-	return r.actor
+	return r.ref.ActorRef()
 }
 
 // Attempts returns the number of attempts for this alarm.

@@ -78,6 +78,7 @@ type Host struct {
 	// List of currently-active alarms
 	activeAlarmsLock *sync.Mutex
 	activeAlarms     map[string]struct{}
+	retryingAlarms   map[string]struct{}
 
 	bind                   string
 	serverTLSConfig        *tls.Config
@@ -239,6 +240,7 @@ func NewHost(opts NewHostOptions) (h *Host, err error) {
 		actors:                 haxmap.New[string, *activeActor](defaultActorsMapSize),
 		activeAlarmsLock:       &sync.Mutex{},
 		activeAlarms:           map[string]struct{}{},
+		retryingAlarms:         map[string]struct{}{},
 		alarmsPollInterval:     opts.AlarmsPollInterval,
 		shutdownGracePeriod:    opts.ShutdownGracePeriod,
 		providerRequestTimeout: opts.ProviderRequestTimeout,
@@ -372,7 +374,7 @@ func (h *Host) HaltAll() error {
 	for _, act := range h.actors.Iterator() {
 		count++
 		go func(act *activeActor) {
-			err := h.haltActiveActor(act)
+			err := h.haltActiveActor(act, true)
 			if err != nil {
 				err = fmt.Errorf("failed to halt actor '%s': %w", act.Key(), err)
 			}
@@ -407,7 +409,7 @@ func (h *Host) Halt(actorType string, actorID string) error {
 	}
 
 	// Gracefully halt the actor
-	err := h.haltActiveActor(act)
+	err := h.haltActiveActor(act, true)
 	if err != nil {
 		return fmt.Errorf("failed to halt actor: %w", err)
 	}
@@ -461,46 +463,6 @@ func (h *Host) runHealthChecks(parentCtx context.Context) error {
 	}
 }
 
-func (h *Host) runLeaseRenewal(parentCtx context.Context) (err error) {
-	var res components.RenewAlarmLeasesRes
-
-	// Renew the alarm leases on a loop
-	interval := h.actorProvider.RenewLeaseInterval()
-	h.log.DebugContext(parentCtx, "Starting background alarm lease renewal", slog.Any("interval", interval))
-	defer h.log.Debug("Stopped background lease renewal")
-
-	t := h.clock.NewTicker(interval)
-	defer t.Stop()
-
-	hostList := []string{h.hostID}
-	for {
-		select {
-		case <-t.C():
-			ctx, cancel := context.WithTimeout(parentCtx, h.providerRequestTimeout)
-			defer cancel()
-			res, err = h.actorProvider.RenewAlarmLeases(ctx, components.RenewAlarmLeasesReq{
-				Hosts: hostList,
-			})
-			if err != nil {
-				// Log the error only
-				h.log.ErrorContext(parentCtx, "Error while renewing leases for alarms", slog.Any("error", err))
-			} else if len(res.Leases) > 0 {
-				h.log.DebugContext(parentCtx, "Renewed alarm leases", slog.Int("count", len(res.Leases)))
-
-				// Re-enqueue all leases
-				// The method is safe for concurrent access
-				err = h.enqueueAlarms(res.Leases)
-				if err != nil {
-					h.log.ErrorContext(parentCtx, "Error while re-enqueueing alarms", slog.Any("error", err))
-				}
-			}
-		case <-parentCtx.Done():
-			// Stop when the context is canceled
-			return parentCtx.Err()
-		}
-	}
-}
-
 func (h *Host) handleIdleActor(act *activeActor) {
 	// Just because the actor is marked as idle, doesn't mean it's inactive
 	// For example, there could be a long-running operation still in progress
@@ -523,7 +485,8 @@ func (h *Host) handleIdleActor(act *activeActor) {
 	}
 
 	// Proceed with halting
-	err = h.haltActiveActor(act)
+	// We don't need to drain the active calls because we just acquired the lock
+	err = h.haltActiveActor(act, false)
 	if err != nil {
 		h.log.Error("Failed to deactivate idle actor", slog.String("actorRef", act.Key()), slog.Any("error", err))
 		return
@@ -531,14 +494,14 @@ func (h *Host) handleIdleActor(act *activeActor) {
 }
 
 // Gracefully halts an actor's instance
-func (h *Host) haltActiveActor(act *activeActor) error {
+func (h *Host) haltActiveActor(act *activeActor, drain bool) error {
 	key := act.Key()
 
 	h.log.Debug("Halting actor", slog.String("actorRef", key))
 
 	// First, signal the actor's instance to halt, so it drains the current call and prevents more calls
 	// Note that this call blocks until the current in-process request stops
-	err := act.Halt()
+	err := act.Halt(drain)
 	if errors.Is(err, errActiveActorAlreadyHalted) {
 		// The actor is already halting, so nothing else to do here...
 		return nil

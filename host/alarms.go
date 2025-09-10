@@ -67,11 +67,20 @@ func (h *Host) enqueueAlarms(leases []*ref.AlarmLease) (err error) {
 	// Get the lock
 	h.activeAlarmsLock.Lock()
 
-	var i int
+	var (
+		i  int
+		ok bool
+	)
 	for _, a := range leases {
-		// If the alarm is already active, skip it
-		_, active := h.activeAlarms[a.Key()]
-		if active {
+		// If the alarm is already ok, skip it
+		// We also skip alarms that are being retried, otherwise their attempt counter and delay would be overwritten
+		// (retries are not persisted and are managed in-memory only)
+		_, ok = h.activeAlarms[a.Key()]
+		if ok {
+			continue
+		}
+		_, ok = h.retryingAlarms[a.Key()]
+		if ok {
 			continue
 		}
 
@@ -100,8 +109,10 @@ func (h *Host) enqueueAlarms(leases []*ref.AlarmLease) (err error) {
 	return nil
 }
 
+type executeAlarmStatus int
+
 const (
-	executeAlarmStatusCompleted = iota
+	executeAlarmStatusCompleted = executeAlarmStatus(iota)
 	executeAlarmStatusFatal
 	executeAlarmStatusRetryable
 	executeAlarmStatusAbandoned
@@ -128,8 +139,9 @@ func (h *Host) executeAlarm(lease *ref.AlarmLease) {
 func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 	ctx := context.Background()
 
+	key := lease.Key()
 	log := h.log.With(
-		slog.String("id", lease.Key()),
+		slog.String("id", lease.AlarmRef().String()),
 		slog.Any("due", lease.DueTime()),
 	)
 	log.Debug("Executing alarm")
@@ -178,14 +190,25 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		return executeAlarmStatusCompleted, nil
 	})
 
-	// Remove from the list of active alarms now
-	h.activeAlarmsLock.Lock()
-	delete(h.activeAlarms, lease.Key())
-	h.activeAlarmsLock.Unlock()
+	// Remove from the list of active alarms upon returning
+	isRetrying := false
+	defer func() {
+		h.activeAlarmsLock.Lock()
+		delete(h.activeAlarms, key)
 
-	status, ok := statusAny.(int)
+		// If it's retrying, we add it to the list of retrying alarms
+		if isRetrying {
+			h.retryingAlarms[key] = struct{}{}
+		} else {
+			delete(h.retryingAlarms, key)
+		}
+
+		h.activeAlarmsLock.Unlock()
+	}()
+
+	status, ok := statusAny.(executeAlarmStatus)
 	if !ok {
-		// If result was not int, it means that something failed getting the actor
+		// If result was not executeAlarmStatus, it means that something failed getting the actor
 		// We'll retry
 		status = executeAlarmStatusRetryable
 	}
@@ -205,9 +228,11 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 			// Note we ignore ErrNoAlarm since that means the lease was lost or the alarm was deleted in the meanwhile
 			log.Error("Error deleting leased alarm after fatal error", slog.Any("error", err))
 		}
+		return
 
 	case executeAlarmStatusRetryable:
 		// We can retry this
+		h.log.Warn("Error executing alarm - will retry", slog.Any("error", err))
 		// We still hold the lease, so just increment the due time and add re-add it to the queue
 		// We increment it by taking the initial retry delay and multiplying it by 1.5^attempts, with a max of 10
 		multiplier := min(math.Pow(1.5, float64(lease.Attempts())), 10)
@@ -219,6 +244,11 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 			log.Error("Error re-enqueueing alarm", slog.Any("error", err))
 		}
 
+		// Here, we add it to the list of alarms that we're retrying
+		// Otherwise, if the lease renewal happens in background, it will clear the attempt counter
+		isRetrying = true
+		return
+
 	case executeAlarmStatusCompleted:
 		// Complete the alarm
 		err = h.completeAlarm(ctx, lease, log)
@@ -226,6 +256,7 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 			// Log the error only - we are in background goroutine
 			log.Error("Error completing alarm", slog.Any("error", err))
 		}
+		return
 
 	default:
 		// Indicates a development-time error
@@ -303,6 +334,46 @@ func (h *Host) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, l
 
 	// All done here too
 	return nil
+}
+
+func (h *Host) runLeaseRenewal(parentCtx context.Context) (err error) {
+	var res components.RenewAlarmLeasesRes
+
+	// Renew the alarm leases on a loop
+	interval := h.actorProvider.RenewLeaseInterval()
+	h.log.DebugContext(parentCtx, "Starting background alarm lease renewal", slog.Any("interval", interval))
+	defer h.log.Debug("Stopped background lease renewal")
+
+	t := h.clock.NewTicker(interval)
+	defer t.Stop()
+
+	hostList := []string{h.hostID}
+	for {
+		select {
+		case <-t.C():
+			ctx, cancel := context.WithTimeout(parentCtx, h.providerRequestTimeout)
+			defer cancel()
+			res, err = h.actorProvider.RenewAlarmLeases(ctx, components.RenewAlarmLeasesReq{
+				Hosts: hostList,
+			})
+			if err != nil {
+				// Log the error only
+				h.log.ErrorContext(parentCtx, "Error while renewing leases for alarms", slog.Any("error", err))
+			} else if len(res.Leases) > 0 {
+				h.log.DebugContext(parentCtx, "Renewed alarm leases", slog.Int("count", len(res.Leases)))
+
+				// Re-enqueue all leases
+				// The method is safe for concurrent access
+				err = h.enqueueAlarms(res.Leases)
+				if err != nil {
+					h.log.ErrorContext(parentCtx, "Error while re-enqueueing alarms", slog.Any("error", err))
+				}
+			}
+		case <-parentCtx.Done():
+			// Stop when the context is canceled
+			return parentCtx.Err()
+		}
+	}
 }
 
 func (h *Host) GetAlarm(ctx context.Context, actorType string, actorID string, name string) (actor.AlarmProperties, error) {

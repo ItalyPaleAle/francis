@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	clocktesting "k8s.io/utils/clock/testing"
 
+	"github.com/italypaleale/actors/components"
 	comptesting "github.com/italypaleale/actors/components/testing"
 	"github.com/italypaleale/actors/internal/ptr"
 	"github.com/italypaleale/actors/internal/sql/transactions"
@@ -320,6 +321,150 @@ func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, err
 		rows.Close()
 
 		return res, nil
+	})
+}
+
+func TestHostGarbageCollection(t *testing.T) {
+	clock := clocktesting.NewFakeClock(time.Now())
+	h := comptesting.NewSlogClockHandler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}), clock)
+	log := slog.New(h)
+
+	providerOpts := SQLiteProviderOptions{
+		ConnectionString: testConnectionString,
+		// Disable automated cleanups in this test
+		// We will run the cleanups manually
+		CleanupInterval: -1,
+		clock:           clock,
+	}
+	providerConfig := comptesting.GetProviderConfig()
+
+	// Create the provider
+	s, err := NewSQLiteProvider(log, providerOpts, providerConfig)
+	require.NoError(t, err, "Error creating provider")
+
+	// Init the provider
+	err = s.Init(t.Context())
+	require.NoError(t, err, "Error initializing provider")
+
+	// Run the provider in background for side effects (this initializes the GC)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() {
+		err = s.Run(ctx)
+		if err != nil && err != context.Canceled {
+			log.Error("Error running provider", slog.Any("error", err))
+		}
+	}()
+
+	t.Run("garbage collector removes expired hosts", func(t *testing.T) {
+		// Register multiple hosts at different times
+		host1Req := components.RegisterHostReq{
+			Address: "192.168.1.1:8080",
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "TestActor1", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 5},
+			},
+		}
+		host1Res, err := s.RegisterHost(ctx, host1Req)
+		require.NoError(t, err)
+
+		// Advance clock by 30 seconds
+		s.AdvanceClock(30 * time.Second)
+
+		host2Req := components.RegisterHostReq{
+			Address: "192.168.1.2:8080",
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "TestActor2", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 3},
+			},
+		}
+		host2Res, err := s.RegisterHost(ctx, host2Req)
+		require.NoError(t, err)
+
+		// Advance clock by another 20 seconds (so host3 is 20s after host2)
+		s.AdvanceClock(20 * time.Second)
+
+		host3Req := components.RegisterHostReq{
+			Address: "192.168.1.3:8080",
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "TestActor3", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 2},
+			},
+		}
+		host3Res, err := s.RegisterHost(ctx, host3Req)
+		require.NoError(t, err)
+
+		// Verify all hosts are initially present
+		spec, err := s.GetAllHosts(ctx)
+		require.NoError(t, err)
+		require.Len(t, spec.Hosts, 3, "All hosts should be present initially")
+		require.Len(t, spec.HostActorTypes, 3, "All host actor types should be present initially")
+
+		// Advance clock to make only the first host expired (beyond 1 minute health check deadline)
+		// Current state: Host1 at 50s, Host2 at 20s, Host3 at 0s
+		// Advance by 15 seconds: Host1 at 65s (expired), Host2 at 35s (healthy), Host3 at 15s (healthy)
+		s.AdvanceClock(15 * time.Second)
+
+		// Run garbage collection
+		err = s.CleanupExpired()
+		require.NoError(t, err)
+
+		// Verify only host1 and its actor types are removed
+		spec, err = s.GetAllHosts(ctx)
+		require.NoError(t, err)
+		require.Len(t, spec.Hosts, 2, "Only expired host should be removed")
+		require.Len(t, spec.HostActorTypes, 2, "Expired host's actor types should be removed")
+
+		// Verify the correct hosts remain (host2 and host3)
+		hostIDs := make([]string, len(spec.Hosts))
+		for i, host := range spec.Hosts {
+			hostIDs[i] = host.HostID
+		}
+		assert.Contains(t, hostIDs, host2Res.HostID, "Host2 should still be present")
+		assert.Contains(t, hostIDs, host3Res.HostID, "Host3 should still be present")
+		assert.NotContains(t, hostIDs, host1Res.HostID, "Host1 should be removed")
+
+		// Verify the correct actor types remain
+		actorTypes := make([]string, len(spec.HostActorTypes))
+		for i, hat := range spec.HostActorTypes {
+			actorTypes[i] = hat.ActorType
+		}
+		assert.Contains(t, actorTypes, "TestActor2", "TestActor2 should still be present")
+		assert.Contains(t, actorTypes, "TestActor3", "TestActor3 should still be present")
+		assert.NotContains(t, actorTypes, "TestActor1", "TestActor1 should be removed")
+
+		// Advance clock to make host2 also expired
+		// Current state: Host2 at 35s, Host3 at 15s
+		// Advance by 30 seconds: Host2 at 65s (expired), Host3 at 45s (healthy)
+		s.AdvanceClock(30 * time.Second)
+
+		// Run garbage collection again
+		err = s.CleanupExpired()
+		require.NoError(t, err)
+
+		// Verify only host3 remains
+		spec, err = s.GetAllHosts(ctx)
+		require.NoError(t, err)
+		require.Len(t, spec.Hosts, 1, "Only one host should remain")
+		require.Len(t, spec.HostActorTypes, 1, "Only one host actor type should remain")
+
+		// Verify host3 is the remaining one
+		assert.Equal(t, host3Res.HostID, spec.Hosts[0].HostID, "Host3 should be the remaining host")
+		assert.Equal(t, "TestActor3", spec.HostActorTypes[0].ActorType, "TestActor3 should be the remaining actor type")
+
+		// Advance clock to make all hosts expired
+		// Current state: Host3 at 45s
+		// Advance by 20 seconds: Host3 at 65s (expired)
+		s.AdvanceClock(20 * time.Second)
+
+		// Run garbage collection one more time
+		err = s.CleanupExpired()
+		require.NoError(t, err)
+
+		// Verify all hosts are removed
+		spec, err = s.GetAllHosts(ctx)
+		require.NoError(t, err)
+		assert.Len(t, spec.Hosts, 0, "All hosts should be removed")
+		assert.Len(t, spec.HostActorTypes, 0, "All host actor types should be removed")
 	})
 }
 

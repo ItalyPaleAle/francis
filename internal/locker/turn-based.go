@@ -158,7 +158,7 @@ func (l *TurnBasedLocker) doStop(wait bool) {
 	// Unlock the lock so the other call to the Unlock method of the locker can continue
 	l.mu.Unlock()
 
-	// Wait for doneCh to be closed, which happens on the unlock
+	// Wait for closingWaiter to be closed, which happens on the unlock
 	<-l.closingWaiter
 }
 

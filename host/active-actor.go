@@ -144,7 +144,8 @@ func (a *activeActor) Unlock() {
 	a.locker.Unlock()
 }
 
-func (a *activeActor) Halt() error {
+// Halt the active actor
+func (a *activeActor) Halt(drain bool) error {
 	if !a.halted.CompareAndSwap(false, true) {
 		return errActiveActorAlreadyHalted
 	}
@@ -161,8 +162,13 @@ func (a *activeActor) Halt() error {
 		_ = a.idleProcessor.Dequeue(a.Key())
 	}
 
-	// Call StopAndWait on the locker, which now makes sure no one is holding the lock
-	a.locker.StopAndWait()
+	// If we need to drain the actor, call StopAndWait on the locker, which now makes sure no one is holding the lock
+	// Otherwise, just call Stop
+	if drain {
+		a.locker.StopAndWait()
+	} else {
+		a.locker.Stop()
+	}
 
 	return nil
 }

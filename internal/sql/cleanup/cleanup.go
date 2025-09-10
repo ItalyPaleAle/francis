@@ -23,6 +23,8 @@ type GarbageCollector interface {
 	io.Closer
 }
 
+type DeleteExpiredValuesQueryFn func() (string, func() []any)
+
 type GCOptions struct {
 	Logger *slog.Logger
 
@@ -32,8 +34,8 @@ type GCOptions struct {
 	// The function must return both the query and the argument.
 	UpdateLastCleanupQuery func(arg any) (string, []any)
 
-	// Query that performs the cleanup of all expired rows.
-	DeleteExpiredValuesQuery func() (string, []any)
+	// Queries that perform the cleanup of all expired rows.
+	DeleteExpiredValuesQueries map[string]DeleteExpiredValuesQueryFn
 
 	// Interval to perfm the cleanup.
 	CleanupInterval time.Duration
@@ -51,13 +53,13 @@ type GCOptions struct {
 }
 
 type gc struct {
-	log                      *slog.Logger
-	updateLastCleanupQuery   func(arg any) (string, []any)
-	deleteExpiredValuesQuery func() (string, []any)
-	cleanupInterval          time.Duration
-	cleanupQueryTimeout      time.Duration
-	db                       sqladapter.DatabaseConn
-	clock                    clock.WithTicker
+	log                        *slog.Logger
+	updateLastCleanupQuery     func(arg any) (string, []any)
+	deleteExpiredValuesQueries map[string]DeleteExpiredValuesQueryFn
+	cleanupInterval            time.Duration
+	cleanupQueryTimeout        time.Duration
+	db                         sqladapter.DatabaseConn
+	clock                      clock.WithTicker
 
 	closed   atomic.Bool
 	closedCh chan struct{}
@@ -79,14 +81,14 @@ func ScheduleGarbageCollector(opts GCOptions) (GarbageCollector, error) {
 	}
 
 	gc := &gc{
-		log:                      opts.Logger,
-		updateLastCleanupQuery:   opts.UpdateLastCleanupQuery,
-		deleteExpiredValuesQuery: opts.DeleteExpiredValuesQuery,
-		cleanupInterval:          opts.CleanupInterval,
-		cleanupQueryTimeout:      opts.CleanupQueryTimeout,
-		db:                       opts.DB,
-		clock:                    opts.Clock,
-		closedCh:                 make(chan struct{}),
+		log:                        opts.Logger,
+		updateLastCleanupQuery:     opts.UpdateLastCleanupQuery,
+		deleteExpiredValuesQueries: opts.DeleteExpiredValuesQueries,
+		cleanupInterval:            opts.CleanupInterval,
+		cleanupQueryTimeout:        opts.CleanupQueryTimeout,
+		db:                         opts.DB,
+		clock:                      opts.Clock,
+		closedCh:                   make(chan struct{}),
 	}
 
 	// Start the background task only if the interval is positive
@@ -152,16 +154,18 @@ func (g *gc) CleanupExpired() error {
 	}
 
 	// Delete the expired values
-	query, params := g.deleteExpiredValuesQuery()
-	rowsAffected, err := g.db.Exec(ctx, query, params...)
-	if err != nil {
-		return fmt.Errorf("failed to execute query: %w", err)
-	}
+	for name, fn := range g.deleteExpiredValuesQueries {
+		query, paramsFn := fn()
+		rowsAffected, err := g.db.Exec(ctx, query, paramsFn()...)
+		if err != nil {
+			return fmt.Errorf("failed to execute query: %w", err)
+		}
 
-	if rowsAffected > 0 {
-		g.log.Info("Cleaned up expired rows", slog.Int64("removed", rowsAffected))
-	} else {
-		g.log.Debug("No expired rows deleted")
+		if rowsAffected > 0 {
+			g.log.Info("Cleaned up expired rows", slog.String("name", name), slog.Int64("removed", rowsAffected))
+		} else {
+			g.log.Debug("No expired rows deleted", slog.String("name", name))
+		}
 	}
 	return nil
 }
