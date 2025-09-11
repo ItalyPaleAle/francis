@@ -1,0 +1,17 @@
+# Using mockery v3
+# Version used: 3.5.4
+# Installation: https://vektra.github.io/mockery/latest/installation
+
+all: true
+dir: 'internal/mocks/{{ .SrcPackageName }}'
+force-file-write: true
+filename: '{{ .InterfaceName }}.go'
+structname: 'Mock{{ .InterfaceName }}'
+pkgname: '{{ .SrcPackageName }}_mocks'
+template: testify
+template-data:
+  boilerplate-file: .mockery-boilerplate
+  unroll-variadic: true
+packages:
+  github.com/italypaleale/actors/components: {}
+  github.com/italypaleale/actors/actor: {}

@@ -163,11 +163,9 @@ func (a *activeActor) Halt(drain bool) error {
 	}
 
 	// If we need to drain the actor, call StopAndWait on the locker, which now makes sure no one is holding the lock
-	// Otherwise, just call Stop
+	// Otherwise, we've already called "Stop" before
 	if drain {
 		a.locker.StopAndWait()
-	} else {
-		a.locker.Stop()
 	}
 
 	return nil

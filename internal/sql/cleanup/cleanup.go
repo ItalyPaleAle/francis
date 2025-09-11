@@ -93,12 +93,10 @@ func ScheduleGarbageCollector(opts GCOptions) (GarbageCollector, error) {
 
 	// Start the background task only if the interval is positive
 	// Interval can be zero in situations like testing
-	if opts.CleanupInterval > 0 {
-		gc.wg.Add(1)
-		go func() {
-			defer gc.wg.Done()
+	if gc.cleanupInterval > 0 {
+		gc.wg.Go(func() {
 			gc.scheduleCleanup()
-		}()
+		})
 	}
 
 	return gc, nil
@@ -130,16 +128,14 @@ func (g *gc) CleanupExpired() error {
 	ctx, cancel := context.WithTimeout(context.Background(), g.cleanupQueryTimeout)
 	defer cancel()
 
-	g.wg.Add(1)
-	go func() {
+	g.wg.Go(func() {
 		// Wait for context cancellation or closing
 		select {
 		case <-ctx.Done():
 		case <-g.closedCh:
 		}
 		cancel()
-		g.wg.Done()
-	}()
+	})
 
 	// Check if the last iteration was too recent
 	// This performs an atomic operation, so allows coordination with other processes too

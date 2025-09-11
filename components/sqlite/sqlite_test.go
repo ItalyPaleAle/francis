@@ -18,6 +18,7 @@ import (
 	comptesting "github.com/italypaleale/actors/components/testing"
 	"github.com/italypaleale/actors/internal/ptr"
 	"github.com/italypaleale/actors/internal/sql/transactions"
+	"github.com/italypaleale/actors/internal/testutil"
 )
 
 // Connect to an in-memory database
@@ -52,12 +53,16 @@ func TestSqliteProvider(t *testing.T) {
 	require.NoError(t, err, "Error initializing provider")
 
 	// Run the provider in background for side effects
+	ctx := testutil.NewContextDoneNotifier(t.Context())
 	go func() {
-		err = s.Run(t.Context())
+		err = s.Run(ctx)
 		if err != nil {
 			log.Error("Error running provider", slog.Any("error", err))
 		}
 	}()
+
+	// Wait for Run to call <-ctx.Done()
+	ctx.WaitForDone()
 
 	// Run the test suite
 	suite := comptesting.NewSuite(s)
@@ -332,7 +337,7 @@ func TestHostGarbageCollection(t *testing.T) {
 	log := slog.New(h)
 
 	providerOpts := SQLiteProviderOptions{
-		ConnectionString: testConnectionString,
+		ConnectionString: "file:gctest?mode=memory",
 		// Disable automated cleanups in this test
 		// We will run the cleanups manually
 		CleanupInterval: -1,
@@ -349,14 +354,16 @@ func TestHostGarbageCollection(t *testing.T) {
 	require.NoError(t, err, "Error initializing provider")
 
 	// Run the provider in background for side effects (this initializes the GC)
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
+	ctx := testutil.NewContextDoneNotifier(t.Context())
 	go func() {
 		err = s.Run(ctx)
 		if err != nil && err != context.Canceled {
 			log.Error("Error running provider", slog.Any("error", err))
 		}
 	}()
+
+	// Wait for Run to call <-ctx.Done()
+	ctx.WaitForDone()
 
 	t.Run("garbage collector removes expired hosts", func(t *testing.T) {
 		// Register multiple hosts at different times

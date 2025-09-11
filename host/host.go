@@ -512,7 +512,9 @@ func (h *Host) haltActiveActor(act *activeActor, drain bool) error {
 	// Send the actor a message it has been deactivated
 	err = h.deactivateActor(act)
 	if err != nil {
-		return fmt.Errorf("failed to deactivate actor: %w", err)
+		// Even though the call to the actor's Deactivate method failed, we still need to continue with the deactivation process
+		// Otherwise, we are in a state where the object is still in-memory and that will cause many issues
+		h.log.Error("Actor returned an error during deactivation", slog.Any("error", err))
 	}
 
 	// Remove the actor from the table
@@ -526,6 +528,7 @@ func (h *Host) haltActiveActor(act *activeActor, drain bool) error {
 	// Report to the provider that the actor has been deactivated
 	// This uses a background context because at this point it needs to not be tied to the caller's context
 	// Once the decision to deactivate an actor has been made, we must go through with it or we could have an inconsistent state
+	// TODO: Handle this error - should retry, and then maybe gracefully exit?
 	ctx, cancel := context.WithTimeout(context.Background(), h.providerRequestTimeout)
 	defer cancel()
 	err = h.actorProvider.RemoveActor(ctx, act.ref)
