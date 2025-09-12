@@ -496,13 +496,15 @@ func (h *Host) handleIdleActor(act *activeActor) {
 		return
 	}
 
-	// Proceed with halting
-	// We don't need to drain the active calls because we just acquired the lock
-	err = h.haltActiveActor(act, false)
-	if err != nil {
-		h.log.Error("Failed to deactivate idle actor", slog.String("actorRef", act.Key()), slog.Any("error", err))
-		return
-	}
+	// Proceed with halting in a background goroutine, so we don't block other idle actors from being deactivated
+	go func() {
+		// We don't need to drain the active calls because we just acquired the lock
+		err = h.haltActiveActor(act, false)
+		if err != nil {
+			h.log.Error("Failed to deactivate idle actor", slog.String("actorRef", act.Key()), slog.Any("error", err))
+			return
+		}
+	}()
 }
 
 // Gracefully halts an actor's instance

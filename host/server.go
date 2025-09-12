@@ -127,8 +127,10 @@ func (h *Host) getServerMux() *http.ServeMux {
 		case errors.Is(err, actor.ErrActorHalted):
 			apiErr = newApiError(http.StatusServiceUnavailable, "actor_halted", "Actor is halted")
 
-			// Get the deactivation timeout for the actor type, and include the X-Actor-Deactivation-Timeout header to aid the caller in deciding how long to wait
-			w.Header().Set(headerXActorDeactivationTimeout, strconv.Itoa(int(h.deactivationTimeoutForActorType(actorType))))
+			// Get the deactivation timeout for the actor type, and include the ActorDeactivationTimeout metadata key to aid the caller in deciding how long to wait
+			apiErr.Metadata = map[string]string{
+				errMetadataActorDeactivationTimeout: strconv.FormatInt(h.deactivationTimeoutForActorType(actorType).Milliseconds(), 10),
+			}
 		case err != nil:
 			apiErr = newApiErrorf(http.StatusInternalServerError, "invoke_error", "Actor invocation error: %v", err)
 		}

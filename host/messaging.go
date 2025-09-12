@@ -16,12 +16,11 @@ import (
 )
 
 const (
-	userAgentValue                  = "actors/v1"
-	contentTypeMsgpack              = "application/vnd.msgpack"
-	headerXHostID                   = "X-Host-ID"
-	headerXActorDeactivationTimeout = "X-Actor-Deactivation-Timeout"
-	headerContentType               = "Content-Type"
-	headerUserAgent                 = "User-Agent"
+	userAgentValue     = "actors/v1"
+	contentTypeMsgpack = "application/vnd.msgpack"
+	headerXHostID      = "X-Host-ID"
+	headerContentType  = "Content-Type"
+	headerUserAgent    = "User-Agent"
 )
 
 // Invoke performs the synchronous invocation of an actor running anywhere.

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -394,7 +395,9 @@ func TestLockAndInvokeFn(t *testing.T) {
 
 		// Create a function that completes quickly
 		const testValue = "quick-result"
+		startedCh := make(chan struct{})
 		mockFn := func(ctx context.Context, act *activeActor) (any, error) {
+			close(startedCh)
 			return testValue, nil
 		}
 
@@ -404,9 +407,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 			err    error
 		}
 		resultCh := make(chan resultData, 1)
-		startedCh := make(chan struct{})
 		go func() {
-			close(startedCh)
 			result, err := host.lockAndInvokeFn(t.Context(), actorRef, mockFn)
 			resultCh <- resultData{result: result, err: err}
 		}()
@@ -418,6 +419,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 		case <-time.After(500 * time.Millisecond):
 			t.Fatal("Function did not start executing in 500ms")
 		}
+		runtime.Gosched()
 
 		// Now halt the actor, which should signal the halt channel
 		activeAct.Halt(false)

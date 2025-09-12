@@ -1357,15 +1357,20 @@ func TestIdleActorHandling(t *testing.T) {
 		instance.AssertExpectations(t)
 	})
 
-	t.Run("multiple idle actors processed in batch", func(t *testing.T) {
+	t.Run("multiple idle actors processed in batch in parallel", func(t *testing.T) {
 		t.Cleanup(func() { logBuf.Reset() })
 
 		// Create a new host
 		host, provider := newHost()
 
-		const numActors = 3
+		const numActors = 5
 		activeActors := make([]*activeActor, numActors)
 		instances := make([]*actor_mocks.MockActorDeactivate, numActors)
+
+		// Synchronization for parallel processing validation
+		deactivateStarted := make(chan int, numActors)
+		deactivateCanContinue := make(chan struct{})
+		deactivateCompleted := make(chan int, numActors)
 
 		idleTimeout := 1 * time.Minute
 
@@ -1373,8 +1378,24 @@ func TestIdleActorHandling(t *testing.T) {
 		for i := range numActors {
 			actorRef := ref.NewActorRef("testactor", fmt.Sprintf("idleActor%d", i))
 			instance := &actor_mocks.MockActorDeactivate{}
+
+			// Capture the actor index for the closure
+			actorIndex := i
 			instance.
 				On("Deactivate", mock.MatchedBy(testutil.MatchContextInterface)).
+				Run(func(args mock.Arguments) {
+					// Signal that this actor's deactivation started
+					deactivateStarted <- actorIndex
+
+					// Wait for signal to continue (to ensure all start before any complete)
+					<-deactivateCanContinue
+
+					// Small delay to simulate some work
+					time.Sleep(10 * time.Millisecond)
+
+					// Signal completion
+					deactivateCompleted <- actorIndex
+				}).
 				Return(nil).
 				Once()
 
@@ -1398,9 +1419,55 @@ func TestIdleActorHandling(t *testing.T) {
 		assert.Equal(t, uintptr(numActors), host.actors.Len(), "Should have all actors initially")
 
 		// Advance time to when actors should be processed
+		start := time.Now()
 		clock.Step(idleTimeout + 1*time.Second)
 
-		// Wait for all actors to be processed and removed
+		// Wait for all actors to start deactivation (proving they started in parallel)
+		var startedActors []int
+		timeout := time.After(2 * time.Second)
+
+		for len(startedActors) < numActors {
+			select {
+			case actorIndex := <-deactivateStarted:
+				startedActors = append(startedActors, actorIndex)
+				t.Logf("Actor %d started deactivation", actorIndex)
+			case <-timeout:
+				t.Fatalf("Timeout waiting for all actors to start deactivation. Only %d/%d started", len(startedActors), numActors)
+			}
+		}
+
+		// Verify all actors started deactivation within a reasonable time window (proving parallelism)
+		parallelStartTime := time.Since(start)
+		assert.Less(t, parallelStartTime, 500*time.Millisecond, "All actors should start deactivation quickly if processed in parallel")
+		t.Logf("All %d actors started deactivation in %v", numActors, parallelStartTime)
+
+		// Now allow all deactivations to continue
+		close(deactivateCanContinue)
+
+		// Wait for all actors to complete deactivation
+		var completedActors []int
+		completionTimeout := time.After(2 * time.Second)
+
+		for len(completedActors) < numActors {
+			select {
+			case actorIndex := <-deactivateCompleted:
+				completedActors = append(completedActors, actorIndex)
+				t.Logf("Actor %d completed deactivation", actorIndex)
+			case <-completionTimeout:
+				t.Fatalf("Timeout waiting for all actors to complete deactivation. Only %d/%d completed", len(completedActors), numActors)
+			}
+		}
+
+		// Verify parallel completion time
+		// If processed in parallel, total time should be less than if processed sequentially
+		// Sequential would be roughly (numActors * 10ms) + overhead
+		// Parallel should be roughly 10ms + overhead regardless of numActors
+		totalTime := time.Since(start)
+		expectedSequentialTime := time.Duration(numActors) * 10 * time.Millisecond
+		assert.Less(t, totalTime, expectedSequentialTime, "Parallel processing should be faster than sequential")
+		t.Logf("All %d actors completed deactivation in %v (sequential would take ~%v)", numActors, totalTime, expectedSequentialTime)
+
+		// Wait for all actors to be processed and removed from the host map
 		assert.Eventually(t, func() bool {
 			return host.actors.Len() == 0
 		}, 3*time.Second, 100*time.Millisecond, "All actors should be removed from host")
@@ -1409,6 +1476,10 @@ func TestIdleActorHandling(t *testing.T) {
 		for i, activeAct := range activeActors {
 			assert.True(t, activeAct.halted.Load(), "Actor %d should be marked as halted", i)
 		}
+
+		// Verify that we got all expected actors in both started and completed lists
+		assert.Len(t, startedActors, numActors, "All actors should have started")
+		assert.Len(t, completedActors, numActors, "All actors should have completed")
 
 		// Assert expected method calls
 		provider.AssertExpectations(t)

@@ -7,10 +7,15 @@ import (
 	msgpack "github.com/vmihailenco/msgpack/v5"
 )
 
+const (
+	errMetadataActorDeactivationTimeout = "ActorDeactivationTimeout"
+)
+
 type apiError struct {
 	HTTPStatus int
 	Code       string
 	Message    string
+	Metadata   map[string]string
 }
 
 func newApiError(httpStatus int, code string, message string) *apiError {
