@@ -1,11 +1,8 @@
 package host
 
 import (
-	"bytes"
 	"fmt"
-	"io"
 	"net/http"
-	"strconv"
 
 	msgpack "github.com/vmihailenco/msgpack/v5"
 )
@@ -33,18 +30,16 @@ func newApiErrorf(httpStatus int, code string, message string, args ...any) *api
 }
 
 func (e apiError) WriteResponse(w http.ResponseWriter) {
-	b := &bytes.Buffer{}
 	enc := msgpack.GetEncoder()
 	defer msgpack.PutEncoder(enc)
-	enc.Reset(b)
+	enc.Reset(w)
 
 	w.Header().Add(headerContentType, contentTypeMsgpack)
-	w.Header().Add(headerContentLength, strconv.Itoa(b.Len()))
 
 	w.WriteHeader(e.HTTPStatus)
 
 	// Ignore errors here
-	_, _ = io.Copy(w, b)
+	_ = enc.Encode(e)
 }
 
 // Error implements the error interface

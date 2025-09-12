@@ -19,7 +19,7 @@ type Cache[V any] struct {
 	stopped   atomic.Bool
 	runningCh chan struct{}
 	stopCh    chan struct{}
-	maxTTL    int64
+	maxTTL    time.Duration
 }
 
 // CacheOptions are options for NewCache.
@@ -32,16 +32,21 @@ type CacheOptions struct {
 	// This is optional, and defaults to 150s (2.5 minutes).
 	CleanupInterval time.Duration
 
-	// Maximum TTL value in seconds, if greater than 0
-	MaxTTL int64
+	// Maximum TTL value, if greater than 0
+	MaxTTL time.Duration
 
 	// Internal clock property, used for testing
 	clock kclock.WithTicker
 }
 
 // NewCache returns a new cache with a TTL.
-func NewCache[V any](opts CacheOptions) *Cache[V] {
+func NewCache[V any](opts *CacheOptions) *Cache[V] {
 	var m *haxmap.Map[string, cacheEntry[V]]
+
+	if opts == nil {
+		opts = &CacheOptions{}
+	}
+
 	if opts.InitialSize > 0 {
 		m = haxmap.New[string, cacheEntry[V]](uintptr(opts.InitialSize))
 	} else {
@@ -63,6 +68,7 @@ func NewCache[V any](opts CacheOptions) *Cache[V] {
 		stopCh: make(chan struct{}),
 	}
 	c.startBackgroundCleanup(opts.CleanupInterval)
+
 	return c
 }
 
@@ -77,16 +83,16 @@ func (c *Cache[V]) Get(key string) (v V, ok bool) {
 }
 
 // Set an item in the cache.
-func (c *Cache[V]) Set(key string, val V, ttl int64) {
-	if ttl <= 0 {
-		panic("invalid TTL: must be > 0")
+func (c *Cache[V]) Set(key string, val V, ttl time.Duration) {
+	if ttl < time.Millisecond {
+		panic("invalid TTL: must be 1ms or greater")
 	}
 
 	if c.maxTTL > 0 && ttl > c.maxTTL {
 		ttl = c.maxTTL
 	}
 
-	exp := c.clock.Now().Add(time.Duration(ttl) * time.Second)
+	exp := c.clock.Now().Add(ttl)
 	c.m.Set(key, cacheEntry[V]{
 		val: val,
 		exp: exp,

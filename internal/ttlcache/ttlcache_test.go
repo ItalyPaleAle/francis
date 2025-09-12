@@ -18,19 +18,19 @@ func TestCache(t *testing.T) {
 	clock := &clocktesting.FakeClock{}
 	clock.SetTime(time.Now())
 
-	cache := NewCache[string](CacheOptions{
+	cache := NewCache[string](&CacheOptions{
 		InitialSize:     10,
 		CleanupInterval: 20 * time.Second,
-		MaxTTL:          15,
+		MaxTTL:          15 * time.Second,
 		clock:           clock,
 	})
 	defer cache.Stop()
 
 	// Set values in the cache
-	cache.Set("key1", "val1", 2)
-	cache.Set("key2", "val2", 5)
-	cache.Set("key3", "val3", 30) // Max TTL is 15s
-	cache.Set("key4", "val4", 5)
+	cache.Set("key1", "val1", 2*time.Second)
+	cache.Set("key2", "val2", 5*time.Second)
+	cache.Set("key3", "val3", 30*time.Second) // Max TTL is 15s
+	cache.Set("key4", "val4", 5*time.Second)
 
 	// Retrieve values
 	for i := range 16 {
@@ -81,12 +81,9 @@ func TestCache(t *testing.T) {
 	// Advance the clock a bit more to make sure the cleanup runs
 	clock.Step(5 * time.Second)
 
-	runtime.Gosched()
-	time.Sleep(20 * time.Millisecond)
-
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		if !assert.EqualValues(c, 0, cache.m.Len()) {
 			runtime.Gosched()
 		}
-	}, time.Second, 50*time.Millisecond)
+	}, time.Second, 20*time.Millisecond)
 }

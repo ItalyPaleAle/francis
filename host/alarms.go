@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"math/rand/v2"
 	"time"
 
 	"github.com/italypaleale/actors/actor"
@@ -234,8 +235,9 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		// We can retry this
 		h.log.Warn("Error executing alarm - will retry", slog.Any("error", err))
 		// We still hold the lease, so just increment the due time and add re-add it to the queue
-		// We increment it by taking the initial retry delay and multiplying it by 1.5^attempts, with a max of 10
-		multiplier := min(math.Pow(1.5, float64(lease.Attempts())), 10)
+		// We increment it by taking the initial retry delay and multiplying it by 1.5^attempts, with a max of 10, and some jitter
+		jitter := rand.Float64()*0.2 + 0.9
+		multiplier := min(math.Pow(1.5, float64(lease.Attempts())), 10) * jitter
 		delay := h.actorsConfig[ref.ActorType].InitialRetryDelay * time.Duration(multiplier)
 		lease.IncreaseAttempts(h.clock.Now().Add(delay))
 		err = h.alarmProcessor.Enqueue(lease)
@@ -384,21 +386,13 @@ func (h *Host) GetAlarm(ctx context.Context, actorType string, actorID string, n
 		return actor.AlarmProperties{}, fmt.Errorf("failed to get alarm: %w", err)
 	}
 
-	properties, err := alarmPropertiesFromAlarmRes(res)
-	if err != nil {
-		return actor.AlarmProperties{}, err
-	}
-
-	return properties, nil
+	return alarmPropertiesFromAlarmRes(res), nil
 }
 
 func (h *Host) SetAlarm(ctx context.Context, actorType string, actorID string, name string, properties actor.AlarmProperties) error {
-	req, err := alarmPropertiesToAlarmReq(properties)
-	if err != nil {
-		return err
-	}
+	req := alarmPropertiesToAlarmReq(properties)
 
-	err = h.actorProvider.SetAlarm(ctx, ref.NewAlarmRef(actorType, actorID, name), req)
+	err := h.actorProvider.SetAlarm(ctx, ref.NewAlarmRef(actorType, actorID, name), req)
 	if err != nil {
 		return fmt.Errorf("failed to set alarm: %w", err)
 	}
@@ -417,7 +411,7 @@ func (h *Host) DeleteAlarm(ctx context.Context, actorType string, actorID string
 	return nil
 }
 
-func alarmPropertiesFromAlarmRes(res components.GetAlarmRes) (actor.AlarmProperties, error) {
+func alarmPropertiesFromAlarmRes(res components.GetAlarmRes) actor.AlarmProperties {
 	o := actor.AlarmProperties{
 		DueTime:  res.DueTime,
 		Interval: res.Interval,
@@ -428,10 +422,10 @@ func alarmPropertiesFromAlarmRes(res components.GetAlarmRes) (actor.AlarmPropert
 		o.TTL = *res.TTL
 	}
 
-	return o, nil
+	return o
 }
 
-func alarmPropertiesToAlarmReq(o actor.AlarmProperties) (components.SetAlarmReq, error) {
+func alarmPropertiesToAlarmReq(o actor.AlarmProperties) components.SetAlarmReq {
 	req := components.SetAlarmReq{
 		AlarmProperties: ref.AlarmProperties{
 			DueTime:  o.DueTime,
@@ -444,5 +438,5 @@ func alarmPropertiesToAlarmReq(o actor.AlarmProperties) (components.SetAlarmReq,
 		req.TTL = &o.TTL
 	}
 
-	return req, nil
+	return req
 }

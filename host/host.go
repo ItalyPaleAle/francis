@@ -26,6 +26,7 @@ import (
 	"github.com/italypaleale/actors/internal/eventqueue"
 	"github.com/italypaleale/actors/internal/ref"
 	"github.com/italypaleale/actors/internal/servicerunner"
+	"github.com/italypaleale/actors/internal/ttlcache"
 )
 
 // This file contains code adapted from https://github.com/dapr/dapr/tree/v1.14.5/
@@ -71,6 +72,9 @@ type Host struct {
 	actors             *haxmap.Map[string, *activeActor]
 	idleActorProcessor *eventqueue.Processor[string, *activeActor]
 	alarmProcessor     *eventqueue.Processor[string, *ref.AlarmLease]
+
+	// Actor placement cache
+	placementCache *ttlcache.Cache[*actorPlacement]
 
 	// Map of actor configuration objects; key is actor type
 	actorsConfig map[string]components.ActorHostType
@@ -249,10 +253,6 @@ func NewHost(opts NewHostOptions) (h *Host, err error) {
 		clock:                  opts.clock,
 	}
 	h.service = actor.NewService(h)
-	h.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
-		Clock:     h.clock,
-		ExecuteFn: h.handleIdleActor,
-	})
 
 	// Init the TLS certificate for the server
 	clientTLSConfig, err := h.initTLS(opts.TLSOptions)
@@ -289,7 +289,19 @@ func (h *Host) Run(parentCtx context.Context) error {
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
-	// Perform initialization steps
+	// Init idle processor and ttlcache
+	h.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
+		Clock:     h.clock,
+		ExecuteFn: h.handleIdleActor,
+	})
+	defer h.idleActorProcessor.Close()
+
+	h.placementCache = ttlcache.NewCache[*actorPlacement](&ttlcache.CacheOptions{
+		MaxTTL: placementCacheMaxTTL,
+	})
+	defer h.placementCache.Stop()
+
+	// Perform provider initialization steps
 	initCtx, initCancel := context.WithTimeout(parentCtx, h.providerRequestTimeout)
 	defer initCancel()
 	err := h.actorProvider.Init(initCtx)

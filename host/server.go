@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"math/big"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -85,9 +86,9 @@ func (h *Host) getServerMux() *http.ServeMux {
 
 		// Validate the request is for the correct host
 		// It can happen that clients make calls to incorrect hosts if the app just (re-)started and their cached data is stale
-		hostID := r.Header.Get(headerHostID)
+		hostID := r.Header.Get(headerXHostID)
 		if hostID == "" {
-			apiErr = newApiErrorf(http.StatusBadRequest, "req_invoke_hostid_empty", "%s header is missing in the request", headerHostID)
+			apiErr = newApiErrorf(http.StatusBadRequest, "req_invoke_hostid_empty", "%s header is missing in the request", headerXHostID)
 			apiErr.WriteResponse(w)
 			return
 		} else if hostID != h.hostID {
@@ -118,12 +119,16 @@ func (h *Host) getServerMux() *http.ServeMux {
 		}
 
 		// Invoke the actor
-		err = h.InvokeLocal(r.Context(), r.PathValue("actorType"), r.PathValue("actorID"), r.PathValue("method"), reqData, &outData)
+		actorType := r.PathValue("actorType")
+		err = h.InvokeLocal(r.Context(), actorType, r.PathValue("actorID"), r.PathValue("method"), reqData, &outData)
 		switch {
 		case errors.Is(err, actor.ErrActorNotHosted):
 			apiErr = newApiError(http.StatusNotFound, "actor_not_hosted", "Actor is not active on the current host")
 		case errors.Is(err, actor.ErrActorHalted):
-			apiErr = newApiError(http.StatusConflict, "actor_halted", "Actor is halted")
+			apiErr = newApiError(http.StatusServiceUnavailable, "actor_halted", "Actor is halted")
+
+			// Get the deactivation timeout for the actor type, and include the X-Actor-Deactivation-Timeout header to aid the caller in deciding how long to wait
+			w.Header().Set(headerXActorDeactivationTimeout, strconv.Itoa(int(h.deactivationTimeoutForActorType(actorType))))
 		case err != nil:
 			apiErr = newApiErrorf(http.StatusInternalServerError, "invoke_error", "Actor invocation error: %v", err)
 		}

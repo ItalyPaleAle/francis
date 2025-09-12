@@ -12,52 +12,72 @@ import (
 	msgpack "github.com/vmihailenco/msgpack/v5"
 
 	"github.com/italypaleale/actors/actor"
-	"github.com/italypaleale/actors/components"
 	"github.com/italypaleale/actors/internal/ref"
 )
 
 const (
-	userAgentValue      = "actors/v1"
-	contentTypeMsgpack  = "application/vnd.msgpack"
-	headerHostID        = "X-Host-ID"
-	headerContentType   = "Content-Type"
-	headerContentLength = "Content-Length"
-	headerUserAgent     = "User-Agent"
+	userAgentValue                  = "actors/v1"
+	contentTypeMsgpack              = "application/vnd.msgpack"
+	headerXHostID                   = "X-Host-ID"
+	headerXActorDeactivationTimeout = "X-Actor-Deactivation-Timeout"
+	headerContentType               = "Content-Type"
+	headerUserAgent                 = "User-Agent"
 )
 
 // Invoke performs the synchronous invocation of an actor running anywhere.
 func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, method string, data any, out any) error {
-	return h.doInvoke(ctx, ref.NewActorRef(actorType, actorID), method, data, out, false)
-}
+	aRef := ref.NewActorRef(actorType, actorID)
 
-// InvokeLocal performs the synchronous invocation of an actor running on the current node.
-// It returns ErrActorNotHosted if the actor is active on a different node.
-func (h *Host) InvokeLocal(ctx context.Context, actorType string, actorID string, method string, data any, out any) error {
-	return h.doInvoke(ctx, ref.NewActorRef(actorType, actorID), method, data, out, true)
-}
-
-func (h *Host) doInvoke(ctx context.Context, aRef ref.ActorRef, method string, data any, out any, local bool) error {
 	// Look up the actor
-	lar, err := h.actorProvider.LookupActor(ctx, aRef, components.LookupActorOpts{})
+	ap, err := h.lookupActor(ctx, aRef, false)
 	if err != nil {
 		return fmt.Errorf("failed to look up actor '%s': %w", aRef, err)
 	}
 
-	// If the host ID is different from the current, the invocation is for a remote actor
-	if lar.HostID != h.hostID {
-		if local {
-			// Caller wanted to invoke a local actor only
-			return actor.ErrActorNotHosted
-		}
-
-		// Invoke the remote actor
-		return h.doInvokeRemote(ctx, aRef, lar, method, data, out)
+	// Check if we're invoking a remote host
+	if !h.isLocal(ap) {
+		return h.doInvokeRemote(ctx, aRef, ap, method, data, out)
 	}
 
-	// TODO: Handle ErrActorHalted:
-	// - If local=false, retry: actor could be on a separate host
-	// - If local=true, return ErrActorNotHosted
-	res, err := h.doInvokeLocal(ctx, aRef, method, data)
+	// TODO: Handle ErrActorHalted: retry (after new lookup without cache): actor could be on a separate host
+	return h.doInvokeLocal(ctx, ref.NewActorRef(actorType, actorID), method, data, out)
+}
+
+// InvokeLocal performs the synchronous invocation of an actor running on the current node.
+// Returns ErrActorNotHosted if the actor is active on a different node.
+// Returns ErrActorHalted if the actor is being halted (callers should retry after a delay).
+func (h *Host) InvokeLocal(ctx context.Context, actorType string, actorID string, method string, data any, out any) error {
+	aRef := ref.NewActorRef(actorType, actorID)
+
+	// Look up the actor
+	ap, err := h.lookupActor(ctx, aRef, false)
+	if err != nil {
+		return fmt.Errorf("failed to look up actor '%s': %w", aRef, err)
+	}
+
+	// Cannot invoke remote actors in this method
+	if !h.isLocal(ap) {
+		return actor.ErrActorNotHosted
+	}
+
+	return h.doInvokeLocal(ctx, ref.NewActorRef(actorType, actorID), method, data, out)
+}
+
+func (h *Host) doInvokeLocal(ctx context.Context, ref ref.ActorRef, method string, data any, out any) error {
+	res, err := h.lockAndInvokeFn(ctx, ref, func(ctx context.Context, act *activeActor) (any, error) {
+		obj, ok := act.instance.(actor.ActorInvoke)
+		if !ok {
+			return nil, fmt.Errorf("actor of type '%s' does not implement the Invoke method", act.ActorType())
+		}
+
+		// Invoke the actor
+		res, err := obj.Invoke(ctx, method, data)
+		if err != nil {
+			return nil, fmt.Errorf("error from actor: %w", err)
+		}
+
+		return res, nil
+	})
 	if err != nil {
 		return err
 	}
@@ -82,11 +102,11 @@ func (h *Host) doInvoke(ctx context.Context, aRef ref.ActorRef, method string, d
 	return nil
 }
 
-func (h *Host) doInvokeRemote(ctx context.Context, aRef ref.ActorRef, lar components.LookupActorRes, method string, data any, out any) error {
+func (h *Host) doInvokeRemote(ctx context.Context, aRef ref.ActorRef, ap *actorPlacement, method string, data any, out any) error {
 	// Request URL
 	u := url.URL{}
 	u.Scheme = "https"
-	u.Host = lar.Address
+	u.Host = ap.Address
 	u.Path = "/v1/invoke/" + aRef.String() + "/" + method
 
 	// Encode the body using msgpack
@@ -114,7 +134,7 @@ func (h *Host) doInvokeRemote(ctx context.Context, aRef ref.ActorRef, lar compon
 
 	// TODO: Auth
 	req.Header.Set(headerUserAgent, userAgentValue)
-	req.Header.Set(headerHostID, lar.HostID)
+	req.Header.Set(headerXHostID, ap.HostID)
 
 	res, err := h.client.Do(req)
 	if err != nil {
@@ -163,23 +183,6 @@ func (h *Host) doInvokeRemote(ctx context.Context, aRef ref.ActorRef, lar compon
 	return nil
 }
 
-func (h *Host) doInvokeLocal(ctx context.Context, ref ref.ActorRef, method string, data any) (any, error) {
-	return h.lockAndInvokeFn(ctx, ref, func(ctx context.Context, act *activeActor) (any, error) {
-		obj, ok := act.instance.(actor.ActorInvoke)
-		if !ok {
-			return nil, fmt.Errorf("actor of type '%s' does not implement the Invoke method", act.ActorType())
-		}
-
-		// Invoke the actor
-		res, err := obj.Invoke(ctx, method, data)
-		if err != nil {
-			return nil, fmt.Errorf("error from actor: %w", err)
-		}
-
-		return res, nil
-	})
-}
-
 func (h *Host) lockAndInvokeFn(parentCtx context.Context, ref ref.ActorRef, fn func(context.Context, *activeActor) (any, error)) (any, error) {
 	// Get the actor, which may create it
 	act, err := h.getOrCreateActor(ref)
@@ -188,8 +191,8 @@ func (h *Host) lockAndInvokeFn(parentCtx context.Context, ref ref.ActorRef, fn f
 	}
 
 	// Create a context for this request, which allows us to stop it in-flight if needed
-	ctx, cancel := context.WithCancel(parentCtx)
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(parentCtx)
+	defer cancel(nil)
 
 	// Acquire a lock for turn-based concurrency
 	haltCh, err := act.Lock(ctx)
@@ -206,7 +209,7 @@ func (h *Host) lockAndInvokeFn(parentCtx context.Context, ref ref.ActorRef, fn f
 			select {
 			case <-t.C():
 				// Graceful timeout has passed: forcefully cancel the context
-				cancel()
+				cancel(actor.ErrActorHalted)
 				return
 			case <-ctx.Done():
 				// The method is returning (either fn() is done, or context was canceled)

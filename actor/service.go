@@ -12,9 +12,11 @@ var (
 	ErrAlarmNotFound = errors.New("alarm not found")
 	// ErrActorNotHosted is returned by Halt when the actor is not active on the current host.
 	ErrActorNotHosted = errors.New("actor is not active on the current host")
-	// ErrActorHalted is returned by methods that perform invocation when the actor is halted on the current host.
+	// ErrActorHalted is returned by methods that perform invocation when the actor is halted on the host where it was previously active.
 	// Callers should retry after a delay.
 	ErrActorHalted = errors.New("actor is halted")
+	// ErrActorHalted is returned by methods that perform invocation when the actor type is not supported for this cluster.
+	ErrActorTypeUnsupported = errors.New("actor type is not supported in the cluster")
 )
 
 // Service allows interacting with the actor host, to invoke actors and perform operations on state and alarms.
