@@ -27,7 +27,7 @@ import (
 func (h *Host) runServer(ctx context.Context) (err error) {
 	// Create the HTTP/3 server (QUIC)
 	srv := http3.Server{
-		Handler:        h.getServerMux(),
+		Handler:        h.getServerHandler(),
 		Addr:           h.bind,
 		MaxHeaderBytes: 1 << 20,
 		TLSConfig:      h.serverTLSConfig,
@@ -67,7 +67,7 @@ func (h *Host) runServer(ctx context.Context) (err error) {
 	return nil
 }
 
-func (h *Host) getServerMux() *http.ServeMux {
+func (h *Host) getServerHandler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -78,22 +78,19 @@ func (h *Host) getServerMux() *http.ServeMux {
 		defer r.Body.Close()
 
 		var (
-			apiErr *apiError
-			err    error
+			err error
 
 			reqData, outData any
 		)
 
 		// Validate the request is for the correct host
 		// It can happen that clients make calls to incorrect hosts if the app just (re-)started and their cached data is stale
-		hostID := r.Header.Get(headerXHostID)
-		if hostID == "" {
-			apiErr = newApiErrorf(http.StatusBadRequest, "req_invoke_hostid_empty", "%s header is missing in the request", headerXHostID)
-			apiErr.WriteResponse(w)
+		reqHostID := r.Header.Get(headerXHostID)
+		if reqHostID == "" {
+			errApiReqInvokeHostIdEmpty.WriteResponse(w)
 			return
-		} else if hostID != h.hostID {
-			apiErr = newApiErrorf(http.StatusConflict, "req_invoke_hostid_mismatch", "Request is for host ID '%s', but current host ID is '%s'", hostID, h.hostID)
-			apiErr.WriteResponse(w)
+		} else if reqHostID != h.hostID {
+			errApiReqInvokeHostIdMismatch.WriteResponse(w)
 			return
 		}
 
@@ -106,15 +103,15 @@ func (h *Host) getServerMux() *http.ServeMux {
 			dec.Reset(r.Body)
 			err = dec.Decode(&reqData)
 			if err != nil {
-				apiErr = newApiErrorf(http.StatusBadRequest, "req_invoke_body", "Failed to parse request body: %v", err)
-				apiErr.WriteResponse(w)
+				errApiReqInvokeBody.
+					Clone(withInnerError(err)).
+					WriteResponse(w)
 				return
 			}
 		case "":
 			// Ignore the body if the content type is unsupported
 		default:
-			apiErr = newApiErrorf(http.StatusBadRequest, "req_invoke_content_type", "Unsupported content type: %s", ct)
-			apiErr.WriteResponse(w)
+			errApiReqInvokeContentType.WriteResponse(w)
 			return
 		}
 
@@ -123,19 +120,21 @@ func (h *Host) getServerMux() *http.ServeMux {
 		err = h.InvokeLocal(r.Context(), actorType, r.PathValue("actorID"), r.PathValue("method"), reqData, &outData)
 		switch {
 		case errors.Is(err, actor.ErrActorNotHosted):
-			apiErr = newApiError(http.StatusNotFound, "actor_not_hosted", "Actor is not active on the current host")
+			errApiActorNotHosted.WriteResponse(w)
+			return
 		case errors.Is(err, actor.ErrActorHalted):
-			apiErr = newApiError(http.StatusServiceUnavailable, "actor_halted", "Actor is halted")
-
-			// Get the deactivation timeout for the actor type, and include the ActorDeactivationTimeout metadata key to aid the caller in deciding how long to wait
-			apiErr.Metadata = map[string]string{
-				errMetadataActorDeactivationTimeout: strconv.FormatInt(h.deactivationTimeoutForActorType(actorType).Milliseconds(), 10),
-			}
+			// Get the deactivation timeout for the actor type (in ms), and include the ActorDeactivationTimeout metadata key to aid the caller in deciding how long to wait
+			dt := h.deactivationTimeoutForActorType(actorType).Milliseconds()
+			errApiActorHalted.
+				Clone(withMetadata(map[string]string{
+					errMetadataActorDeactivationTimeout: strconv.FormatInt(dt, 10),
+				})).
+				WriteResponse(w)
+			return
 		case err != nil:
-			apiErr = newApiErrorf(http.StatusInternalServerError, "invoke_error", "Actor invocation error: %v", err)
-		}
-		if apiErr != nil {
-			apiErr.WriteResponse(w)
+			errApiInvokeFailed.
+				Clone(withInnerError(err)).
+				WriteResponse(w)
 			return
 		}
 
@@ -158,7 +157,17 @@ func (h *Host) getServerMux() *http.ServeMux {
 		}
 	})
 
-	return mux
+	// Add the middleware adding the host ID to each response
+	handler := h.hostIdHeaderServerMiddleware(mux)
+
+	return handler
+}
+
+func (h *Host) hostIdHeaderServerMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Add(headerXHostID, h.hostID)
+		next.ServeHTTP(w, req)
+	})
 }
 
 func (h *Host) initTLS(opts *HostTLSOptions) (clientTLSConfig *tls.Config, err error) {
