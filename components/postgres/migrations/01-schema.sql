@@ -1,3 +1,6 @@
+-- Ensure required extensions
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 -- Contains the active actor hosts
 CREATE TABLE hosts (
     -- ID of the host
@@ -65,7 +68,7 @@ CREATE TABLE actor_state (
     -- Actor ID
     actor_id text NOT NULL,
     -- State data
-    actor_state_data blob NOT NULL,
+    actor_state_data bytea NOT NULL,
     -- If set, indicates the expiration time for this state
     -- Expired rows are automatically garbage collected
     actor_state_expiration_time timestamp,
@@ -93,7 +96,7 @@ CREATE TABLE alarms (
     -- For repeating alarms, time at which to stop repeating
     alarm_ttl_time timestamp,
     -- Optional data associated with the alarm
-    alarm_data blob,
+    alarm_data bytea,
     -- For alarms that have been fetched and have a lease, this is a unique ID for the lease
     alarm_lease_id uuid,
     -- For alarms that have been fetched and have a lease, indicates the time the lease expires
@@ -108,15 +111,28 @@ CREATE UNIQUE INDEX alarm_lease_id_idx ON alarms (alarm_lease_id)
 
 -- Trigger that nullifies the leases on the alarms table when an actor is deactivated
 -- (deleted from the active_actors table)
-CREATE TRIGGER active_actors_delete_update_alarms
-AFTER DELETE ON active_actors
+CREATE OR REPLACE FUNCTION active_actors_delete_update_alarms_fn()
+RETURNS trigger AS $$
 BEGIN
+    -- Batch update: join alarms with the transition table of deleted rows
     UPDATE alarms
     SET
         alarm_lease_id = NULL,
         alarm_lease_expiration_time = NULL
+    FROM old_rows r
     WHERE
-        actor_type = OLD.actor_type
-        AND actor_id = OLD.actor_id
-        AND alarm_lease_id IS NOT NULL;
+        alarms.actor_type = r.actor_type
+        AND alarms.actor_id = r.actor_id
+        AND alarms.alarm_lease_id IS NOT NULL;
+
+    -- Statement-level trigger return value is ignored
+    RETURN NULL;
 END;
+$$ LANGUAGE plpgsql;
+
+-- Use a statement-level trigger with a transition table, so the function runs once per DELETE statement and can operate on all deleted rows in a single batch.
+CREATE TRIGGER active_actors_delete_update_alarms
+AFTER DELETE ON active_actors
+REFERENCING OLD TABLE AS old_rows
+FOR EACH STATEMENT
+EXECUTE FUNCTION active_actors_delete_update_alarms_fn();

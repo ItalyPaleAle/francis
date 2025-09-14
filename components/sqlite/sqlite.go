@@ -91,7 +91,7 @@ func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, provi
 		}
 		sqliteOpts.ConnectionString, err = ParseConnectionString(sqliteOpts.ConnectionString, s.log)
 		if err != nil {
-			return nil, fmt.Errorf("connection string for SQLite is not valid")
+			return nil, fmt.Errorf("connection string for SQLite is not valid: %w", err)
 		}
 
 		// Open the database

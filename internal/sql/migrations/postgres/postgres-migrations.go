@@ -35,8 +35,8 @@ func (m Migrations) Perform(ctx context.Context, migrationFns []migrations.Migra
 		return fmt.Errorf("failed to ensure metadata table exists: %w", err)
 	}
 
-	// Normally, the way to acquire an exclusive lock in PostgreSQL (commonly used for migrations by other frameworks too) is to use advisory locks
-	// However, advisory locks aren't supported in all PostgreSQL-compatible databases, for example CockroachDB
+	// Normally, the way to acquire an exclusive lock in Postgres (commonly used for migrations by other frameworks too) is to use advisory locks
+	// However, advisory locks aren't supported in all Postgres-compatible databases, for example CockroachDB
 	// So, we're going to write a row in there (not using a transaction, as that causes a table-level lock to be created), ignoring duplicates
 	const lockKey = "lock"
 	logger.DebugContext(ctx, "Ensuring lock row exists in metadata table", slog.String("lockKey", lockKey))
