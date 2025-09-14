@@ -62,19 +62,19 @@ func TestPostgresProvider(t *testing.T) {
 	suite.Run(t)
 }
 
-func (s *PostgresProvider) CleanupExpired() error {
-	return s.gc.CleanupExpired()
+func (p *PostgresProvider) CleanupExpired() error {
+	return p.gc.CleanupExpired()
 }
 
-func (s *PostgresProvider) Now() time.Time {
-	return s.clock.Now()
+func (p *PostgresProvider) Now() time.Time {
+	return p.clock.Now()
 }
 
-func (s *PostgresProvider) AdvanceClock(d time.Duration) {
-	s.clock.Sleep(d)
+func (p *PostgresProvider) AdvanceClock(d time.Duration) {
+	p.clock.Sleep(d)
 }
 
-func (s *PostgresProvider) Seed(ctx context.Context, spec comptesting.Spec) error {
+func (p *PostgresProvider) Seed(ctx context.Context, spec comptesting.Spec) error {
 	return nil
 	/* _, tErr := transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (z struct{}, err error) {
 		now := s.clock.Now()
@@ -201,8 +201,8 @@ func (s *PostgresProvider) Seed(ctx context.Context, spec comptesting.Spec) erro
 	*/
 }
 
-func (s *PostgresProvider) GetAllActorState(ctx context.Context) (comptesting.ActorStateSpecCollection, error) {
-	rows, err := s.db.Query(ctx, "SELECT actor_type, actor_id, actor_state_data FROM actor_state")
+func (p *PostgresProvider) GetAllActorState(ctx context.Context) (comptesting.ActorStateSpecCollection, error) {
+	rows, err := p.db.Query(ctx, "SELECT actor_type, actor_id, actor_state_data FROM actor_state")
 	if err != nil {
 		return nil, fmt.Errorf("select actor_state: %w", err)
 	}
@@ -221,7 +221,7 @@ func (s *PostgresProvider) GetAllActorState(ctx context.Context) (comptesting.Ac
 	return res, nil
 }
 
-func (s *PostgresProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, error) {
+func (p *PostgresProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, error) {
 	return comptesting.Spec{}, nil
 
 	/* return transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (res comptesting.Spec, err error) {

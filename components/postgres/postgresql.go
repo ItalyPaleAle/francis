@@ -86,10 +86,6 @@ func NewPostgresProvider(log *slog.Logger, postgresOpts PostgresProviderOptions,
 			return nil, errors.New("missing property ConnectionString in Postgres options")
 		}
 
-		// TODO: Validate and sanitize connstring
-		// See: https://github.com/dapr/components-contrib/blob/main/common/authentication/postgresql/metadata.go
-		// Also set TZ to UTC: https://stackoverflow.com/questions/6663765/postgres-default-timezone
-
 		// Open the database
 		connCtx, cancel := context.WithTimeout(context.Background(), p.timeout)
 		defer cancel()
@@ -123,9 +119,9 @@ type PostgresProviderOptions struct {
 }
 
 // TODO: Rename to "p"
-func (s *PostgresProvider) Init(ctx context.Context) error {
+func (p *PostgresProvider) Init(ctx context.Context) error {
 	// Perform schema migrations
-	err := s.performMigrations(ctx)
+	err := p.performMigrations(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to perform schema migrations: %w", err)
 	}
@@ -133,13 +129,13 @@ func (s *PostgresProvider) Init(ctx context.Context) error {
 	return nil
 }
 
-func (s *PostgresProvider) Run(ctx context.Context) error {
-	if !s.running.CompareAndSwap(false, true) {
+func (p *PostgresProvider) Run(ctx context.Context) error {
+	if !p.running.CompareAndSwap(false, true) {
 		return components.ErrAlreadyRunning
 	}
 
 	// Start the background garbage collection
-	err := s.initGC()
+	err := p.initGC()
 	if err != nil {
 		return fmt.Errorf("failed to start garbage collector: %w", err)
 	}
@@ -148,7 +144,7 @@ func (s *PostgresProvider) Run(ctx context.Context) error {
 	<-ctx.Done()
 
 	// Stop the garbage collector
-	err = s.gc.Close()
+	err = p.gc.Close()
 	if err != nil {
 		return fmt.Errorf("failed to stop garbage collector: %w", err)
 	}
@@ -156,9 +152,9 @@ func (s *PostgresProvider) Run(ctx context.Context) error {
 	return nil
 }
 
-func (s *PostgresProvider) HealthCheckInterval() time.Duration {
+func (p *PostgresProvider) HealthCheckInterval() time.Duration {
 	// The recommended health check interval is the deadline, less the query timeout, less 1s, then rounded down to the closest 5s
-	interval := (s.cfg.HostHealthCheckDeadline - s.timeout - time.Second).Truncate(time.Second)
+	interval := (p.cfg.HostHealthCheckDeadline - p.timeout - time.Second).Truncate(time.Second)
 	interval = interval - time.Duration(int64(interval.Seconds())%5)*time.Second
 
 	// ...however, there's a minimum of 1s
@@ -168,18 +164,18 @@ func (s *PostgresProvider) HealthCheckInterval() time.Duration {
 	return interval
 }
 
-func (s *PostgresProvider) RenewLeaseInterval() time.Duration {
+func (p *PostgresProvider) RenewLeaseInterval() time.Duration {
 	// The recommended interval is the bigger of: the lease duration less 10s, or half of the lease duration
-	if s.cfg.AlarmsLeaseDuration < 20*time.Second {
-		return s.cfg.AlarmsLeaseDuration / 2
+	if p.cfg.AlarmsLeaseDuration < 20*time.Second {
+		return p.cfg.AlarmsLeaseDuration / 2
 	}
 
-	return s.cfg.AlarmsLeaseDuration - 10*time.Second
+	return p.cfg.AlarmsLeaseDuration - 10*time.Second
 }
 
-func (s *PostgresProvider) performMigrations(ctx context.Context) error {
+func (p *PostgresProvider) performMigrations(ctx context.Context) error {
 	m := postgresmigrations.Migrations{
-		DB:                s.db,
+		DB:                p.db,
 		MetadataTableName: "metadata",
 		MetadataKey:       "migrations-version",
 	}
@@ -207,7 +203,7 @@ func (s *PostgresProvider) performMigrations(ctx context.Context) error {
 		}
 
 		migrationFns[i] = func(ctx context.Context) error {
-			s.log.InfoContext(ctx, "Performing Postgres database migration", slog.String("migration", e))
+			p.log.InfoContext(ctx, "Performing Postgres database migration", slog.String("migration", e))
 			_, err := m.DB.Exec(ctx, string(data))
 			if err != nil {
 				return fmt.Errorf("failed to perform migration '%s': %w", e, err)
@@ -217,7 +213,7 @@ func (s *PostgresProvider) performMigrations(ctx context.Context) error {
 	}
 
 	// Execute the migrations
-	err = m.Perform(ctx, migrationFns, s.log)
+	err = m.Perform(ctx, migrationFns, p.log)
 	if err != nil {
 		return fmt.Errorf("migrations failed with error: %w", err)
 	}
@@ -225,9 +221,9 @@ func (s *PostgresProvider) performMigrations(ctx context.Context) error {
 	return nil
 }
 
-func (s *PostgresProvider) initGC() (err error) {
-	s.gc, err = cleanup.ScheduleGarbageCollector(cleanup.GCOptions{
-		Logger: s.log,
+func (p *PostgresProvider) initGC() (err error) {
+	p.gc, err = cleanup.ScheduleGarbageCollector(cleanup.GCOptions{
+		Logger: p.log,
 		UpdateLastCleanupQuery: func(arg any) (string, []any) {
 			return `
 				INSERT INTO metadata (key, value)
@@ -241,7 +237,7 @@ func (s *PostgresProvider) initGC() (err error) {
 			"hosts": func() (string, func() []any) {
 				q := `DELETE FROM hosts WHERE host_last_health_check < (LOCALTIMESTAMP - $1)`
 				return q, func() []any {
-					return []any{s.cfg.HostHealthCheckDeadline}
+					return []any{p.cfg.HostHealthCheckDeadline}
 				}
 			},
 			"actor_state": func() (string, func() []any) {
@@ -256,8 +252,8 @@ func (s *PostgresProvider) initGC() (err error) {
 				}
 			},
 		},
-		CleanupInterval: s.cleanupInterval,
-		DB:              sqladapter.AdaptPgxConn(s.db),
+		CleanupInterval: p.cleanupInterval,
+		DB:              sqladapter.AdaptPgxConn(p.db),
 	})
 	return err
 }

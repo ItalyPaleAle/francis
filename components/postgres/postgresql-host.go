@@ -11,7 +11,7 @@ import (
 	"github.com/italypaleale/actors/internal/ref"
 )
 
-func (s *PostgresProvider) RegisterHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {
+func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {
 	return components.RegisterHostRes{}, nil
 	/*hostIDObj, oErr := uuid.NewV7()
 	if oErr != nil {
@@ -71,7 +71,7 @@ func (s *PostgresProvider) RegisterHost(ctx context.Context, req components.Regi
 	}, nil*/
 }
 
-func (s *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, req components.UpdateActorHostReq) error {
+func (p *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, req components.UpdateActorHostReq) error {
 	// At this stage, there are two things we can update here (one or both):
 	// - The last health check
 	// - The list of supported actor types (if non-nil)
@@ -147,10 +147,10 @@ func (s *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, r
 	return nil*/
 }
 
-func (s *PostgresProvider) updateActorHostLastHealthCheck(ctx context.Context, hostID string, tx pgx.Tx) error {
-	now := s.clock.Now().UnixMilli()
+func (p *PostgresProvider) updateActorHostLastHealthCheck(ctx context.Context, hostID string, tx pgx.Tx) error {
+	now := p.clock.Now().UnixMilli()
 
-	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 	res, err := tx.
 		Exec(queryCtx,
@@ -162,7 +162,7 @@ func (s *PostgresProvider) updateActorHostLastHealthCheck(ctx context.Context, h
 			AND host_last_health_check >= ?`,
 			now,
 			hostID,
-			now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
+			now-p.cfg.HostHealthCheckDeadline.Milliseconds(),
 		)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)
@@ -178,7 +178,7 @@ func (s *PostgresProvider) updateActorHostLastHealthCheck(ctx context.Context, h
 	return nil
 }
 
-func (s *PostgresProvider) UnregisterHost(ctx context.Context, hostID string) error {
+func (p *PostgresProvider) UnregisterHost(ctx context.Context, hostID string) error {
 	return nil
 
 	/*// Deleting from the hosts table causes all actors to be deactivate
@@ -211,7 +211,7 @@ func (s *PostgresProvider) UnregisterHost(ctx context.Context, hostID string) er
 	return nil*/
 }
 
-func (s *PostgresProvider) LookupActor(ctx context.Context, ref ref.ActorRef, opts components.LookupActorOpts) (components.LookupActorRes, error) {
+func (p *PostgresProvider) LookupActor(ctx context.Context, ref ref.ActorRef, opts components.LookupActorOpts) (components.LookupActorRes, error) {
 	return components.LookupActorRes{}, nil
 
 	/*res, err := transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (res components.LookupActorRes, err error) {
@@ -348,10 +348,10 @@ func (s *PostgresProvider) LookupActor(ctx context.Context, ref ref.ActorRef, op
 	return res, nil*/
 }
 
-func (s *PostgresProvider) RemoveActor(ctx context.Context, ref ref.ActorRef) error {
-	queryCtx, queryCancel := context.WithTimeout(ctx, s.timeout)
+func (p *PostgresProvider) RemoveActor(ctx context.Context, ref ref.ActorRef) error {
+	queryCtx, queryCancel := context.WithTimeout(ctx, p.timeout)
 	defer queryCancel()
-	res, err := s.db.
+	res, err := p.db.
 		Exec(queryCtx,
 			`DELETE FROM active_actors
 			WHERE actor_type = $1 AND actor_id = $2`,
@@ -367,7 +367,7 @@ func (s *PostgresProvider) RemoveActor(ctx context.Context, ref ref.ActorRef) er
 	return nil
 }
 
-func (s *PostgresProvider) insertHostActorTypes(ctx context.Context, tx pgx.Tx, hostID string, actorTypes []components.ActorHostType) error {
+func (p *PostgresProvider) insertHostActorTypes(ctx context.Context, tx pgx.Tx, hostID string, actorTypes []components.ActorHostType) error {
 	if len(actorTypes) == 0 {
 		return nil
 	}
@@ -396,7 +396,7 @@ func (s *PostgresProvider) insertHostActorTypes(ctx context.Context, tx pgx.Tx, 
 		q.WriteString("(?,?,?,?)")
 	}
 
-	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 	_, err := tx.Exec(queryCtx, q.String(), args...)
 	if err != nil {

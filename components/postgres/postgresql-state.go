@@ -11,11 +11,11 @@ import (
 	"github.com/italypaleale/actors/internal/ref"
 )
 
-func (s *PostgresProvider) GetState(ctx context.Context, ref ref.ActorRef) (data []byte, err error) {
-	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+func (p *PostgresProvider) GetState(ctx context.Context, ref ref.ActorRef) (data []byte, err error) {
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
-	err = s.db.
+	err = p.db.
 		QueryRow(queryCtx,
 			`SELECT actor_state_data
 			FROM actor_state
@@ -35,17 +35,17 @@ func (s *PostgresProvider) GetState(ctx context.Context, ref ref.ActorRef) (data
 	return data, nil
 }
 
-func (s *PostgresProvider) SetState(ctx context.Context, ref ref.ActorRef, data []byte, opts components.SetStateOpts) error {
+func (p *PostgresProvider) SetState(ctx context.Context, ref ref.ActorRef, data []byte, opts components.SetStateOpts) error {
 	var exp *time.Duration
 	if opts.TTL > 0 {
 		exp = &opts.TTL
 	}
 
-	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
 	// Performs a upsert
-	_, err := s.db.Exec(queryCtx,
+	_, err := p.db.Exec(queryCtx,
 		// If exp is nil, LOCALTIMESTAMP + NULL will be NULL
 		`INSERT INTO actor_state
 			(actor_type, actor_id, actor_state_data, actor_state_expiration_time)
@@ -62,13 +62,13 @@ func (s *PostgresProvider) SetState(ctx context.Context, ref ref.ActorRef, data 
 	return nil
 }
 
-func (s *PostgresProvider) DeleteState(ctx context.Context, ref ref.ActorRef) error {
-	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+func (p *PostgresProvider) DeleteState(ctx context.Context, ref ref.ActorRef) error {
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
 	// We exclude expired state from the deletion because we want to be able to get an appropriate count of affected rows, and return ErrNoState if nothing was deleted
 	// Expired state entries are garbage collected periodically anyways
-	res, err := s.db.Exec(queryCtx,
+	res, err := p.db.Exec(queryCtx,
 		`DELETE FROM actor_state
 		WHERE
 			actor_type = $1

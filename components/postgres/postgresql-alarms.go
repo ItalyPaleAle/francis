@@ -15,7 +15,7 @@ import (
 	"github.com/italypaleale/actors/internal/ref"
 )
 
-func (s *PostgresProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res components.GetAlarmRes, err error) {
+func (p *PostgresProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res components.GetAlarmRes, err error) {
 	return components.GetAlarmRes{}, nil
 
 	/*queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
@@ -57,7 +57,7 @@ func (s *PostgresProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res 
 	*/
 }
 
-func (s *PostgresProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req components.SetAlarmReq) error {
+func (p *PostgresProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req components.SetAlarmReq) error {
 	return nil
 
 	/*var (
@@ -103,10 +103,10 @@ func (s *PostgresProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req c
 	return nil*/
 }
 
-func (s *PostgresProvider) DeleteAlarm(ctx context.Context, ref ref.AlarmRef) error {
-	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+func (p *PostgresProvider) DeleteAlarm(ctx context.Context, ref ref.AlarmRef) error {
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
-	res, err := s.db.Exec(queryCtx,
+	res, err := p.db.Exec(queryCtx,
 		`DELETE FROM alarms
 		WHERE
 			actor_type = $1
@@ -125,7 +125,7 @@ func (s *PostgresProvider) DeleteAlarm(ctx context.Context, ref ref.AlarmRef) er
 	return nil
 }
 
-func (s *PostgresProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req components.FetchAndLeaseUpcomingAlarmsReq) ([]*ref.AlarmLease, error) {
+func (p *PostgresProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req components.FetchAndLeaseUpcomingAlarmsReq) ([]*ref.AlarmLease, error) {
 	// The list of hosts is required; if there's no host, return an empty list
 	if len(req.Hosts) == 0 {
 		return nil, nil
@@ -145,12 +145,12 @@ func (s *PostgresProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req 
 	})*/
 }
 
-func (s *PostgresProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmLease) (res components.GetLeasedAlarmRes, err error) {
-	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+func (p *PostgresProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmLease) (res components.GetLeasedAlarmRes, err error) {
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
 	var interval *string
-	err = s.db.
+	err = p.db.
 		QueryRow(queryCtx, `
 			SELECT
 				actor_type, actor_id, alarm_name, alarm_data,
@@ -181,7 +181,7 @@ func (s *PostgresProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmL
 	return res, nil
 }
 
-func (s *PostgresProvider) RenewAlarmLeases(ctx context.Context, req components.RenewAlarmLeasesReq) (res components.RenewAlarmLeasesRes, err error) {
+func (p *PostgresProvider) RenewAlarmLeases(ctx context.Context, req components.RenewAlarmLeasesReq) (res components.RenewAlarmLeasesRes, err error) {
 	return components.RenewAlarmLeasesRes{}, nil
 
 	/*now := s.clock.Now()
@@ -266,11 +266,11 @@ func (s *PostgresProvider) RenewAlarmLeases(ctx context.Context, req components.
 	return res, nil*/
 }
 
-func (s *PostgresProvider) ReleaseAlarmLease(ctx context.Context, lease *ref.AlarmLease) error {
-	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+func (p *PostgresProvider) ReleaseAlarmLease(ctx context.Context, lease *ref.AlarmLease) error {
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
-	res, err := s.db.Exec(queryCtx, `
+	res, err := p.db.Exec(queryCtx, `
 		UPDATE alarms
 		SET
 			alarm_lease_id = NULL,
@@ -293,8 +293,8 @@ func (s *PostgresProvider) ReleaseAlarmLease(ctx context.Context, lease *ref.Ala
 	return nil
 }
 
-func (s *PostgresProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.AlarmLease, req components.UpdateLeasedAlarmReq) (err error) {
-	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+func (p *PostgresProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.AlarmLease, req components.UpdateLeasedAlarmReq) (err error) {
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
 	whereClause := `WHERE
@@ -306,17 +306,17 @@ func (s *PostgresProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Ala
 	// If we want to refresh the lease...
 	var res pgconn.CommandTag
 	if req.RefreshLease {
-		res, err = s.db.Exec(queryCtx, `
+		res, err = p.db.Exec(queryCtx, `
 			UPDATE alarms
 			SET
 				alarm_lease_expiration_time = LOCALTIMESTAMP + $1,
 				alarm_due_time = $2
 			`+whereClause,
-			s.cfg.AlarmsLeaseDuration, req.DueTime,
+			p.cfg.AlarmsLeaseDuration, req.DueTime,
 			lease.Key(), lease.LeaseID(),
 		)
 	} else {
-		res, err = s.db.Exec(queryCtx, `
+		res, err = p.db.Exec(queryCtx, `
 			UPDATE alarms
 			SET
 				alarm_lease_id = NULL,
@@ -338,11 +338,11 @@ func (s *PostgresProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Ala
 	return nil
 }
 
-func (s *PostgresProvider) DeleteLeasedAlarm(ctx context.Context, lease *ref.AlarmLease) error {
-	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+func (p *PostgresProvider) DeleteLeasedAlarm(ctx context.Context, lease *ref.AlarmLease) error {
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
-	res, err := s.db.Exec(queryCtx, `
+	res, err := p.db.Exec(queryCtx, `
 		DELETE FROM alarms
 		WHERE
 			alarm_id = $1
