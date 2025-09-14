@@ -35,7 +35,6 @@ var (
 )
 
 type SQLiteProvider struct {
-	pid             string
 	cfg             components.ProviderConfig
 	db              *sql.DB
 	running         atomic.Bool
@@ -53,8 +52,6 @@ func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, provi
 	}
 
 	s := &SQLiteProvider{
-		// TODO: Set a PID
-		pid:             "TODO",
 		cfg:             providerConfig,
 		log:             log,
 		timeout:         sqliteOpts.Timeout,

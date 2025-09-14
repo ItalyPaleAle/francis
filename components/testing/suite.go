@@ -1187,7 +1187,6 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 		// But it should not have lease information anymore
 		assert.Nil(t, foundAlarm.LeaseID, "alarm should not have lease ID after actor removal")
 		assert.Nil(t, foundAlarm.LeaseExp, "alarm should not have lease expiration after actor removal")
-		assert.Nil(t, foundAlarm.LeasePID, "alarm should not have lease PID after actor removal")
 	})
 }
 
@@ -1377,7 +1376,6 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 			if !expectAlarmIDsMap[a.AlarmID] {
 				assert.Emptyf(t, a.LeaseID, "expected alarm %q not to have a lease ID", a.AlarmID)
 				assert.Emptyf(t, a.LeaseExp, "expected alarm %q not to have a lease expiration", a.AlarmID)
-				assert.Emptyf(t, a.LeasePID, "expected alarm %q not to have a lease PID", a.AlarmID)
 				continue
 			}
 
@@ -1385,8 +1383,6 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 				assert.NotEmpty(t, *a.LeaseID, "expected alarm %q to have a lease ID", a.AlarmID)
 			_ = assert.NotNil(t, a.LeaseExp, "expected alarm %q to have a lease expiration", a.AlarmID) &&
 				assert.Greater(t, *a.LeaseExp, s.p.Now(), "expected alarm's %q lease expiration to be in the future", a.AlarmID)
-			_ = assert.NotNil(t, a.LeasePID, "expected alarm %q to have a lease PID", a.AlarmID) &&
-				assert.NotEmpty(t, *a.LeasePID, "expected alarm %q to have a lease PID", a.AlarmID)
 		}
 
 		// Also ensure that all actors were activated on H7
@@ -1457,7 +1453,6 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 				// Seed data doesn't contain any leased alarm, so we can confidently exclude others
 				assert.Emptyf(t, a.LeaseID, "expected alarm %q not to have a lease ID", a.AlarmID)
 				assert.Emptyf(t, a.LeaseExp, "expected alarm %q not to have a lease expiration", a.AlarmID)
-				assert.Emptyf(t, a.LeasePID, "expected alarm %q not to have a lease PID", a.AlarmID)
 				continue
 			}
 
@@ -1465,8 +1460,6 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 				assert.NotEmpty(t, *a.LeaseID, "expected alarm %q to have a lease ID", a.AlarmID)
 			_ = assert.NotNil(t, a.LeaseExp, "expected alarm %q to have a lease expiration", a.AlarmID) &&
 				assert.Greater(t, *a.LeaseExp, s.p.Now(), "expected alarm's %q lease expiration to be in the future", a.AlarmID)
-			_ = assert.NotNil(t, a.LeasePID, "expected alarm %q to have a lease PID", a.AlarmID) &&
-				assert.NotEmpty(t, *a.LeasePID, "expected alarm %q to have a lease PID", a.AlarmID)
 		}
 
 		// Also ensure that all actors were activated on H1 or H2

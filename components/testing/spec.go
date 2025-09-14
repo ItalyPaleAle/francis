@@ -82,7 +82,6 @@ type AlarmSpec struct {
 	// Read only
 	LeaseID  *string
 	LeaseExp *time.Time
-	LeasePID *string
 }
 
 // String implements fmt.Stringer and is used for debugging

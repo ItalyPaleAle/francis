@@ -159,9 +159,9 @@ func (s *SQLiteProvider) Seed(ctx context.Context, spec comptesting.Spec) error 
 			`INSERT INTO alarms (
 				alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
 				alarm_interval, alarm_ttl_time, alarm_data,
-				alarm_lease_id, alarm_lease_expiration_time, alarm_lease_pid
+				alarm_lease_id, alarm_lease_expiration_time
 			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		)
 		if err != nil {
 			return z, fmt.Errorf("prep alarms: %w", err)
@@ -182,18 +182,17 @@ func (s *SQLiteProvider) Seed(ctx context.Context, spec comptesting.Spec) error 
 			}
 
 			var (
-				leaseID, leasePID *string
-				leaseExp          *int64
+				leaseID  *string
+				leaseExp *int64
 			)
 			if a.LeaseTTL != nil {
 				leaseExp = ptr.Of(now.UnixMilli() + a.LeaseTTL.Milliseconds())
 				leaseID = ptr.Of(uuid.New().String())
-				leasePID = &s.pid
 			}
 
 			_, err = insAlarm.ExecContext(ctx,
 				a.AlarmID, a.ActorType, a.ActorID, a.Name, due,
-				interval, ttl, a.Data, leaseID, leaseExp, leasePID,
+				interval, ttl, a.Data, leaseID, leaseExp,
 			)
 			if err != nil {
 				return z, fmt.Errorf("insert alarm '%s': %w", a.AlarmID, err)
@@ -294,7 +293,7 @@ func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, err
 		rows.Close()
 
 		// Load all alarms
-		rows, err = tx.QueryContext(ctx, "SELECT alarm_id, actor_type, actor_id, alarm_name, alarm_due_time, alarm_interval, alarm_ttl_time, alarm_data, alarm_lease_id, alarm_lease_expiration_time, alarm_lease_pid FROM alarms")
+		rows, err = tx.QueryContext(ctx, "SELECT alarm_id, actor_type, actor_id, alarm_name, alarm_due_time, alarm_interval, alarm_ttl_time, alarm_data, alarm_lease_id, alarm_lease_expiration_time FROM alarms")
 		if err != nil {
 			return res, fmt.Errorf("select alarms: %w", err)
 		}
@@ -307,7 +306,7 @@ func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, err
 				interval      *string
 				ttl, leaseExp *int64
 			)
-			err = rows.Scan(&r.AlarmID, &r.ActorType, &r.ActorID, &r.Name, &due, &interval, &ttl, &r.Data, &r.LeaseID, &leaseExp, &r.LeasePID)
+			err = rows.Scan(&r.AlarmID, &r.ActorType, &r.ActorID, &r.Name, &due, &interval, &ttl, &r.Data, &r.LeaseID, &leaseExp)
 			if err != nil {
 				return res, fmt.Errorf("reading active_actors row: %w", err)
 			}

@@ -88,11 +88,11 @@ func (s *SQLiteProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req com
 			`REPLACE INTO alarms
 				(alarm_id, actor_type, actor_id, alarm_name,
 				alarm_due_time, alarm_interval, alarm_ttl_time, alarm_data,
-				alarm_lease_id, alarm_lease_expiration_time, alarm_lease_pid)
+				alarm_lease_id, alarm_lease_expiration_time)
 			VALUES
 				(?, ?, ?, ?,
 				?, ?, ?, ?,
-				NULL, NULL, NULL)`,
+				NULL, NULL)`,
 			alarmID, ref.ActorType, ref.ActorID, ref.Name,
 			req.DueTime.UnixMilli(), interval, ttlTime, req.Data)
 	if err != nil {
@@ -163,10 +163,9 @@ func (s *SQLiteProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmLea
 			WHERE
 				alarm_id = ?
 				AND alarm_lease_id = ?
-				AND alarm_lease_pid = ?
 				AND alarm_lease_expiration_time IS NOT NULL
 				AND alarm_lease_expiration_time >= ?`,
-			lease.Key(), lease.LeaseID(), s.pid, s.clock.Now().UnixMilli(),
+			lease.Key(), lease.LeaseID(), s.clock.Now().UnixMilli(),
 		).
 		Scan(
 			&res.ActorType, &res.ActorID, &res.Name, &res.Data,
@@ -196,10 +195,9 @@ func (s *SQLiteProvider) RenewAlarmLeases(ctx context.Context, req components.Re
 
 	var leaseIdCondition string
 
-	args := make([]any, 3+len(req.Leases)+len(req.Hosts))
+	args := make([]any, 2+len(req.Leases)+len(req.Hosts))
 	args[0] = expTime
-	args[1] = s.pid
-	args[2] = now.UnixMilli()
+	args[1] = now.UnixMilli()
 
 	// If we have a list of leases, we restrict by them too
 	if len(req.Leases) > 0 {
@@ -213,7 +211,7 @@ func (s *SQLiteProvider) RenewAlarmLeases(ctx context.Context, req components.Re
 			} else {
 				b.WriteString(",?")
 			}
-			args[3+i] = lease.LeaseID()
+			args[2+i] = lease.LeaseID()
 		}
 		b.WriteRune(')')
 
@@ -221,7 +219,7 @@ func (s *SQLiteProvider) RenewAlarmLeases(ctx context.Context, req components.Re
 	}
 
 	// Add host conditions
-	hostPlaceholders := getInPlaceholders(req.Hosts, args, 3+len(req.Leases))
+	hostPlaceholders := getInPlaceholders(req.Hosts, args, 2+len(req.Leases))
 
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
@@ -230,8 +228,7 @@ func (s *SQLiteProvider) RenewAlarmLeases(ctx context.Context, req components.Re
 		UPDATE alarms
 		SET alarm_lease_expiration_time = ?
 		WHERE
-			alarm_lease_pid = ?
-			AND alarm_lease_expiration_time IS NOT NULL
+			alarm_lease_expiration_time IS NOT NULL
 			AND alarm_lease_expiration_time >= ?
 			`+leaseIdCondition+`
 			AND alarm_id IN (
@@ -283,15 +280,13 @@ func (s *SQLiteProvider) ReleaseAlarmLease(ctx context.Context, lease *ref.Alarm
 		UPDATE alarms
 		SET
 			alarm_lease_id = NULL,
-			alarm_lease_expiration_time = NULL,
-			alarm_lease_pid = NULL
+			alarm_lease_expiration_time = NULL
 		WHERE
 			alarm_id = ?
 			AND alarm_lease_id = ?
-			AND alarm_lease_pid = ?
 			AND alarm_lease_expiration_time IS NOT NULL
 			AND alarm_lease_expiration_time >= ?`,
-		lease.Key(), lease.LeaseID(), s.pid, s.clock.Now().UnixMilli(),
+		lease.Key(), lease.LeaseID(), s.clock.Now().UnixMilli(),
 	)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)
@@ -315,7 +310,6 @@ func (s *SQLiteProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Alarm
 	whereClause := `WHERE
 		alarm_id = ?
 		AND alarm_lease_id = ?
-		AND alarm_lease_pid = ?
 		AND alarm_lease_expiration_time IS NOT NULL
 		AND alarm_lease_expiration_time >= ?`
 
@@ -331,7 +325,7 @@ func (s *SQLiteProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Alarm
 				alarm_due_time = ?
 			`+whereClause,
 			now.Add(s.cfg.AlarmsLeaseDuration).UnixMilli(), req.DueTime.UnixMilli(),
-			lease.Key(), lease.LeaseID(), s.pid, now.UnixMilli(),
+			lease.Key(), lease.LeaseID(), now.UnixMilli(),
 		)
 	} else {
 		res, err = s.db.ExecContext(queryCtx, `
@@ -339,11 +333,10 @@ func (s *SQLiteProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Alarm
 			SET
 				alarm_lease_id = NULL,
 				alarm_lease_expiration_time = NULL,
-				alarm_lease_pid = NULL,
 				alarm_due_time = ?
 			`+whereClause,
 			req.DueTime.UnixMilli(),
-			lease.Key(), lease.LeaseID(), s.pid, now.UnixMilli(),
+			lease.Key(), lease.LeaseID(), now.UnixMilli(),
 		)
 	}
 	if err != nil {
@@ -370,10 +363,9 @@ func (s *SQLiteProvider) DeleteLeasedAlarm(ctx context.Context, lease *ref.Alarm
 		WHERE
 			alarm_id = ?
 			AND alarm_lease_id = ?
-			AND alarm_lease_pid = ?
 			AND alarm_lease_expiration_time IS NOT NULL
 			AND alarm_lease_expiration_time >= ?`,
-		lease.Key(), lease.LeaseID(), s.pid, s.clock.Now().UnixMilli(),
+		lease.Key(), lease.LeaseID(), s.clock.Now().UnixMilli(),
 	)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)
@@ -395,7 +387,6 @@ type upcomingAlarmFetcher struct {
 	now     time.Time
 	log     *slog.Logger
 	req     *components.FetchAndLeaseUpcomingAlarmsReq
-	pid     string
 	timeout time.Duration
 
 	nowMs             int64
@@ -413,7 +404,6 @@ func newUpcomingAlarmFetcher(tx *sql.Tx, s *SQLiteProvider, req *components.Fetc
 		now:     now,
 		log:     s.log,
 		req:     req,
-		pid:     s.pid,
 		timeout: s.timeout,
 
 		nowMs:             now.UnixMilli(),
@@ -665,12 +655,11 @@ func (u *upcomingAlarmFetcher) obtainLeases(ctx context.Context, fetchedUpcoming
 	}
 
 	// Build the arguments
-	args := make([]any, i+4)
+	args := make([]any, i+3)
 	args[0] = leaseID
 	args[1] = u.leaseExpirationMs
-	args[2] = u.pid
-	args[3] = u.nowMs
-	placeholders := getInPlaceholders(alarmIDs, args, 4)
+	args[2] = u.nowMs
+	placeholders := getInPlaceholders(alarmIDs, args, 3)
 
 	// Update all alarms with the matching alarm IDs
 	// We add a check to make sure no one else has acquired a (different) lease meanwhile
@@ -681,8 +670,7 @@ func (u *upcomingAlarmFetcher) obtainLeases(ctx context.Context, fetchedUpcoming
 		UPDATE alarms
 		SET
 			alarm_lease_id = ? || '_' || alarm_id,
-			alarm_lease_expiration_time = ?,
-			alarm_lease_pid = ?
+			alarm_lease_expiration_time = ?
 		WHERE
 			(
 				alarm_lease_id IS NULL

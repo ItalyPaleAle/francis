@@ -98,17 +98,13 @@ CREATE TABLE alarms (
     alarm_lease_id uuid,
     -- For alarms that have been fetched and have a lease, indicates the time the lease expires
     -- Note that leases can be renewed
-    alarm_lease_expiration_time timestamp,
-    -- For alarms that have been fetched and have a lease, this is the "process id" of the owner of the lease
-    alarm_lease_pid text
+    alarm_lease_expiration_time timestamp
 );
 
 CREATE UNIQUE INDEX alarm_ref_idx ON alarms (actor_type, actor_id, alarm_name);
 CREATE INDEX alarm_due_time_idx ON alarms (alarm_due_time);
 CREATE UNIQUE INDEX alarm_lease_id_idx ON alarms (alarm_lease_id)
     WHERE alarm_lease_id IS NOT NULL;
-CREATE INDEX alarm_lease_pid_idx ON alarms (alarm_lease_pid)
-    WHERE alarm_lease_pid IS NOT NULL;
 
 -- Trigger that nullifies the leases on the alarms table when an actor is deactivated
 -- (deleted from the active_actors table)
@@ -118,8 +114,7 @@ BEGIN
     UPDATE alarms
     SET
         alarm_lease_id = NULL,
-        alarm_lease_expiration_time = NULL,
-        alarm_lease_pid = NULL
+        alarm_lease_expiration_time = NULL
     WHERE
         actor_type = OLD.actor_type
         AND actor_id = OLD.actor_id
