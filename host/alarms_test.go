@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"github.com/vmihailenco/msgpack/v5"
 	clocktesting "k8s.io/utils/clock/testing"
 
 	"github.com/italypaleale/actors/actor"
@@ -23,6 +24,8 @@ import (
 func TestGetAlarm(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 	log := slog.New(slog.DiscardHandler)
+
+	testData, _ := msgpack.Marshal("test-data")
 
 	var newHost = func() (*Host, *components_mocks.MockActorProvider) {
 		// Create a mocked actor provider
@@ -62,7 +65,7 @@ func TestGetAlarm(t *testing.T) {
 				AlarmProperties: ref.AlarmProperties{
 					DueTime:  dueTime,
 					Interval: "1h",
-					Data:     []byte("test-data"),
+					Data:     testData,
 					TTL:      &ttl,
 				},
 			}, nil).
@@ -75,7 +78,7 @@ func TestGetAlarm(t *testing.T) {
 		// Verify the properties
 		assert.Equal(t, dueTime, properties.DueTime)
 		assert.Equal(t, "1h", properties.Interval)
-		assert.Equal(t, []byte("test-data"), properties.Data)
+		assert.Equal(t, "test-data", properties.Data)
 		assert.Equal(t, ttl, properties.TTL)
 
 		// Assert expectations
@@ -95,7 +98,7 @@ func TestGetAlarm(t *testing.T) {
 				AlarmProperties: ref.AlarmProperties{
 					DueTime:  dueTime,
 					Interval: "2h",
-					Data:     []byte("test-data-2"),
+					Data:     testData,
 					TTL:      nil,
 				},
 			}, nil).
@@ -108,7 +111,7 @@ func TestGetAlarm(t *testing.T) {
 		// Verify the properties
 		assert.Equal(t, dueTime, properties.DueTime)
 		assert.Equal(t, "2h", properties.Interval)
-		assert.Equal(t, []byte("test-data-2"), properties.Data)
+		assert.Equal(t, "test-data", properties.Data)
 		assert.True(t, properties.TTL.IsZero())
 
 		// Assert expectations
@@ -163,6 +166,8 @@ func TestSetAlarm(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 	log := slog.New(slog.DiscardHandler)
 
+	testData, _ := msgpack.Marshal("test-data")
+
 	var newHost = func() (*Host, *components_mocks.MockActorProvider) {
 		// Create a mocked actor provider
 		provider := components_mocks.NewMockActorProvider(t)
@@ -197,7 +202,7 @@ func TestSetAlarm(t *testing.T) {
 		properties := actor.AlarmProperties{
 			DueTime:  dueTime,
 			Interval: "1h",
-			Data:     []byte("test-data"),
+			Data:     "test-data",
 			TTL:      ttl,
 		}
 
@@ -205,7 +210,7 @@ func TestSetAlarm(t *testing.T) {
 			AlarmProperties: ref.AlarmProperties{
 				DueTime:  dueTime,
 				Interval: "1h",
-				Data:     []byte("test-data"),
+				Data:     testData,
 				TTL:      &ttl,
 			},
 		}
@@ -233,7 +238,7 @@ func TestSetAlarm(t *testing.T) {
 		properties := actor.AlarmProperties{
 			DueTime:  dueTime,
 			Interval: "2h",
-			Data:     []byte("test-data-2"),
+			Data:     "test-data",
 			// TTL is zero value (not set)
 		}
 
@@ -241,7 +246,7 @@ func TestSetAlarm(t *testing.T) {
 			AlarmProperties: ref.AlarmProperties{
 				DueTime:  dueTime,
 				Interval: "2h",
-				Data:     []byte("test-data-2"),
+				Data:     testData,
 			},
 			// TTL should be nil when not set
 		}
@@ -304,14 +309,14 @@ func TestSetAlarm(t *testing.T) {
 		properties := actor.AlarmProperties{
 			DueTime:  dueTime,
 			Interval: "1h",
-			Data:     []byte("test-data"),
+			Data:     "test-data",
 		}
 
 		expectedReq := components.SetAlarmReq{
 			AlarmProperties: ref.AlarmProperties{
 				DueTime:  dueTime,
 				Interval: "1h",
-				Data:     []byte("test-data"),
+				Data:     testData,
 			},
 		}
 

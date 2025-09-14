@@ -1,7 +1,6 @@
 package host
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -31,7 +30,8 @@ func TestHostHalt(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 
 	// Create logger
-	logBuf := &bytes.Buffer{}
+	// We need to use a custom buffer that uses a lock to make "go test -race" work
+	logBuf := &testutil.ConcurrentBuffer{}
 	log := slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
@@ -646,7 +646,8 @@ func TestHostHaltAll(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 
 	// Create logger
-	logBuf := &bytes.Buffer{}
+	// We need to use a custom buffer that uses a lock to make "go test -race" work
+	logBuf := &testutil.ConcurrentBuffer{}
 	log := slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
@@ -1094,7 +1095,8 @@ func TestIdleActorHandling(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 
 	// Create logger to see re-enqueue logs
-	logBuf := &bytes.Buffer{}
+	// We need to use a custom buffer that uses a lock to make "go test -race" work
+	logBuf := &testutil.ConcurrentBuffer{}
 	log := slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
