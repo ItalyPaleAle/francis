@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"embed"
-	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -53,8 +52,8 @@ func NewPostgresProvider(log *slog.Logger, postgresOpts PostgresProviderOptions,
 		log:             log,
 		timeout:         postgresOpts.Timeout,
 		cleanupInterval: postgresOpts.CleanupInterval,
-		clock:           postgresOpts.clock,
 		db:              postgresOpts.DB,
+		clock:           postgresOpts.clock,
 	}
 
 	// Set default values
@@ -82,40 +81,21 @@ func NewPostgresProvider(log *slog.Logger, postgresOpts PostgresProviderOptions,
 
 	// Open a database connection unless we have one passed in already
 	if p.db == nil {
-		if postgresOpts.ConnectionString == "" {
-			return nil, errors.New("missing property ConnectionString in Postgres options")
+		cfg, err := postgresOpts.GetPgxPoolConfig()
+		if err != nil {
+			return nil, err
 		}
 
 		// Open the database
 		connCtx, cancel := context.WithTimeout(context.Background(), p.timeout)
 		defer cancel()
-		p.db, err = pgxpool.New(connCtx, postgresOpts.ConnectionString)
+		p.db, err = pgxpool.NewWithConfig(connCtx, cfg)
 		if err != nil {
 			return nil, fmt.Errorf("failed to connect to Postgres database: %w", err)
 		}
 	}
 
 	return p, nil
-}
-
-type PostgresProviderOptions struct {
-	components.ProviderOptions
-
-	// Connection string for the Postgres database
-	// This allows the provider to establish a new database connection
-	ConnectionString string
-
-	// Connection to an existing database
-	DB *pgxpool.Pool
-
-	// Timeout for requests to the database
-	Timeout time.Duration
-
-	// Interval at which to perform garbage collection
-	CleanupInterval time.Duration
-
-	// Clock, used to pass a mock one for testing
-	clock clock.WithTicker
 }
 
 // TODO: Rename to "p"
@@ -227,15 +207,15 @@ func (p *PostgresProvider) initGC() (err error) {
 		UpdateLastCleanupQuery: func(arg any) (string, []any) {
 			return `
 				INSERT INTO metadata (key, value)
-					VALUES ('last-cleanup', LOCALTIMESTAMP::text)
+					VALUES ('last-cleanup', now()::text)
 				ON CONFLICT (key)
 					DO UPDATE SET value = EXCLUDED.value
-				WHERE (EXTRACT('epoch' FROM LOCALTIMESTAMP - metadata.value::timestamp) * 1000)::bigint > $1`,
+				WHERE (EXTRACT('epoch' FROM now() - metadata.value::timestamp) * 1000)::bigint > $1`,
 				[]any{arg}
 		},
 		DeleteExpiredValuesQueries: map[string]cleanup.DeleteExpiredValuesQueryFn{
 			"hosts": func() (string, func() []any) {
-				q := `DELETE FROM hosts WHERE host_last_health_check < (LOCALTIMESTAMP - $1)`
+				q := `DELETE FROM hosts WHERE host_last_health_check < (now() - $1)`
 				return q, func() []any {
 					return []any{p.cfg.HostHealthCheckDeadline}
 				}
@@ -245,7 +225,7 @@ func (p *PostgresProvider) initGC() (err error) {
 				DELETE FROM actor_state
 				WHERE
 					actor_state_expiration_time IS NOT NULL
-					AND actor_state_expiration_time < LOCALTIMESTAMP
+					AND actor_state_expiration_time < now()
 				`
 				return q, func() []any {
 					return nil

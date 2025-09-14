@@ -2,14 +2,22 @@ package postgres
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"testing"
 	"time"
 
+	_ "embed"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/utils/clock"
 	clocktesting "k8s.io/utils/clock/testing"
 
 	"github.com/italypaleale/actors/components"
@@ -19,6 +27,68 @@ import (
 
 const testConnectionString = "postgres://actors:actors@localhost:5432/actors"
 
+var (
+	//go:embed test-queries/test-setup.sql
+	queryTestSetup string
+)
+
+func generateTestSchemaName(t *testing.T) string {
+	t.Helper()
+
+	testSchemaB := make([]byte, 5)
+	_, err := io.ReadFull(rand.Reader, testSchemaB)
+	require.NoError(t, err)
+	return "test_" + hex.EncodeToString(testSchemaB)
+}
+
+func connectTestDatabase(t *testing.T, testSchema string, clock clock.Clock) (conn *pgxpool.Pool, cleanupFn func(t *testing.T)) {
+	t.Helper()
+
+	// Parse the connection string
+	cfg, err := pgxpool.ParseConfig(testConnectionString)
+	require.NoError(t, err)
+
+	// Set a callback so we can make sure that the schema exists after connecting, and setting the correct search path
+	cfg.AfterConnect = func(ctx context.Context, c *pgx.Conn) error {
+		queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_, err := c.Exec(queryCtx, `CREATE SCHEMA IF NOT EXISTS "`+testSchema+`"`)
+		if err != nil {
+			return fmt.Errorf("failed to ensure test schema '%s' exists: %w", testSchema, err)
+		}
+
+		queryCtx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_, err = c.Exec(queryCtx, `SET SESSION search_path = "`+testSchema+`", pg_catalog, public`)
+		if err != nil {
+			return fmt.Errorf("failed to set search path for session: %w", err)
+		}
+
+		return nil
+	}
+
+	// Connect to the database
+	conn, err = pgxpool.NewWithConfig(t.Context(), cfg)
+	require.NoError(t, err, "Failed to connect to database")
+
+	// Execute the test setup queries
+	queryCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	_, err = conn.Exec(queryCtx, queryTestSetup)
+	require.NoError(t, err, "Failed to perform test setup")
+
+	// Cleanup function that deletes the schema at the end of the tests
+	cleanupFn = func(t *testing.T) {
+		// Use a background context because t.Context() has been canceled already
+		queryCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := conn.Exec(queryCtx, `DROP SCHEMA "`+testSchema+`" CASCADE`)
+		require.NoError(t, err, "Failed to drop test schema")
+	}
+
+	return conn, cleanupFn
+}
+
 func TestPostgresProvider(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 	h := comptesting.NewSlogClockHandler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
@@ -26,8 +96,16 @@ func TestPostgresProvider(t *testing.T) {
 	}), clock)
 	log := slog.New(h)
 
+	// Generate a random name for the schema
+	testSchema := generateTestSchemaName(t)
+	t.Log("Test schema:", testSchema)
+
+	// Connect to the database beforehand so we can create a new schema for the tests
+	conn, cleanupFn := connectTestDatabase(t, testSchema, clock)
+	t.Cleanup(func() { cleanupFn(t) })
+
 	providerOpts := PostgresProviderOptions{
-		ConnectionString: testConnectionString,
+		DB: conn,
 
 		// Disable automated cleanups in this test
 		// We will run the cleanups automatically
@@ -38,17 +116,21 @@ func TestPostgresProvider(t *testing.T) {
 	providerConfig := comptesting.GetProviderConfig()
 
 	// Create the provider
-	s, err := NewPostgresProvider(log, providerOpts, providerConfig)
+	p, err := NewPostgresProvider(log, providerOpts, providerConfig)
 	require.NoError(t, err, "Error creating provider")
 
+	// Set the current frozen time in the database
+	err = p.setCurrentFrozenTime()
+	require.NoError(t, err, "Error setting current frozen time in the database")
+
 	// Init the provider
-	err = s.Init(t.Context())
+	err = p.Init(t.Context())
 	require.NoError(t, err, "Error initializing provider")
 
 	// Run the provider in background for side effects
 	ctx := testutil.NewContextDoneNotifier(t.Context())
 	go func() {
-		err = s.Run(ctx)
+		err = p.Run(ctx)
 		if err != nil {
 			log.Error("Error running provider", slog.Any("error", err))
 		}
@@ -58,7 +140,7 @@ func TestPostgresProvider(t *testing.T) {
 	ctx.WaitForDone()
 
 	// Run the test suite
-	suite := comptesting.NewSuite(s)
+	suite := comptesting.NewSuite(p)
 	suite.Run(t)
 }
 
@@ -70,8 +152,23 @@ func (p *PostgresProvider) Now() time.Time {
 	return p.clock.Now()
 }
 
-func (p *PostgresProvider) AdvanceClock(d time.Duration) {
+func (p *PostgresProvider) AdvanceClock(d time.Duration) error {
 	p.clock.Sleep(d)
+
+	return p.setCurrentFrozenTime()
+}
+
+func (p *PostgresProvider) setCurrentFrozenTime() error {
+	queryCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := p.db.Exec(queryCtx,
+		`SELECT freeze_time($1, false)`,
+		p.clock.Now(),
+	)
+	if err != nil {
+		return fmt.Errorf("error invoking freeze_time: %w", err)
+	}
+	return nil
 }
 
 func (p *PostgresProvider) Seed(ctx context.Context, spec comptesting.Spec) error {

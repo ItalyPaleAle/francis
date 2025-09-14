@@ -8,7 +8,7 @@ CREATE TABLE hosts (
     -- Address and port of the host
     host_address text NOT NULL,
     -- Last health check received
-    host_last_health_check timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
+    host_last_health_check timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE UNIQUE INDEX host_address_idx ON hosts (host_address);
@@ -45,7 +45,7 @@ CREATE TABLE active_actors (
     -- This is copied from the host_actor_types table
     actor_idle_timeout interval NOT NULL,
     -- Time the actor was originally activated at
-    actor_activation timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    actor_activation timestamptz NOT NULL DEFAULT now(),
 
     PRIMARY KEY (actor_type, actor_id),
     FOREIGN KEY (host_id) REFERENCES hosts (host_id) ON DELETE CASCADE
@@ -71,7 +71,7 @@ CREATE TABLE actor_state (
     actor_state_data bytea NOT NULL,
     -- If set, indicates the expiration time for this state
     -- Expired rows are automatically garbage collected
-    actor_state_expiration_time timestamp,
+    actor_state_expiration_time timestamptz,
 
     PRIMARY KEY (actor_type, actor_id)
 );
@@ -90,18 +90,18 @@ CREATE TABLE alarms (
     -- Name of the alarm
     alarm_name text NOT NULL,
     -- Due time for the alarm
-    alarm_due_time timestamp NOT NULL,
+    alarm_due_time timestamptz NOT NULL,
     -- For repeating alarms, as an ISO8601-formatted duration string.
     alarm_interval text,
     -- For repeating alarms, time at which to stop repeating
-    alarm_ttl_time timestamp,
+    alarm_ttl_time timestamptz,
     -- Optional data associated with the alarm
     alarm_data bytea,
     -- For alarms that have been fetched and have a lease, this is a unique ID for the lease
     alarm_lease_id uuid,
     -- For alarms that have been fetched and have a lease, indicates the time the lease expires
     -- Note that leases can be renewed
-    alarm_lease_expiration_time timestamp
+    alarm_lease_expiration_time timestamptz
 );
 
 CREATE UNIQUE INDEX alarm_ref_idx ON alarms (actor_type, actor_id, alarm_name);

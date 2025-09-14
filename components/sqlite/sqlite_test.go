@@ -77,8 +77,9 @@ func (s *SQLiteProvider) Now() time.Time {
 	return s.clock.Now()
 }
 
-func (s *SQLiteProvider) AdvanceClock(d time.Duration) {
+func (s *SQLiteProvider) AdvanceClock(d time.Duration) error {
 	s.clock.Sleep(d)
+	return nil
 }
 
 func (s *SQLiteProvider) Seed(ctx context.Context, spec comptesting.Spec) error {

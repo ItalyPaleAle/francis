@@ -23,7 +23,7 @@ type ActorProviderTesting interface {
 
 	// AdvanceClock advances the clock
 	// Providers that do not have a mocked clock should sleep for the given duration
-	AdvanceClock(d time.Duration)
+	AdvanceClock(d time.Duration) error
 
 	// GetAllActorState returns all stored actor state
 	GetAllActorState(ctx context.Context) (ActorStateSpecCollection, error)

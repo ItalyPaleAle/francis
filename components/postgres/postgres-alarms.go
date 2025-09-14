@@ -160,7 +160,7 @@ func (p *PostgresProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmL
 				alarm_id = $1
 				AND alarm_lease_id = $2
 				AND alarm_lease_expiration_time IS NOT NULL
-				AND alarm_lease_expiration_time >= LOCALTIMESTAMP`,
+				AND alarm_lease_expiration_time >= now()`,
 			lease.Key(), lease.LeaseID(),
 		).
 		Scan(
@@ -279,7 +279,7 @@ func (p *PostgresProvider) ReleaseAlarmLease(ctx context.Context, lease *ref.Ala
 			alarm_id = $1
 			AND alarm_lease_id = $2
 			AND alarm_lease_expiration_time IS NOT NULL
-			AND alarm_lease_expiration_time >= LOCALTIMESTAMP`,
+			AND alarm_lease_expiration_time >= now()`,
 		lease.Key(), lease.LeaseID(),
 	)
 	if err != nil {
@@ -301,7 +301,7 @@ func (p *PostgresProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Ala
 		alarm_id = $1
 		AND alarm_lease_id = $2
 		AND alarm_lease_expiration_time IS NOT NULL
-		AND alarm_lease_expiration_time >= LOCALTIMESTAMP`
+		AND alarm_lease_expiration_time >= now()`
 
 	// If we want to refresh the lease...
 	var res pgconn.CommandTag
@@ -309,7 +309,7 @@ func (p *PostgresProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Ala
 		res, err = p.db.Exec(queryCtx, `
 			UPDATE alarms
 			SET
-				alarm_lease_expiration_time = LOCALTIMESTAMP + $1,
+				alarm_lease_expiration_time = now() + $1,
 				alarm_due_time = $2
 			`+whereClause,
 			p.cfg.AlarmsLeaseDuration, req.DueTime,
@@ -348,7 +348,7 @@ func (p *PostgresProvider) DeleteLeasedAlarm(ctx context.Context, lease *ref.Ala
 			alarm_id = $1
 			AND alarm_lease_id = $2
 			AND alarm_lease_expiration_time IS NOT NULL
-			AND alarm_lease_expiration_time >= LOCALTIMESTAMP`,
+			AND alarm_lease_expiration_time >= now()`,
 		lease.Key(), lease.LeaseID(),
 	)
 	if err != nil {

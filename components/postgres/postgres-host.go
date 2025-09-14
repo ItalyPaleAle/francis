@@ -148,21 +148,18 @@ func (p *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, r
 }
 
 func (p *PostgresProvider) updateActorHostLastHealthCheck(ctx context.Context, hostID string, tx pgx.Tx) error {
-	now := p.clock.Now().UnixMilli()
-
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 	res, err := tx.
 		Exec(queryCtx,
 			`UPDATE hosts
 		SET
-			host_last_health_check = ?
+			host_last_health_check = now()
 		WHERE
-			host_id = ?
-			AND host_last_health_check >= ?`,
-			now,
+			host_id = $1
+			AND host_last_health_check >= (now() - $2)`,
 			hostID,
-			now-p.cfg.HostHealthCheckDeadline.Milliseconds(),
+			p.cfg.HostHealthCheckDeadline,
 		)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)
