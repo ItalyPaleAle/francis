@@ -98,7 +98,6 @@ func NewPostgresProvider(log *slog.Logger, postgresOpts PostgresProviderOptions,
 	return p, nil
 }
 
-// TODO: Rename to "p"
 func (p *PostgresProvider) Init(ctx context.Context) error {
 	// Perform schema migrations
 	err := p.performMigrations(ctx)
@@ -215,7 +214,7 @@ func (p *PostgresProvider) initGC() (err error) {
 		},
 		DeleteExpiredValuesQueries: map[string]cleanup.DeleteExpiredValuesQueryFn{
 			"hosts": func() (string, func() []any) {
-				q := `DELETE FROM hosts WHERE host_last_health_check < (now() - $1)`
+				q := `DELETE FROM hosts WHERE host_last_health_check < (now() - $1::interval)`
 				return q, func() []any {
 					return []any{p.cfg.HostHealthCheckDeadline}
 				}
