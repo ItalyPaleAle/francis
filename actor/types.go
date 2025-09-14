@@ -12,7 +12,7 @@ import (
 type Duration = timeutils.Duration
 
 type Host interface {
-	Invoke(ctx context.Context, actorType string, actorID string, method string, data any, out any) error
+	Invoke(ctx context.Context, actorType string, actorID string, method string, data any) (Envelope, error)
 
 	HaltAll() error
 	Halt(actorType string, actorID string) error
@@ -38,7 +38,7 @@ type AlarmProperties struct {
 	// When parsed from JSON, it could be a RFC3339/ISO8601-formatted string, or a number indicating a UNIX timestamp in milliseconds
 	TTL time.Time `json:"ttl"`
 	// Optional data associated with the alarm.
-	Data []byte `json:"data"`
+	Data any `json:"data"`
 }
 
 // UnmarshalJSON implements custom unmarshaling for AlarmProperties.
@@ -46,10 +46,10 @@ func (a *AlarmProperties) UnmarshalJSON(data []byte) error {
 	type Alias AlarmProperties
 	aux := &struct {
 		*Alias
-		DueTime  any    `json:"dueTime"`
-		Interval any    `json:"interval"`
-		TTL      any    `json:"ttl"`
-		Data     []byte `json:"data"`
+		DueTime  any `json:"dueTime"`
+		Interval any `json:"interval"`
+		TTL      any `json:"ttl"`
+		Data     any `json:"data"`
 	}{
 		Alias: (*Alias)(a),
 	}

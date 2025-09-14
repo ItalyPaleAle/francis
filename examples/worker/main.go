@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -107,15 +108,17 @@ func runControlServer(actorService *actor.Service) func(ctx context.Context) err
 		mux.HandleFunc("POST /invoke/{actorType}/{actorID}/{method}", func(w http.ResponseWriter, r *http.Request) {
 			defer r.Body.Close()
 
-			body, err := io.ReadAll(r.Body)
-			if err != nil {
+			var body struct {
+				In int64
+			}
+			err := json.NewDecoder(r.Body).Decode(&body)
+			if err != nil && !errors.Is(err, io.EOF) {
 				w.WriteHeader(http.StatusBadRequest)
-				fmt.Fprint(w, "failed to read body")
+				fmt.Fprintf(w, "failed to read body as JSON: %v", err)
 				return
 			}
 
-			var resp any
-			err = actorService.Invoke(r.Context(), r.PathValue("actorType"), r.PathValue("actorID"), r.PathValue("method"), body, &resp)
+			resp, err := actorService.Invoke(r.Context(), r.PathValue("actorType"), r.PathValue("actorID"), r.PathValue("method"), body)
 			if err != nil {
 				log.ErrorContext(r.Context(), "Error invoking actor", slog.Any("error", err))
 				w.WriteHeader(http.StatusInternalServerError)
@@ -124,10 +127,21 @@ func runControlServer(actorService *actor.Service) func(ctx context.Context) err
 			}
 
 			if resp != nil {
+				var data struct {
+					Out int64
+				}
+				err = resp.Decode(&data)
+				if err != nil {
+					log.ErrorContext(r.Context(), "Error decoding response envelope", slog.Any("error", err))
+					w.WriteHeader(http.StatusInternalServerError)
+					fmt.Fprint(w, err.Error())
+					return
+				}
+
 				w.WriteHeader(http.StatusOK)
 				enc := json.NewEncoder(w)
 				enc.SetEscapeHTML(false)
-				enc.Encode(resp)
+				enc.Encode(data)
 			} else {
 				w.WriteHeader(http.StatusNoContent)
 			}

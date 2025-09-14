@@ -1,6 +1,7 @@
 package host
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,8 @@ import (
 	"math"
 	"math/rand/v2"
 	"time"
+
+	msgpack "github.com/vmihailenco/msgpack/v5"
 
 	"github.com/italypaleale/actors/actor"
 	"github.com/italypaleale/actors/components"
@@ -173,11 +176,19 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 			return executeAlarmStatusFatal, fmt.Errorf("actor of type '%s' does not implement the Alarm method", act.ActorType())
 		}
 
+		var data actor.Envelope
+		if len(a.Data) > 0 {
+			dec := msgpack.GetDecoder()
+			dec.Reset(bytes.NewReader(a.Data))
+			defer msgpack.PutDecoder(dec)
+			data = dec
+		}
+
 		// Mark the alarm as executed now
 		lease.SetExecutionTime(h.clock.Now())
 
 		// Invoke the actor
-		err = obj.Alarm(parentCtx, a.Name, a.Data)
+		err = obj.Alarm(parentCtx, a.Name, data)
 		if err != nil {
 			// Consider this as a retryable condition unless we've exceeded the max attempts
 			code := executeAlarmStatusRetryable
@@ -386,13 +397,16 @@ func (h *Host) GetAlarm(ctx context.Context, actorType string, actorID string, n
 		return actor.AlarmProperties{}, fmt.Errorf("failed to get alarm: %w", err)
 	}
 
-	return alarmPropertiesFromAlarmRes(res), nil
+	return alarmPropertiesFromAlarmRes(res)
 }
 
 func (h *Host) SetAlarm(ctx context.Context, actorType string, actorID string, name string, properties actor.AlarmProperties) error {
-	req := alarmPropertiesToAlarmReq(properties)
+	req, err := alarmPropertiesToAlarmReq(properties)
+	if err != nil {
+		return err
+	}
 
-	err := h.actorProvider.SetAlarm(ctx, ref.NewAlarmRef(actorType, actorID, name), req)
+	err = h.actorProvider.SetAlarm(ctx, ref.NewAlarmRef(actorType, actorID, name), req)
 	if err != nil {
 		return fmt.Errorf("failed to set alarm: %w", err)
 	}
@@ -411,32 +425,54 @@ func (h *Host) DeleteAlarm(ctx context.Context, actorType string, actorID string
 	return nil
 }
 
-func alarmPropertiesFromAlarmRes(res components.GetAlarmRes) actor.AlarmProperties {
+func alarmPropertiesFromAlarmRes(res components.GetAlarmRes) (actor.AlarmProperties, error) {
 	o := actor.AlarmProperties{
 		DueTime:  res.DueTime,
 		Interval: res.Interval,
-		Data:     res.Data,
+	}
+
+	if len(res.Data) > 0 {
+		dec := msgpack.GetDecoder()
+		dec.Reset(bytes.NewReader(res.Data))
+		defer msgpack.PutDecoder(dec)
+		err := dec.Decode(&o.Data)
+		if err != nil {
+			return actor.AlarmProperties{}, fmt.Errorf("failed to deserialize state using msgpack: %w", err)
+		}
 	}
 
 	if res.TTL != nil {
 		o.TTL = *res.TTL
 	}
 
-	return o
+	return o, nil
 }
 
-func alarmPropertiesToAlarmReq(o actor.AlarmProperties) components.SetAlarmReq {
+func alarmPropertiesToAlarmReq(o actor.AlarmProperties) (components.SetAlarmReq, error) {
 	req := components.SetAlarmReq{
 		AlarmProperties: ref.AlarmProperties{
 			DueTime:  o.DueTime,
 			Interval: o.Interval,
-			Data:     o.Data,
 		},
+	}
+
+	if o.Data != nil {
+		var data bytes.Buffer
+		enc := msgpack.GetEncoder()
+		defer msgpack.PutEncoder(enc)
+		enc.Reset(&data)
+
+		err := enc.Encode(o.Data)
+		if err != nil {
+			return components.SetAlarmReq{}, fmt.Errorf("failed to serialize data using msgpack: %w", err)
+		}
+
+		req.Data = data.Bytes()
 	}
 
 	if !o.TTL.IsZero() {
 		req.TTL = &o.TTL
 	}
 
-	return req
+	return req, nil
 }

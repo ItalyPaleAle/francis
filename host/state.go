@@ -40,7 +40,7 @@ func (h *Host) GetState(ctx context.Context, actorType string, actorID string, d
 
 	err = msgpack.Unmarshal(data, dest)
 	if err != nil {
-		return fmt.Errorf("failed to unserialize state using msgpack: %w", err)
+		return fmt.Errorf("failed to deserialize state using msgpack: %w", err)
 	}
 
 	return nil

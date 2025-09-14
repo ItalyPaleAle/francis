@@ -78,9 +78,8 @@ func (h *Host) getServerHandler() http.Handler {
 		defer r.Body.Close()
 
 		var (
-			err error
-
-			reqData, outData any
+			err     error
+			reqData any
 		)
 
 		// Validate the request is for the correct host
@@ -117,7 +116,7 @@ func (h *Host) getServerHandler() http.Handler {
 
 		// Invoke the actor
 		actorType := r.PathValue("actorType")
-		err = h.InvokeLocal(r.Context(), actorType, r.PathValue("actorID"), r.PathValue("method"), reqData, &outData)
+		outData, err := h.InvokeLocal(r.Context(), actorType, r.PathValue("actorID"), r.PathValue("method"), reqData)
 		switch {
 		case errors.Is(err, actor.ErrActorNotHosted):
 			errApiActorNotHosted.WriteResponse(w)
@@ -145,6 +144,8 @@ func (h *Host) getServerHandler() http.Handler {
 		}
 
 		// Respond with the body
+		// Set the content type for msgpack if we have a body
+		w.Header().Set(headerContentType, contentTypeMsgpack)
 		w.WriteHeader(http.StatusOK)
 		enc := msgpack.GetEncoder()
 		defer msgpack.PutEncoder(enc)

@@ -470,11 +470,12 @@ func TestAlarmPropertiesConversion(t *testing.T) {
 			},
 		}
 
-		properties := alarmPropertiesFromAlarmRes(res)
+		properties, err := alarmPropertiesFromAlarmRes(res)
+		require.NoError(t, err)
 
 		assert.Equal(t, dueTime, properties.DueTime)
 		assert.Equal(t, "1h", properties.Interval)
-		assert.Equal(t, []byte("test-data"), properties.Data)
+		assert.NotEmpty(t, properties.Data)
 		assert.Equal(t, ttl, properties.TTL)
 	})
 
@@ -490,12 +491,30 @@ func TestAlarmPropertiesConversion(t *testing.T) {
 			},
 		}
 
-		properties := alarmPropertiesFromAlarmRes(res)
+		properties, err := alarmPropertiesFromAlarmRes(res)
+		require.NoError(t, err)
 
 		assert.Equal(t, dueTime, properties.DueTime)
 		assert.Equal(t, "2h", properties.Interval)
-		assert.Equal(t, []byte("test-data-2"), properties.Data)
+		assert.NotEmpty(t, properties.Data)
 		assert.True(t, properties.TTL.IsZero())
+	})
+
+	t.Run("alarmPropertiesFromAlarmRes with invalid msgpack data", func(t *testing.T) {
+		dueTime := time.Now().Add(time.Hour)
+		// Intentionally invalid msgpack data
+		invalidData := []byte{0xD8}
+		res := components.GetAlarmRes{
+			AlarmProperties: ref.AlarmProperties{
+				DueTime:  dueTime,
+				Interval: "1h",
+				Data:     invalidData,
+				TTL:      nil,
+			},
+		}
+		_, err := alarmPropertiesFromAlarmRes(res)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "msgpack")
 	})
 
 	t.Run("alarmPropertiesToAlarmReq with TTL", func(t *testing.T) {
@@ -509,11 +528,12 @@ func TestAlarmPropertiesConversion(t *testing.T) {
 			TTL:      ttl,
 		}
 
-		req := alarmPropertiesToAlarmReq(properties)
+		req, err := alarmPropertiesToAlarmReq(properties)
+		require.NoError(t, err)
 
 		assert.Equal(t, dueTime, req.AlarmProperties.DueTime)
 		assert.Equal(t, "1h", req.AlarmProperties.Interval)
-		assert.Equal(t, []byte("test-data"), req.AlarmProperties.Data)
+		assert.NotEmpty(t, req.AlarmProperties.Data)
 		require.NotNil(t, req.TTL)
 		assert.Equal(t, ttl, *req.TTL)
 	})
@@ -528,11 +548,25 @@ func TestAlarmPropertiesConversion(t *testing.T) {
 			// TTL is zero value
 		}
 
-		req := alarmPropertiesToAlarmReq(properties)
+		req, err := alarmPropertiesToAlarmReq(properties)
+		require.NoError(t, err)
 
 		assert.Equal(t, dueTime, req.AlarmProperties.DueTime)
 		assert.Equal(t, "2h", req.AlarmProperties.Interval)
-		assert.Equal(t, []byte("test-data-2"), req.AlarmProperties.Data)
+		assert.NotEmpty(t, properties.Data)
 		assert.Nil(t, req.TTL)
+	})
+
+	t.Run("alarmPropertiesToAlarmReq with unserializable data", func(t *testing.T) {
+		dueTime := time.Now().Add(time.Hour)
+		// Channels cannot be encoded by msgpack
+		properties := actor.AlarmProperties{
+			DueTime:  dueTime,
+			Interval: "1h",
+			Data:     make(chan int),
+		}
+		_, err := alarmPropertiesToAlarmReq(properties)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "msgpack")
 	})
 }

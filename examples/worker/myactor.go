@@ -36,7 +36,17 @@ func NewMyActor(actorID string, service *actor.Service) actor.Actor {
 	}
 }
 
-func (m *MyActor) Invoke(ctx context.Context, method string, data any) (any, error) {
+func (m *MyActor) Invoke(ctx context.Context, method string, data actor.Envelope) (any, error) {
+	var d struct {
+		In int64
+	}
+	if data != nil {
+		err := data.Decode(&d)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode data: %w", err)
+		}
+	}
+
 	m.invocations++
 
 	state, err := m.client.GetState(ctx)
@@ -68,13 +78,29 @@ func (m *MyActor) Invoke(ctx context.Context, method string, data any) (any, err
 		return nil, fmt.Errorf("error saving state: %w", err)
 	}
 
-	m.log.InfoContext(ctx, "Actor invoked", "method", method, "counter", state.Counter, "invocations", m.invocations)
+	m.log.InfoContext(ctx, "Actor invoked", "method", method, "counter", state.Counter, "invocations", m.invocations, "in", d.In)
 
-	return state, nil
+	var res struct {
+		Out int64
+	}
+	res.Out = state.Counter
+
+	return res, nil
 }
 
-func (m *MyActor) Alarm(ctx context.Context, name string, data any) error {
-	m.log.InfoContext(ctx, "Actor received alarm", "name", name)
+func (m *MyActor) Alarm(ctx context.Context, name string, data actor.Envelope) error {
+	var d struct {
+		Hello string
+	}
+	if data != nil {
+		err := data.Decode(&d)
+		if err != nil {
+			return fmt.Errorf("failed to decode data: %w", err)
+		}
+	}
+
+	m.log.InfoContext(ctx, "Actor received alarm", slog.String("name", name), slog.String("data.hello", d.Hello))
+
 	return nil
 }
 
