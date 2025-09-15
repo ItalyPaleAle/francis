@@ -835,7 +835,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 
 		// Try to create actor with restriction to non-existent host
 		ref := ref.ActorRef{ActorType: "B", ActorID: "B-nonexistent-host"}
-		opts := components.LookupActorOpts{Hosts: []string{"NON-EXISTENT"}}
+		opts := components.LookupActorOpts{Hosts: []string{"1da70d19-ea7a-448e-934a-c03605c3d2ee"}}
 		_, err := s.p.LookupActor(ctx, ref, opts)
 		require.Error(t, err)
 		require.ErrorIs(t, err, components.ErrNoHost)
@@ -1560,7 +1560,7 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 
 		// Fetch alarms from non-existent hosts
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"NON-EXISTENT-1", "NON-EXISTENT-2"},
+			Hosts: []string{"95302b0c-92cd-4201-b15d-98fcd56d7bf5", "ee6e3ddd-9ff0-42e7-af80-5624407f6da9"},
 		})
 		require.NoError(t, err)
 		assert.Empty(t, res)
@@ -2123,7 +2123,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 
 		// Try to renew leases for non-existent hosts
 		renewReq := components.RenewAlarmLeasesReq{
-			Hosts: []string{"NON-EXISTENT-1", "NON-EXISTENT-2"},
+			Hosts: []string{"dd86ac68-ee00-4a8f-97e1-a3d4bbb92e0f", "e8a3256c-5381-4a3c-b8f7-19dc87913d5f"},
 		}
 		renewRes, err := s.p.RenewAlarmLeases(ctx, renewReq)
 		require.NoError(t, err)
@@ -2170,7 +2170,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 
 		// Create a mix of valid and invalid lease IDs
 		validLease := res[0]
-		invalidLease := ref.NewAlarmLease(validLease.AlarmRef(), "non-existent-alarm", time.Now(), "fake-lease-id")
+		invalidLease := ref.NewAlarmLease(validLease.AlarmRef(), "46d1668d-dd68-4320-a562-66176ac4a11f", time.Now(), "fake-lease-id")
 
 		// Advance time partway through lease duration
 		s.p.AdvanceClock(30 * time.Second)
@@ -2267,7 +2267,7 @@ func (s Suite) TestReleaseAlarmLease(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, Spec{}))
 
 		// Try to release a non-existent alarm lease
-		nonExistentLease := ref.NewAlarmLease(ref.NewAlarmRef("at", "aid", "name"), "non-existent-alarm", time.Now(), "fake-lease-id")
+		nonExistentLease := ref.NewAlarmLease(ref.NewAlarmRef("at", "aid", "name"), "7f84f417-de01-46d0-b5bb-80f3d8bf003b", time.Now(), "fake-lease-id")
 		err := s.p.ReleaseAlarmLease(ctx, nonExistentLease)
 		require.ErrorIs(t, err, components.ErrNoAlarm)
 	})

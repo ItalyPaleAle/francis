@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -201,31 +204,28 @@ func (p *PostgresProvider) UnregisterHost(ctx context.Context, hostID string) er
 }
 
 func (p *PostgresProvider) LookupActor(ctx context.Context, ref ref.ActorRef, opts components.LookupActorOpts) (components.LookupActorRes, error) {
-	return components.LookupActorRes{}, nil
-
-	/*res, err := transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (res components.LookupActorRes, err error) {
+	// TODO: Try to refactor into a single plpgsql function
+	res, err := transactions.ExecuteInPgxTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (res components.LookupActorRes, err error) {
 		// Perform a lookup to check if the actor is already active on _any_ host
-		queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+		queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 		defer cancel()
-		var idleTimeoutMs int64
 		err = tx.
 			QueryRow(queryCtx,
 				`SELECT hosts.host_id, hosts.host_address, active_actors.actor_idle_timeout
 				FROM active_actors
 				JOIN hosts ON active_actors.host_id = hosts.host_id
 				WHERE
-					active_actors.actor_type = ?
-					AND active_actors.actor_id = ?
-					AND hosts.host_last_health_check >= ?`,
+					active_actors.actor_type = $1
+					AND active_actors.actor_id = $2
+					AND hosts.host_last_health_check >= now() - $3::interval`,
 				ref.ActorType,
 				ref.ActorID,
-				now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
+				p.cfg.HostHealthCheckDeadline,
 			).
-			Scan(&res.HostID, &res.Address, &idleTimeoutMs)
-		res.IdleTimeout = time.Duration(idleTimeoutMs) * time.Millisecond
+			Scan(&res.HostID, &res.Address, &res.IdleTimeout)
 
 		switch {
-		case errors.Is(err, sql.ErrNoRows):
+		case errors.Is(err, pgx.ErrNoRows):
 			// No-op
 			// If no row was retrieved, the actor is currently not active, so we will create it below
 		case err != nil:
@@ -255,26 +255,25 @@ func (p *PostgresProvider) LookupActor(ctx context.Context, ref ref.ActorRef, op
 		params := make([]any, 0, len(opts.Hosts)+2)
 		params = append(params,
 			ref.ActorType,
-			now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
+			p.cfg.HostHealthCheckDeadline,
 		)
 		hostClause := strings.Builder{}
 		if len(opts.Hosts) > 0 {
-			hostClause.Grow(len("hosts.host_id=? OR ")*len(opts.Hosts) + len("AND ()"))
+			hostClause.Grow(len("hosts.host_id=$$ OR ")*len(opts.Hosts) + len("AND ()"))
 			hostClause.WriteString("AND (")
 			for i, host := range opts.Hosts {
 				params = append(params, host)
 				if i > 0 {
 					hostClause.WriteString(" OR ")
 				}
-				hostClause.WriteString("hosts.host_id=?")
+				hostClause.WriteString("hosts.host_id=$" + strconv.Itoa(i+3))
 			}
 			hostClause.WriteRune(')')
 		}
 
 		// Execute the query
-		queryCtx, cancel = context.WithTimeout(ctx, s.timeout)
+		queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
 		defer cancel()
-		idleTimeoutMs = 0
 		err = tx.
 			QueryRow(queryCtx,
 				`SELECT
@@ -286,8 +285,8 @@ func (p *PostgresProvider) LookupActor(ctx context.Context, ref ref.ActorRef, op
 					hosts.host_id = host_active_actor_count.host_id
 					AND host_actor_types.actor_type = host_active_actor_count.actor_type
 				WHERE
-					host_actor_types.actor_type = ?
-					AND hosts.host_last_health_check >= ?
+					host_actor_types.actor_type = $1
+					AND hosts.host_last_health_check >= (now() - $2::interval)
 					AND (
 						host_actor_types.actor_concurrency_limit = 0
 						OR host_active_actor_count.active_count < host_actor_types.actor_concurrency_limit
@@ -296,13 +295,12 @@ func (p *PostgresProvider) LookupActor(ctx context.Context, ref ref.ActorRef, op
 				ORDER BY random() LIMIT 1`,
 				params...,
 			).
-			Scan(&res.HostID, &res.Address, &idleTimeoutMs)
-		res.IdleTimeout = time.Duration(idleTimeoutMs) * time.Millisecond
+			Scan(&res.HostID, &res.Address, &res.IdleTimeout)
 
 		if err != nil {
 			// Reset res
 			res = components.LookupActorRes{}
-			if errors.Is(err, sql.ErrNoRows) {
+			if errors.Is(err, pgx.ErrNoRows) {
 				// If we get no rows, it means that there's no host capable of running the actor (at least, not with the given conditions)
 				return res, components.ErrNoHost
 			}
@@ -312,13 +310,21 @@ func (p *PostgresProvider) LookupActor(ctx context.Context, ref ref.ActorRef, op
 
 		// Finally, insert the row in the active actors table to "activate" the actor, in the host we selected
 		// Note that we perform an upsert query here. This is because the actor (with same type and ID) may already be present in the table, where it's active on a host that has failed (but hasn't been garbage-collected yet)
-		queryCtx, cancel = context.WithTimeout(ctx, s.timeout)
+		queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
 		defer cancel()
 		_, err = tx.
 			Exec(queryCtx,
-				`REPLACE INTO active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation)
-				VALUES (?, ?, ?, ?, ?)`,
-				ref.ActorType, ref.ActorID, res.HostID, res.IdleTimeout.Milliseconds(), now,
+				`
+				INSERT INTO active_actors
+					(actor_type, actor_id, host_id, actor_idle_timeout, actor_activation)
+				VALUES
+					($1, $2, $3, $4, now())
+				ON CONFLICT (actor_type, actor_id) DO UPDATE SET
+					host_id = EXCLUDED.host_id,
+					actor_idle_timeout = EXCLUDED.actor_idle_timeout,
+					actor_activation = EXCLUDED.actor_activation
+				`,
+				ref.ActorType, ref.ActorID, res.HostID, res.IdleTimeout,
 			)
 		if err != nil {
 			// Reset res
@@ -333,7 +339,7 @@ func (p *PostgresProvider) LookupActor(ctx context.Context, ref ref.ActorRef, op
 		return components.LookupActorRes{}, fmt.Errorf("failed to lookup actor: %w", err)
 	}
 
-	return res, nil*/
+	return res, nil
 }
 
 func (p *PostgresProvider) RemoveActor(ctx context.Context, ref ref.ActorRef) error {

@@ -298,8 +298,8 @@ func (p *PostgresProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Ala
 	defer cancel()
 
 	whereClause := `WHERE
-		alarm_id = $1
-		AND alarm_lease_id = $2
+		alarm_id = $3
+		AND alarm_lease_id = $4
 		AND alarm_lease_expiration_time IS NOT NULL
 		AND alarm_lease_expiration_time >= now()`
 
@@ -309,7 +309,7 @@ func (p *PostgresProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Ala
 		res, err = p.db.Exec(queryCtx, `
 			UPDATE alarms
 			SET
-				alarm_lease_expiration_time = now() + $1,
+				alarm_lease_expiration_time = now() + $1::interval,
 				alarm_due_time = $2
 			`+whereClause,
 			p.cfg.AlarmsLeaseDuration, req.DueTime,
@@ -321,9 +321,9 @@ func (p *PostgresProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Ala
 			SET
 				alarm_lease_id = NULL,
 				alarm_lease_expiration_time = NULL,
-				alarm_due_time = $4
+				alarm_due_time = $1
 			`+whereClause,
-			req.DueTime,
+			req.DueTime, nil,
 			lease.Key(), lease.LeaseID(),
 		)
 	}

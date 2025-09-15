@@ -386,10 +386,20 @@ func (p *PostgresProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, e
 
 		res.Alarms = make([]comptesting.AlarmSpec, 0)
 		for rows.Next() {
-			var r comptesting.AlarmSpec
-			err = rows.Scan(&r.AlarmID, &r.ActorType, &r.ActorID, &r.Name, &r.DueIn, &r.Interval, &r.TTL, &r.Data, &r.LeaseID, &r.LeaseExp)
+			var (
+				r        comptesting.AlarmSpec
+				interval *string
+				ttl      *time.Duration
+			)
+			err = rows.Scan(&r.AlarmID, &r.ActorType, &r.ActorID, &r.Name, &r.DueIn, &interval, &ttl, &r.Data, &r.LeaseID, &r.LeaseExp)
 			if err != nil {
-				return res, fmt.Errorf("reading active_actors row: %w", err)
+				return res, fmt.Errorf("reading alarms row: %w", err)
+			}
+			if interval != nil {
+				r.Interval = *interval
+			}
+			if ttl != nil {
+				r.TTL = *ttl
 			}
 			res.Alarms = append(res.Alarms, r)
 		}
