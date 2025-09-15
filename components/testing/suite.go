@@ -2510,7 +2510,7 @@ func (s Suite) TestUpdateLeasedAlarm(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, Spec{}))
 
 		// Try to update a non-existent alarm
-		nonExistentLease := ref.NewAlarmLease(ref.NewAlarmRef("at", "aid", "name"), "non-existent", time.Now(), "fake-lease-id")
+		nonExistentLease := ref.NewAlarmLease(ref.NewAlarmRef("at", "aid", "name"), "0b610c71-fd4a-429b-a4ff-873698e5b3a1", time.Now(), "fake-lease-id")
 		updateReq := components.UpdateLeasedAlarmReq{
 			DueTime:      time.Now().Add(1 * time.Hour),
 			RefreshLease: true,
@@ -2627,7 +2627,7 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, Spec{}))
 
 		// Try to delete a non-existent alarm
-		nonExistentLease := ref.NewAlarmLease(ref.NewAlarmRef("at", "aid", "name"), "non-existent", time.Now(), "fake-lease-id")
+		nonExistentLease := ref.NewAlarmLease(ref.NewAlarmRef("at", "aid", "name"), "e7acafab-d2a1-4e95-929f-7da0c781fee0", time.Now(), "fake-lease-id")
 		err := s.p.DeleteLeasedAlarm(ctx, nonExistentLease)
 		require.ErrorIs(t, err, components.ErrNoAlarm)
 	})
@@ -2645,7 +2645,7 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 			},
 			Alarms: []AlarmSpec{
 				{
-					AlarmID:   "test-alarm-no-lease",
+					AlarmID:   "944f30d6-bbc4-474c-9d6a-734a6bb92577",
 					ActorType: "TestType",
 					ActorID:   "test-actor",
 					Name:      "test-alarm",
@@ -2659,7 +2659,7 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, customSpec))
 
 		// Try to delete an alarm that was never leased
-		fakeLease := ref.NewAlarmLease(ref.NewAlarmRef("at", "aid", "name"), "test-alarm-no-lease", time.Now(), "fake-lease-id")
+		fakeLease := ref.NewAlarmLease(ref.NewAlarmRef("at", "aid", "name"), "944f30d6-bbc4-474c-9d6a-734a6bb92577", time.Now(), "fake-lease-id")
 		err := s.p.DeleteLeasedAlarm(ctx, fakeLease)
 		require.ErrorIs(t, err, components.ErrNoAlarm)
 

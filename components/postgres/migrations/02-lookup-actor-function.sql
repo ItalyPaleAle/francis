@@ -116,15 +116,15 @@ BEGIN
             h.host_address,
             hat.actor_idle_timeout,
             hat.actor_concurrency_limit,
-            COALESCE(current_count.active_count, 0) as current_active_count
+            COALESCE(current_count.active_count, 0) AS current_active_count
         FROM hosts h
         JOIN host_actor_types hat ON h.host_id = hat.host_id
         LEFT JOIN (
             -- Count actual rows instead of using the view to avoid race conditions
-            SELECT host_id, COUNT(*) as active_count
-            FROM active_actors 
-            WHERE actor_type = p_actor_type
-            GROUP BY host_id
+            SELECT aa.host_id, COUNT(*) AS active_count
+            FROM active_actors aa
+            WHERE aa.actor_type = p_actor_type
+            GROUP BY aa.host_id
         ) current_count ON h.host_id = current_count.host_id
         WHERE hat.actor_type = p_actor_type
           AND h.host_last_health_check >= (now() - p_host_health_check_deadline)
