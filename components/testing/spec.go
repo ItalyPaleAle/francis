@@ -22,6 +22,17 @@ const (
 	SpecHostH8          = "88888888-8888-4888-8888-888888888888" // H8
 	SpecHostH9          = "99999999-9999-4999-8999-999999999999" // H9
 	SpecHostNonExistent = "10101010-1010-4101-8101-101010101010"
+
+	SpecAlarmA1       = "AA000000-000A-4000-0001-000000000000" // ALM-A-1
+	SpecAlarmA2       = "AA000000-000A-4000-0002-000000000000" // ALM-A-2
+	SpecAlarmA4       = "AA000000-000A-4000-0004-000000000000" // ALM-A-4
+	SpecAlarmB1       = "AA000000-000B-4000-0001-000000000000" // ALM-B-1
+	SpecAlarmB2       = "AA000000-000B-4000-0002-000000000000" // ALM-B-2
+	SpecAlarmB3       = "AA000000-000B-4000-0003-000000000000" // ALM-B-3
+	SpecAlarmD0001    = "AA000000-000D-4000-0001-000000000000" // ALM-D-0001
+	SpecAlarmD0002    = "AA000000-000D-4000-0002-000000000000" // ALM-D-0002
+	SpecAlarmOverdue1 = "AA000000-00AA-4000-0000-000000000001" // ALM-OVERDUE-1
+	SpecAlarmOverdue2 = "AA000000-00AA-4000-0000-000000000002" // ALM-OVERDUE-2
 )
 
 // Spec contains all the test data
@@ -341,7 +352,7 @@ func GetSpec() Spec {
 	// A alarms: earliest, un-placeable on allowed hosts because A is full on H1 and H2
 	for i := 1; i <= 50; i++ {
 		spec.addAlarm(AlarmSpec{
-			AlarmID:   fmt.Sprintf("ALM-A-%03d", i),
+			AlarmID:   fmt.Sprintf("AA000000-000A-4000-000A-000000000%03d", i),
 			ActorType: "A",
 			ActorID:   fmt.Sprintf("A-%03d", i+1000),
 			Name:      fmt.Sprintf("A-%03d", i),
@@ -352,7 +363,7 @@ func GetSpec() Spec {
 
 	// A alarms for active actors: should be leased even though the hosts are at capacity
 	spec.addAlarm(AlarmSpec{
-		AlarmID:   "ALM-A-1",
+		AlarmID:   SpecAlarmA1,
 		ActorType: "A",
 		ActorID:   "A-1",
 		Name:      "Alarm-A-1",
@@ -360,7 +371,7 @@ func GetSpec() Spec {
 		Data:      []byte("active-A-1"),
 	})
 	spec.addAlarm(AlarmSpec{
-		AlarmID:   "ALM-A-2",
+		AlarmID:   SpecAlarmA2,
 		ActorType: "A",
 		ActorID:   "A-2",
 		Name:      "Alarm-A-2",
@@ -368,7 +379,7 @@ func GetSpec() Spec {
 		Data:      []byte("active-A-2"),
 	})
 	spec.addAlarm(AlarmSpec{
-		AlarmID:   "ALM-A-4",
+		AlarmID:   SpecAlarmA4,
 		ActorType: "A",
 		ActorID:   "A-4",
 		Name:      "Alarm-A-4",
@@ -379,7 +390,7 @@ func GetSpec() Spec {
 	// B alarms: due after A, should still be leased and run on H1 or H2
 	for i := 1; i <= 50; i++ {
 		spec.addAlarm(AlarmSpec{
-			AlarmID:   fmt.Sprintf("ALM-B-%03d", i),
+			AlarmID:   fmt.Sprintf("AA000000-000B-4000-000B-000000000%03d", i),
 			ActorType: "B",
 			ActorID:   fmt.Sprintf("B-%03d", i),
 			Name:      fmt.Sprintf("B-%03d", i),
@@ -390,7 +401,7 @@ func GetSpec() Spec {
 
 	// B alarms for active actors
 	spec.addAlarm(AlarmSpec{
-		AlarmID:   "ALM-B-1",
+		AlarmID:   SpecAlarmB1,
 		ActorType: "B",
 		ActorID:   "B-1", // Active on H1 (SpecHostH1)
 		Name:      "Alarm-B-1",
@@ -398,7 +409,7 @@ func GetSpec() Spec {
 		Data:      []byte("active-B-1"),
 	})
 	spec.addAlarm(AlarmSpec{
-		AlarmID:   "ALM-B-2",
+		AlarmID:   SpecAlarmB2,
 		ActorType: "B",
 		ActorID:   "B-2", // Active on H2 (SpecHostH2)
 		Name:      "Alarm-B-2",
@@ -406,7 +417,7 @@ func GetSpec() Spec {
 		Data:      []byte("active-B-2"),
 	})
 	spec.addAlarm(AlarmSpec{
-		AlarmID:   "ALM-B-3",
+		AlarmID:   SpecAlarmB3,
 		ActorType: "B",
 		ActorID:   "B-3", // Active on H3 (SpecHostH3)
 		Name:      "Alarm-B-3",
@@ -426,7 +437,7 @@ func GetSpec() Spec {
 			leaseTTL = ptr.Of(-10 * time.Minute)
 		}
 		spec.addAlarm(AlarmSpec{
-			AlarmID:   fmt.Sprintf("ALM-C-%03d", i),
+			AlarmID:   fmt.Sprintf("AA000000-000C-4000-000C-000000000%03d", i),
 			ActorType: "C",
 			ActorID:   fmt.Sprintf("C-%03d", i),
 			Name:      fmt.Sprintf("C-%03d", i),
@@ -440,7 +451,7 @@ func GetSpec() Spec {
 	// These should be treated as inactive. Since D is not supported on allowed healthy hosts,
 	// they remain unplaceable, confirming that the scheduler does not route to H6 or H5.
 	spec.addAlarm(AlarmSpec{
-		AlarmID:   "ALM-D-0001",
+		AlarmID:   SpecAlarmD0001,
 		ActorType: "D",
 		ActorID:   "D-1",
 		Name:      "Alarm-D-1",
@@ -448,7 +459,7 @@ func GetSpec() Spec {
 		Data:      []byte("rehydrate-D1"),
 	})
 	spec.addAlarm(AlarmSpec{
-		AlarmID:   "ALM-D-0002",
+		AlarmID:   SpecAlarmD0002,
 		ActorType: "D",
 		ActorID:   "D-2",
 		Name:      "Alarm-D-2",
@@ -458,16 +469,23 @@ func GetSpec() Spec {
 
 	// X and Y alarms: unlimited type on H7 and H8
 	// Note that X-1, X-2, an Y-1 are active actors
-	for _, k := range []string{"X", "Y"} {
-		for i := 1; i <= 50; i++ {
-			spec.addAlarm(AlarmSpec{
-				AlarmID:   fmt.Sprintf("ALM-%s-%03d", k, i),
-				ActorType: k,
-				ActorID:   fmt.Sprintf("%s-%d", k, i),
-				Name:      fmt.Sprintf("%s-%d", k, i),
-				DueIn:     time.Duration(i) * 100 * time.Millisecond,
-			})
-		}
+	for i := 1; i <= 50; i++ {
+		spec.addAlarm(AlarmSpec{
+			AlarmID:   fmt.Sprintf("AA000000-EEEE-4000-00EE-000000000%03d", i),
+			ActorType: "X",
+			ActorID:   fmt.Sprintf("X-%d", i),
+			Name:      fmt.Sprintf("X-%d", i),
+			DueIn:     time.Duration(i) * 100 * time.Millisecond,
+		})
+	}
+	for i := 1; i <= 50; i++ {
+		spec.addAlarm(AlarmSpec{
+			AlarmID:   fmt.Sprintf("AA000000-FFFF-4000-00FF-000000000%03d", i),
+			ActorType: "Y",
+			ActorID:   fmt.Sprintf("Y-%d", i),
+			Name:      fmt.Sprintf("Y-%d", i),
+			DueIn:     time.Duration(i) * 100 * time.Millisecond,
+		})
 	}
 
 	return spec

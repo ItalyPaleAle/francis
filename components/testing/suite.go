@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -1311,7 +1310,12 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 	// ALM-C-006 has an expired lease
 	expectPreLeasedAlarms := func(alarmID string) bool {
 		switch alarmID {
-		case "ALM-C-001", "ALM-C-002", "ALM-C-003", "ALM-C-004", "ALM-C-005", "ALM-C-006":
+		case "AA000000-000C-4000-000C-000000000001",
+			"AA000000-000C-4000-000C-000000000002",
+			"AA000000-000C-4000-000C-000000000003",
+			"AA000000-000C-4000-000C-000000000004",
+			"AA000000-000C-4000-000C-000000000005",
+			"AA000000-000C-4000-000C-000000000006":
 			return true
 		default:
 			return false
@@ -1343,7 +1347,12 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 					continue
 				}
 
-				alarmID := fmt.Sprintf("ALM-%s-%03d", typ, i)
+				var alarmID string
+				if typ == "X" {
+					alarmID = fmt.Sprintf("AA000000-EEEE-4000-00EE-000000000%03d", i)
+				} else {
+					alarmID = fmt.Sprintf("AA000000-FFFF-4000-00FF-000000000%03d", i)
+				}
 				actorID := fmt.Sprintf("%s-%d", typ, i)
 
 				expectAlarmIDs = append(expectAlarmIDs, alarmID)
@@ -1415,16 +1424,36 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		// For type B, the combined capacity between H1 and H2 is 10, with 2 actors already active, so we should only get the earliest 8 plus ALM-B-1 and ALM-B-2 which are for the actors active on H1 and H2 (meanwhile, ALM-B-3 is active on H3 so should not be returned)
 		// There's no capacity limit on type C, so we should get 12 of them. However, ALM-C-001...ALM-C-005 are already leased with a valid lease
 		expectAlarmIDs := []string{
-			"ALM-A-1", "ALM-A-2", "ALM-A-4",
-			"ALM-B-1", "ALM-B-2",
-			"ALM-B-001", "ALM-B-007", "ALM-B-014", "ALM-B-021", "ALM-B-028", "ALM-B-035", "ALM-B-042", "ALM-B-049",
-			"ALM-C-006", "ALM-C-010", "ALM-C-011", "ALM-C-015", "ALM-C-020", "ALM-C-025", "ALM-C-030", "ALM-C-035", "ALM-C-040", "ALM-C-045", "ALM-C-050",
+			SpecAlarmA1, SpecAlarmA2, SpecAlarmA4,
+			SpecAlarmB1, SpecAlarmB2,
+			"AA000000-000B-4000-000B-000000000001", // ALM-B-001
+			"AA000000-000B-4000-000B-000000000007", // ALM-B-007
+			"AA000000-000B-4000-000B-000000000014", // ALM-B-014
+			"AA000000-000B-4000-000B-000000000021", // ALM-B-021
+			"AA000000-000B-4000-000B-000000000028", // ALM-B-028
+			"AA000000-000B-4000-000B-000000000035", // ALM-B-035
+			"AA000000-000B-4000-000B-000000000042", // ALM-B-042
+			"AA000000-000B-4000-000B-000000000049", // ALM-B-049
+			"AA000000-000C-4000-000C-000000000006", // ALM-C-006
+			"AA000000-000C-4000-000C-000000000010", // ALM-C-010
+			"AA000000-000C-4000-000C-000000000011", // ALM-C-011
+			"AA000000-000C-4000-000C-000000000015", // ALM-C-015
+			"AA000000-000C-4000-000C-000000000020", // ALM-C-020
+			"AA000000-000C-4000-000C-000000000025", // ALM-C-025
+			"AA000000-000C-4000-000C-000000000030", // ALM-C-030
+			"AA000000-000C-4000-000C-000000000035", // ALM-C-035
+			"AA000000-000C-4000-000C-000000000040", // ALM-C-040
+			"AA000000-000C-4000-000C-000000000045", // ALM-C-045
+			"AA000000-000C-4000-000C-000000000050", // ALM-C-050
+		}
+		expectActorIDs := []string{
+			"A-1", "A-2", "A-4", "B-1", "B-2",
+			"B-001", "B-007", "B-014", "B-021", "B-028", "B-035", "B-042", "B-049",
+			"C-006", "C-010", "C-011", "C-015", "C-020", "C-025", "C-030", "C-035", "C-040", "C-045", "C-050",
 		}
 		expectAlarmIDsMap := make(map[string]bool, len(expectAlarmIDs))
-		expectActorIDs := make([]string, len(expectAlarmIDs))
-		for i, id := range expectAlarmIDs {
+		for _, id := range expectAlarmIDs {
 			expectAlarmIDsMap[id] = true
-			expectActorIDs[i] = strings.TrimPrefix(id, "ALM-")
 		}
 
 		// Collect all alarm IDs
@@ -1445,7 +1474,7 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 
 		for _, a := range spec.Alarms {
 			// ALM-C-006's leases was expired and we should have taken it over
-			if a.AlarmID != "ALM-C-006" && expectPreLeasedAlarms(a.AlarmID) {
+			if a.AlarmID != "AA000000-000C-4000-000C-000000000006" && expectPreLeasedAlarms(a.AlarmID) {
 				continue
 			}
 
@@ -1606,7 +1635,7 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		// Check if we got the expired lease ALM-C-006 and gave it a new lease
 		foundExpiredAlarm := false
 		for _, lease := range res {
-			if lease.Key() == "ALM-C-006" {
+			if lease.Key() == "AA000000-000C-4000-000C-000000000006" {
 				// Should have a lease ID (new lease was created)
 				assert.NotEmpty(t, lease.LeaseID(), "ALM-C-006 should have been given a new lease")
 				foundExpiredAlarm = true
@@ -1629,7 +1658,7 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 			},
 			Alarms: []AlarmSpec{
 				{
-					AlarmID:   "ALM-OVERDUE-1",
+					AlarmID:   SpecAlarmOverdue1,
 					ActorType: "TestOverdue",
 					ActorID:   "overdue-actor-1",
 					Name:      "overdue-alarm-1",
@@ -1637,7 +1666,7 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 					Data:      []byte("overdue-data-1"),
 				},
 				{
-					AlarmID:   "ALM-OVERDUE-2",
+					AlarmID:   SpecAlarmOverdue2,
 					ActorType: "TestOverdue",
 					ActorID:   "overdue-actor-2",
 					Name:      "overdue-alarm-2",
@@ -1661,13 +1690,13 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		foundOverdue1 := false
 		foundOverdue2 := false
 		for _, lease := range res {
-			if lease.Key() == "ALM-OVERDUE-1" {
+			if lease.Key() == SpecAlarmOverdue1 {
 				foundOverdue1 = true
 				// Verify the alarm is in the past
 				assert.True(t, lease.DueTime().Before(s.p.Now()), "ALM-OVERDUE-1 should be overdue")
 				assert.Equal(t, "TestOverdue/overdue-actor-1", lease.ActorRef().String())
 			}
-			if lease.Key() == "ALM-OVERDUE-2" {
+			if lease.Key() == SpecAlarmOverdue2 {
 				foundOverdue2 = true
 				// Verify the alarm is in the past
 				assert.True(t, lease.DueTime().Before(s.p.Now()), "ALM-OVERDUE-2 should be overdue")
@@ -1680,7 +1709,7 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		// Verify the leased overdue alarms can be retrieved
 		for _, lease := range res {
 			key := lease.Key()
-			if key == "ALM-OVERDUE-1" || key == "ALM-OVERDUE-2" {
+			if key == SpecAlarmOverdue1 || key == SpecAlarmOverdue2 {
 				alarmRes, err := s.p.GetLeasedAlarm(ctx, lease)
 				require.NoError(t, err, "overdue alarm %s should be properly leased", key)
 				assert.Equal(t, "TestOverdue", alarmRes.ActorType)
@@ -1778,7 +1807,7 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 
 		// Try to get an alarm that exists but isn't leased
 		// From spec, ALM-B-007 and later B alarms should not be pre-leased
-		unleaedAlarmLease := ref.NewAlarmLease(ref.NewAlarmRef("B", "B-007", "Alarm-B-007"), "ALM-B-007", time.Now(), "fake-lease-id")
+		unleaedAlarmLease := ref.NewAlarmLease(ref.NewAlarmRef("B", "B-007", "Alarm-B-007"), "AA000000-000B-4000-000B-000000000007", time.Now(), "fake-lease-id")
 		_, err := s.p.GetLeasedAlarm(ctx, unleaedAlarmLease)
 		require.ErrorIs(t, err, components.ErrNoAlarm)
 	})
@@ -1849,7 +1878,7 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 		var found bool
 		for _, lease := range res {
 			// ALM-A-1, ALM-A-2, ALM-A-4, ALM-B-1, ALM-B-2 should have specific data
-			if lease.Key() == "ALM-A-1" || lease.Key() == "ALM-B-1" {
+			if lease.Key() == SpecAlarmA1 || lease.Key() == SpecAlarmB1 {
 				targetLease = lease
 				found = true
 				break
@@ -1863,12 +1892,12 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 
 		// Verify the alarm data matches expected values from GetSpec
 		switch targetLease.Key() {
-		case "ALM-A-1":
+		case SpecAlarmA1:
 			assert.Equal(t, "A", alarmRes.ActorType)
 			assert.Equal(t, "A-1", alarmRes.ActorID)
 			assert.Equal(t, "Alarm-A-1", alarmRes.Name)
 			assert.Equal(t, []byte("active-A-1"), alarmRes.Data)
-		case "ALM-B-1":
+		case SpecAlarmB1:
 			assert.Equal(t, "B", alarmRes.ActorType)
 			assert.Equal(t, "B-1", alarmRes.ActorID)
 			assert.Equal(t, "Alarm-B-1", alarmRes.Name)
@@ -1889,7 +1918,7 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 			},
 			Alarms: []AlarmSpec{
 				{
-					AlarmID:   "test-alarm-with-extras",
+					AlarmID:   "30752437-a376-44a9-9156-b9cafcc052ee",
 					ActorType: "TestType",
 					ActorID:   "test-actor",
 					Name:      "test-alarm",
@@ -1943,7 +1972,7 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 			},
 			Alarms: []AlarmSpec{
 				{
-					AlarmID:   "test-alarm-no-data",
+					AlarmID:   "980c9240-3300-4581-abc5-228843df55c5",
 					ActorType: "TestType",
 					ActorID:   "test-actor",
 					Name:      "test-alarm",
