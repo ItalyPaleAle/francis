@@ -2,36 +2,35 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/italypaleale/actors/components"
 	"github.com/italypaleale/actors/internal/ref"
+	"github.com/italypaleale/actors/internal/sql/transactions"
 )
 
 func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {
-	return components.RegisterHostRes{}, nil
-	/*hostIDObj, oErr := uuid.NewV7()
+	hostIDObj, oErr := uuid.NewV7()
 	if oErr != nil {
 		return components.RegisterHostRes{}, fmt.Errorf("failed to generate host ID: %w", oErr)
 	}
 	hostID := hostIDObj.String()
 
-	_, oErr = transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
-		now := s.clock.Now().UnixMilli()
-
+	_, oErr = transactions.ExecuteInPgxTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (zero struct{}, err error) {
 		// To start, we need to delete any actor host with the same address that has not sent a health check in the maximum allotted time
 		// We need to do this because the hosts table has a unique index on the address, so two apps can't have the same address
 		// If it's the same app that's restarted after a crash, then it will be able to re-register once the health checks have timed out
 		// Because of the foreign key references, deleting a host also causes all actors hosted there to be deleted
-		queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+		queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 		defer cancel()
 		_, err = tx.Exec(queryCtx,
 			`DELETE FROM hosts
-			WHERE host_last_health_check < ?`,
-			now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
+			WHERE host_last_health_check < (now() - $1::interval)`,
+			p.cfg.HostHealthCheckDeadline,
 		)
 		if err != nil {
 			return zero, fmt.Errorf("error removing failed hosts: %w", err)
@@ -39,14 +38,13 @@ func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.Regi
 
 		// Let's try to insert the host now
 		// We don't do an upsert here on purpose, so if there's already an active host at the same address, this will cause a conflict
-		queryCtx, cancel = context.WithTimeout(ctx, s.timeout)
+		queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
 		defer cancel()
 		_, err = tx.Exec(queryCtx,
 			`INSERT INTO hosts (host_id, host_address, host_last_health_check)
-			VALUES (?, ?, ?)`,
+			VALUES ($1, $2, now())`,
 			hostID,
 			req.Address,
-			now,
 		)
 		if isConstraintError(err) {
 			return zero, components.ErrHostAlreadyRegistered
@@ -55,7 +53,7 @@ func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.Regi
 		}
 
 		// Insert all supported host types
-		err = s.insertHostActorTypes(ctx, tx, hostID, req.ActorTypes)
+		err = p.insertHostActorTypes(ctx, tx, hostID, req.ActorTypes)
 		if err != nil {
 			return zero, fmt.Errorf("error inserting supported actor types: %w", err)
 		}
@@ -68,7 +66,7 @@ func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.Regi
 
 	return components.RegisterHostRes{
 		HostID: hostID,
-	}, nil*/
+	}, nil
 }
 
 func (p *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, req components.UpdateActorHostReq) error {
@@ -80,12 +78,10 @@ func (p *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, r
 		return nil
 	}
 
-	return nil
-
-	/*_, oErr := transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
+	_, oErr := transactions.ExecuteInPgxTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (zero struct{}, err error) {
 		// Update the last health check if needed
 		if req.UpdateLastHealthCheck {
-			err = s.updateActorHostLastHealthCheck(ctx, hostID, tx)
+			err = p.updateActorHostLastHealthCheck(ctx, hostID, tx)
 			if err != nil {
 				return zero, fmt.Errorf("failed to update last health check: %w", err)
 			}
@@ -96,19 +92,18 @@ func (p *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, r
 		if req.ActorTypes != nil {
 			// When updating actor types without updating health check, we need to verify the host exists and is healthy
 			if !req.UpdateLastHealthCheck {
-				now := s.clock.Now().UnixMilli()
-				queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+				queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 				defer cancel()
 				var ok bool
 				err = tx.QueryRow(queryCtx,
 					`SELECT EXISTS (
 						SELECT 1 FROM hosts
 						WHERE
-							host_id = ?
-							AND host_last_health_check >= ?
+							host_id = $1
+							AND host_last_health_check >= (now() - $2::interval)
 					)`,
 					hostID,
-					now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
+					p.cfg.HostHealthCheckDeadline,
 				).Scan(&ok)
 				if err != nil {
 					return zero, fmt.Errorf("error checking host health: %w", err)
@@ -120,11 +115,11 @@ func (p *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, r
 			}
 
 			// First, delete all supported actor types for the host
-			queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+			queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 			defer cancel()
 			_, err = tx.
 				Exec(queryCtx,
-					`DELETE FROM host_actor_types WHERE host_id = ?`,
+					`DELETE FROM host_actor_types WHERE host_id = $1`,
 					hostID,
 				)
 			if err != nil {
@@ -132,7 +127,7 @@ func (p *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, r
 			}
 
 			// Insert the new supported actor types
-			err = s.insertHostActorTypes(ctx, tx, hostID, req.ActorTypes)
+			err = p.insertHostActorTypes(ctx, tx, hostID, req.ActorTypes)
 			if err != nil {
 				return zero, fmt.Errorf("error inserting supported actor types: %w", err)
 			}
@@ -144,7 +139,7 @@ func (p *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, r
 		return fmt.Errorf("failed to update host: %w", oErr)
 	}
 
-	return nil*/
+	return nil
 }
 
 func (p *PostgresProvider) updateActorHostLastHealthCheck(ctx context.Context, hostID string, tx pgx.Tx) error {
@@ -176,23 +171,20 @@ func (p *PostgresProvider) updateActorHostLastHealthCheck(ctx context.Context, h
 }
 
 func (p *PostgresProvider) UnregisterHost(ctx context.Context, hostID string) error {
-	return nil
-
-	/*// Deleting from the hosts table causes all actors to be deactivate
-	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	// Deleting from the hosts table causes all actors to be deactivate
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
-	now := s.clock.Now().UnixMilli()
 	var hostActive bool
-	err := s.db.
+	err := p.db.
 		QueryRow(queryCtx,
 			`DELETE FROM hosts
-			WHERE host_id = ?
-			RETURNING host_last_health_check >= ?`,
+			WHERE host_id = $1
+			RETURNING host_last_health_check >= (now() - $2::interval)`,
 			hostID,
-			now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
+			p.cfg.HostHealthCheckDeadline,
 		).
 		Scan(&hostActive)
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		// Host doesn't exist
 		return components.ErrHostUnregistered
 	} else if err != nil {
@@ -205,7 +197,7 @@ func (p *PostgresProvider) UnregisterHost(ctx context.Context, hostID string) er
 		return components.ErrHostUnregistered
 	}
 
-	return nil*/
+	return nil
 }
 
 func (p *PostgresProvider) LookupActor(ctx context.Context, ref ref.ActorRef, opts components.LookupActorOpts) (components.LookupActorRes, error) {
@@ -216,7 +208,6 @@ func (p *PostgresProvider) LookupActor(ctx context.Context, ref ref.ActorRef, op
 		queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 		defer cancel()
 		var idleTimeoutMs int64
-		now := s.clock.Now().UnixMilli()
 		err = tx.
 			QueryRow(queryCtx,
 				`SELECT hosts.host_id, hosts.host_address, active_actors.actor_idle_timeout
@@ -369,36 +360,49 @@ func (p *PostgresProvider) insertHostActorTypes(ctx context.Context, tx pgx.Tx, 
 		return nil
 	}
 
-	// Build the query
-	q := strings.Builder{}
-	q.WriteString(
-		`INSERT INTO host_actor_types
-			(host_id, actor_type, actor_idle_timeout, actor_concurrency_limit)
-		VALUES `,
-	)
-	q.Grow(len(actorTypes) * len("(?,?,?,?),"))
-
-	args := make([]any, 0, len(actorTypes)*3)
-	for i, t := range actorTypes {
-		args = append(args,
-			hostID,
-			t.ActorType,
-			t.IdleTimeout.Milliseconds(),
-			t.ConcurrencyLimit,
-		)
-
-		if i > 0 {
-			q.WriteRune(',')
-		}
-		q.WriteString("(?,?,?,?)")
-	}
-
+	// We use "CopyFrom" to efficiently insert multiple rows
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
-	_, err := tx.Exec(queryCtx, q.String(), args...)
+	_, err := tx.CopyFrom(
+		queryCtx,
+		pgx.Identifier{"host_actor_types"},
+		[]string{"host_id", "actor_type", "actor_idle_timeout", "actor_concurrency_limit"},
+		&actorHostTypeColl{
+			hostID:     hostID,
+			actorTypes: actorTypes,
+		},
+	)
 	if err != nil {
-		return fmt.Errorf("error executing query: %w", err)
+		return fmt.Errorf("error executing copy: %w", err)
 	}
 
+	return nil
+}
+
+// Implement pgx.CopyFromSource for a slice of components.ActorHostType
+type actorHostTypeColl struct {
+	hostID     string
+	actorTypes []components.ActorHostType
+
+	idx int
+}
+
+func (ahtc *actorHostTypeColl) Next() bool {
+	ahtc.idx++
+	return ahtc.idx < len(ahtc.actorTypes)
+}
+
+func (ahtc *actorHostTypeColl) Values() ([]any, error) {
+	row := ahtc.actorTypes[ahtc.idx]
+	res := []any{
+		ahtc.hostID,
+		row.ActorType,
+		row.IdleTimeout,
+		row.ConcurrencyLimit,
+	}
+	return res, nil
+}
+
+func (ahtc *actorHostTypeColl) Err() error {
 	return nil
 }

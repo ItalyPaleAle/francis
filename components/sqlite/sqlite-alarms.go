@@ -133,7 +133,7 @@ func (s *SQLiteProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req co
 		return nil, nil
 	}
 
-	return transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) ([]*ref.AlarmLease, error) {
+	return transactions.ExecuteInSqlTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) ([]*ref.AlarmLease, error) {
 		fetcher := newUpcomingAlarmFetcher(tx, s, &req)
 
 		res, err := fetcher.FetchUpcoming(ctx)

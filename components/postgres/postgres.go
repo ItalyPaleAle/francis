@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -10,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"k8s.io/utils/clock"
 
@@ -235,4 +238,18 @@ func (p *PostgresProvider) initGC() (err error) {
 		DB:              sqladapter.AdaptPgxConn(p.db),
 	})
 	return err
+}
+
+// Checks if an error returned by the database is a unique constraint violation error, such as a duplicate unique index or primary key.
+func isConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+
+	return pgerrcode.IsIntegrityConstraintViolation(pgErr.Code)
 }

@@ -13,6 +13,7 @@ import (
 
 	_ "embed"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -22,6 +23,8 @@ import (
 
 	"github.com/italypaleale/actors/components"
 	comptesting "github.com/italypaleale/actors/components/testing"
+	"github.com/italypaleale/actors/internal/ptr"
+	"github.com/italypaleale/actors/internal/sql/transactions"
 	"github.com/italypaleale/actors/internal/testutil"
 )
 
@@ -172,130 +175,134 @@ func (p *PostgresProvider) setCurrentFrozenTime() error {
 }
 
 func (p *PostgresProvider) Seed(ctx context.Context, spec comptesting.Spec) error {
-	return nil
-	/* _, tErr := transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (z struct{}, err error) {
-		now := s.clock.Now()
+	_, tErr := transactions.ExecuteInPgxTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (z struct{}, err error) {
+		// We need to get the current time here because we cannot use "now()" when using CopyFrom
+		// However, since time in the database is "frozen" and synced with the mock clock, it should be the same
+		now := p.clock.Now()
 
 		// Truncate all data
 		for _, tbl := range []string{"active_actors", "host_actor_types", "hosts", "actor_state", "alarms"} {
-			_, err = tx.ExecContext(ctx, "DELETE FROM "+tbl)
+			_, err = tx.Exec(ctx, "DELETE FROM "+tbl)
 			if err != nil {
 				return z, fmt.Errorf("truncate '%s': %w", tbl, err)
 			}
 		}
 
 		// Hosts
-		insHost, err := tx.PrepareContext(ctx,
-			`INSERT INTO hosts (host_id, host_address, host_last_health_check)
-			VALUES (?, ?, ?)`,
-		)
-		if err != nil {
-			return z, fmt.Errorf("prep hosts: %w", err)
-		}
-		defer insHost.Close()
-		for _, h := range spec.Hosts {
-			hb := now.UnixMilli() - h.LastHealthAgo.Milliseconds()
-			_, err = insHost.ExecContext(ctx, h.HostID, h.Address, hb)
+		if len(spec.Hosts) > 0 {
+			rows := make([][]any, len(spec.Hosts))
+			for i, h := range spec.Hosts {
+				rows[i] = []any{
+					h.HostID,
+					h.Address,
+					now.Add(-1 * h.LastHealthAgo),
+				}
+			}
+			_, err = tx.CopyFrom(
+				ctx,
+				pgx.Identifier{"hosts"},
+				[]string{"host_id", "host_address", "host_last_health_check"},
+				pgx.CopyFromRows(rows),
+			)
 			if err != nil {
-				return z, fmt.Errorf("insert host '%s': %w", h.HostID, err)
+				return z, fmt.Errorf("copy hosts: %w", err)
 			}
 		}
-		_ = insHost.Close()
 
 		// Host actor types
-		insHat, err := tx.PrepareContext(ctx,
-			`INSERT INTO host_actor_types (host_id, actor_type, actor_idle_timeout, actor_concurrency_limit)
-			VALUES (?, ?, ?, ?)`,
-		)
-		if err != nil {
-			return z, fmt.Errorf("prep host_actor_types: %w", err)
-		}
-		defer insHat.Close()
-		for _, hat := range spec.HostActorTypes {
-			_, err = insHat.ExecContext(ctx,
-				hat.HostID,
-				hat.ActorType,
-				hat.ActorIdleTimeout.Milliseconds(),
-				hat.ActorConcurrencyLimit,
+		if len(spec.HostActorTypes) > 0 {
+			rows := make([][]any, len(spec.HostActorTypes))
+			for i, hat := range spec.HostActorTypes {
+				rows[i] = []any{
+					hat.HostID,
+					hat.ActorType,
+					hat.ActorIdleTimeout,
+					hat.ActorConcurrencyLimit,
+				}
+			}
+			_, err = tx.CopyFrom(
+				ctx,
+				pgx.Identifier{"host_actor_types"},
+				[]string{"host_id", "actor_type", "actor_idle_timeout", "actor_concurrency_limit"},
+				pgx.CopyFromRows(rows),
 			)
 			if err != nil {
-				return z, fmt.Errorf("insert host_actor_type '%s/%s': %w", hat.HostID, hat.ActorType, err)
+				return z, fmt.Errorf("copy host actor types: %w", err)
 			}
 		}
-		_ = insHat.Close()
 
 		// Active actors
-		insAA, err := tx.PrepareContext(ctx,
-			`INSERT INTO active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation)
-			VALUES (?, ?, ?, ?, ?)`,
-		)
-		if err != nil {
-			return z, fmt.Errorf("prep active_actors: %w", err)
-		}
-		defer insAA.Close()
-		for _, aa := range spec.ActiveActors {
-			act := now.UnixMilli() - aa.ActivationAgo.Milliseconds()
-			_, err = insAA.ExecContext(ctx,
-				aa.ActorType, aa.ActorID, aa.HostID,
-				aa.ActorIdleTimeout.Milliseconds(), act,
+		if len(spec.ActiveActors) > 0 {
+			rows := make([][]any, len(spec.ActiveActors))
+			for i, aa := range spec.ActiveActors {
+				rows[i] = []any{
+					aa.ActorType,
+					aa.ActorID,
+					aa.HostID,
+					aa.ActorIdleTimeout,
+					now.Add(-1 * aa.ActivationAgo),
+				}
+			}
+			_, err = tx.CopyFrom(
+				ctx,
+				pgx.Identifier{"active_actors"},
+				[]string{"actor_type", "actor_id", "host_id", "actor_idle_timeout", "actor_activation"},
+				pgx.CopyFromRows(rows),
 			)
 			if err != nil {
-				return z, fmt.Errorf("insert active_actor '%s/%s': %w", aa.ActorType, aa.ActorID, err)
+				return z, fmt.Errorf("copy active actors: %w", err)
 			}
 		}
-		_ = insAA.Close()
 
 		// Alarms
-		insAlarm, err := tx.PrepareContext(ctx,
-			`INSERT INTO alarms (
-				alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
-				alarm_interval, alarm_ttl_time, alarm_data,
-				alarm_lease_id, alarm_lease_expiration_time
-			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		)
-		if err != nil {
-			return z, fmt.Errorf("prep alarms: %w", err)
-		}
-		defer insAlarm.Close()
-		for _, a := range spec.Alarms {
-			due := now.UnixMilli() + a.DueIn.Milliseconds()
+		if len(spec.Alarms) > 0 {
+			rows := make([][]any, len(spec.Alarms))
+			for i, a := range spec.Alarms {
+				var (
+					ttl      *time.Time
+					interval *string
+				)
+				if a.Interval != "" {
+					interval = ptr.Of(a.Interval)
+				}
+				if a.TTL > 0 {
+					ttl = ptr.Of(now.Add(a.TTL))
+				}
 
-			var (
-				ttl      *int64
-				interval *string
-			)
-			if a.Interval != "" {
-				interval = ptr.Of(a.Interval)
-			}
-			if a.TTL > 0 {
-				ttl = ptr.Of(now.UnixMilli() + a.TTL.Milliseconds())
-			}
+				var (
+					leaseID  *string
+					leaseExp *time.Time
+				)
+				if a.LeaseTTL != nil {
+					leaseExp = ptr.Of(now.Add(*a.LeaseTTL))
+					leaseID = ptr.Of(uuid.New().String())
+				}
 
-			var (
-				leaseID  *string
-				leaseExp *int64
-			)
-			if a.LeaseTTL != nil {
-				leaseExp = ptr.Of(now.UnixMilli() + a.LeaseTTL.Milliseconds())
-				leaseID = ptr.Of(uuid.New().String())
+				rows[i] = []any{
+					a.AlarmID, a.ActorType, a.ActorID, a.Name, now.Add(a.DueIn),
+					interval, ttl, a.Data,
+					leaseID, leaseExp,
+				}
 			}
-
-			_, err = insAlarm.ExecContext(ctx,
-				a.AlarmID, a.ActorType, a.ActorID, a.Name, due,
-				interval, ttl, a.Data, leaseID, leaseExp,
+			_, err = tx.CopyFrom(
+				ctx,
+				pgx.Identifier{"alarms"},
+				[]string{
+					"alarm_id", "actor_type", "actor_id", "alarm_name", "alarm_due_time",
+					"alarm_interval", "alarm_ttl_time", "alarm_data",
+					"alarm_lease_id", "alarm_lease_expiration_time",
+				},
+				pgx.CopyFromRows(rows),
 			)
 			if err != nil {
-				return z, fmt.Errorf("insert alarm '%s': %w", a.AlarmID, err)
+				return z, fmt.Errorf("copy alarms: %w", err)
 			}
 		}
-		_ = insAlarm.Close()
 
 		return z, nil
 	})
 
 	return tErr
-	*/
 }
 
 func (p *PostgresProvider) GetAllActorState(ctx context.Context) (comptesting.ActorStateSpecCollection, error) {

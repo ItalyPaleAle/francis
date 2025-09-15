@@ -83,7 +83,7 @@ func (s *SQLiteProvider) AdvanceClock(d time.Duration) error {
 }
 
 func (s *SQLiteProvider) Seed(ctx context.Context, spec comptesting.Spec) error {
-	_, tErr := transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (z struct{}, err error) {
+	_, tErr := transactions.ExecuteInSqlTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (z struct{}, err error) {
 		now := s.clock.Now()
 
 		// Truncate all data
@@ -228,7 +228,7 @@ func (s *SQLiteProvider) GetAllActorState(ctx context.Context) (comptesting.Acto
 }
 
 func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, error) {
-	return transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (res comptesting.Spec, err error) {
+	return transactions.ExecuteInSqlTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (res comptesting.Spec, err error) {
 		// Load all hosts
 		rows, err := tx.QueryContext(ctx, "SELECT host_id, host_address, host_last_health_check FROM hosts")
 		if err != nil {
