@@ -505,12 +505,12 @@ func TestGetInPlaceholders(t *testing.T) {
 
 func TestActiveHostsList_HostForActorType(t *testing.T) {
 	t.Run("pick hosts at random", func(t *testing.T) {
-		h1 := &activeHost{HostID: "H1", ActorType: "typeA", Capacity: 10000}
-		h2 := &activeHost{HostID: "H2", ActorType: "typeA", Capacity: 10000}
+		h1 := &activeHost{HostID: comptesting.SpecHostH1, ActorType: "typeA", Capacity: 10000}
+		h2 := &activeHost{HostID: comptesting.SpecHostH2, ActorType: "typeA", Capacity: 10000}
 		ahl := &activeHostsList{
 			hosts: map[string]*activeHost{
-				"H1": h1,
-				"H2": h2,
+				comptesting.SpecHostH1: h1,
+				comptesting.SpecHostH2: h2,
 			},
 			capacities: map[string][]*activeHost{
 				"typeA": {h1, h2},
@@ -526,15 +526,15 @@ func TestActiveHostsList_HostForActorType(t *testing.T) {
 
 		// Should be roughly 50/50, but we enforce at least 30 to leave some buffer for randomness
 		assert.Len(t, observed, 2)
-		assert.GreaterOrEqual(t, observed["H1"], 30)
-		assert.GreaterOrEqual(t, observed["H2"], 30)
+		assert.GreaterOrEqual(t, observed[comptesting.SpecHostH1], 30)
+		assert.GreaterOrEqual(t, observed[comptesting.SpecHostH2], 30)
 	})
 
 	t.Run("single host capacity exhaustion", func(t *testing.T) {
-		h1 := &activeHost{HostID: "H1", ActorType: "typeA", Capacity: 3}
+		h1 := &activeHost{HostID: comptesting.SpecHostH1, ActorType: "typeA", Capacity: 3}
 		ahl := &activeHostsList{
 			hosts: map[string]*activeHost{
-				"H1": h1,
+				comptesting.SpecHostH1: h1,
 			},
 			capacities: map[string][]*activeHost{
 				"typeA": {h1},
@@ -545,18 +545,18 @@ func TestActiveHostsList_HostForActorType(t *testing.T) {
 		for range 3 {
 			host := ahl.HostForActorType("typeA")
 			require.NotNil(t, host)
-			assert.Equal(t, "H1", host.HostID)
+			assert.Equal(t, comptesting.SpecHostH1, host.HostID)
 		}
 		assert.Nil(t, ahl.HostForActorType("typeA"))
 	})
 
 	t.Run("multiple hosts capacity exhaustion", func(t *testing.T) {
-		h1 := &activeHost{HostID: "H1", ActorType: "typeA", Capacity: 5}
-		h2 := &activeHost{HostID: "H2", ActorType: "typeA", Capacity: 10000}
+		h1 := &activeHost{HostID: comptesting.SpecHostH1, ActorType: "typeA", Capacity: 5}
+		h2 := &activeHost{HostID: comptesting.SpecHostH2, ActorType: "typeA", Capacity: 10000}
 		ahl := &activeHostsList{
 			hosts: map[string]*activeHost{
-				"H1": h1,
-				"H2": h2,
+				comptesting.SpecHostH1: h1,
+				comptesting.SpecHostH2: h2,
 			},
 			capacities: map[string][]*activeHost{
 				"typeA": {h1, h2},
@@ -572,8 +572,8 @@ func TestActiveHostsList_HostForActorType(t *testing.T) {
 
 		// Should have depleted all capacity in H1 (5), and the rest should be H2
 		assert.Len(t, observed, 2)
-		assert.Equal(t, 5, observed["H1"])
-		assert.Equal(t, 95, observed["H2"])
+		assert.Equal(t, 5, observed[comptesting.SpecHostH1])
+		assert.Equal(t, 95, observed[comptesting.SpecHostH2])
 	})
 
 	t.Run("unsupported actor type", func(t *testing.T) {
@@ -585,10 +585,10 @@ func TestActiveHostsList_HostForActorType(t *testing.T) {
 	})
 
 	t.Run("zero capacity host", func(t *testing.T) {
-		h1 := &activeHost{HostID: "H1", ActorType: "typeA", Capacity: 0}
+		h1 := &activeHost{HostID: comptesting.SpecHostH1, ActorType: "typeA", Capacity: 0}
 		ahl := &activeHostsList{
 			hosts: map[string]*activeHost{
-				"H1": h1,
+				comptesting.SpecHostH1: h1,
 			},
 			capacities: map[string][]*activeHost{
 				"typeA": {h1},

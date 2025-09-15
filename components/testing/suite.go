@@ -635,7 +635,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		require.NoError(t, err)
 
 		// Should return the existing host H1
-		assert.Equal(t, "H1", res.HostID)
+		assert.Equal(t, SpecHostH1, res.HostID)
 		assert.Equal(t, "127.0.0.1:4001", res.Address)
 		assert.Equal(t, 5*time.Minute, res.IdleTimeout)
 	})
@@ -654,7 +654,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 			require.NoError(t, err)
 
 			// Should place it on one of the healthy hosts that support B (H1, H2, or H3)
-			assert.Contains(t, []string{"H1", "H2", "H3"}, res.HostID)
+			assert.Contains(t, []string{SpecHostH1, SpecHostH2, SpecHostH3}, res.HostID)
 			assert.Contains(t, []string{"127.0.0.1:4001", "127.0.0.1:4002", "127.0.0.1:4003"}, res.Address)
 			assert.Equal(t, 5*time.Minute, res.IdleTimeout)
 
@@ -693,12 +693,12 @@ func (s Suite) TestLookupActor(t *testing.T) {
 
 		// Look up actor B-1 which is active on H1, but restrict to only H1
 		ref := ref.ActorRef{ActorType: "B", ActorID: "B-1"}
-		opts := components.LookupActorOpts{Hosts: []string{"H1"}}
+		opts := components.LookupActorOpts{Hosts: []string{SpecHostH1}}
 		res, err := s.p.LookupActor(ctx, ref, opts)
 		require.NoError(t, err)
 
 		// Should return the existing actor on H1
-		assert.Equal(t, "H1", res.HostID)
+		assert.Equal(t, SpecHostH1, res.HostID)
 		assert.Equal(t, "127.0.0.1:4001", res.Address)
 	})
 
@@ -711,7 +711,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		// Look up actor B-1 which is active on H1, but restrict to only H2
 		// This should return ErrNoHost because the actor is on a disallowed host
 		ref := ref.ActorRef{ActorType: "B", ActorID: "B-1"}
-		opts := components.LookupActorOpts{Hosts: []string{"H2"}}
+		opts := components.LookupActorOpts{Hosts: []string{SpecHostH2}}
 		_, err := s.p.LookupActor(ctx, ref, opts)
 		require.Error(t, err)
 		require.ErrorIs(t, err, components.ErrNoHost)
@@ -727,12 +727,12 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		// Type C has unlimited capacity so this should work
 		for i := range 3 {
 			ref := ref.ActorRef{ActorType: "C", ActorID: fmt.Sprintf("C-restricted-%d", i)}
-			opts := components.LookupActorOpts{Hosts: []string{"H2"}}
+			opts := components.LookupActorOpts{Hosts: []string{SpecHostH2}}
 			res, err := s.p.LookupActor(ctx, ref, opts)
 			require.NoError(t, err)
 
 			// Should always place it on H2 only
-			assert.Equal(t, "H2", res.HostID)
+			assert.Equal(t, SpecHostH2, res.HostID)
 			assert.Equal(t, "127.0.0.1:4002", res.Address)
 			assert.Equal(t, 5*time.Minute, res.IdleTimeout)
 		}
@@ -766,7 +766,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 			require.NoError(t, err)
 
 			// Should place it on one of the healthy hosts that support C (H1 or H2)
-			assert.Contains(t, []string{"H1", "H2"}, res.HostID)
+			assert.Contains(t, []string{SpecHostH1, SpecHostH2}, res.HostID)
 			assert.Contains(t, []string{"127.0.0.1:4001", "127.0.0.1:4002"}, res.Address)
 			assert.Equal(t, 5*time.Minute, res.IdleTimeout)
 
@@ -778,8 +778,8 @@ func (s Suite) TestLookupActor(t *testing.T) {
 
 		// Validate approximately even distribution (at least 12 on each host out of 40 total)
 		// This allows for some randomness while ensuring reasonable distribution
-		h1Count := hostCounts["H1"]
-		h2Count := hostCounts["H2"]
+		h1Count := hostCounts[SpecHostH1]
+		h2Count := hostCounts[SpecHostH2]
 
 		assert.GreaterOrEqual(t, h1Count, 12, "H1 should have at least 12 actors for reasonable distribution, got %d", h1Count)
 		assert.GreaterOrEqual(t, h2Count, 12, "H2 should have at least 12 actors for reasonable distribution, got %d", h2Count)
@@ -803,10 +803,10 @@ func (s Suite) TestLookupActor(t *testing.T) {
 			require.NoError(t, err)
 
 			// Should ONLY be placed on healthy hosts H1, H2 (where C is supported)
-			assert.Contains(t, []string{"H1", "H2"}, res.HostID)
-			assert.NotEqual(t, "H5", res.HostID) // H5 is unhealthy
-			assert.NotEqual(t, "H6", res.HostID) // H6 is unhealthy
-			assert.NotEqual(t, "H3", res.HostID) // H3 doesn't support C
+			assert.Contains(t, []string{SpecHostH1, SpecHostH2}, res.HostID)
+			assert.NotEqual(t, SpecHostH5, res.HostID) // H5 is unhealthy
+			assert.NotEqual(t, SpecHostH6, res.HostID) // H6 is unhealthy
+			assert.NotEqual(t, SpecHostH3, res.HostID) // H3 doesn't support C
 
 			seenHosts[res.HostID] = true
 		}
@@ -867,9 +867,9 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		for _, activeActor := range spec.ActiveActors {
 			if activeActor.ActorType == "A" {
 				switch activeActor.HostID {
-				case "H1":
+				case SpecHostH1:
 					h1ActiveCount++
-				case "H2":
+				case SpecHostH2:
 					h2ActiveCount++
 				}
 			}
@@ -891,7 +891,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 			createdActors++
 
 			// Verify the actor was created on a valid host
-			assert.Contains(t, []string{"H1", "H2", "H3"}, res.HostID)
+			assert.Contains(t, []string{SpecHostH1, SpecHostH2, SpecHostH3}, res.HostID)
 		}
 
 		// Verify we could create at least some B actors (B has unlimited capacity on some hosts)
@@ -911,9 +911,9 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		for _, activeActor := range finalSpec.ActiveActors {
 			if activeActor.ActorType == "A" {
 				switch activeActor.HostID {
-				case "H1":
+				case SpecHostH1:
 					finalH1ACount++
-				case "H2":
+				case SpecHostH2:
 					finalH2ACount++
 				}
 			}
@@ -947,7 +947,7 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 			}
 		}
 		require.NotNil(t, foundActor, "B-1 should exist in initial test data")
-		assert.Equal(t, "H1", foundActor.HostID)
+		assert.Equal(t, SpecHostH1, foundActor.HostID)
 
 		// Remove the actor
 		ref := ref.ActorRef{ActorType: "B", ActorID: "B-1"}
@@ -1013,7 +1013,7 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 		res, err := s.p.LookupActor(ctx, ref.ActorRef{ActorType: "A", ActorID: "A-new-after-removal"}, components.LookupActorOpts{})
 		require.NoError(t, err)
 		assert.NotEmpty(t, res.HostID)
-		assert.Contains(t, []string{"H1", "H2"}, res.HostID, "should be placed on one of the hosts that support A")
+		assert.Contains(t, []string{SpecHostH1, SpecHostH2}, res.HostID, "should be placed on one of the hosts that support A")
 
 		// Verify the capacity was freed up correctly by checking final state
 		spec, err := s.p.GetAllHosts(ctx)
@@ -1024,9 +1024,9 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 		for _, aa := range spec.ActiveActors {
 			if aa.ActorType == "A" {
 				switch aa.HostID {
-				case "H1":
+				case SpecHostH1:
 					h1Count++
-				case "H2":
+				case SpecHostH2:
 					h2Count++
 				}
 			}
@@ -1121,10 +1121,10 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 
 		// First create the actor by looking it up (this activates it)
 		lookupRes, err := s.p.LookupActor(ctx, aRef, components.LookupActorOpts{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		})
 		require.NoError(t, err)
-		assert.Contains(t, []string{"H7", "H8"}, lookupRes.HostID)
+		assert.Contains(t, []string{SpecHostH7, SpecHostH8}, lookupRes.HostID)
 
 		// Set an alarm for this actor
 		alarmRef := ref.AlarmRef{
@@ -1326,7 +1326,7 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 
 		// Retrieve the alarms
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7"},
+			Hosts: []string{SpecHostH7},
 		})
 		require.NoError(t, err)
 
@@ -1394,7 +1394,7 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 
 		for _, id := range expectActorIDs {
 			_ = assert.NotEmptyf(t, gotActiveActorIDs[id], "expected actor %q to be active on host H7, but it was not active", id) &&
-				assert.Equalf(t, "H7", gotActiveActorIDs[id], "expected actor %q to be active on host H7, but it was active on host %q", id, gotActiveActorIDs[id])
+				assert.Equalf(t, SpecHostH7, gotActiveActorIDs[id], "expected actor %q to be active on host H7, but it was active on host %q", id, gotActiveActorIDs[id])
 		}
 	})
 
@@ -1406,7 +1406,7 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 
 		// Retrieve the alarms
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H1", "H2"},
+			Hosts: []string{SpecHostH1, SpecHostH2},
 		})
 		require.NoError(t, err)
 
@@ -1478,11 +1478,11 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 			switch id {
 			// These actors were already active in the seed data
 			case "A-1", "A-2", "B-1":
-				assert.Equalf(t, "H1", gotActiveActorIDs[id], "expected actor %q to be active on host H1, but it was active on host %q", id, gotActiveActorIDs[id])
+				assert.Equalf(t, SpecHostH1, gotActiveActorIDs[id], "expected actor %q to be active on host H1, but it was active on host %q", id, gotActiveActorIDs[id])
 			case "A-4", "B-2":
-				assert.Equalf(t, "H2", gotActiveActorIDs[id], "expected actor %q to be active on host H2, but it was active on host %q", id, gotActiveActorIDs[id])
+				assert.Equalf(t, SpecHostH2, gotActiveActorIDs[id], "expected actor %q to be active on host H2, but it was active on host %q", id, gotActiveActorIDs[id])
 			default:
-				assert.Contains(t, []string{"H1", "H2"}, gotActiveActorIDs[id], "expected actor %q to be active on host H1 or H2, but it was active on host %q", id, gotActiveActorIDs[id])
+				assert.Contains(t, []string{SpecHostH1, SpecHostH2}, gotActiveActorIDs[id], "expected actor %q to be active on host H1 or H2, but it was active on host %q", id, gotActiveActorIDs[id])
 				hostCounts[gotActiveActorIDs[id]]++
 			}
 		}
@@ -1490,8 +1490,8 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		// There should be some level of distribution for actors that were just activated
 		// It doesn't have to be 50/50 since there's randomness involved
 		assert.Len(t, hostCounts, 2)
-		assert.GreaterOrEqual(t, hostCounts["H1"], 4)
-		assert.GreaterOrEqual(t, hostCounts["H2"], 4)
+		assert.GreaterOrEqual(t, hostCounts[SpecHostH1], 4)
+		assert.GreaterOrEqual(t, hostCounts[SpecHostH2], 4)
 	})
 
 	t.Run("returns empty slice when no hosts provided", func(t *testing.T) {
@@ -1517,7 +1517,7 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		// Fetch alarms only from unhealthy hosts
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
 			// Both unhealthy in seed data
-			Hosts: []string{"H5", "H6"},
+			Hosts: []string{SpecHostH5, SpecHostH6},
 		})
 		require.NoError(t, err)
 		assert.Empty(t, res)
@@ -1543,17 +1543,17 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		// Seed with hosts but no alarms
 		customSpec := Spec{
 			Hosts: []HostSpec{
-				{HostID: "H1", Address: "127.0.0.1:4001", LastHealthAgo: 2 * time.Second},
+				{HostID: SpecHostH1, Address: "127.0.0.1:4001", LastHealthAgo: 2 * time.Second},
 			},
 			HostActorTypes: []HostActorTypeSpec{
-				{HostID: "H1", ActorType: "TestType", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+				{HostID: SpecHostH1, ActorType: "TestType", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
 			},
 			Alarms: []AlarmSpec{},
 		}
 		require.NoError(t, s.p.Seed(ctx, customSpec))
 
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H1"},
+			Hosts: []string{SpecHostH1},
 		})
 		require.NoError(t, err)
 		assert.Empty(t, res, "should return empty slice when no upcoming alarms")
@@ -1567,14 +1567,14 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 
 		// First fetch should get some alarms and lease them
 		res1, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7"},
+			Hosts: []string{SpecHostH7},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res1)
 
 		// Second fetch immediately should not return the same alarms (they're already leased)
 		res2, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7"},
+			Hosts: []string{SpecHostH7},
 		})
 		require.NoError(t, err)
 
@@ -1598,7 +1598,7 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		// Fetch alarms from H1 and H2 where C type is supported
 		// This should include ALM-C-006 which has an expired lease
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H1", "H2"},
+			Hosts: []string{SpecHostH1, SpecHostH2},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res)
@@ -1622,10 +1622,10 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		// Create a custom test spec with overdue alarms
 		customSpec := Spec{
 			Hosts: []HostSpec{
-				{HostID: "H1", Address: "127.0.0.1:4001", LastHealthAgo: 2 * time.Second}, // healthy
+				{HostID: SpecHostH1, Address: "127.0.0.1:4001", LastHealthAgo: 2 * time.Second}, // healthy
 			},
 			HostActorTypes: []HostActorTypeSpec{
-				{HostID: "H1", ActorType: "TestOverdue", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+				{HostID: SpecHostH1, ActorType: "TestOverdue", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
 			},
 			Alarms: []AlarmSpec{
 				{
@@ -1652,7 +1652,7 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 
 		// Fetch alarms - should include overdue ones
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H1"},
+			Hosts: []string{SpecHostH1},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res, "should fetch overdue alarms")
@@ -1697,7 +1697,7 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 
 		// Request from mix of healthy and unhealthy hosts
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H5", "H8", "H6"}, // H7,H8 healthy, H5,H6 unhealthy
+			Hosts: []string{SpecHostH7, SpecHostH5, SpecHostH8, SpecHostH6}, // H7,H8 healthy, H5,H6 unhealthy
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res, "should return alarms from healthy hosts")
@@ -1721,7 +1721,7 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		for _, lease := range res {
 			alarmRes, _ := s.p.GetLeasedAlarm(ctx, lease)
 			if hostID, exists := gotActiveActorIDs[alarmRes.ActorID]; exists {
-				assert.Contains(t, []string{"H7", "H8"}, hostID, "actor %s should only be placed on healthy hosts", alarmRes.ActorID)
+				assert.Contains(t, []string{SpecHostH7, SpecHostH8}, hostID, "actor %s should only be placed on healthy hosts", alarmRes.ActorID)
 			}
 		}
 	})
@@ -1736,7 +1736,7 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 
 		// Fetch some alarms to create valid leases
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
@@ -1791,7 +1791,7 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 
 		// Fetch some alarms to create valid leases
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
@@ -1815,7 +1815,7 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 
 		// Fetch some alarms to create valid leases
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
@@ -1839,7 +1839,7 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 
 		// Fetch some alarms to create valid leases
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H1", "H2"},
+			Hosts: []string{SpecHostH1, SpecHostH2},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
@@ -1882,10 +1882,10 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 		// Create a custom test spec with an alarm that has interval and TTL
 		customSpec := Spec{
 			Hosts: []HostSpec{
-				{HostID: "H1", Address: "127.0.0.1:4001", LastHealthAgo: 2 * time.Second},
+				{HostID: SpecHostH1, Address: "127.0.0.1:4001", LastHealthAgo: 2 * time.Second},
 			},
 			HostActorTypes: []HostActorTypeSpec{
-				{HostID: "H1", ActorType: "TestType", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+				{HostID: SpecHostH1, ActorType: "TestType", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
 			},
 			Alarms: []AlarmSpec{
 				{
@@ -1906,7 +1906,7 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 
 		// Fetch the alarm to create a lease
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H1"},
+			Hosts: []string{SpecHostH1},
 		})
 		require.NoError(t, err)
 		require.Len(t, res, 1, "should have fetched exactly one alarm")
@@ -1936,10 +1936,10 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 		// Create a custom test spec with an alarm that has no data
 		customSpec := Spec{
 			Hosts: []HostSpec{
-				{HostID: "H1", Address: "127.0.0.1:4001", LastHealthAgo: 2 * time.Second},
+				{HostID: SpecHostH1, Address: "127.0.0.1:4001", LastHealthAgo: 2 * time.Second},
 			},
 			HostActorTypes: []HostActorTypeSpec{
-				{HostID: "H1", ActorType: "TestType", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+				{HostID: SpecHostH1, ActorType: "TestType", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
 			},
 			Alarms: []AlarmSpec{
 				{
@@ -1958,7 +1958,7 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 
 		// Fetch the alarm to create a lease
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H1"},
+			Hosts: []string{SpecHostH1},
 		})
 		require.NoError(t, err)
 		require.Len(t, res, 1, "should have fetched exactly one alarm")
@@ -1985,7 +1985,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 
 		// Fetch some alarms to create valid leases
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
@@ -1995,7 +1995,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 
 		// Renew leases for H7 only
 		renewReq := components.RenewAlarmLeasesReq{
-			Hosts: []string{"H7"},
+			Hosts: []string{SpecHostH7},
 		}
 		renewRes, err := s.p.RenewAlarmLeases(ctx, renewReq)
 		require.NoError(t, err)
@@ -2026,7 +2026,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 
 		// Fetch some alarms to create valid leases
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		})
 		require.NoError(t, err)
 		require.GreaterOrEqual(t, len(res), 3, "need at least 3 leases for this test")
@@ -2040,7 +2040,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 
 		// Renew only specific leases
 		renewReq := components.RenewAlarmLeasesReq{
-			Hosts:  []string{"H7", "H8"},
+			Hosts:  []string{SpecHostH7, SpecHostH8},
 			Leases: leasesToRenew,
 		}
 		renewRes, err := s.p.RenewAlarmLeases(ctx, renewReq)
@@ -2079,7 +2079,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 		// Try to renew leases for hosts with no active leases
 		renewReq := components.RenewAlarmLeasesReq{
 			// These hosts don't have any leases in the initial seed
-			Hosts: []string{"H1", "H2"},
+			Hosts: []string{SpecHostH1, SpecHostH2},
 		}
 		renewRes, err := s.p.RenewAlarmLeases(ctx, renewReq)
 		require.NoError(t, err)
@@ -2109,7 +2109,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 
 		// Fetch some alarms to create valid leases
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
@@ -2119,7 +2119,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 
 		// Try to renew expired leases
 		renewReq := components.RenewAlarmLeasesReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		}
 		renewRes, err := s.p.RenewAlarmLeases(ctx, renewReq)
 		require.NoError(t, err)
@@ -2134,7 +2134,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 
 		// Fetch some alarms to create valid leases
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		})
 		require.NoError(t, err)
 		require.GreaterOrEqual(t, len(res), 2, "need at least 2 leases for this test")
@@ -2148,7 +2148,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 
 		// Try to renew mix of valid and invalid leases
 		renewReq := components.RenewAlarmLeasesReq{
-			Hosts:  []string{"H7", "H8"},
+			Hosts:  []string{SpecHostH7, SpecHostH8},
 			Leases: []*ref.AlarmLease{validLease, invalidLease},
 		}
 		renewRes, err := s.p.RenewAlarmLeases(ctx, renewReq)
@@ -2167,14 +2167,14 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 
 		// Fetch alarms from H7
 		res1, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7"},
+			Hosts: []string{SpecHostH7},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res1)
 
 		// Fetch alarms from H8
 		res2, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H8"},
+			Hosts: []string{SpecHostH8},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res2)
@@ -2186,7 +2186,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 
 		// Renew all leases for both hosts
 		renewReq := components.RenewAlarmLeasesReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		}
 		renewRes, err := s.p.RenewAlarmLeases(ctx, renewReq)
 		require.NoError(t, err)
@@ -2209,7 +2209,7 @@ func (s Suite) TestReleaseAlarmLease(t *testing.T) {
 
 		// Fetch some alarms to create valid leases
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
@@ -2249,10 +2249,10 @@ func (s Suite) TestReleaseAlarmLease(t *testing.T) {
 		// Create a custom test spec with an unleased alarm
 		customSpec := Spec{
 			Hosts: []HostSpec{
-				{HostID: "H1", Address: "127.0.0.1:4001", LastHealthAgo: 2 * time.Second},
+				{HostID: SpecHostH1, Address: "127.0.0.1:4001", LastHealthAgo: 2 * time.Second},
 			},
 			HostActorTypes: []HostActorTypeSpec{
-				{HostID: "H1", ActorType: "TestType", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+				{HostID: SpecHostH1, ActorType: "TestType", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
 			},
 			Alarms: []AlarmSpec{
 				{
@@ -2283,7 +2283,7 @@ func (s Suite) TestReleaseAlarmLease(t *testing.T) {
 
 		// Fetch some alarms to create valid leases
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
@@ -2311,7 +2311,7 @@ func (s Suite) TestReleaseAlarmLease(t *testing.T) {
 
 		// Fetch some alarms to create valid leases
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
@@ -2335,7 +2335,7 @@ func (s Suite) TestReleaseAlarmLease(t *testing.T) {
 
 		// Fetch some alarms to create valid leases
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
@@ -2360,7 +2360,7 @@ func (s Suite) TestReleaseAlarmLease(t *testing.T) {
 
 		// Fetch multiple alarms to create valid leases
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		})
 		require.NoError(t, err)
 		require.GreaterOrEqual(t, len(res), 3, "should have fetched at least 3 alarms for this test")
@@ -2399,7 +2399,7 @@ func (s Suite) TestUpdateLeasedAlarm(t *testing.T) {
 
 		// Fetch some alarms to create valid leases
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
@@ -2450,7 +2450,7 @@ func (s Suite) TestUpdateLeasedAlarm(t *testing.T) {
 
 		// Fetch some alarms to create valid leases
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
@@ -2499,7 +2499,7 @@ func (s Suite) TestUpdateLeasedAlarm(t *testing.T) {
 
 		// Fetch some alarms to create valid leases
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
@@ -2529,7 +2529,7 @@ func (s Suite) TestUpdateLeasedAlarm(t *testing.T) {
 
 		// Fetch some alarms to create valid leases
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
@@ -2560,7 +2560,7 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 
 		// Fetch some alarms to create valid leases
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
@@ -2609,10 +2609,10 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 		// Create a custom test spec with an unleased alarm
 		customSpec := Spec{
 			Hosts: []HostSpec{
-				{HostID: "H1", Address: "127.0.0.1:4001", LastHealthAgo: 2 * time.Second},
+				{HostID: SpecHostH1, Address: "127.0.0.1:4001", LastHealthAgo: 2 * time.Second},
 			},
 			HostActorTypes: []HostActorTypeSpec{
-				{HostID: "H1", ActorType: "TestType", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+				{HostID: SpecHostH1, ActorType: "TestType", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
 			},
 			Alarms: []AlarmSpec{
 				{
@@ -2648,7 +2648,7 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 
 		// Fetch some alarms to create valid leases
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
@@ -2676,7 +2676,7 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 
 		// Fetch some alarms to create valid leases
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
@@ -2700,7 +2700,7 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 
 		// Fetch some alarms to create valid leases
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		})
 		require.NoError(t, err)
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
@@ -2725,7 +2725,7 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 
 		// Fetch multiple alarms to create valid leases
 		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
-			Hosts: []string{"H7", "H8"},
+			Hosts: []string{SpecHostH7, SpecHostH8},
 		})
 		require.NoError(t, err)
 		require.GreaterOrEqual(t, len(res), 3, "should have fetched at least 3 alarms for this test")

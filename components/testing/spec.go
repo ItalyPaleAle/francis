@@ -10,6 +10,19 @@ import (
 	"github.com/italypaleale/actors/internal/ptr"
 )
 
+// Test host UUIDs - human readable patterns for easier debugging
+const (
+	SpecHostH1 = "11111111-1111-4111-8111-111111111111" // H1
+	SpecHostH2 = "22222222-2222-4222-8222-222222222222" // H2
+	SpecHostH3 = "33333333-3333-4333-8333-333333333333" // H3
+	SpecHostH4 = "44444444-4444-4444-8444-444444444444" // H4
+	SpecHostH5 = "55555555-5555-4555-8555-555555555555" // H5
+	SpecHostH6 = "66666666-6666-4666-8666-666666666666" // H6
+	SpecHostH7 = "77777777-7777-4777-8777-777777777777" // H7
+	SpecHostH8 = "88888888-8888-4888-8888-888888888888" // H8
+	SpecHostH9 = "99999999-9999-4999-8999-999999999999" // H9
+)
+
 // Spec contains all the test data
 type Spec struct {
 	// Hosts to create
@@ -249,15 +262,15 @@ func GetProviderConfig() components.ProviderConfig {
 func GetSpec() Spec {
 	spec := Spec{
 		Hosts: []HostSpec{
-			{HostID: "H1", Address: "127.0.0.1:4001", LastHealthAgo: 2 * time.Second},  // healthy
-			{HostID: "H2", Address: "127.0.0.1:4002", LastHealthAgo: 5 * time.Second},  // healthy
-			{HostID: "H3", Address: "127.0.0.1:4003", LastHealthAgo: 8 * time.Second},  // healthy
-			{HostID: "H4", Address: "127.0.0.1:4004", LastHealthAgo: 10 * time.Second}, // healthy
-			{HostID: "H5", Address: "127.0.0.1:4005", LastHealthAgo: 24 * time.Hour},   // unhealthy
-			{HostID: "H6", Address: "127.0.0.1:4006", LastHealthAgo: 24 * time.Hour},   // unhealthy
-			{HostID: "H7", Address: "127.0.0.1:4007", LastHealthAgo: 2 * time.Second},  // healthy
-			{HostID: "H8", Address: "127.0.0.1:4008", LastHealthAgo: 2 * time.Second},  // healthy
-			{HostID: "H9", Address: "127.0.0.1:4009", LastHealthAgo: 24 * time.Hour},   // unhealthy
+			{HostID: SpecHostH1, Address: "127.0.0.1:4001", LastHealthAgo: 2 * time.Second},  // healthy (H1)
+			{HostID: SpecHostH2, Address: "127.0.0.1:4002", LastHealthAgo: 5 * time.Second},  // healthy (H2)
+			{HostID: SpecHostH3, Address: "127.0.0.1:4003", LastHealthAgo: 8 * time.Second},  // healthy (H3)
+			{HostID: SpecHostH4, Address: "127.0.0.1:4004", LastHealthAgo: 10 * time.Second}, // healthy (H4)
+			{HostID: SpecHostH5, Address: "127.0.0.1:4005", LastHealthAgo: 24 * time.Hour},   // unhealthy (H5)
+			{HostID: SpecHostH6, Address: "127.0.0.1:4006", LastHealthAgo: 24 * time.Hour},   // unhealthy (H6)
+			{HostID: SpecHostH7, Address: "127.0.0.1:4007", LastHealthAgo: 2 * time.Second},  // healthy (H7)
+			{HostID: SpecHostH8, Address: "127.0.0.1:4008", LastHealthAgo: 2 * time.Second},  // healthy (H8)
+			{HostID: SpecHostH9, Address: "127.0.0.1:4009", LastHealthAgo: 24 * time.Hour},   // unhealthy (H9)
 		},
 
 		// HostActorTypes:
@@ -269,58 +282,58 @@ func GetSpec() Spec {
 		// - H7 and H8 have unlimited room for X and Y
 		HostActorTypes: []HostActorTypeSpec{
 			// A on allowed healthy hosts
-			{HostID: "H1", ActorType: "A", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 3},
-			{HostID: "H2", ActorType: "A", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 2},
+			{HostID: SpecHostH1, ActorType: "A", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 3},
+			{HostID: SpecHostH2, ActorType: "A", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 2},
 
 			// B on allowed healthy hosts
-			{HostID: "H1", ActorType: "B", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 5},
-			{HostID: "H2", ActorType: "B", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 5},
-			{HostID: "H3", ActorType: "B", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 2},
+			{HostID: SpecHostH1, ActorType: "B", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 5},
+			{HostID: SpecHostH2, ActorType: "B", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 5},
+			{HostID: SpecHostH3, ActorType: "B", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 2},
 
 			// C unlimited on allowed healthy hosts
-			{HostID: "H1", ActorType: "C", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
-			{HostID: "H2", ActorType: "C", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+			{HostID: SpecHostH1, ActorType: "C", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+			{HostID: SpecHostH2, ActorType: "C", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
 
 			// D only on unhealthy H6
-			{HostID: "H6", ActorType: "D", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 3},
+			{HostID: SpecHostH6, ActorType: "D", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 3},
 
 			// H5 is unhealthy but still advertises support for B and C. This capacity should never be used.
-			{HostID: "H5", ActorType: "B", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 4},
-			{HostID: "H5", ActorType: "C", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+			{HostID: SpecHostH5, ActorType: "B", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 4},
+			{HostID: SpecHostH5, ActorType: "C", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
 
 			// X and Y on H7, H8, H9 (unhealthy) without limits
-			{HostID: "H7", ActorType: "X", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
-			{HostID: "H7", ActorType: "Y", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
-			{HostID: "H8", ActorType: "X", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
-			{HostID: "H8", ActorType: "Y", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
-			{HostID: "H9", ActorType: "X", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
-			{HostID: "H9", ActorType: "Y", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+			{HostID: SpecHostH7, ActorType: "X", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+			{HostID: SpecHostH7, ActorType: "Y", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+			{HostID: SpecHostH8, ActorType: "X", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+			{HostID: SpecHostH8, ActorType: "Y", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+			{HostID: SpecHostH9, ActorType: "X", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+			{HostID: SpecHostH9, ActorType: "Y", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
 		},
 
 		ActiveActors: []ActiveActorSpec{
 			// Fill type A to capacity on H1 and H2 so A alarms are blocked on allowed hosts
-			{ActorType: "A", ActorID: "A-1", HostID: "H1", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 2 * time.Minute},
-			{ActorType: "A", ActorID: "A-2", HostID: "H1", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 2 * time.Minute},
-			{ActorType: "A", ActorID: "A-3", HostID: "H1", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 2 * time.Minute},
-			{ActorType: "A", ActorID: "A-4", HostID: "H2", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 2 * time.Minute},
-			{ActorType: "A", ActorID: "A-5", HostID: "H2", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 2 * time.Minute},
+			{ActorType: "A", ActorID: "A-1", HostID: SpecHostH1, ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 2 * time.Minute},
+			{ActorType: "A", ActorID: "A-2", HostID: SpecHostH1, ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 2 * time.Minute},
+			{ActorType: "A", ActorID: "A-3", HostID: SpecHostH1, ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 2 * time.Minute},
+			{ActorType: "A", ActorID: "A-4", HostID: SpecHostH2, ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 2 * time.Minute},
+			{ActorType: "A", ActorID: "A-5", HostID: SpecHostH2, ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 2 * time.Minute},
 
 			// Some B actors but leave room for more
-			{ActorType: "B", ActorID: "B-1", HostID: "H1", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
-			{ActorType: "B", ActorID: "B-2", HostID: "H2", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
-			{ActorType: "B", ActorID: "B-3", HostID: "H3", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
+			{ActorType: "B", ActorID: "B-1", HostID: SpecHostH1, ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
+			{ActorType: "B", ActorID: "B-2", HostID: SpecHostH2, ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
+			{ActorType: "B", ActorID: "B-3", HostID: SpecHostH3, ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
 
 			// Actors on unhealthy H6. They should be treated as inactive by the scheduler.
-			{ActorType: "D", ActorID: "D-1", HostID: "H6", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 3 * time.Minute},
-			{ActorType: "D", ActorID: "D-2", HostID: "H6", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 3 * time.Minute},
+			{ActorType: "D", ActorID: "D-1", HostID: SpecHostH6, ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 3 * time.Minute},
+			{ActorType: "D", ActorID: "D-2", HostID: SpecHostH6, ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 3 * time.Minute},
 
 			// Some X and Y actors on H7 and H8
-			{ActorType: "X", ActorID: "X-1", HostID: "H7", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
-			{ActorType: "X", ActorID: "X-2", HostID: "H8", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
-			{ActorType: "Y", ActorID: "Y-1", HostID: "H8", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
+			{ActorType: "X", ActorID: "X-1", HostID: SpecHostH7, ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
+			{ActorType: "X", ActorID: "X-2", HostID: SpecHostH8, ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
+			{ActorType: "Y", ActorID: "Y-1", HostID: SpecHostH8, ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
 
 			// Y-2 is active on the unhealthy H9
-			{ActorType: "Y", ActorID: "Y-2", HostID: "H9", ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
+			{ActorType: "Y", ActorID: "Y-2", HostID: SpecHostH9, ActorIdleTimeout: 5 * time.Minute, ActivationAgo: 1 * time.Minute},
 		},
 	}
 
@@ -378,7 +391,7 @@ func GetSpec() Spec {
 	spec.addAlarm(AlarmSpec{
 		AlarmID:   "ALM-B-1",
 		ActorType: "B",
-		ActorID:   "B-1", // Active on H1
+		ActorID:   "B-1", // Active on H1 (SpecHostH1)
 		Name:      "Alarm-B-1",
 		DueIn:     100 * time.Millisecond,
 		Data:      []byte("active-B-1"),
@@ -386,7 +399,7 @@ func GetSpec() Spec {
 	spec.addAlarm(AlarmSpec{
 		AlarmID:   "ALM-B-2",
 		ActorType: "B",
-		ActorID:   "B-2", // Active on H2
+		ActorID:   "B-2", // Active on H2 (SpecHostH2)
 		Name:      "Alarm-B-2",
 		DueIn:     100 * time.Millisecond,
 		Data:      []byte("active-B-2"),
@@ -394,7 +407,7 @@ func GetSpec() Spec {
 	spec.addAlarm(AlarmSpec{
 		AlarmID:   "ALM-B-3",
 		ActorType: "B",
-		ActorID:   "B-3", // Active on H3
+		ActorID:   "B-3", // Active on H3 (SpecHostH3)
 		Name:      "Alarm-B-3",
 		DueIn:     100 * time.Millisecond,
 		Data:      []byte("active-B-3"),
@@ -442,7 +455,7 @@ func GetSpec() Spec {
 		Data:      []byte("rehydrate-D2"),
 	})
 
-	// X and Y alarms: unlimited type on H7 and H7
+	// X and Y alarms: unlimited type on H7 and H8
 	// Note that X-1, X-2, an Y-1 are active actors
 	for _, k := range []string{"X", "Y"} {
 		for i := 1; i <= 50; i++ {
