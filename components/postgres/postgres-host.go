@@ -152,7 +152,7 @@ func (p *PostgresProvider) updateActorHostLastHealthCheck(ctx context.Context, h
 			host_last_health_check = now()
 		WHERE
 			host_id = $1
-			AND host_last_health_check >= (now() - $2)`,
+			AND host_last_health_check >= (now() - $2::interval)`,
 			hostID,
 			p.cfg.HostHealthCheckDeadline,
 		)
@@ -384,16 +384,17 @@ type actorHostTypeColl struct {
 	hostID     string
 	actorTypes []components.ActorHostType
 
+	// Do not set
 	idx int
 }
 
 func (ahtc *actorHostTypeColl) Next() bool {
 	ahtc.idx++
-	return ahtc.idx < len(ahtc.actorTypes)
+	return ahtc.idx <= len(ahtc.actorTypes)
 }
 
 func (ahtc *actorHostTypeColl) Values() ([]any, error) {
-	row := ahtc.actorTypes[ahtc.idx]
+	row := ahtc.actorTypes[ahtc.idx-1]
 	res := []any{
 		ahtc.hostID,
 		row.ActorType,

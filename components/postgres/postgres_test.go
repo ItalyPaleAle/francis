@@ -326,107 +326,77 @@ func (p *PostgresProvider) GetAllActorState(ctx context.Context) (comptesting.Ac
 }
 
 func (p *PostgresProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, error) {
-	return comptesting.Spec{}, nil
-
-	/* return transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (res comptesting.Spec, err error) {
+	return transactions.ExecuteInPgxTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (res comptesting.Spec, err error) {
 		// Load all hosts
-		rows, err := tx.QueryContext(ctx, "SELECT host_id, host_address, host_last_health_check FROM hosts")
+		rows, err := tx.Query(ctx, "SELECT host_id, host_address, now() - host_last_health_check FROM hosts")
 		if err != nil {
 			return res, fmt.Errorf("select hosts: %w", err)
 		}
 
 		res.Hosts = make([]comptesting.HostSpec, 0)
 		for rows.Next() {
-			var (
-				r               comptesting.HostSpec
-				lastHealthCheck int64
-			)
-			err = rows.Scan(&r.HostID, &r.Address, &lastHealthCheck)
+			var r comptesting.HostSpec
+			err = rows.Scan(&r.HostID, &r.Address, &r.LastHealthAgo)
 			if err != nil {
 				return res, fmt.Errorf("reading host row: %w", err)
 			}
-			r.LastHealthAgo = s.clock.Since(time.UnixMilli(lastHealthCheck))
 			res.Hosts = append(res.Hosts, r)
 		}
 		rows.Close()
 
 		// Load all actor types
-		rows, err = tx.QueryContext(ctx, "SELECT host_id, actor_type, actor_idle_timeout, actor_concurrency_limit FROM host_actor_types")
+		rows, err = tx.Query(ctx, "SELECT host_id, actor_type, actor_idle_timeout, actor_concurrency_limit FROM host_actor_types")
 		if err != nil {
 			return res, fmt.Errorf("select host_actor_types: %w", err)
 		}
 
 		res.HostActorTypes = make([]comptesting.HostActorTypeSpec, 0)
 		for rows.Next() {
-			var (
-				r           comptesting.HostActorTypeSpec
-				idleTimeout int64
-			)
-			err = rows.Scan(&r.HostID, &r.ActorType, &idleTimeout, &r.ActorConcurrencyLimit)
+			var r comptesting.HostActorTypeSpec
+			err = rows.Scan(&r.HostID, &r.ActorType, &r.ActorIdleTimeout, &r.ActorConcurrencyLimit)
 			if err != nil {
 				return res, fmt.Errorf("reading host_actor_types row: %w", err)
 			}
-			r.ActorIdleTimeout = time.Duration(idleTimeout) * time.Millisecond
 			res.HostActorTypes = append(res.HostActorTypes, r)
 		}
 		rows.Close()
 
 		// Load all active actors
-		rows, err = tx.QueryContext(ctx, "SELECT actor_type, actor_id, host_id, actor_idle_timeout, actor_activation FROM active_actors")
+		rows, err = tx.Query(ctx, "SELECT actor_type, actor_id, host_id, actor_idle_timeout, now() - actor_activation FROM active_actors")
 		if err != nil {
 			return res, fmt.Errorf("select active_actors: %w", err)
 		}
 
 		res.ActiveActors = make([]comptesting.ActiveActorSpec, 0)
 		for rows.Next() {
-			var (
-				r                       comptesting.ActiveActorSpec
-				idleTimeout, activation int64
-			)
-			err = rows.Scan(&r.ActorType, &r.ActorID, &r.HostID, &idleTimeout, &activation)
+			var r comptesting.ActiveActorSpec
+			err = rows.Scan(&r.ActorType, &r.ActorID, &r.HostID, &r.ActorIdleTimeout, &r.ActivationAgo)
 			if err != nil {
 				return res, fmt.Errorf("reading active_actors row: %w", err)
 			}
-			r.ActorIdleTimeout = time.Duration(idleTimeout) * time.Millisecond
-			r.ActivationAgo = s.clock.Since(time.UnixMilli(activation))
 			res.ActiveActors = append(res.ActiveActors, r)
 		}
 		rows.Close()
 
 		// Load all alarms
-		rows, err = tx.QueryContext(ctx, "SELECT alarm_id, actor_type, actor_id, alarm_name, alarm_due_time, alarm_interval, alarm_ttl_time, alarm_data, alarm_lease_id, alarm_lease_expiration_time FROM alarms")
+		rows, err = tx.Query(ctx, "SELECT alarm_id, actor_type, actor_id, alarm_name, alarm_due_time - now(), alarm_interval, alarm_ttl_time, alarm_data, alarm_lease_id, alarm_lease_expiration_time FROM alarms")
 		if err != nil {
 			return res, fmt.Errorf("select alarms: %w", err)
 		}
 
 		res.Alarms = make([]comptesting.AlarmSpec, 0)
 		for rows.Next() {
-			var (
-				r             comptesting.AlarmSpec
-				due           int64
-				interval      *string
-				ttl, leaseExp *int64
-			)
-			err = rows.Scan(&r.AlarmID, &r.ActorType, &r.ActorID, &r.Name, &due, &interval, &ttl, &r.Data, &r.LeaseID, &leaseExp)
+			var r comptesting.AlarmSpec
+			err = rows.Scan(&r.AlarmID, &r.ActorType, &r.ActorID, &r.Name, &r.DueIn, &r.Interval, &r.TTL, &r.Data, &r.LeaseID, &r.LeaseExp)
 			if err != nil {
 				return res, fmt.Errorf("reading active_actors row: %w", err)
-			}
-			r.DueIn = time.UnixMilli(due).Sub(s.clock.Now())
-			if interval != nil {
-				r.Interval = *interval
-			}
-			if ttl != nil {
-				r.TTL = time.Duration(*ttl) * time.Millisecond
-			}
-			if leaseExp != nil {
-				r.LeaseExp = ptr.Of(time.UnixMilli(*leaseExp))
 			}
 			res.Alarms = append(res.Alarms, r)
 		}
 		rows.Close()
 
 		return res, nil
-	}) */
+	})
 }
 
 func TestHostGarbageCollection(t *testing.T) {

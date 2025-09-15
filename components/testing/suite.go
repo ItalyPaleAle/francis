@@ -416,7 +416,7 @@ func (s Suite) TestUpdateActorHost(t *testing.T) {
 		updateReq := components.UpdateActorHostReq{
 			UpdateLastHealthCheck: true,
 		}
-		err := s.p.UpdateActorHost(ctx, "non-existent-host-id", updateReq)
+		err := s.p.UpdateActorHost(ctx, SpecHostNonExistent, updateReq)
 		require.ErrorIs(t, err, components.ErrHostUnregistered)
 	})
 
@@ -432,7 +432,7 @@ func (s Suite) TestUpdateActorHost(t *testing.T) {
 				{ActorType: "TestActor", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 5},
 			},
 		}
-		err := s.p.UpdateActorHost(ctx, "non-existent-host-id", updateReq)
+		err := s.p.UpdateActorHost(ctx, SpecHostNonExistent, updateReq)
 		require.ErrorIs(t, err, components.ErrHostUnregistered)
 	})
 
@@ -542,7 +542,7 @@ func (s Suite) TestUnregisterHost(t *testing.T) {
 		ctx := t.Context()
 
 		// Try to unregister a non-existent host
-		err := s.p.UnregisterHost(ctx, "non-existent-host-id")
+		err := s.p.UnregisterHost(ctx, SpecHostNonExistent)
 		require.Error(t, err)
 		require.ErrorIs(t, err, components.ErrHostUnregistered)
 	})
