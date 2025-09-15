@@ -9,35 +9,31 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/italypaleale/actors/components"
+	"github.com/italypaleale/actors/internal/ptr"
 	"github.com/italypaleale/actors/internal/ref"
 )
 
 func (p *PostgresProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res components.GetAlarmRes, err error) {
-	return components.GetAlarmRes{}, nil
-
-	/*queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
-	var (
-		dueTime  int64
-		interval *string
-		ttlTime  *int64
-	)
-	err = s.db.
+	var interval *string
+	err = p.db.
 		QueryRow(queryCtx, `
 			SELECT
 				alarm_due_time, alarm_interval, alarm_data, alarm_ttl_time
 			FROM alarms
 			WHERE
-				actor_type = ?
-				AND actor_id = ?
-				AND alarm_name = ?`,
+				actor_type = $1
+				AND actor_id = $2
+				AND alarm_name = $3`,
 			req.ActorType, req.ActorID, req.Name,
 		).
-		Scan(&dueTime, &interval, &res.Data, &ttlTime)
+		Scan(&res.DueTime, &interval, &res.Data, &res.TTL)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		return res, components.ErrNoAlarm
@@ -45,30 +41,16 @@ func (p *PostgresProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res 
 		return res, fmt.Errorf("error executing query: %w", err)
 	}
 
-	res.DueTime = time.UnixMilli(dueTime)
 	if interval != nil {
 		res.Interval = *interval
 	}
-	if ttlTime != nil {
-		res.TTL = ptr.Of(time.UnixMilli(*ttlTime))
-	}
-
 	return res, nil
-	*/
 }
 
 func (p *PostgresProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req components.SetAlarmReq) error {
-	return nil
-
-	/*var (
-		interval *string
-		ttlTime  *int64
-	)
+	var interval *string
 	if req.Interval != "" {
 		interval = ptr.Of(req.Interval)
-	}
-	if req.TTL != nil {
-		ttlTime = ptr.Of(req.TTL.UnixMilli())
 	}
 
 	if req.Data != nil && len(req.Data) == 0 {
@@ -80,27 +62,27 @@ func (p *PostgresProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req c
 		return fmt.Errorf("failed to generate alarm ID: %w", err)
 	}
 
-	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
 	// We do an upsert to replace alarms with the same actor ID, actor type, and alarm name
 	// Any upsert will cause the lease to be lost
-	_, err = s.db.
-		ExecContext(queryCtx,
+	_, err = p.db.
+		Exec(queryCtx,
 			`REPLACE INTO alarms
 				(alarm_id, actor_type, actor_id, alarm_name,
 				alarm_due_time, alarm_interval, alarm_ttl_time, alarm_data,
 				alarm_lease_id, alarm_lease_expiration_time)
 			VALUES
-				(?, ?, ?, ?,
-				?, ?, ?, ?,
+				($1, $2, $3, $4,
+				$5, $6, $7, $8,
 				NULL, NULL)`,
 			alarmID, ref.ActorType, ref.ActorID, ref.Name,
-			req.DueTime.UnixMilli(), interval, ttlTime, req.Data)
+			req.DueTime, interval, req.TTL, req.Data)
 	if err != nil {
 		return fmt.Errorf("failed to create alarm: %w", err)
 	}
-	return nil*/
+	return nil
 }
 
 func (p *PostgresProvider) DeleteAlarm(ctx context.Context, ref ref.AlarmRef) error {
@@ -133,7 +115,7 @@ func (p *PostgresProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req 
 
 	return nil, nil
 
-	/*return transactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) ([]*ref.AlarmLease, error) {
+	/*return transactions.ExecuteInTransaction(ctx, p.log, p.db, func(ctx context.Context, tx *sql.Tx) ([]*ref.AlarmLease, error) {
 		fetcher := newUpcomingAlarmFetcher(tx, s, &req)
 
 		res, err := fetcher.FetchUpcoming(ctx)
