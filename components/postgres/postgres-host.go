@@ -4,12 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
-	"strconv"
-	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/italypaleale/actors/components"
 	"github.com/italypaleale/actors/internal/ref"
@@ -204,138 +202,33 @@ func (p *PostgresProvider) UnregisterHost(ctx context.Context, hostID string) er
 }
 
 func (p *PostgresProvider) LookupActor(ctx context.Context, ref ref.ActorRef, opts components.LookupActorOpts) (components.LookupActorRes, error) {
-	// TODO: Try to refactor into a single plpgsql function
-	res, err := transactions.ExecuteInPgxTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (res components.LookupActorRes, err error) {
-		// Perform a lookup to check if the actor is already active on _any_ host
-		queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
-		defer cancel()
-		err = tx.
-			QueryRow(queryCtx,
-				`SELECT hosts.host_id, hosts.host_address, active_actors.actor_idle_timeout
-				FROM active_actors
-				JOIN hosts ON active_actors.host_id = hosts.host_id
-				WHERE
-					active_actors.actor_type = $1
-					AND active_actors.actor_id = $2
-					AND hosts.host_last_health_check >= now() - $3::interval`,
-				ref.ActorType,
-				ref.ActorID,
-				p.cfg.HostHealthCheckDeadline,
-			).
-			Scan(&res.HostID, &res.Address, &res.IdleTimeout)
+	var res components.LookupActorRes
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
 
-		switch {
-		case errors.Is(err, pgx.ErrNoRows):
-			// No-op
-			// If no row was retrieved, the actor is currently not active, so we will create it below
-		case err != nil:
-			// Query error
-			return res, fmt.Errorf("error looking up actor: %w", err)
-		default:
-			// We have an active actor
-			// However, the query did not enforce conditions such as host restrictions, so we need to check that
-			if len(opts.Hosts) > 0 {
-				if slices.Contains(opts.Hosts, res.HostID) {
-					// The host is one of those in the allowlist, so we can return the row
-					return res, nil
-				}
-
-				// The actor is active on a host that was not allowed, so we return ErrNoHost
-				// Note we return a new struct to avoid returning data in addition to the error
-				return components.LookupActorRes{}, components.ErrNoHost
-			}
-
-			// No host restrictions, so we're good to return the actor
-			return res, nil
-		}
-
-		// If we're here, we need to create a new actor
-		// First, find a host that is capable of executing the actor and has capacity
-		// We start by building the host restrictions, if any
-		params := make([]any, 0, len(opts.Hosts)+2)
-		params = append(params,
+	err := p.db.
+		QueryRow(queryCtx,
+			`SELECT host_id, host_address, idle_timeout 
+			FROM lookup_actor_v1($1, $2, $3, $4)`,
 			ref.ActorType,
+			ref.ActorID,
 			p.cfg.HostHealthCheckDeadline,
-		)
-		hostClause := strings.Builder{}
-		if len(opts.Hosts) > 0 {
-			hostClause.Grow(len("hosts.host_id=$$ OR ")*len(opts.Hosts) + len("AND ()"))
-			hostClause.WriteString("AND (")
-			for i, host := range opts.Hosts {
-				params = append(params, host)
-				if i > 0 {
-					hostClause.WriteString(" OR ")
-				}
-				hostClause.WriteString("hosts.host_id=$" + strconv.Itoa(i+3))
-			}
-			hostClause.WriteRune(')')
-		}
+			opts.Hosts,
+		).
+		Scan(&res.HostID, &res.Address, &res.IdleTimeout)
 
-		// Execute the query
-		queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
-		defer cancel()
-		err = tx.
-			QueryRow(queryCtx,
-				`SELECT
-					hosts.host_id, hosts.host_address, host_actor_types.actor_idle_timeout
-				FROM hosts
-				JOIN host_actor_types ON
-					hosts.host_id = host_actor_types.host_id
-				LEFT JOIN host_active_actor_count ON
-					hosts.host_id = host_active_actor_count.host_id
-					AND host_actor_types.actor_type = host_active_actor_count.actor_type
-				WHERE
-					host_actor_types.actor_type = $1
-					AND hosts.host_last_health_check >= (now() - $2::interval)
-					AND (
-						host_actor_types.actor_concurrency_limit = 0
-						OR host_active_actor_count.active_count < host_actor_types.actor_concurrency_limit
-					)
-				`+hostClause.String()+`
-				ORDER BY random() LIMIT 1`,
-				params...,
-			).
-			Scan(&res.HostID, &res.Address, &res.IdleTimeout)
-
-		if err != nil {
-			// Reset res
-			res = components.LookupActorRes{}
-			if errors.Is(err, pgx.ErrNoRows) {
-				// If we get no rows, it means that there's no host capable of running the actor (at least, not with the given conditions)
-				return res, components.ErrNoHost
-			}
-
-			return res, fmt.Errorf("error finding host for the actor: %w", err)
-		}
-
-		// Finally, insert the row in the active actors table to "activate" the actor, in the host we selected
-		// Note that we perform an upsert query here. This is because the actor (with same type and ID) may already be present in the table, where it's active on a host that has failed (but hasn't been garbage-collected yet)
-		queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
-		defer cancel()
-		_, err = tx.
-			Exec(queryCtx,
-				`
-				INSERT INTO active_actors
-					(actor_type, actor_id, host_id, actor_idle_timeout, actor_activation)
-				VALUES
-					($1, $2, $3, $4, now())
-				ON CONFLICT (actor_type, actor_id) DO UPDATE SET
-					host_id = EXCLUDED.host_id,
-					actor_idle_timeout = EXCLUDED.actor_idle_timeout,
-					actor_activation = EXCLUDED.actor_activation
-				`,
-				ref.ActorType, ref.ActorID, res.HostID, res.IdleTimeout,
-			)
-		if err != nil {
-			// Reset res
-			res = components.LookupActorRes{}
-
-			return res, fmt.Errorf("error inserting actor row: %w", err)
-		}
-
-		return res, nil
-	})
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// This shouldn't happen with the function design, but handle it just in case
+			return components.LookupActorRes{}, components.ErrNoHost
+		}
+
+		// Check for our custom error code indicating no host available
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "P0001" && pgErr.Message == "NO_HOST_AVAILABLE" {
+			return components.LookupActorRes{}, components.ErrNoHost
+		}
+
 		return components.LookupActorRes{}, fmt.Errorf("failed to lookup actor: %w", err)
 	}
 
