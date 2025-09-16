@@ -21,6 +21,7 @@ DECLARE
     v_lease_expiration timestamptz;
     v_has_capacity_limits boolean := false;
     v_allocated_host_id uuid;
+    v_actor_lock_key bigint;
     rec RECORD;
 BEGIN
     -- Initialize time variables
@@ -299,55 +300,81 @@ BEGIN
         FROM temp_upcoming_alarms AS tua 
         WHERE tua.existing_host_id IS NULL
     LOOP
-        -- Find a random host with capacity for this actor type
-        SELECT tah.host_id INTO v_allocated_host_id
-        FROM temp_active_hosts AS tah 
-        WHERE
-            tah.actor_type = rec.actor_type 
-            AND tah.available_capacity > 0
-        ORDER BY 
-            -- Prefer hosts with lower current load for better distribution
-            available_capacity DESC,
-            -- Then randomize among hosts with same load
-            random()
-        LIMIT 1;
+        -- Create deterministic lock key from actor type and ID to prevent double activation
+        v_actor_lock_key := abs(hashtext(rec.actor_type || '::' || rec.actor_id));
 
-        IF v_allocated_host_id IS NOT NULL THEN
-            -- Insert/update the actor
-            -- Note that we perform an upsert query here. This is because the actor (with same type and ID) may already be present in the table, where it's active on a host that has failed (but hasn't been garbage-collected yet)
-            INSERT INTO active_actors
-                (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation)
-            SELECT 
-                rec.actor_type, 
-                rec.actor_id, 
-                v_allocated_host_id, 
-                tah.actor_idle_timeout,
-                -- We set the alarm's due time as actor activation time, or the current time if that's later
-                GREATEST(rec.alarm_due_time, v_now)
-            FROM temp_active_hosts AS tah 
-            WHERE
-                tah.host_id = v_allocated_host_id
-                AND tah.actor_type = rec.actor_type
-            ON CONFLICT (actor_type, actor_id) DO UPDATE SET
-                host_id = EXCLUDED.host_id,
-                actor_idle_timeout = EXCLUDED.actor_idle_timeout,
-                actor_activation = EXCLUDED.actor_activation;
+        -- Try to acquire advisory lock for this specific actor
+        IF pg_try_advisory_lock(v_actor_lock_key) THEN
+            BEGIN
+                -- Check if actor already exists (another process might have created it)
+                IF NOT EXISTS (
+                    SELECT 1 FROM active_actors 
+                    WHERE actor_type = rec.actor_type 
+                    AND actor_id = rec.actor_id
+                )
+                THEN
+                    -- Find a random host with capacity for this actor type
+                    -- Note: There's a chance that multiple queries may allocate actors on the same hosts and we may go over capacity
+                    -- We consider this an acceptable risk, as the complexity of handling that case is too significant otherwise
+                    SELECT tah.host_id INTO v_allocated_host_id
+                    FROM temp_active_hosts AS tah 
+                    WHERE
+                        tah.actor_type = rec.actor_type 
+                        AND tah.available_capacity > 0
+                    ORDER BY 
+                        -- Prefer hosts with lower current load for better distribution
+                        available_capacity DESC,
+                        -- Then randomize among hosts with same load
+                        random()
+                    LIMIT 1;
 
-            -- Update the allocated host in our temp table
-            UPDATE temp_upcoming_alarms 
-            SET allocated_host_id = v_allocated_host_id 
-            WHERE alarm_id = rec.alarm_id;
+                    IF v_allocated_host_id IS NOT NULL THEN
+                        -- Insert/update the actor
+                        -- Note that we perform an upsert query here. This is because the actor (with same type and ID) may already be present in the table, where it's active on a host that has failed (but hasn't been garbage-collected yet)
+                        INSERT INTO active_actors
+                            (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation)
+                        SELECT 
+                            rec.actor_type, 
+                            rec.actor_id, 
+                            v_allocated_host_id, 
+                            tah.actor_idle_timeout,
+                            -- We set the alarm's due time as actor activation time, or the current time if that's later
+                            GREATEST(rec.alarm_due_time, v_now)
+                        FROM temp_active_hosts AS tah 
+                        WHERE
+                            tah.host_id = v_allocated_host_id
+                            AND tah.actor_type = rec.actor_type
+                        ON CONFLICT (actor_type, actor_id) DO UPDATE SET
+                            host_id = EXCLUDED.host_id,
+                            actor_idle_timeout = EXCLUDED.actor_idle_timeout,
+                            actor_activation = EXCLUDED.actor_activation;
 
-            -- Decrease available capacity
-            UPDATE temp_active_hosts 
-            SET
-                available_capacity = available_capacity - 1 
-            WHERE 
-                host_id = v_allocated_host_id
-                AND actor_type = rec.actor_type;
+                        -- Update the allocated host in our temp table
+                        UPDATE temp_upcoming_alarms 
+                        SET allocated_host_id = v_allocated_host_id 
+                        WHERE alarm_id = rec.alarm_id;
 
-            -- Clear the variable for next iteration
-            v_allocated_host_id := NULL;
+                        -- Decrease available capacity
+                        UPDATE temp_active_hosts 
+                        SET
+                            available_capacity = available_capacity - 1 
+                        WHERE 
+                            host_id = v_allocated_host_id
+                            AND actor_type = rec.actor_type;
+
+                        -- Clear the variable for next iteration
+                        v_allocated_host_id := NULL;
+                    END IF; -- End of v_allocated_host_id not null
+                END IF;  -- End of actor existence check
+            EXCEPTION
+                WHEN OTHERS THEN
+                    -- Release lock on any error and re-raise
+                    PERFORM pg_advisory_unlock(v_actor_lock_key);
+                    RAISE;
+            END;
+
+            -- Release the advisory lock
+            PERFORM pg_advisory_unlock(v_actor_lock_key);
         END IF;
     END LOOP;
 
