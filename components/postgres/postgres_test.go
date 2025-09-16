@@ -29,177 +29,80 @@ import (
 
 const testConnectionString = "postgres://actors:actors@localhost:5432/actors"
 
-var (
-	//go:embed test-queries/test-setup.sql
-	queryTestSetup string
-)
-
-func generateTestSchemaName(t *testing.T) string {
-	t.Helper()
-
-	testSchemaB := make([]byte, 5)
-	_, err := io.ReadFull(rand.Reader, testSchemaB)
-	require.NoError(t, err)
-	return "test_" + hex.EncodeToString(testSchemaB)
-}
-
-func connectTestDatabase(t *testing.T, testSchema string) (conn *pgxpool.Pool, cleanupFn func(t *testing.T)) {
-	t.Helper()
-
-	// Parse the connection string
-	cfg, err := pgxpool.ParseConfig(testConnectionString)
-	require.NoError(t, err)
-
-	// Set a callback so we can make sure that the schema exists after connecting, and setting the correct search path
-	cfg.AfterConnect = func(ctx context.Context, c *pgx.Conn) error {
-		queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		_, err := c.Exec(queryCtx, `CREATE SCHEMA IF NOT EXISTS "`+testSchema+`"`)
-		if err != nil {
-			return fmt.Errorf("failed to ensure test schema '%s' exists: %w", testSchema, err)
-		}
-
-		queryCtx, cancel = context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		_, err = c.Exec(queryCtx, `SET SESSION search_path = "`+testSchema+`", pg_catalog, public`)
-		if err != nil {
-			return fmt.Errorf("failed to set search path for session: %w", err)
-		}
-
-		return nil
-	}
-
-	// Connect to the database
-	conn, err = pgxpool.NewWithConfig(t.Context(), cfg)
-	require.NoError(t, err, "Failed to connect to database")
-
-	// Execute the test setup queries
-	queryCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	_, err = conn.Exec(queryCtx, queryTestSetup)
-	require.NoError(t, err, "Failed to perform test setup")
-
-	// Cleanup function that deletes the schema at the end of the tests
-	cleanupFn = func(t *testing.T) {
-		// Use a background context because t.Context() has been canceled already
-		queryCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_, err := conn.Exec(queryCtx, `DROP SCHEMA "`+testSchema+`" CASCADE`)
-		require.NoError(t, err, "Failed to drop test schema")
-	}
-
-	return conn, cleanupFn
-}
+//go:embed test-queries/test-setup.sql
+var queryTestSetup string
 
 // Uncomment this test to have a test database, including seed data, populated
 // It is not removed automatically at the end of the test
 func TestPostgresCreateTestDB(t *testing.T) {
-	clock := clocktesting.NewFakeClock(time.Now())
-	h := comptesting.NewSlogClockHandler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}), clock)
-	log := slog.New(h)
-
-	// Generate a random name for the schema
-	testSchema := generateTestSchemaName(t)
-	t.Log("Test schema:", testSchema)
+	p, testSchema, _ := initTestProvider(t)
 	t.Log(`Session option query: SET SESSION search_path = "` + testSchema + `", pg_catalog, public`)
 
-	// Connect to the database beforehand so we can create a new schema for the tests
-	conn, _ := connectTestDatabase(t, testSchema)
-
-	providerOpts := PostgresProviderOptions{
-		DB: conn,
-
-		// Disable automated cleanups in this test
-		// We will run the cleanups automatically
-		CleanupInterval: -1,
-
-		clock: clock,
-	}
-	providerConfig := comptesting.GetProviderConfig()
-
-	// Create the provider
-	p, err := NewPostgresProvider(log, providerOpts, providerConfig)
-	require.NoError(t, err, "Error creating provider")
-
-	// Set the current frozen time in the database
-	err = p.setCurrentFrozenTime()
-	require.NoError(t, err, "Error setting current frozen time in the database")
-
-	// Init the provider
-	err = p.Init(t.Context())
-	require.NoError(t, err, "Error initializing provider")
-
-	// Run the provider in background for side effects
-	ctx := testutil.NewContextDoneNotifier(t.Context())
-	go func() {
-		err = p.Run(ctx)
-		if err != nil {
-			log.Error("Error running provider", slog.Any("error", err))
-		}
-	}()
-
-	// Wait for Run to call <-ctx.Done()
-	ctx.WaitForDone()
-
 	// Seed with the test data
-	require.NoError(t, p.Seed(ctx, comptesting.GetSpec()))
+	require.NoError(t, p.Seed(t.Context(), comptesting.GetSpec()))
 }
 
 func TestPostgresProvider(t *testing.T) {
-	clock := clocktesting.NewFakeClock(time.Now())
-	h := comptesting.NewSlogClockHandler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}), clock)
-	log := slog.New(h)
-
-	// Generate a random name for the schema
-	testSchema := generateTestSchemaName(t)
-	t.Log("Test schema:", testSchema)
-
-	// Connect to the database beforehand so we can create a new schema for the tests
-	conn, cleanupFn := connectTestDatabase(t, testSchema)
-	t.Cleanup(func() { cleanupFn(t) })
-
-	providerOpts := PostgresProviderOptions{
-		DB: conn,
-
-		// Disable automated cleanups in this test
-		// We will run the cleanups automatically
-		CleanupInterval: -1,
-
-		clock: clock,
-	}
-	providerConfig := comptesting.GetProviderConfig()
-
-	// Create the provider
-	p, err := NewPostgresProvider(log, providerOpts, providerConfig)
-	require.NoError(t, err, "Error creating provider")
-
-	// Set the current frozen time in the database
-	err = p.setCurrentFrozenTime()
-	require.NoError(t, err, "Error setting current frozen time in the database")
-
-	// Init the provider
-	err = p.Init(t.Context())
-	require.NoError(t, err, "Error initializing provider")
-
-	// Run the provider in background for side effects
-	ctx := testutil.NewContextDoneNotifier(t.Context())
-	go func() {
-		err = p.Run(ctx)
-		if err != nil {
-			log.Error("Error running provider", slog.Any("error", err))
-		}
-	}()
-
-	// Wait for Run to call <-ctx.Done()
-	ctx.WaitForDone()
+	p, _, cleanupFn := initTestProvider(t)
+	t.Cleanup(cleanupFn)
 
 	// Run the test suite
 	suite := comptesting.NewSuite(p)
 	suite.Run(t)
+}
+
+func initTestProvider(t *testing.T) (p *PostgresProvider, testSchema string, cleanupFn func()) {
+	clock := clocktesting.NewFakeClock(time.Now())
+	h := comptesting.NewSlogClockHandler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}), clock)
+	log := slog.New(h)
+
+	// Generate a random name for the schema
+	testSchema = generateTestSchemaName(t)
+	t.Log("Test schema:", testSchema)
+
+	// Connect to the database beforehand so we can create a new schema for the tests
+	conn, cleanupFnT := connectTestDatabase(t, testSchema)
+	cleanupFn = func() { cleanupFnT(t) }
+
+	providerOpts := PostgresProviderOptions{
+		DB: conn,
+
+		// Disable automated cleanups in this test
+		// We will run the cleanups automatically
+		CleanupInterval: -1,
+
+		clock: clock,
+	}
+	providerConfig := comptesting.GetProviderConfig()
+
+	// Create the provider
+	var err error
+	p, err = NewPostgresProvider(log, providerOpts, providerConfig)
+	require.NoError(t, err, "Error creating provider")
+
+	// Set the current frozen time in the database
+	err = p.setCurrentFrozenTime()
+	require.NoError(t, err, "Error setting current frozen time in the database")
+
+	// Init the provider
+	err = p.Init(t.Context())
+	require.NoError(t, err, "Error initializing provider")
+
+	// Run the provider in background for side effects
+	ctx := testutil.NewContextDoneNotifier(t.Context())
+	go func() {
+		err = p.Run(ctx)
+		if err != nil {
+			log.Error("Error running provider", slog.Any("error", err))
+		}
+	}()
+
+	// Wait for Run to call <-ctx.Done()
+	ctx.WaitForDone()
+
+	return p, testSchema, cleanupFn
 }
 
 func (p *PostgresProvider) CleanupExpired() error {
@@ -465,40 +368,8 @@ func (p *PostgresProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, e
 }
 
 func TestHostGarbageCollection(t *testing.T) {
-	clock := clocktesting.NewFakeClock(time.Now())
-	h := comptesting.NewSlogClockHandler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}), clock)
-	log := slog.New(h)
-
-	providerOpts := PostgresProviderOptions{
-		ConnectionString: testConnectionString,
-		// Disable automated cleanups in this test
-		// We will run the cleanups manually
-		CleanupInterval: -1,
-		clock:           clock,
-	}
-	providerConfig := comptesting.GetProviderConfig()
-
-	// Create the provider
-	s, err := NewPostgresProvider(log, providerOpts, providerConfig)
-	require.NoError(t, err, "Error creating provider")
-
-	// Init the provider
-	err = s.Init(t.Context())
-	require.NoError(t, err, "Error initializing provider")
-
-	// Run the provider in background for side effects (this initializes the GC)
-	ctx := testutil.NewContextDoneNotifier(t.Context())
-	go func() {
-		err = s.Run(ctx)
-		if err != nil && err != context.Canceled {
-			log.Error("Error running provider", slog.Any("error", err))
-		}
-	}()
-
-	// Wait for Run to call <-ctx.Done()
-	ctx.WaitForDone()
+	p, _, cleanupFn := initTestProvider(t)
+	t.Cleanup(cleanupFn)
 
 	t.Run("garbage collector removes expired hosts", func(t *testing.T) {
 		// Register multiple hosts at different times
@@ -508,11 +379,11 @@ func TestHostGarbageCollection(t *testing.T) {
 				{ActorType: "TestActor1", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 5},
 			},
 		}
-		host1Res, err := s.RegisterHost(ctx, host1Req)
+		host1Res, err := p.RegisterHost(t.Context(), host1Req)
 		require.NoError(t, err)
 
 		// Advance clock by 30 seconds
-		s.AdvanceClock(30 * time.Second)
+		p.AdvanceClock(30 * time.Second)
 
 		host2Req := components.RegisterHostReq{
 			Address: "192.168.1.2:8080",
@@ -520,11 +391,11 @@ func TestHostGarbageCollection(t *testing.T) {
 				{ActorType: "TestActor2", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 3},
 			},
 		}
-		host2Res, err := s.RegisterHost(ctx, host2Req)
+		host2Res, err := p.RegisterHost(t.Context(), host2Req)
 		require.NoError(t, err)
 
 		// Advance clock by another 20 seconds (so host3 is 20s after host2)
-		s.AdvanceClock(20 * time.Second)
+		p.AdvanceClock(20 * time.Second)
 
 		host3Req := components.RegisterHostReq{
 			Address: "192.168.1.3:8080",
@@ -532,11 +403,11 @@ func TestHostGarbageCollection(t *testing.T) {
 				{ActorType: "TestActor3", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 2},
 			},
 		}
-		host3Res, err := s.RegisterHost(ctx, host3Req)
+		host3Res, err := p.RegisterHost(t.Context(), host3Req)
 		require.NoError(t, err)
 
 		// Verify all hosts are initially present
-		spec, err := s.GetAllHosts(ctx)
+		spec, err := p.GetAllHosts(t.Context())
 		require.NoError(t, err)
 		require.Len(t, spec.Hosts, 3, "All hosts should be present initially")
 		require.Len(t, spec.HostActorTypes, 3, "All host actor types should be present initially")
@@ -544,14 +415,14 @@ func TestHostGarbageCollection(t *testing.T) {
 		// Advance clock to make only the first host expired (beyond 1 minute health check deadline)
 		// Current state: Host1 at 50s, Host2 at 20s, Host3 at 0s
 		// Advance by 15 seconds: Host1 at 65s (expired), Host2 at 35s (healthy), Host3 at 15s (healthy)
-		s.AdvanceClock(15 * time.Second)
+		p.AdvanceClock(15 * time.Second)
 
 		// Run garbage collection
-		err = s.CleanupExpired()
+		err = p.CleanupExpired()
 		require.NoError(t, err)
 
 		// Verify only host1 and its actor types are removed
-		spec, err = s.GetAllHosts(ctx)
+		spec, err = p.GetAllHosts(t.Context())
 		require.NoError(t, err)
 		require.Len(t, spec.Hosts, 2, "Only expired host should be removed")
 		require.Len(t, spec.HostActorTypes, 2, "Expired host's actor types should be removed")
@@ -577,14 +448,14 @@ func TestHostGarbageCollection(t *testing.T) {
 		// Advance clock to make host2 also expired
 		// Current state: Host2 at 35s, Host3 at 15s
 		// Advance by 30 seconds: Host2 at 65s (expired), Host3 at 45s (healthy)
-		s.AdvanceClock(30 * time.Second)
+		p.AdvanceClock(30 * time.Second)
 
 		// Run garbage collection again
-		err = s.CleanupExpired()
+		err = p.CleanupExpired()
 		require.NoError(t, err)
 
 		// Verify only host3 remains
-		spec, err = s.GetAllHosts(ctx)
+		spec, err = p.GetAllHosts(t.Context())
 		require.NoError(t, err)
 		require.Len(t, spec.Hosts, 1, "Only one host should remain")
 		require.Len(t, spec.HostActorTypes, 1, "Only one host actor type should remain")
@@ -596,16 +467,73 @@ func TestHostGarbageCollection(t *testing.T) {
 		// Advance clock to make all hosts expired
 		// Current state: Host3 at 45s
 		// Advance by 20 seconds: Host3 at 65s (expired)
-		s.AdvanceClock(20 * time.Second)
+		p.AdvanceClock(20 * time.Second)
 
 		// Run garbage collection one more time
-		err = s.CleanupExpired()
+		err = p.CleanupExpired()
 		require.NoError(t, err)
 
 		// Verify all hosts are removed
-		spec, err = s.GetAllHosts(ctx)
+		spec, err = p.GetAllHosts(t.Context())
 		require.NoError(t, err)
 		assert.Len(t, spec.Hosts, 0, "All hosts should be removed")
 		assert.Len(t, spec.HostActorTypes, 0, "All host actor types should be removed")
 	})
+}
+
+func generateTestSchemaName(t *testing.T) string {
+	t.Helper()
+
+	testSchemaB := make([]byte, 5)
+	_, err := io.ReadFull(rand.Reader, testSchemaB)
+	require.NoError(t, err)
+	return "test_" + hex.EncodeToString(testSchemaB)
+}
+
+func connectTestDatabase(t *testing.T, testSchema string) (conn *pgxpool.Pool, cleanupFn func(t *testing.T)) {
+	t.Helper()
+
+	// Parse the connection string
+	cfg, err := pgxpool.ParseConfig(testConnectionString)
+	require.NoError(t, err)
+
+	// Set a callback so we can make sure that the schema exists after connecting, and setting the correct search path
+	cfg.AfterConnect = func(ctx context.Context, c *pgx.Conn) error {
+		queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_, err := c.Exec(queryCtx, `CREATE SCHEMA IF NOT EXISTS "`+testSchema+`"`)
+		if err != nil {
+			return fmt.Errorf("failed to ensure test schema '%s' exists: %w", testSchema, err)
+		}
+
+		queryCtx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_, err = c.Exec(queryCtx, `SET SESSION search_path = "`+testSchema+`", pg_catalog, public`)
+		if err != nil {
+			return fmt.Errorf("failed to set search path for session: %w", err)
+		}
+
+		return nil
+	}
+
+	// Connect to the database
+	conn, err = pgxpool.NewWithConfig(t.Context(), cfg)
+	require.NoError(t, err, "Failed to connect to database")
+
+	// Execute the test setup queries
+	queryCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	_, err = conn.Exec(queryCtx, queryTestSetup)
+	require.NoError(t, err, "Failed to perform test setup")
+
+	// Cleanup function that deletes the schema at the end of the tests
+	cleanupFn = func(t *testing.T) {
+		// Use a background context because t.Context() has been canceled already
+		queryCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := conn.Exec(queryCtx, `DROP SCHEMA "`+testSchema+`" CASCADE`)
+		require.NoError(t, err, "Failed to drop test schema")
+	}
+
+	return conn, cleanupFn
 }
