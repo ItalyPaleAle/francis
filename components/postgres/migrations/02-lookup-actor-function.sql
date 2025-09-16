@@ -90,7 +90,7 @@ BEGIN
 
     -- Create a deterministic lock key based on actor type and ID
     -- This ensures the same actor always gets the same lock
-    v_lock_key := abs(hashtext(p_actor_type || '::' || p_actor_id));
+    v_lock_key := abs(h_bigint(p_actor_type || '::' || p_actor_id));
 
     -- Acquire an advisory lock for this specific actor
     -- This prevents concurrent placement of the same actor

@@ -136,3 +136,10 @@ AFTER DELETE ON active_actors
 REFERENCING OLD TABLE AS old_rows
 FOR EACH STATEMENT
 EXECUTE FUNCTION active_actors_delete_update_alarms_fn();
+
+-- Used for creating IDs for advisory locks
+-- Adapted from https://stackoverflow.com/a/9812029/192024
+CREATE FUNCTION h_bigint(text)
+RETURNS bigint AS $$
+    SELECT ('x' || substr(encode(sha256($1::bytea), 'hex'), 1, 16))::bit(64)::bigint;
+$$ LANGUAGE sql;

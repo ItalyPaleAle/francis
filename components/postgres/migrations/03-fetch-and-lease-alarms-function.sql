@@ -12,8 +12,8 @@ BEGIN
         INNER JOIN hosts AS h ON
             aa.host_id = h.host_id
         WHERE
-            actor_type = p_actor_type 
-            AND actor_id = p_actor_id
+            aa.actor_type = p_actor_type 
+            AND aa.actor_id = p_actor_id
             AND h.host_last_health_check >= p_health_cutoff
     );
 END;
@@ -322,7 +322,7 @@ BEGIN
         WHERE tua.existing_host_id IS NULL
     LOOP
         -- Create deterministic lock key from actor type and ID to prevent double activation
-        v_actor_lock_key := abs(hashtext(rec.actor_type || '::' || rec.actor_id));
+        v_actor_lock_key := abs(h_bigint(rec.actor_type || '::' || rec.actor_id));
 
         -- Try to acquire advisory lock for this specific actor
         IF pg_try_advisory_lock(v_actor_lock_key) THEN
