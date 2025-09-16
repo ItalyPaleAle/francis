@@ -46,12 +46,12 @@
 
 WITH
     allowed_actor_hosts AS (
-        SELECT DISTINCT host_id
+        SELECT host_id
         FROM temp_capacities
 
         UNION
 
-        SELECT DISTINCT aa.host_id
+        SELECT aa.host_id
         FROM active_actors AS aa
         INNER JOIN temp_capacities AS cap
             USING (actor_type)
@@ -101,7 +101,11 @@ WITH
             )
             AND (
                 aa.host_id IS NULL
-                OR aa.host_id IN (SELECT host_id FROM allowed_actor_hosts)
+                 OR EXISTS (
+                    SELECT 1
+                    FROM allowed_actor_hosts AS ah
+                    WHERE ah.host_id = aa.host_id
+                )
             )
     )
 SELECT

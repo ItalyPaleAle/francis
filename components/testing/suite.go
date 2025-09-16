@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -1364,7 +1365,7 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		// Collect all alarm IDs
 		gotIDs := make([]string, 0, 24)
 		for _, a := range res {
-			gotIDs = append(gotIDs, a.Key())
+			gotIDs = append(gotIDs, strings.ToUpper(a.Key()))
 			assert.NotEmpty(t, a.LeaseID())
 		}
 
@@ -1378,20 +1379,22 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		require.NoError(t, err)
 
 		for _, a := range spec.Alarms {
-			if expectPreLeasedAlarms(a.AlarmID) {
+			alarmID := strings.ToUpper(a.AlarmID)
+
+			if expectPreLeasedAlarms(alarmID) {
 				continue
 			}
 
-			if !expectAlarmIDsMap[a.AlarmID] {
-				assert.Emptyf(t, a.LeaseID, "expected alarm %q not to have a lease ID", a.AlarmID)
-				assert.Emptyf(t, a.LeaseExp, "expected alarm %q not to have a lease expiration", a.AlarmID)
+			if !expectAlarmIDsMap[alarmID] {
+				assert.Emptyf(t, a.LeaseID, "expected alarm %q not to have a lease ID", alarmID)
+				assert.Emptyf(t, a.LeaseExp, "expected alarm %q not to have a lease expiration", alarmID)
 				continue
 			}
 
-			_ = assert.NotNil(t, a.LeaseID, "expected alarm %q to have a lease ID", a.AlarmID) &&
-				assert.NotEmpty(t, *a.LeaseID, "expected alarm %q to have a lease ID", a.AlarmID)
-			_ = assert.NotNil(t, a.LeaseExp, "expected alarm %q to have a lease expiration", a.AlarmID) &&
-				assert.Greater(t, *a.LeaseExp, s.p.Now(), "expected alarm's %q lease expiration to be in the future", a.AlarmID)
+			_ = assert.NotNil(t, a.LeaseID, "expected alarm %q to have a lease ID", alarmID) &&
+				assert.NotEmpty(t, *a.LeaseID, "expected alarm %q to have a lease ID", alarmID)
+			_ = assert.NotNil(t, a.LeaseExp, "expected alarm %q to have a lease expiration", alarmID) &&
+				assert.Greater(t, *a.LeaseExp, s.p.Now(), "expected alarm's %q lease expiration to be in the future", alarmID)
 		}
 
 		// Also ensure that all actors were activated on H7
@@ -1459,7 +1462,7 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		// Collect all alarm IDs
 		gotIDs := make([]string, 0, 24)
 		for _, a := range res {
-			gotIDs = append(gotIDs, a.Key())
+			gotIDs = append(gotIDs, strings.ToUpper(a.Key()))
 			assert.NotEmpty(t, a.LeaseID())
 		}
 
@@ -1473,22 +1476,24 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		require.NoError(t, err)
 
 		for _, a := range spec.Alarms {
+			alarmID := strings.ToUpper(a.AlarmID)
+
 			// ALM-C-006's leases was expired and we should have taken it over
-			if a.AlarmID != "AA000000-000C-4000-000C-000000000006" && expectPreLeasedAlarms(a.AlarmID) {
+			if a.AlarmID != "AA000000-000C-4000-000C-000000000006" && expectPreLeasedAlarms(alarmID) {
 				continue
 			}
 
-			if !expectAlarmIDsMap[a.AlarmID] {
+			if !expectAlarmIDsMap[alarmID] {
 				// Seed data doesn't contain any leased alarm, so we can confidently exclude others
-				assert.Emptyf(t, a.LeaseID, "expected alarm %q not to have a lease ID", a.AlarmID)
-				assert.Emptyf(t, a.LeaseExp, "expected alarm %q not to have a lease expiration", a.AlarmID)
+				assert.Emptyf(t, a.LeaseID, "expected alarm %q not to have a lease ID", alarmID)
+				assert.Emptyf(t, a.LeaseExp, "expected alarm %q not to have a lease expiration", alarmID)
 				continue
 			}
 
-			_ = assert.NotNil(t, a.LeaseID, "expected alarm %q to have a lease ID", a.AlarmID) &&
-				assert.NotEmpty(t, *a.LeaseID, "expected alarm %q to have a lease ID", a.AlarmID)
-			_ = assert.NotNil(t, a.LeaseExp, "expected alarm %q to have a lease expiration", a.AlarmID) &&
-				assert.Greater(t, *a.LeaseExp, s.p.Now(), "expected alarm's %q lease expiration to be in the future", a.AlarmID)
+			_ = assert.NotNil(t, a.LeaseID, "expected alarm %q to have a lease ID", alarmID) &&
+				assert.NotEmpty(t, *a.LeaseID, "expected alarm %q to have a lease ID", alarmID)
+			_ = assert.NotNil(t, a.LeaseExp, "expected alarm %q to have a lease expiration", alarmID) &&
+				assert.Greater(t, *a.LeaseExp, s.p.Now(), "expected alarm's %q lease expiration to be in the future", alarmID)
 		}
 
 		// Also ensure that all actors were activated on H1 or H2
@@ -1635,7 +1640,7 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		// Check if we got the expired lease ALM-C-006 and gave it a new lease
 		foundExpiredAlarm := false
 		for _, lease := range res {
-			if lease.Key() == "AA000000-000C-4000-000C-000000000006" {
+			if strings.ToUpper(lease.Key()) == "AA000000-000C-4000-000C-000000000006" {
 				// Should have a lease ID (new lease was created)
 				assert.NotEmpty(t, lease.LeaseID(), "ALM-C-006 should have been given a new lease")
 				foundExpiredAlarm = true
@@ -1690,13 +1695,14 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 		foundOverdue1 := false
 		foundOverdue2 := false
 		for _, lease := range res {
-			if lease.Key() == SpecAlarmOverdue1 {
+			key := strings.ToUpper(lease.Key())
+			if key == SpecAlarmOverdue1 {
 				foundOverdue1 = true
 				// Verify the alarm is in the past
 				assert.True(t, lease.DueTime().Before(s.p.Now()), "ALM-OVERDUE-1 should be overdue")
 				assert.Equal(t, "TestOverdue/overdue-actor-1", lease.ActorRef().String())
 			}
-			if lease.Key() == SpecAlarmOverdue2 {
+			if key == SpecAlarmOverdue2 {
 				foundOverdue2 = true
 				// Verify the alarm is in the past
 				assert.True(t, lease.DueTime().Before(s.p.Now()), "ALM-OVERDUE-2 should be overdue")
@@ -1708,7 +1714,7 @@ func (s Suite) TestFetchAlarms(t *testing.T) {
 
 		// Verify the leased overdue alarms can be retrieved
 		for _, lease := range res {
-			key := lease.Key()
+			key := strings.ToUpper(lease.Key())
 			if key == SpecAlarmOverdue1 || key == SpecAlarmOverdue2 {
 				alarmRes, err := s.p.GetLeasedAlarm(ctx, lease)
 				require.NoError(t, err, "overdue alarm %s should be properly leased", key)
@@ -1794,7 +1800,7 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, Spec{}))
 
 		// Try to get a non-existent alarm
-		nonExistentLease := ref.NewAlarmLease(ref.NewAlarmRef("at", "aid", "name"), "not-exists", time.Now(), "fake-lease-id")
+		nonExistentLease := ref.NewAlarmLease(ref.NewAlarmRef("at", "aid", "name"), "cc11a1b4-8c70-4253-8e24-64eb6e876eb6", s.p.Now(), "1e4ecca7-db68-431c-a6d7-08aa0434e5c6")
 		_, err := s.p.GetLeasedAlarm(ctx, nonExistentLease)
 		require.ErrorIs(t, err, components.ErrNoAlarm)
 	})
@@ -1807,7 +1813,7 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 
 		// Try to get an alarm that exists but isn't leased
 		// From spec, ALM-B-007 and later B alarms should not be pre-leased
-		unleaedAlarmLease := ref.NewAlarmLease(ref.NewAlarmRef("B", "B-007", "Alarm-B-007"), "AA000000-000B-4000-000B-000000000007", time.Now(), "fake-lease-id")
+		unleaedAlarmLease := ref.NewAlarmLease(ref.NewAlarmRef("B", "B-007", "Alarm-B-007"), "AA000000-000B-4000-000B-000000000007", s.p.Now(), "70cb3dc4-cb83-4f44-92d0-07b9c59ec36d")
 		_, err := s.p.GetLeasedAlarm(ctx, unleaedAlarmLease)
 		require.ErrorIs(t, err, components.ErrNoAlarm)
 	})
@@ -1829,7 +1835,7 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 		lease := res[0]
 
 		// Create a fake lease with the same alarm ID but different lease ID
-		fakeLease := ref.NewAlarmLease(lease.AlarmRef(), lease.Key(), lease.DueTime(), "bad-lease-id")
+		fakeLease := ref.NewAlarmLease(lease.AlarmRef(), lease.Key(), lease.DueTime(), "05ac8871-02f3-4e02-b98d-a9ec231de084")
 
 		// Try to get the alarm with the wrong lease ID
 		_, err = s.p.GetLeasedAlarm(ctx, fakeLease)
@@ -1877,8 +1883,9 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 		targetLease := &ref.AlarmLease{}
 		var found bool
 		for _, lease := range res {
+			key := strings.ToUpper(lease.Key())
 			// ALM-A-1, ALM-A-2, ALM-A-4, ALM-B-1, ALM-B-2 should have specific data
-			if lease.Key() == SpecAlarmA1 || lease.Key() == SpecAlarmB1 {
+			if key == SpecAlarmA1 || key == SpecAlarmB1 {
 				targetLease = lease
 				found = true
 				break
@@ -1891,7 +1898,7 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 		require.NoError(t, err)
 
 		// Verify the alarm data matches expected values from GetSpec
-		switch targetLease.Key() {
+		switch strings.ToUpper(targetLease.Key()) {
 		case SpecAlarmA1:
 			assert.Equal(t, "A", alarmRes.ActorType)
 			assert.Equal(t, "A-1", alarmRes.ActorID)
@@ -2170,7 +2177,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 
 		// Create a mix of valid and invalid lease IDs
 		validLease := res[0]
-		invalidLease := ref.NewAlarmLease(validLease.AlarmRef(), "46d1668d-dd68-4320-a562-66176ac4a11f", time.Now(), "fake-lease-id")
+		invalidLease := ref.NewAlarmLease(validLease.AlarmRef(), "46d1668d-dd68-4320-a562-66176ac4a11f", s.p.Now(), "8a54df5a-2007-4add-af3c-265c4d569e28")
 
 		// Advance time partway through lease duration
 		s.p.AdvanceClock(30 * time.Second)
@@ -2267,7 +2274,7 @@ func (s Suite) TestReleaseAlarmLease(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, Spec{}))
 
 		// Try to release a non-existent alarm lease
-		nonExistentLease := ref.NewAlarmLease(ref.NewAlarmRef("at", "aid", "name"), "7f84f417-de01-46d0-b5bb-80f3d8bf003b", time.Now(), "fake-lease-id")
+		nonExistentLease := ref.NewAlarmLease(ref.NewAlarmRef("at", "aid", "name"), "7f84f417-de01-46d0-b5bb-80f3d8bf003b", s.p.Now(), "46d03825-2a8f-498d-bd02-e1e6bf8d82c3")
 		err := s.p.ReleaseAlarmLease(ctx, nonExistentLease)
 		require.ErrorIs(t, err, components.ErrNoAlarm)
 	})
@@ -2285,7 +2292,7 @@ func (s Suite) TestReleaseAlarmLease(t *testing.T) {
 			},
 			Alarms: []AlarmSpec{
 				{
-					AlarmID:   "test-alarm-no-lease",
+					AlarmID:   "0ec13fd1-ff6d-4059-bcc6-29315f57b1c6",
 					ActorType: "TestType",
 					ActorID:   "test-actor",
 					Name:      "test-alarm",
@@ -2299,7 +2306,7 @@ func (s Suite) TestReleaseAlarmLease(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, customSpec))
 
 		// Try to release a lease for an alarm that was never leased
-		fakeLease := ref.NewAlarmLease(ref.NewAlarmRef("TestType", "test-actor", "test-alarm"), "test-alarm-no-lease", time.Now(), "fake-lease-id")
+		fakeLease := ref.NewAlarmLease(ref.NewAlarmRef("TestType", "test-actor", "test-alarm"), "0ec13fd1-ff6d-4059-bcc6-29315f57b1c6", s.p.Now(), "e811769a-6b7a-4080-b406-87efd603c7f4")
 		err := s.p.ReleaseAlarmLease(ctx, fakeLease)
 		require.ErrorIs(t, err, components.ErrNoAlarm)
 	})
@@ -2321,7 +2328,7 @@ func (s Suite) TestReleaseAlarmLease(t *testing.T) {
 		lease := res[0]
 
 		// Create a fake lease with wrong lease ID
-		fakeLease := ref.NewAlarmLease(lease.AlarmRef(), lease.Key(), lease.DueTime(), "wrong-lease-id")
+		fakeLease := ref.NewAlarmLease(lease.AlarmRef(), lease.Key(), lease.DueTime(), "e731a719-0c1c-4c41-9c92-a44e0e8ef681")
 
 		// Try to release with wrong lease ID
 		err = s.p.ReleaseAlarmLease(ctx, fakeLease)
@@ -2441,7 +2448,7 @@ func (s Suite) TestUpdateLeasedAlarm(t *testing.T) {
 		require.NoError(t, err)
 
 		// Update the alarm with new details and refresh lease
-		newDueTime := time.Now().Add(2 * time.Hour)
+		newDueTime := s.p.Now().Add(2 * time.Hour)
 		updateReq := components.UpdateLeasedAlarmReq{
 			DueTime:      newDueTime,
 			RefreshLease: true,
@@ -2489,7 +2496,7 @@ func (s Suite) TestUpdateLeasedAlarm(t *testing.T) {
 
 		// Update the alarm without refreshing lease
 		// This will release the lease
-		newDueTime := time.Now().Add(3 * time.Hour)
+		newDueTime := s.p.Now().Add(3 * time.Hour)
 		updateReq := components.UpdateLeasedAlarmReq{
 			DueTime:      newDueTime,
 			RefreshLease: false,
@@ -2510,9 +2517,9 @@ func (s Suite) TestUpdateLeasedAlarm(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, Spec{}))
 
 		// Try to update a non-existent alarm
-		nonExistentLease := ref.NewAlarmLease(ref.NewAlarmRef("at", "aid", "name"), "0b610c71-fd4a-429b-a4ff-873698e5b3a1", time.Now(), "fake-lease-id")
+		nonExistentLease := ref.NewAlarmLease(ref.NewAlarmRef("at", "aid", "name"), "0b610c71-fd4a-429b-a4ff-873698e5b3a1", s.p.Now(), "8693c0bc-1062-405e-9e7b-3a9c2f65899d")
 		updateReq := components.UpdateLeasedAlarmReq{
-			DueTime:      time.Now().Add(1 * time.Hour),
+			DueTime:      s.p.Now().Add(1 * time.Hour),
 			RefreshLease: true,
 		}
 
@@ -2535,10 +2542,10 @@ func (s Suite) TestUpdateLeasedAlarm(t *testing.T) {
 
 		// Pick the first leased alarm and create fake lease with wrong ID
 		validLease := res[0]
-		fakeLease := ref.NewAlarmLease(validLease.AlarmRef(), validLease.Key(), validLease.DueTime(), "wrong-lease-id")
+		fakeLease := ref.NewAlarmLease(validLease.AlarmRef(), validLease.Key(), validLease.DueTime(), "ebccb3b6-b677-437b-83d1-cb0b21134328")
 
 		updateReq := components.UpdateLeasedAlarmReq{
-			DueTime:      time.Now().Add(1 * time.Hour),
+			DueTime:      s.p.Now().Add(1 * time.Hour),
 			RefreshLease: true,
 		}
 
@@ -2570,7 +2577,7 @@ func (s Suite) TestUpdateLeasedAlarm(t *testing.T) {
 		s.p.AdvanceClock(2 * time.Minute)
 
 		updateReq := components.UpdateLeasedAlarmReq{
-			DueTime:      time.Now().Add(1 * time.Hour),
+			DueTime:      s.p.Now().Add(1 * time.Hour),
 			RefreshLease: true,
 		}
 
@@ -2627,7 +2634,7 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, Spec{}))
 
 		// Try to delete a non-existent alarm
-		nonExistentLease := ref.NewAlarmLease(ref.NewAlarmRef("at", "aid", "name"), "e7acafab-d2a1-4e95-929f-7da0c781fee0", time.Now(), "fake-lease-id")
+		nonExistentLease := ref.NewAlarmLease(ref.NewAlarmRef("at", "aid", "name"), "e7acafab-d2a1-4e95-929f-7da0c781fee0", s.p.Now(), "3c6f3e23-599b-4220-a86a-4a74b3a2ff52")
 		err := s.p.DeleteLeasedAlarm(ctx, nonExistentLease)
 		require.ErrorIs(t, err, components.ErrNoAlarm)
 	})
@@ -2659,7 +2666,7 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 		require.NoError(t, s.p.Seed(ctx, customSpec))
 
 		// Try to delete an alarm that was never leased
-		fakeLease := ref.NewAlarmLease(ref.NewAlarmRef("at", "aid", "name"), "944f30d6-bbc4-474c-9d6a-734a6bb92577", time.Now(), "fake-lease-id")
+		fakeLease := ref.NewAlarmLease(ref.NewAlarmRef("at", "aid", "name"), "944f30d6-bbc4-474c-9d6a-734a6bb92577", s.p.Now(), "e362bf50-a974-4927-b3c6-06ec45ed4c32")
 		err := s.p.DeleteLeasedAlarm(ctx, fakeLease)
 		require.ErrorIs(t, err, components.ErrNoAlarm)
 
@@ -2686,7 +2693,7 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 		validLease := res[0]
 
 		// Create a fake lease with wrong lease ID
-		fakeLease := ref.NewAlarmLease(validLease.AlarmRef(), validLease.Key(), validLease.DueTime(), "wrong-lease-id")
+		fakeLease := ref.NewAlarmLease(validLease.AlarmRef(), validLease.Key(), validLease.DueTime(), "9779ea8f-fa1e-4c2e-9487-bc690b1b57be")
 
 		// Try to delete with wrong lease ID
 		err = s.p.DeleteLeasedAlarm(ctx, fakeLease)

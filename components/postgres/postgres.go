@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -238,6 +239,20 @@ func (p *PostgresProvider) initGC() (err error) {
 		DB:              sqladapter.AdaptPgxConn(p.db),
 	})
 	return err
+}
+
+// Convert string slice to UUID slice for PostgreSQL
+func hostIDsToUUIDs(hosts []string) ([]uuid.UUID, error) {
+	hostUUIDs := make([]uuid.UUID, len(hosts))
+	for i, hostStr := range hosts {
+		hostUUID, err := uuid.Parse(hostStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid host UUID '%s': %w", hostStr, err)
+		}
+		hostUUIDs[i] = hostUUID
+	}
+
+	return hostUUIDs, nil
 }
 
 // Checks if an error returned by the database is a unique constraint violation error, such as a duplicate unique index or primary key.

@@ -18,7 +18,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"k8s.io/utils/clock"
 	clocktesting "k8s.io/utils/clock/testing"
 
 	"github.com/italypaleale/actors/components"
@@ -44,7 +43,7 @@ func generateTestSchemaName(t *testing.T) string {
 	return "test_" + hex.EncodeToString(testSchemaB)
 }
 
-func connectTestDatabase(t *testing.T, testSchema string, clock clock.Clock) (conn *pgxpool.Pool, cleanupFn func(t *testing.T)) {
+func connectTestDatabase(t *testing.T, testSchema string) (conn *pgxpool.Pool, cleanupFn func(t *testing.T)) {
 	t.Helper()
 
 	// Parse the connection string
@@ -92,6 +91,62 @@ func connectTestDatabase(t *testing.T, testSchema string, clock clock.Clock) (co
 	return conn, cleanupFn
 }
 
+// Uncomment this test to have a test database, including seed data, populated
+// It is not removed automatically at the end of the test
+func TestPostgresCreateTestDB(t *testing.T) {
+	clock := clocktesting.NewFakeClock(time.Now())
+	h := comptesting.NewSlogClockHandler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}), clock)
+	log := slog.New(h)
+
+	// Generate a random name for the schema
+	testSchema := generateTestSchemaName(t)
+	t.Log("Test schema:", testSchema)
+	t.Log(`Session option query: SET SESSION search_path = "` + testSchema + `", pg_catalog, public`)
+
+	// Connect to the database beforehand so we can create a new schema for the tests
+	conn, _ := connectTestDatabase(t, testSchema)
+
+	providerOpts := PostgresProviderOptions{
+		DB: conn,
+
+		// Disable automated cleanups in this test
+		// We will run the cleanups automatically
+		CleanupInterval: -1,
+
+		clock: clock,
+	}
+	providerConfig := comptesting.GetProviderConfig()
+
+	// Create the provider
+	p, err := NewPostgresProvider(log, providerOpts, providerConfig)
+	require.NoError(t, err, "Error creating provider")
+
+	// Set the current frozen time in the database
+	err = p.setCurrentFrozenTime()
+	require.NoError(t, err, "Error setting current frozen time in the database")
+
+	// Init the provider
+	err = p.Init(t.Context())
+	require.NoError(t, err, "Error initializing provider")
+
+	// Run the provider in background for side effects
+	ctx := testutil.NewContextDoneNotifier(t.Context())
+	go func() {
+		err = p.Run(ctx)
+		if err != nil {
+			log.Error("Error running provider", slog.Any("error", err))
+		}
+	}()
+
+	// Wait for Run to call <-ctx.Done()
+	ctx.WaitForDone()
+
+	// Seed with the test data
+	require.NoError(t, p.Seed(ctx, comptesting.GetSpec()))
+}
+
 func TestPostgresProvider(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 	h := comptesting.NewSlogClockHandler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
@@ -104,7 +159,7 @@ func TestPostgresProvider(t *testing.T) {
 	t.Log("Test schema:", testSchema)
 
 	// Connect to the database beforehand so we can create a new schema for the tests
-	conn, cleanupFn := connectTestDatabase(t, testSchema, clock)
+	conn, cleanupFn := connectTestDatabase(t, testSchema)
 	t.Cleanup(func() { cleanupFn(t) })
 
 	providerOpts := PostgresProviderOptions{
@@ -552,100 +607,5 @@ func TestHostGarbageCollection(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, spec.Hosts, 0, "All hosts should be removed")
 		assert.Len(t, spec.HostActorTypes, 0, "All host actor types should be removed")
-	})
-}
-
-func TestActiveHostsList_HostForActorType(t *testing.T) {
-	t.Run("pick hosts at random", func(t *testing.T) {
-		h1 := &activeHost{HostID: comptesting.SpecHostH1, ActorType: "typeA", Capacity: 10000}
-		h2 := &activeHost{HostID: comptesting.SpecHostH2, ActorType: "typeA", Capacity: 10000}
-		ahl := &activeHostsList{
-			hosts: map[string]*activeHost{
-				comptesting.SpecHostH1: h1,
-				comptesting.SpecHostH2: h2,
-			},
-			capacities: map[string][]*activeHost{
-				"typeA": {h1, h2},
-			},
-		}
-
-		observed := map[string]int{}
-		for range 100 {
-			host := ahl.HostForActorType("typeA")
-			require.NotNil(t, host)
-			observed[host.HostID]++
-		}
-
-		// Should be roughly 50/50, but we enforce at least 30 to leave some buffer for randomness
-		assert.Len(t, observed, 2)
-		assert.GreaterOrEqual(t, observed[comptesting.SpecHostH1], 30)
-		assert.GreaterOrEqual(t, observed[comptesting.SpecHostH2], 30)
-	})
-
-	t.Run("single host capacity exhaustion", func(t *testing.T) {
-		h1 := &activeHost{HostID: comptesting.SpecHostH1, ActorType: "typeA", Capacity: 3}
-		ahl := &activeHostsList{
-			hosts: map[string]*activeHost{
-				comptesting.SpecHostH1: h1,
-			},
-			capacities: map[string][]*activeHost{
-				"typeA": {h1},
-			},
-		}
-
-		// First three calls should return the host ID; fourth should be empty
-		for range 3 {
-			host := ahl.HostForActorType("typeA")
-			require.NotNil(t, host)
-			assert.Equal(t, comptesting.SpecHostH1, host.HostID)
-		}
-		assert.Nil(t, ahl.HostForActorType("typeA"))
-	})
-
-	t.Run("multiple hosts capacity exhaustion", func(t *testing.T) {
-		h1 := &activeHost{HostID: comptesting.SpecHostH1, ActorType: "typeA", Capacity: 5}
-		h2 := &activeHost{HostID: comptesting.SpecHostH2, ActorType: "typeA", Capacity: 10000}
-		ahl := &activeHostsList{
-			hosts: map[string]*activeHost{
-				comptesting.SpecHostH1: h1,
-				comptesting.SpecHostH2: h2,
-			},
-			capacities: map[string][]*activeHost{
-				"typeA": {h1, h2},
-			},
-		}
-
-		observed := map[string]int{}
-		for range 100 {
-			host := ahl.HostForActorType("typeA")
-			require.NotNil(t, host)
-			observed[host.HostID]++
-		}
-
-		// Should have depleted all capacity in H1 (5), and the rest should be H2
-		assert.Len(t, observed, 2)
-		assert.Equal(t, 5, observed[comptesting.SpecHostH1])
-		assert.Equal(t, 95, observed[comptesting.SpecHostH2])
-	})
-
-	t.Run("unsupported actor type", func(t *testing.T) {
-		ahl := &activeHostsList{
-			hosts:      map[string]*activeHost{},
-			capacities: map[string][]*activeHost{},
-		}
-		assert.Nil(t, ahl.HostForActorType("missing"))
-	})
-
-	t.Run("zero capacity host", func(t *testing.T) {
-		h1 := &activeHost{HostID: comptesting.SpecHostH1, ActorType: "typeA", Capacity: 0}
-		ahl := &activeHostsList{
-			hosts: map[string]*activeHost{
-				comptesting.SpecHostH1: h1,
-			},
-			capacities: map[string][]*activeHost{
-				"typeA": {h1},
-			},
-		}
-		assert.Nil(t, ahl.HostForActorType("typeA"))
 	})
 }

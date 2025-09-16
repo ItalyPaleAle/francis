@@ -16,7 +16,7 @@ func TestAlarmProperties_UnmarshalJSON(t *testing.T) {
 			"dueTime": "2024-11-25T10:30:00Z",
 			"interval": "PT1H30M",
 			"ttl": "2024-11-26T10:30:00Z",
-			"data": "SGVsbG8gV29ybGQ="
+			"data": "Hello World"
 		}`
 
 		var alarm AlarmProperties
@@ -29,7 +29,7 @@ func TestAlarmProperties_UnmarshalJSON(t *testing.T) {
 		assert.True(t, alarm.DueTime.Equal(expectedDue))
 		assert.Equal(t, "PT1H30M", alarm.Interval)
 		assert.True(t, alarm.TTL.Equal(expectedTTL))
-		assert.Equal(t, []byte("Hello World"), alarm.Data)
+		assert.Equal(t, "Hello World", alarm.Data)
 	})
 
 	t.Run("UNIX milliseconds and Go duration string", func(t *testing.T) {

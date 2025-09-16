@@ -110,42 +110,45 @@ BEGIN
 
     -- If we reach here, we need to find a suitable host and activate the actor
     -- Use a SELECT FOR UPDATE to lock the host records while we're making our decision
-    WITH available_hosts AS (
-        SELECT 
-            h.host_id,
-            h.host_address,
-            hat.actor_idle_timeout,
-            hat.actor_concurrency_limit,
-            COALESCE(current_count.active_count, 0) AS current_active_count
-        FROM hosts h
-        JOIN host_actor_types hat ON h.host_id = hat.host_id
-        LEFT JOIN (
+    WITH
+        current_count AS (
             -- Count actual rows instead of using the view to avoid race conditions
             SELECT aa.host_id, COUNT(*) AS active_count
             FROM active_actors aa
             WHERE aa.actor_type = p_actor_type
             GROUP BY aa.host_id
-        ) current_count ON h.host_id = current_count.host_id
-        WHERE hat.actor_type = p_actor_type
-          AND h.host_last_health_check >= (now() - p_host_health_check_deadline)
-          AND (
-                hat.actor_concurrency_limit = 0 
-                OR COALESCE(current_count.active_count, 0) < hat.actor_concurrency_limit
-          )
-          AND (
-                p_allowed_hosts IS NULL 
-                OR array_length(p_allowed_hosts, 1) = 0 
-                OR h.host_id = ANY(p_allowed_hosts)
-          )
-        -- Lock the host rows to prevent concurrent modifications
-        ORDER BY 
-            -- Prefer hosts with lower current load for better distribution
-            current_active_count ASC,
-            -- Then randomize among hosts with same load
-            random()
-        LIMIT 1
-        FOR UPDATE OF h
-    )
+        ),
+        available_hosts AS (
+            SELECT 
+                h.host_id,
+                h.host_address,
+                hat.actor_idle_timeout,
+                hat.actor_concurrency_limit,
+                COALESCE(current_count.active_count, 0) AS current_active_count
+            FROM hosts h
+            JOIN host_actor_types hat ON h.host_id = hat.host_id
+            LEFT JOIN current_count ON h.host_id = current_count.host_id
+            WHERE
+                hat.actor_type = p_actor_type
+            AND h.host_last_health_check >= (now() - p_host_health_check_deadline)
+            AND (
+                    hat.actor_concurrency_limit = 0 
+                    OR COALESCE(current_count.active_count, 0) < hat.actor_concurrency_limit
+            )
+            AND (
+                    p_allowed_hosts IS NULL 
+                    OR array_length(p_allowed_hosts, 1) = 0 
+                    OR h.host_id = ANY(p_allowed_hosts)
+            )
+            ORDER BY 
+                -- Prefer hosts with lower current load for better distribution
+                current_active_count ASC,
+                -- Then randomize among hosts with same load
+                random()
+            LIMIT 1
+            -- Lock the host rows to prevent concurrent modifications
+            FOR UPDATE OF h
+        )
     SELECT ah.host_id, ah.host_address, ah.actor_idle_timeout
     INTO v_host_id, v_host_address, v_idle_timeout
     FROM available_hosts ah;

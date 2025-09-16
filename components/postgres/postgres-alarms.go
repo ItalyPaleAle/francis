@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"math/rand/v2"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -69,14 +67,22 @@ func (p *PostgresProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req c
 	// Any upsert will cause the lease to be lost
 	_, err = p.db.
 		Exec(queryCtx,
-			`REPLACE INTO alarms
+			`
+			INSERT INTO alarms
 				(alarm_id, actor_type, actor_id, alarm_name,
 				alarm_due_time, alarm_interval, alarm_ttl_time, alarm_data,
 				alarm_lease_id, alarm_lease_expiration_time)
 			VALUES
-				($1, $2, $3, $4,
-				$5, $6, $7, $8,
-				NULL, NULL)`,
+				($1, $2, $3, $4, $5, $6, $7, $8,NULL, NULL)
+			ON CONFLICT (actor_type, actor_id, alarm_name) DO UPDATE SET
+				alarm_id = EXCLUDED.alarm_id,
+				alarm_due_time = EXCLUDED.alarm_due_time,
+				alarm_interval = EXCLUDED.alarm_interval,
+				alarm_ttl_time = EXCLUDED.alarm_ttl_time,
+				alarm_data = EXCLUDED.alarm_data,
+				alarm_lease_id = NULL,
+				alarm_lease_expiration_time = NULL
+			`,
 			alarmID, ref.ActorType, ref.ActorID, ref.Name,
 			req.DueTime, interval, req.TTL, req.Data)
 	if err != nil {
@@ -113,18 +119,66 @@ func (p *PostgresProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req 
 		return nil, nil
 	}
 
-	return nil, nil
+	hostUUIDs, err := hostIDsToUUIDs(req.Hosts)
+	if err != nil {
+		return nil, err
+	}
 
-	/*return transactions.ExecuteInTransaction(ctx, p.log, p.db, func(ctx context.Context, tx *sql.Tx) ([]*ref.AlarmLease, error) {
-		fetcher := newUpcomingAlarmFetcher(tx, s, &req)
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
 
-		res, err := fetcher.FetchUpcoming(ctx)
+	rows, err := p.db.Query(queryCtx,
+		`SELECT r_alarm_id, r_actor_type, r_actor_id, r_alarm_name, r_alarm_due_time, r_lease_id
+		FROM fetch_and_lease_upcoming_alarms_v1($1, $2, $3, $4, $5)`,
+		hostUUIDs,
+		p.cfg.HostHealthCheckDeadline,
+		p.cfg.AlarmsFetchAheadInterval,
+		p.cfg.AlarmsLeaseDuration,
+		p.cfg.AlarmsFetchAheadBatchSize,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("error executing fetch_and_lease_upcoming_alarms function: %w", err)
+	}
+	defer rows.Close()
+
+	result := make([]*ref.AlarmLease, 0, p.cfg.AlarmsFetchAheadBatchSize)
+	for rows.Next() {
+		var (
+			alarmID   uuid.UUID
+			actorType string
+			actorID   string
+			alarmName string
+			dueTime   time.Time
+			leaseID   uuid.UUID
+		)
+
+		err := rows.Scan(&alarmID, &actorType, &actorID, &alarmName, &dueTime, &leaseID)
 		if err != nil {
-			return nil, fmt.Errorf("failed to fetch upcoming alarms: %w", err)
+			return nil, fmt.Errorf("error scanning row: %w", err)
 		}
 
-		return res, nil
-	})*/
+		alarmRef := ref.AlarmRef{
+			ActorType: actorType,
+			ActorID:   actorID,
+			Name:      alarmName,
+		}
+
+		lease := ref.NewAlarmLease(
+			alarmRef,
+			alarmID.String(),
+			dueTime,
+			leaseID.String(),
+		)
+
+		result = append(result, lease)
+	}
+
+	err = rows.Err()
+	if err != nil {
+		return nil, fmt.Errorf("error iterating rows: %w", err)
+	}
+
+	return result, nil
 }
 
 func (p *PostgresProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmLease) (res components.GetLeasedAlarmRes, err error) {
@@ -164,56 +218,59 @@ func (p *PostgresProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmL
 }
 
 func (p *PostgresProvider) RenewAlarmLeases(ctx context.Context, req components.RenewAlarmLeasesReq) (res components.RenewAlarmLeasesRes, err error) {
-	return components.RenewAlarmLeasesRes{}, nil
-
-	/*now := s.clock.Now()
-	expTime := now.Add(s.cfg.AlarmsLeaseDuration).UnixMilli()
-
-	var leaseIdCondition string
-
-	args := make([]any, 2+len(req.Leases)+len(req.Hosts))
-	args[0] = expTime
-	args[1] = now.UnixMilli()
-
-	// If we have a list of leases, we restrict by them too
-	if len(req.Leases) > 0 {
-		// Add lease conditions
-		b := strings.Builder{}
-		b.Grow(len(req.Leases)*2 + len(" AND alarm_lease_id IN ()"))
-		b.WriteString(" AND alarm_lease_id IN (")
-		for i, lease := range req.Leases {
-			if i == 0 {
-				b.WriteRune('?')
-			} else {
-				b.WriteString(",?")
-			}
-			args[2+i] = lease.LeaseID()
-		}
-		b.WriteRune(')')
-
-		leaseIdCondition = b.String()
+	hostUUIDs, err := hostIDsToUUIDs(req.Hosts)
+	if err != nil {
+		return components.RenewAlarmLeasesRes{}, err
 	}
 
-	// Add host conditions
-	hostPlaceholders := getInPlaceholders(req.Hosts, args, 2+len(req.Leases))
+	args := make([]any, 0, 3)
+	args = append(args,
+		p.cfg.AlarmsLeaseDuration,
+		hostUUIDs,
+	)
 
-	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	// If we have a list of leases, we restrict by them too
+	var leaseCondition string
+	if len(req.Leases) > 0 {
+		leaseIDs := make([]uuid.UUID, len(req.Leases))
+		for i, lease := range req.Leases {
+			var u uuid.UUID
+			switch l := lease.LeaseID().(type) {
+			case string:
+				u, err = uuid.Parse(l)
+				if err != nil {
+					return components.RenewAlarmLeasesRes{}, fmt.Errorf("invalid lease ID '%s': not a valid UUID: %w", l, err)
+				}
+			case uuid.UUID:
+				u = l
+			default:
+				return components.RenewAlarmLeasesRes{}, fmt.Errorf("invalid lease ID '%v': type %T is not supported", lease, lease)
+			}
+			leaseIDs[i] = u
+		}
+
+		leaseCondition = `AND alarm_lease_id = ANY($3)`
+		args = append(args, leaseIDs)
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
-	rows, err := s.db.QueryContext(queryCtx,
+	rows, err := p.db.Query(queryCtx,
 		`
 		UPDATE alarms
-		SET alarm_lease_expiration_time = ?
+		SET alarm_lease_expiration_time = now() + $1::interval
 		WHERE
 			alarm_lease_expiration_time IS NOT NULL
-			AND alarm_lease_expiration_time >= ?
-			`+leaseIdCondition+`
+			AND alarm_lease_expiration_time >= now()
 			AND alarm_id IN (
 				SELECT alarm_id FROM alarms a
 				JOIN active_actors aa ON a.actor_type = aa.actor_type AND a.actor_id = aa.actor_id
-				WHERE aa.host_id IN (`+hostPlaceholders+`)
-			)
+				WHERE aa.host_id = ANY($2)
+				)
+			`+leaseCondition+`
 		RETURNING actor_type, actor_id, alarm_name, alarm_id, alarm_lease_id, alarm_due_time`,
-		args...)
+		args...,
+	)
 	if err != nil {
 		return res, fmt.Errorf("query error: %w", err)
 	}
@@ -224,19 +281,16 @@ func (p *PostgresProvider) RenewAlarmLeases(ctx context.Context, req components.
 		var (
 			aRef             ref.AlarmRef
 			alarmID, leaseID string
-			dueTime          int64
+			dueTime          time.Time
 		)
 		err = rows.Scan(&aRef.ActorType, &aRef.ActorID, &aRef.Name, &alarmID, &leaseID, &dueTime)
 		if err != nil {
 			return res, fmt.Errorf("error scanning rows: %w", err)
 		}
 
-		renewedLeases = append(renewedLeases, ref.NewAlarmLease(
-			aRef,
-			alarmID,
-			time.UnixMilli(dueTime),
-			leaseID,
-		))
+		renewedLeases = append(renewedLeases,
+			ref.NewAlarmLease(aRef, alarmID, dueTime, leaseID),
+		)
 	}
 
 	err = rows.Err()
@@ -245,7 +299,7 @@ func (p *PostgresProvider) RenewAlarmLeases(ctx context.Context, req components.
 	}
 
 	res.Leases = renewedLeases
-	return res, nil*/
+	return res, nil
 }
 
 func (p *PostgresProvider) ReleaseAlarmLease(ctx context.Context, lease *ref.AlarmLease) error {
@@ -279,21 +333,21 @@ func (p *PostgresProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Ala
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
-	whereClause := `WHERE
-		alarm_id = $3
-		AND alarm_lease_id = $4
-		AND alarm_lease_expiration_time IS NOT NULL
-		AND alarm_lease_expiration_time >= now()`
-
 	// If we want to refresh the lease...
 	var res pgconn.CommandTag
 	if req.RefreshLease {
-		res, err = p.db.Exec(queryCtx, `
+		res, err = p.db.Exec(queryCtx,
+			`
 			UPDATE alarms
 			SET
 				alarm_lease_expiration_time = now() + $1::interval,
 				alarm_due_time = $2
-			`+whereClause,
+			WHERE
+				alarm_id = $3
+				AND alarm_lease_id = $4
+				AND alarm_lease_expiration_time IS NOT NULL
+				AND alarm_lease_expiration_time >= now()
+			`,
 			p.cfg.AlarmsLeaseDuration, req.DueTime,
 			lease.Key(), lease.LeaseID(),
 		)
@@ -304,8 +358,13 @@ func (p *PostgresProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Ala
 				alarm_lease_id = NULL,
 				alarm_lease_expiration_time = NULL,
 				alarm_due_time = $1
-			`+whereClause,
-			req.DueTime, nil,
+			WHERE
+				alarm_id = $2
+				AND alarm_lease_id = $3
+				AND alarm_lease_expiration_time IS NOT NULL
+				AND alarm_lease_expiration_time >= now()
+			`,
+			req.DueTime,
 			lease.Key(), lease.LeaseID(),
 		)
 	}
@@ -342,179 +401,4 @@ func (p *PostgresProvider) DeleteLeasedAlarm(ctx context.Context, lease *ref.Ala
 	}
 
 	return nil
-}
-
-type activeHost struct {
-	HostID           string
-	ActorType        string
-	IdleTimeoutMs    int64
-	ConcurrencyLimit int32
-	Capacity         int32
-}
-
-// String implements fmt.Stringer and it's used for debugging
-func (ah activeHost) String() string {
-	return fmt.Sprintf(
-		"activeHost:[HostID=%q ActorType=%q IdleTimeoutMs=%d ConcurrencyLimit=%d Capacity=%d]",
-		ah.HostID, ah.ActorType, ah.IdleTimeoutMs, ah.ConcurrencyLimit, ah.Capacity,
-	)
-}
-
-type activeHostsList struct {
-	hosts       map[string]*activeHost   // Host ID -> active host
-	capacities  map[string][]*activeHost // Actor Type -> []active host
-	list        []*activeHost
-	hasCapLimit bool
-}
-
-func newActiveHostsList(hostLen int) *activeHostsList {
-	return &activeHostsList{
-		hosts:      make(map[string]*activeHost, hostLen),
-		list:       make([]*activeHost, 0, hostLen),
-		capacities: map[string][]*activeHost{},
-	}
-}
-
-// HasHost returns true if the list contains the host with the given ID
-func (ahl *activeHostsList) HasHost(hostID string) bool {
-	_, ok := ahl.hosts[hostID]
-	return ok
-}
-
-// HostForActorType picks a random host which has capacity to execute the actor type
-// After picking a host, it decrements the available capacity on that host
-func (ahl *activeHostsList) HostForActorType(actorType string) (host *activeHost) {
-	for len(ahl.capacities[actorType]) > 0 {
-		// Select a random index
-		idx := rand.IntN(len(ahl.capacities[actorType]))
-
-		candidate := ahl.capacities[actorType][idx]
-		if candidate.Capacity > 0 {
-			host = candidate
-		}
-
-		candidate.Capacity--
-		if candidate.Capacity <= 0 {
-			// Delete if capacity is now depleted
-			var j int
-			for _, t := range ahl.capacities[actorType] {
-				if t.HostID == candidate.HostID {
-					continue
-				}
-				ahl.capacities[actorType][j] = t
-				j++
-			}
-			ahl.capacities[actorType] = ahl.capacities[actorType][:j]
-		}
-
-		if host != nil {
-			return host
-		}
-	}
-
-	// No host found
-	return nil
-}
-
-func (ahl *activeHostsList) Len() int {
-	return len(ahl.list)
-}
-
-func (ahl *activeHostsList) Get(hostID string) *activeHost {
-	if hostID == "" {
-		return nil
-	}
-	return ahl.hosts[hostID]
-}
-
-func (ahl *activeHostsList) ScanRows(rows *sql.Rows) error {
-	for rows.Next() {
-		r := &activeHost{}
-		err := rows.Scan(&r.HostID, &r.ActorType, &r.IdleTimeoutMs, &r.ConcurrencyLimit, &r.Capacity)
-		if err != nil {
-			return err
-		}
-
-		ahl.hosts[r.HostID] = r
-		ahl.list = append(ahl.list, r)
-
-		if r.ConcurrencyLimit > 0 {
-			ahl.hasCapLimit = true
-		}
-
-		if r.Capacity > 0 {
-			if ahl.capacities[r.ActorType] == nil {
-				ahl.capacities[r.ActorType] = make([]*activeHost, 0, cap(ahl.list))
-			}
-
-			ahl.capacities[r.ActorType] = append(ahl.capacities[r.ActorType], r)
-		}
-	}
-
-	return rows.Err()
-}
-
-// String implements fmt.Stringer and it's used for debugging
-func (ahl *activeHostsList) String() string {
-	var i int
-	hosts := make([]string, len(ahl.hosts))
-	for h := range ahl.hosts {
-		hosts[i] = h
-		i++
-	}
-
-	list := make([]string, len(ahl.list))
-	for i, v := range ahl.list {
-		list[i] = v.String()
-	}
-
-	listStr := "[]"
-	if len(list) > 0 {
-		listStr = "[\n    " + strings.Join(list, "\n    ") + "\n  ]"
-	}
-
-	return fmt.Sprintf("activeHostsList:[\n  hosts=[%s]\n  hasCapLimit=%v\n  list=%s\n]", strings.Join(hosts, ","), ahl.hasCapLimit, listStr)
-}
-
-type fetchedUpcomingAlarm struct {
-	AlarmID      string
-	ActorType    string
-	ActorID      string
-	AlarmDueTime int64
-	HostID       *string
-}
-
-// String implements fmt.Stringer and it's used for debugging
-func (fua fetchedUpcomingAlarm) String() string {
-	const RFC3339MilliNoTZ = "2006-01-02T15:04:05.999"
-
-	due := time.UnixMilli(fua.AlarmDueTime).Format(RFC3339MilliNoTZ)
-
-	if fua.HostID != nil {
-		return fmt.Sprintf(
-			"fetchedUpcomingAlarm:[ID=%q ActorType=%q ActorID=%q DueTime=%q DueTimeUnix=%d HostID=%q]",
-			fua.AlarmID, fua.ActorType, fua.ActorID, due, fua.AlarmDueTime, *fua.HostID,
-		)
-	}
-
-	return fmt.Sprintf(
-		"fetchedUpcomingAlarm:[ID=%q ActorType=%q ActorID=%q DueTime=%q DueTimeUnix=%d HostID=nil]",
-		fua.AlarmID, fua.ActorType, fua.ActorID, due, fua.AlarmDueTime,
-	)
-}
-
-type fetchedUpcomingAlarmsList []fetchedUpcomingAlarm
-
-// String implements fmt.Stringer and it's used for debugging
-func (ful fetchedUpcomingAlarmsList) String() string {
-	listStr := "[]"
-	if len(ful) > 0 {
-		list := make([]string, len(ful))
-		for i, v := range ful {
-			list[i] = v.String()
-		}
-		listStr = "[\n  " + strings.Join(list, "\n  ") + "\n]"
-	}
-
-	return fmt.Sprintf("fetchedUpcomingAlarmList:%s", listStr)
 }

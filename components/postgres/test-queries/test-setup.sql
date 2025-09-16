@@ -25,7 +25,7 @@ INSERT INTO freeze_time_config
 
 CREATE OR REPLACE FUNCTION freeze_time(
     freeze_time timestamptz,
-    tick BOOL DEFAULT FALSE
+    tick bool DEFAULT FALSE
 )
 RETURNS void AS
 $$
