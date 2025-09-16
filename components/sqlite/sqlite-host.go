@@ -13,7 +13,6 @@ import (
 
 	"github.com/italypaleale/actors/components"
 	"github.com/italypaleale/actors/internal/ref"
-	"github.com/italypaleale/actors/internal/sql/sqladapter"
 	"github.com/italypaleale/actors/internal/sql/transactions"
 )
 
@@ -24,7 +23,7 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 	}
 	hostID := hostIDObj.String()
 
-	_, oErr = transactions.ExecuteInSqlTransaction(ctx, s.log, s.db, s.timeout, "IMMEDIATE", func(ctx context.Context, tx *sql.Conn) (zero struct{}, err error) {
+	_, oErr = transactions.ExecuteInSqlTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
 		now := s.clock.Now().UnixMilli()
 
 		// To start, we need to delete any actor host with the same address that has not sent a health check in the maximum allotted time
@@ -85,7 +84,7 @@ func (s *SQLiteProvider) UpdateActorHost(ctx context.Context, hostID string, req
 		return nil
 	}
 
-	_, oErr := transactions.ExecuteInSqlTransaction(ctx, s.log, s.db, s.timeout, "IMMEDIATE", func(ctx context.Context, tx *sql.Conn) (zero struct{}, err error) {
+	_, oErr := transactions.ExecuteInSqlTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
 		// Update the last health check if needed
 		if req.UpdateLastHealthCheck {
 			err = s.updateActorHostLastHealthCheck(ctx, hostID, tx)
@@ -150,7 +149,7 @@ func (s *SQLiteProvider) UpdateActorHost(ctx context.Context, hostID string, req
 	return nil
 }
 
-func (s *SQLiteProvider) updateActorHostLastHealthCheck(ctx context.Context, hostID string, tx sqladapter.DatabaseSQLConn) error {
+func (s *SQLiteProvider) updateActorHostLastHealthCheck(ctx context.Context, hostID string, tx *sql.Tx) error {
 	now := s.clock.Now().UnixMilli()
 
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
@@ -216,7 +215,12 @@ func (s *SQLiteProvider) UnregisterHost(ctx context.Context, hostID string) erro
 	return nil
 }
 
-func (s *SQLiteProvider) existingActorLookup(ctx context.Context, tx sqladapter.DatabaseSQLConn, ref ref.ActorRef, hosts []string, now int64) (res components.LookupActorRes, err error) {
+// Applies to both *sql.DB and *sql.Tx
+type sqlQueryRow interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func (s *SQLiteProvider) existingActorLookup(ctx context.Context, tx sqlQueryRow, ref ref.ActorRef, hosts []string, now int64) (res components.LookupActorRes, err error) {
 	// Perform a lookup to check if the actor is already active on _any_ host
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
@@ -265,6 +269,7 @@ func (s *SQLiteProvider) existingActorLookup(ctx context.Context, tx sqladapter.
 
 func (s *SQLiteProvider) LookupActor(ctx context.Context, ref ref.ActorRef, opts components.LookupActorOpts) (components.LookupActorRes, error) {
 	// Start by checking if we have an existing active actor
+	// Fast path, we do this before starting any transaction that may lock the database
 	res, err := s.existingActorLookup(ctx, s.db, ref, opts.Hosts, s.clock.Now().UnixMilli())
 	if err != nil {
 		return components.LookupActorRes{}, err
@@ -276,8 +281,7 @@ func (s *SQLiteProvider) LookupActor(ctx context.Context, ref ref.ActorRef, opts
 	}
 
 	// If we didn't find an actor, we need to (attempt to) allocate it
-	// We start an exclusive transaction, which locks the entire database right away
-	res, err = transactions.ExecuteInSqlTransaction(ctx, s.log, s.db, s.timeout, "EXCLUSIVE", func(ctx context.Context, tx *sql.Conn) (res components.LookupActorRes, err error) {
+	res, err = transactions.ExecuteInSqlTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (res components.LookupActorRes, err error) {
 		now := s.clock.Now().UnixMilli()
 
 		// To start, perform the lookup again
@@ -402,7 +406,7 @@ func (s *SQLiteProvider) RemoveActor(ctx context.Context, ref ref.ActorRef) erro
 	return nil
 }
 
-func (s *SQLiteProvider) insertHostActorTypes(ctx context.Context, tx sqladapter.DatabaseSQLConn, hostID string, actorTypes []components.ActorHostType) error {
+func (s *SQLiteProvider) insertHostActorTypes(ctx context.Context, tx *sql.Tx, hostID string, actorTypes []components.ActorHostType) error {
 	if len(actorTypes) == 0 {
 		return nil
 	}

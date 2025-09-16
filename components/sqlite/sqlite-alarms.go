@@ -133,7 +133,7 @@ func (s *SQLiteProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req co
 		return nil, nil
 	}
 
-	return transactions.ExecuteInSqlTransaction(ctx, s.log, s.db, s.timeout, "IMMEDIATE", func(ctx context.Context, tx *sql.Conn) ([]*ref.AlarmLease, error) {
+	return transactions.ExecuteInSqlTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) ([]*ref.AlarmLease, error) {
 		fetcher := newUpcomingAlarmFetcher(tx, s, &req)
 
 		res, err := fetcher.FetchUpcoming(ctx)
@@ -383,7 +383,7 @@ func (s *SQLiteProvider) DeleteLeasedAlarm(ctx context.Context, lease *ref.Alarm
 }
 
 type upcomingAlarmFetcher struct {
-	tx      *sql.Conn
+	tx      *sql.Tx
 	now     time.Time
 	log     *slog.Logger
 	req     *components.FetchAndLeaseUpcomingAlarmsReq
@@ -396,7 +396,7 @@ type upcomingAlarmFetcher struct {
 	batchSize         int
 }
 
-func newUpcomingAlarmFetcher(tx *sql.Conn, s *SQLiteProvider, req *components.FetchAndLeaseUpcomingAlarmsReq) *upcomingAlarmFetcher {
+func newUpcomingAlarmFetcher(tx *sql.Tx, s *SQLiteProvider, req *components.FetchAndLeaseUpcomingAlarmsReq) *upcomingAlarmFetcher {
 	now := s.clock.Now()
 
 	return &upcomingAlarmFetcher{

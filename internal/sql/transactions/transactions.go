@@ -17,16 +17,10 @@ import (
 
 // ExecuteInSqlTransaction executes a function in a transaction for database/sql.
 // If the handler returns an error, the transaction is rolled back automatically.
-func ExecuteInSqlTransaction[T any](ctx context.Context, log *slog.Logger, db *sql.DB, timeout time.Duration, mode string, fn func(ctx context.Context, tx *sql.Conn) (T, error)) (res T, err error) {
-	// We start the transaction manually (instead of using BeginTx) to be able to control the isolation level
-	// Get a connection from the pool
-	// Note that the context here is tied to the connection
-	conn, err := db.Conn(ctx)
-
+func ExecuteInSqlTransaction[T any](ctx context.Context, log *slog.Logger, db *sql.DB, fn func(ctx context.Context, tx *sql.Tx) (T, error)) (res T, err error) {
 	// Start the transaction
-	queryCtx, queryCancel := context.WithTimeout(ctx, timeout)
-	defer queryCancel()
-	_, err = conn.ExecContext(queryCtx, "BEGIN "+mode+" TRANSACTION")
+	// Note that the context here is tied to the entire transaction
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return res, fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -37,10 +31,7 @@ func ExecuteInSqlTransaction[T any](ctx context.Context, log *slog.Logger, db *s
 		if success {
 			return
 		}
-
-		rollbackCtx, rollbackCancel := context.WithTimeout(ctx, timeout)
-		defer rollbackCancel()
-		_, rollbackErr := conn.ExecContext(rollbackCtx, "ROLLBACK")
+		rollbackErr := tx.Rollback()
 		if rollbackErr != nil {
 			// Log errors only
 			log.ErrorContext(ctx, "Error while attempting to roll back transaction", slog.Any("error", rollbackErr))
@@ -48,15 +39,13 @@ func ExecuteInSqlTransaction[T any](ctx context.Context, log *slog.Logger, db *s
 	}()
 
 	// Execute the action
-	res, err = fn(ctx, conn)
+	res, err = fn(ctx, tx)
 	if err != nil {
 		return res, err
 	}
 
 	// Commit the transaction
-	queryCtx, queryCancel = context.WithTimeout(ctx, timeout)
-	defer queryCancel()
-	_, err = conn.ExecContext(queryCtx, "COMMIT")
+	err = tx.Commit()
 	if err != nil {
 		return res, fmt.Errorf("failed to commit transaction: %w", err)
 	}
