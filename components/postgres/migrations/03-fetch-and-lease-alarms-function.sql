@@ -180,22 +180,24 @@ BEGIN
                     aa.host_id AS existing_host_id,
                     atc.total_capacity,
                     CASE
-                WHEN
-                    aa.host_id IS NULL
-                    OR NOT EXISTS (SELECT 1 FROM temp_active_hosts WHERE temp_active_hosts.host_id = aa.host_id)
+                        WHEN
+                            aa.host_id IS NULL
+                            OR NOT EXISTS (
+                                SELECT 1 FROM temp_active_hosts WHERE temp_active_hosts.host_id = aa.host_id
+                            )
                         THEN 0
                         ELSE 1
-                    END AS active_actor,
+                        END AS active_actor,
                     SUM(1)
-                    FILTER (
-                        WHERE aa.host_id IS NULL
-                        OR NOT EXISTS (SELECT 1 FROM temp_active_hosts WHERE temp_active_hosts.host_id = aa.host_id)
-                    )
-                    OVER (
-                        PARTITION BY a.actor_type
-                        ORDER BY a.alarm_due_time, a.alarm_id
-                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-                    ) AS rownum
+                        FILTER (
+                            WHERE aa.host_id IS NULL
+                            OR NOT EXISTS (SELECT 1 FROM temp_active_hosts WHERE temp_active_hosts.host_id = aa.host_id)
+                        )
+                        OVER (
+                            PARTITION BY a.actor_type
+                            ORDER BY a.alarm_due_time, a.alarm_id
+                            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                        ) AS rownum
                 FROM alarms AS a
                 INNER JOIN actor_type_capacity AS atc ON
                     a.actor_type = atc.actor_type
@@ -325,28 +327,28 @@ BEGIN
         v_actor_lock_key := abs(h_bigint(rec.actor_type || '::' || rec.actor_id));
 
         -- Try to acquire advisory lock for this specific actor
+        -- This may fail if someone else is already holding a lock for the actor
+        -- It means that the actor is being activated somewhere else, likely because it's going to be invoked (which will keep it busy for a bit)
+        -- To keep things simple, we can just skip this alarm and we will re-fetch it on the next iteration
+        -- The alternative would be to block while waiting for the lock, but that would slow everything down
         IF pg_try_advisory_lock(v_actor_lock_key) THEN
             BEGIN
                 -- Check if actor already exists (another process might have created it)
                 IF NOT actor_active_v1(rec.actor_type, rec.actor_id, v_health_cutoff) THEN
                     -- Find a random host with capacity for this actor type
-                    -- Use row-level locking to prevent race conditions with the host_actor_types table
-                    SELECT tah.host_id INTO v_allocated_host_id
-                    FROM temp_active_hosts AS tah 
-                    INNER JOIN host_actor_types AS hat ON 
-                        tah.host_id = hat.host_id 
-                        AND tah.actor_type = hat.actor_type
+                    -- Note: There's a chance that multiple queries may allocate actors on the same hosts and we may go over capacity
+                    -- We consider this an acceptable risk, as the complexity of handling that case is too significant otherwise (it would require locking the row with a FOR UPDATE in active_actor_hosts, which can lead to deadlocks and other issues)
+                    SELECT host_id INTO v_allocated_host_id
+                    FROM temp_active_hosts 
                     WHERE
-                        tah.actor_type = rec.actor_type 
-                        AND tah.available_capacity > 0
+                        actor_type = rec.actor_type 
+                        AND available_capacity > 0
                     ORDER BY 
                         -- Prefer hosts with lower current load for better distribution
-                        tah.available_capacity DESC,
+                        available_capacity DESC,
                         -- Then randomize among hosts with same load
                         random()
-                    LIMIT 1
-                    -- Lock the host_actor_types row
-                    FOR UPDATE OF hat;
+                    LIMIT 1;
 
                     IF v_allocated_host_id IS NOT NULL THEN
                         -- Insert/update the actor
