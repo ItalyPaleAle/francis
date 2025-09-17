@@ -470,7 +470,6 @@ func (u *upcomingAlarmFetcher) getActiveHosts(ctx context.Context) (activeHosts 
 			// We add the list of hosts passed as input, filtering unhealthy ones out and including available capacity for all
 			// Note that if an actor host has no limit on a given actor type, we consider it to be "limited to MaxInt32" (2147483647)
 			// Also note that we do not filter out hosts/actor_type combinations at capacity, because we can still fetch alarms for actors active on them
-			// TODO: Indexes on temp table
 			`
 				PRAGMA temp_store = MEMORY;
 

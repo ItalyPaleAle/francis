@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -21,12 +22,34 @@ import (
 	"github.com/italypaleale/actors/internal/testutil"
 )
 
-// Connect to an in-memory database
-// Replace with the commented-out string to write to a file on disk, for debugging
-// Note: file must be deleted manually at the end of each test
-const testConnectionString = ":memory:" // "file:testdb.db"
+// Runs the full test suite with a fast, in-memory database
+func TestSQLiteProviderInMemory(t *testing.T) {
+	// Connect to an in-memory database
+	s := initTestProvider(t, "file:dbtest?mode=memory")
 
-func TestSqliteProvider(t *testing.T) {
+	// Run the test suites
+	suite := comptesting.NewSuite(s)
+	t.Run("suite", suite.RunTests)
+	t.Run("concurrency suite", suite.RunConcurrencyTests)
+}
+
+// Runs the full test suite with an on-disk database
+// For SQLite, this makes a difference because of locking
+func TestSQLiteProviderDisk(t *testing.T) {
+	// Get a temporary file
+	dbPath := filepath.Join(t.TempDir(), "sqlitetest.db")
+
+	// Increase the timeout since the concurrent tests can take some time in a locked state
+	s := initTestProvider(t, "file:"+dbPath+"?_pragma=busy_timeout(15000)")
+	s.timeout = 20 * time.Second
+
+	// Run the test suite
+	suite := comptesting.NewSuite(s)
+	t.Run("suite", suite.RunTests)
+	t.Run("concurrency suite", suite.RunConcurrencyTests)
+}
+
+func initTestProvider(t *testing.T, connString string) (p *SQLiteProvider) {
 	clock := clocktesting.NewFakeClock(time.Now())
 	h := comptesting.NewSlogClockHandler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
@@ -34,7 +57,7 @@ func TestSqliteProvider(t *testing.T) {
 	log := slog.New(h)
 
 	providerOpts := SQLiteProviderOptions{
-		ConnectionString: testConnectionString,
+		ConnectionString: connString,
 
 		// Disable automated cleanups in this test
 		// We will run the cleanups automatically
@@ -64,9 +87,7 @@ func TestSqliteProvider(t *testing.T) {
 	// Wait for Run to call <-ctx.Done()
 	ctx.WaitForDone()
 
-	// Run the test suite
-	suite := comptesting.NewSuite(s)
-	suite.Run(t)
+	return s
 }
 
 func (s *SQLiteProvider) CleanupExpired() error {
@@ -330,40 +351,8 @@ func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, err
 }
 
 func TestHostGarbageCollection(t *testing.T) {
-	clock := clocktesting.NewFakeClock(time.Now())
-	h := comptesting.NewSlogClockHandler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}), clock)
-	log := slog.New(h)
-
-	providerOpts := SQLiteProviderOptions{
-		ConnectionString: "file:gctest?mode=memory",
-		// Disable automated cleanups in this test
-		// We will run the cleanups manually
-		CleanupInterval: -1,
-		clock:           clock,
-	}
-	providerConfig := comptesting.GetProviderConfig()
-
-	// Create the provider
-	s, err := NewSQLiteProvider(log, providerOpts, providerConfig)
-	require.NoError(t, err, "Error creating provider")
-
-	// Init the provider
-	err = s.Init(t.Context())
-	require.NoError(t, err, "Error initializing provider")
-
-	// Run the provider in background for side effects (this initializes the GC)
-	ctx := testutil.NewContextDoneNotifier(t.Context())
-	go func() {
-		err = s.Run(ctx)
-		if err != nil && err != context.Canceled {
-			log.Error("Error running provider", slog.Any("error", err))
-		}
-	}()
-
-	// Wait for Run to call <-ctx.Done()
-	ctx.WaitForDone()
+	// Connect to an in-memory database, but note it has a different name form the previous
+	s := initTestProvider(t, "file:gctest?mode=memory")
 
 	t.Run("garbage collector removes expired hosts", func(t *testing.T) {
 		// Register multiple hosts at different times
@@ -373,7 +362,7 @@ func TestHostGarbageCollection(t *testing.T) {
 				{ActorType: "TestActor1", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 5},
 			},
 		}
-		host1Res, err := s.RegisterHost(ctx, host1Req)
+		host1Res, err := s.RegisterHost(t.Context(), host1Req)
 		require.NoError(t, err)
 
 		// Advance clock by 30 seconds
@@ -385,7 +374,7 @@ func TestHostGarbageCollection(t *testing.T) {
 				{ActorType: "TestActor2", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 3},
 			},
 		}
-		host2Res, err := s.RegisterHost(ctx, host2Req)
+		host2Res, err := s.RegisterHost(t.Context(), host2Req)
 		require.NoError(t, err)
 
 		// Advance clock by another 20 seconds (so host3 is 20s after host2)
@@ -397,11 +386,11 @@ func TestHostGarbageCollection(t *testing.T) {
 				{ActorType: "TestActor3", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 2},
 			},
 		}
-		host3Res, err := s.RegisterHost(ctx, host3Req)
+		host3Res, err := s.RegisterHost(t.Context(), host3Req)
 		require.NoError(t, err)
 
 		// Verify all hosts are initially present
-		spec, err := s.GetAllHosts(ctx)
+		spec, err := s.GetAllHosts(t.Context())
 		require.NoError(t, err)
 		require.Len(t, spec.Hosts, 3, "All hosts should be present initially")
 		require.Len(t, spec.HostActorTypes, 3, "All host actor types should be present initially")
@@ -416,7 +405,7 @@ func TestHostGarbageCollection(t *testing.T) {
 		require.NoError(t, err)
 
 		// Verify only host1 and its actor types are removed
-		spec, err = s.GetAllHosts(ctx)
+		spec, err = s.GetAllHosts(t.Context())
 		require.NoError(t, err)
 		require.Len(t, spec.Hosts, 2, "Only expired host should be removed")
 		require.Len(t, spec.HostActorTypes, 2, "Expired host's actor types should be removed")
@@ -449,7 +438,7 @@ func TestHostGarbageCollection(t *testing.T) {
 		require.NoError(t, err)
 
 		// Verify only host3 remains
-		spec, err = s.GetAllHosts(ctx)
+		spec, err = s.GetAllHosts(t.Context())
 		require.NoError(t, err)
 		require.Len(t, spec.Hosts, 1, "Only one host should remain")
 		require.Len(t, spec.HostActorTypes, 1, "Only one host actor type should remain")
@@ -468,7 +457,7 @@ func TestHostGarbageCollection(t *testing.T) {
 		require.NoError(t, err)
 
 		// Verify all hosts are removed
-		spec, err = s.GetAllHosts(ctx)
+		spec, err = s.GetAllHosts(t.Context())
 		require.NoError(t, err)
 		assert.Len(t, spec.Hosts, 0, "All hosts should be removed")
 		assert.Len(t, spec.HostActorTypes, 0, "All host actor types should be removed")

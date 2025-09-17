@@ -54,11 +54,6 @@ func ParseConnectionString(connString string, log *slog.Logger) (string, error) 
 		qs = make(url.Values, 2)
 	}
 
-	// If the database is in-memory, we must ensure that cache=shared is set
-	if isMemoryDB {
-		qs["cache"] = []string{"shared"}
-	}
-
 	// Check if the database is read-only or immutable
 	isReadOnly := false
 	if len(qs["mode"]) > 0 {

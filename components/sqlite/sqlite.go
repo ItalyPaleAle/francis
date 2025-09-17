@@ -99,6 +99,12 @@ func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, provi
 		if err != nil {
 			return nil, fmt.Errorf("failed to open SQLite database: %w", err)
 		}
+
+		// For in-memory databases, we must limit to 1 open connection at the same time, or they won't see the whole data
+		// The other workaround, of using shared caches, doesn't work well with multiple write transactions trying to happen at once
+		if IsInMemoryDB(sqliteOpts.ConnectionString) {
+			s.db.SetMaxOpenConns(1)
+		}
 	}
 
 	return s, nil

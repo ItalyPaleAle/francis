@@ -35,8 +35,16 @@ var queryTestSetup string
 // Uncomment this test to have a test database, including seed data, populated
 // It is not removed automatically at the end of the test
 func TestPostgresCreateTestDB(t *testing.T) {
+	// Comment out to have the schem created
+	t.SkipNow()
+
 	p, testSchema, _ := initTestProvider(t)
 	t.Log(`Session option query: SET SESSION search_path = "` + testSchema + `", pg_catalog, public`)
+
+	// Close the database at the end, but do not cleanup the data
+	t.Cleanup(func() {
+		p.db.Close()
+	})
 
 	// Seed with the test data
 	require.NoError(t, p.Seed(t.Context(), comptesting.GetSpec()))
@@ -44,11 +52,15 @@ func TestPostgresCreateTestDB(t *testing.T) {
 
 func TestPostgresProvider(t *testing.T) {
 	p, _, cleanupFn := initTestProvider(t)
-	t.Cleanup(cleanupFn)
+	t.Cleanup(func() {
+		cleanupFn()
+		p.db.Close()
+	})
 
-	// Run the test suite
+	// Run the test suites
 	suite := comptesting.NewSuite(p)
-	suite.Run(t)
+	t.Run("suite", suite.RunTests)
+	t.Run("concurrency suite", suite.RunConcurrencyTests)
 }
 
 func initTestProvider(t *testing.T) (p *PostgresProvider, testSchema string, cleanupFn func()) {
@@ -369,7 +381,10 @@ func (p *PostgresProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, e
 
 func TestHostGarbageCollection(t *testing.T) {
 	p, _, cleanupFn := initTestProvider(t)
-	t.Cleanup(cleanupFn)
+	t.Cleanup(func() {
+		cleanupFn()
+		p.db.Close()
+	})
 
 	t.Run("garbage collector removes expired hosts", func(t *testing.T) {
 		// Register multiple hosts at different times
