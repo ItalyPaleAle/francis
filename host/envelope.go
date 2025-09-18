@@ -20,8 +20,8 @@ func newObjectEnvelope(obj any) *objectEnvelope {
 	}
 }
 
-func (o objectEnvelope) Decode(into any) error {
-	if o.object == nil {
+func (o *objectEnvelope) Decode(into any) error {
+	if o == nil || o.object == nil {
 		return nil
 	}
 
@@ -30,7 +30,7 @@ func (o objectEnvelope) Decode(into any) error {
 	}
 
 	intoVal := reflect.ValueOf(into)
-	if intoVal.IsNil() || intoVal.Kind() != reflect.Pointer {
+	if intoVal.Kind() != reflect.Pointer || intoVal.IsNil() {
 		return errors.New("parameter out must be a non-nil pointer")
 	}
 

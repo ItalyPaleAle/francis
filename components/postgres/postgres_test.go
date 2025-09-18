@@ -531,6 +531,14 @@ func connectTestDatabase(t *testing.T, testSchema string) (conn *pgxpool.Pool, c
 		return nil
 	}
 
+	// Log notices from the database
+	if cfg.ConnConfig == nil {
+		cfg.ConnConfig = &pgx.ConnConfig{}
+	}
+	/*cfg.ConnConfig.OnNotice = func(pc *pgconn.PgConn, n *pgconn.Notice) {
+		fmt.Println("PostgreSQL NOTICE:", n.Message)
+	}*/
+
 	// Connect to the database
 	conn, err = pgxpool.NewWithConfig(t.Context(), cfg)
 	require.NoError(t, err, "Failed to connect to database")

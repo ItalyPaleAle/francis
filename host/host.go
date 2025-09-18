@@ -303,8 +303,8 @@ func (h *Host) Run(parentCtx context.Context) error {
 
 	// Perform provider initialization steps
 	initCtx, initCancel := context.WithTimeout(parentCtx, h.providerRequestTimeout)
-	defer initCancel()
 	err := h.actorProvider.Init(initCtx)
+	initCancel()
 	if err != nil {
 		return fmt.Errorf("failed to init provider: %w", err)
 	}
@@ -318,11 +318,11 @@ func (h *Host) Run(parentCtx context.Context) error {
 	}
 
 	registerCtx, registerCancel := context.WithTimeout(parentCtx, h.providerRequestTimeout)
-	defer registerCancel()
 	res, err := h.actorProvider.RegisterHost(registerCtx, components.RegisterHostReq{
 		Address:    h.address,
 		ActorTypes: actorsConfigList,
 	})
+	registerCancel()
 	if err != nil {
 		return fmt.Errorf("failed to register actor host: %w", err)
 	}
@@ -354,6 +354,7 @@ func (h *Host) Run(parentCtx context.Context) error {
 		}
 
 		h.log.InfoContext(ctx, "Unregistered actor host")
+		h.hostID = ""
 	}()
 
 	// Run all services
@@ -408,6 +409,11 @@ func (h *Host) HaltAll() error {
 	}
 
 	return nil
+}
+
+// HostID returns the ID of the host.
+func (h *Host) HostID() string {
+	return h.hostID
 }
 
 // Halt gracefully halts an actor that is hosted on the current host

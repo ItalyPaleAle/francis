@@ -40,7 +40,6 @@ DECLARE
     v_horizon timestamptz;
     v_health_cutoff timestamptz;
     v_lease_expiration timestamptz;
-    v_has_capacity_limits boolean := false;
     v_allocated_host_id uuid;
     v_actor_lock_key bigint;
     rec RECORD;
@@ -106,15 +105,11 @@ BEGIN
         allocated_host_id uuid
     ) ON COMMIT DROP;
 
-    -- Check if we have any capacity limits
-    SELECT EXISTS (
+    -- Fetch upcoming alarms based on whether we have capacity constraints
+    IF EXISTS (
         SELECT 1 FROM temp_active_hosts
         WHERE concurrency_limit > 0
-    )
-    INTO v_has_capacity_limits;
-
-    -- Fetch upcoming alarms based on whether we have capacity constraints
-    IF v_has_capacity_limits THEN
+    ) THEN
         -- How the query works:
         --
         -- 1. allowed_actor_hosts:
@@ -333,6 +328,8 @@ BEGIN
         -- The alternative would be to block while waiting for the lock, but that would slow everything down
         IF pg_try_advisory_lock(v_actor_lock_key) THEN
             BEGIN
+                --RAISE NOTICE 'Acquired lock for actor % / %', rec.actor_type, rec.actor_id;
+
                 -- Check if actor already exists (another process might have created it)
                 IF NOT actor_active_v1(rec.actor_type, rec.actor_id, v_health_cutoff) THEN
                     -- Find a random host with capacity for this actor type
@@ -391,12 +388,16 @@ BEGIN
             EXCEPTION
                 WHEN OTHERS THEN
                     -- Release lock on any error and re-raise
+                    -- RAISE NOTICE 'Released lock for actor % / % after exception', rec.actor_type, rec.actor_id;
                     PERFORM pg_advisory_unlock(v_actor_lock_key);
                     RAISE;
             END;
 
             -- Release the advisory lock
+            --RAISE NOTICE 'Released lock for actor % / %', rec.actor_type, rec.actor_id;
             PERFORM pg_advisory_unlock(v_actor_lock_key);
+        -- ELSE
+        --     RAISE NOTICE 'Could not acquire lock for actor % / %', rec.actor_type, rec.actor_id;
         END IF;
     END LOOP;
 
