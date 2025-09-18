@@ -138,7 +138,7 @@ func (pq queueHeap[K, T]) Swap(i, j int) {
 
 func (pq *queueHeap[K, T]) Push(x any) {
 	n := len(*pq)
-	item := x.(*queueItem[K, T])
+	item := x.(*queueItem[K, T]) //nolint:forcetypeassert
 	item.index = n
 	*pq = append(*pq, item)
 }

@@ -396,14 +396,12 @@ func TestTurnBasedLocker_StopAndWait(t *testing.T) {
 		locker := &TurnBasedLocker{}
 
 		// First goroutine acquires the lock and holds it
-		lockHeld := make(chan struct{})
+		lockHeld := make(chan error)
 		unlockSignal := make(chan struct{})
 		lockReleased := make(chan struct{})
 
 		go func() {
-			err := locker.Lock(t.Context())
-			require.NoError(t, err)
-			close(lockHeld)
+			lockHeld <- locker.Lock(t.Context())
 
 			// Wait for signal to unlock
 			<-unlockSignal
@@ -412,7 +410,7 @@ func TestTurnBasedLocker_StopAndWait(t *testing.T) {
 		}()
 
 		// Wait for the lock to be acquired
-		<-lockHeld
+		require.NoError(t, <-lockHeld)
 
 		// Start StopAndWait in another goroutine
 		stopCompleted := make(chan struct{})
@@ -580,13 +578,11 @@ func TestTurnBasedLocker_StopAndWait(t *testing.T) {
 		locker := &TurnBasedLocker{}
 
 		// First goroutine acquires the lock
-		lockHeld := make(chan struct{})
+		lockHeld := make(chan error)
 		unlockSignal := make(chan struct{})
 
 		go func() {
-			err := locker.Lock(t.Context())
-			require.NoError(t, err)
-			close(lockHeld)
+			lockHeld <- locker.Lock(t.Context())
 
 			// Wait for signal to unlock
 			<-unlockSignal
@@ -594,7 +590,7 @@ func TestTurnBasedLocker_StopAndWait(t *testing.T) {
 		}()
 
 		// Wait for the lock to be acquired
-		<-lockHeld
+		require.NoError(t, <-lockHeld)
 
 		// Start multiple StopAndWait calls concurrently
 		const numStoppers = 3

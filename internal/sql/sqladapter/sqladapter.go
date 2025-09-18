@@ -30,55 +30,55 @@ func AdaptPgxConn(db PgxConn) DatabaseConn {
 
 // DatabaseSQLConn is the interface for connections that use database/sql.
 type DatabaseSQLConn interface {
-	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
-	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
 // PgxConn is the interface for connections that use pgx.
 type PgxConn interface {
-	Begin(context.Context) (pgx.Tx, error)
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-	QueryRow(context.Context, string, ...any) pgx.Row
-	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Begin(ctx context.Context) (pgx.Tx, error)
+	Query(ctx context.Context, query string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, query string, args ...any) pgx.Row
+	Exec(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error)
 }
 
 // DatabaseConn is the interface matched by all adapters.
 type DatabaseConn interface {
-	Begin(context.Context) (databaseConnTx, error)
-	QueryRow(context.Context, string, ...any) databaseConnRow
-	Exec(context.Context, string, ...any) (int64, error)
+	Begin(ctx context.Context) (databaseConnTx, error)
+	QueryRow(ctx context.Context, query string, args ...any) databaseConnRow
+	Exec(ctx context.Context, query string, args ...any) (int64, error)
 	IsNoRowsError(err error) bool
 }
 
 // Interface that contains methods for querying.
 // Applies to *pgx.Conn, *pgxpool.Pool, and pgx.Tx
 type PGXQuerier interface {
-	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)
-	Query(context.Context, string, ...interface{}) (pgx.Rows, error)
-	QueryRow(context.Context, string, ...interface{}) pgx.Row
+	Exec(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, query string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, query string, args ...any) pgx.Row
 }
 
 // Interface that applies to *pgxpool.Pool.
 type PGXPoolConn interface {
 	PGXQuerier
 
-	Begin(context.Context) (pgx.Tx, error)
+	Begin(ctx context.Context) (pgx.Tx, error)
 	BeginTx(ctx context.Context, txOptions pgx.TxOptions) (pgx.Tx, error)
-	Ping(context.Context) error
+	Ping(ctx context.Context) error
 	Close()
 }
 
 type databaseConnRow interface {
-	Scan(...any) error
+	Scan(into ...any) error
 }
 
 type databaseConnTx interface {
-	Commit(context.Context) error
-	Rollback(context.Context) error
-	QueryRow(context.Context, string, ...any) databaseConnRow
-	Exec(context.Context, string, ...any) (int64, error)
+	Commit(ctx context.Context) error
+	Rollback(ctx context.Context) error
+	QueryRow(ctx context.Context, query string, args ...any) databaseConnRow
+	Exec(ctx context.Context, query string, args ...any) (int64, error)
 }
 
 // DatabaseSQLAdapter is an adapter for database/sql connections.

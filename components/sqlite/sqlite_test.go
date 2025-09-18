@@ -104,11 +104,13 @@ func (s *SQLiteProvider) AdvanceClock(d time.Duration) error {
 }
 
 func (s *SQLiteProvider) Seed(ctx context.Context, spec comptesting.Spec) error {
-	_, tErr := transactions.ExecuteInSqlTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (z struct{}, err error) {
+	_, tErr := transactions.ExecuteInSQLTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (z struct{}, err error) {
 		now := s.clock.Now()
 
 		// Truncate all data
 		for _, tbl := range []string{"active_actors", "host_actor_types", "hosts", "actor_state", "alarms"} {
+			// Disable the "G202: SQL string concatenation" gosec warning, since there's no risk of SQL injection here
+			// #nosec G202
 			_, err = tx.ExecContext(ctx, "DELETE FROM "+tbl)
 			if err != nil {
 				return z, fmt.Errorf("truncate '%s': %w", tbl, err)
@@ -249,7 +251,7 @@ func (s *SQLiteProvider) GetAllActorState(ctx context.Context) (comptesting.Acto
 }
 
 func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, error) {
-	return transactions.ExecuteInSqlTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (res comptesting.Spec, err error) {
+	return transactions.ExecuteInSQLTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (res comptesting.Spec, err error) {
 		// Load all hosts
 		rows, err := tx.QueryContext(ctx, "SELECT host_id, host_address, host_last_health_check FROM hosts")
 		if err != nil {
@@ -269,7 +271,7 @@ func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, err
 			r.LastHealthAgo = s.clock.Since(time.UnixMilli(lastHealthCheck))
 			res.Hosts = append(res.Hosts, r)
 		}
-		rows.Close()
+		rows.Close() //nolint:sqlclosecheck
 
 		// Load all actor types
 		rows, err = tx.QueryContext(ctx, "SELECT host_id, actor_type, actor_idle_timeout, actor_concurrency_limit FROM host_actor_types")
@@ -290,7 +292,7 @@ func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, err
 			r.ActorIdleTimeout = time.Duration(idleTimeout) * time.Millisecond
 			res.HostActorTypes = append(res.HostActorTypes, r)
 		}
-		rows.Close()
+		rows.Close() //nolint:sqlclosecheck
 
 		// Load all active actors
 		rows, err = tx.QueryContext(ctx, "SELECT actor_type, actor_id, host_id, actor_idle_timeout, actor_activation FROM active_actors")
@@ -312,7 +314,7 @@ func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, err
 			r.ActivationAgo = s.clock.Since(time.UnixMilli(activation))
 			res.ActiveActors = append(res.ActiveActors, r)
 		}
-		rows.Close()
+		rows.Close() //nolint:sqlclosecheck
 
 		// Load all alarms
 		rows, err = tx.QueryContext(ctx, "SELECT alarm_id, actor_type, actor_id, alarm_name, alarm_due_time, alarm_interval, alarm_ttl_time, alarm_data, alarm_lease_id, alarm_lease_expiration_time FROM alarms")
@@ -344,7 +346,7 @@ func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, err
 			}
 			res.Alarms = append(res.Alarms, r)
 		}
-		rows.Close()
+		rows.Close() //nolint:sqlclosecheck
 
 		return res, nil
 	})
@@ -366,7 +368,7 @@ func TestHostGarbageCollection(t *testing.T) {
 		require.NoError(t, err)
 
 		// Advance clock by 30 seconds
-		s.AdvanceClock(30 * time.Second)
+		_ = s.AdvanceClock(30 * time.Second) //nolint:errcheck
 
 		host2Req := components.RegisterHostReq{
 			Address: "192.168.1.2:8080",
@@ -378,7 +380,7 @@ func TestHostGarbageCollection(t *testing.T) {
 		require.NoError(t, err)
 
 		// Advance clock by another 20 seconds (so host3 is 20s after host2)
-		s.AdvanceClock(20 * time.Second)
+		_ = s.AdvanceClock(20 * time.Second) //nolint:errcheck
 
 		host3Req := components.RegisterHostReq{
 			Address: "192.168.1.3:8080",
@@ -398,7 +400,7 @@ func TestHostGarbageCollection(t *testing.T) {
 		// Advance clock to make only the first host expired (beyond 1 minute health check deadline)
 		// Current state: Host1 at 50s, Host2 at 20s, Host3 at 0s
 		// Advance by 15 seconds: Host1 at 65s (expired), Host2 at 35s (healthy), Host3 at 15s (healthy)
-		s.AdvanceClock(15 * time.Second)
+		_ = s.AdvanceClock(15 * time.Second) //nolint:errcheck
 
 		// Run garbage collection
 		err = s.CleanupExpired()
@@ -431,7 +433,7 @@ func TestHostGarbageCollection(t *testing.T) {
 		// Advance clock to make host2 also expired
 		// Current state: Host2 at 35s, Host3 at 15s
 		// Advance by 30 seconds: Host2 at 65s (expired), Host3 at 45s (healthy)
-		s.AdvanceClock(30 * time.Second)
+		_ = s.AdvanceClock(30 * time.Second) //nolint:errcheck
 
 		// Run garbage collection again
 		err = s.CleanupExpired()
@@ -450,7 +452,7 @@ func TestHostGarbageCollection(t *testing.T) {
 		// Advance clock to make all hosts expired
 		// Current state: Host3 at 45s
 		// Advance by 20 seconds: Host3 at 65s (expired)
-		s.AdvanceClock(20 * time.Second)
+		_ = s.AdvanceClock(20 * time.Second) //nolint:errcheck
 
 		// Run garbage collection one more time
 		err = s.CleanupExpired()
@@ -459,8 +461,8 @@ func TestHostGarbageCollection(t *testing.T) {
 		// Verify all hosts are removed
 		spec, err = s.GetAllHosts(t.Context())
 		require.NoError(t, err)
-		assert.Len(t, spec.Hosts, 0, "All hosts should be removed")
-		assert.Len(t, spec.HostActorTypes, 0, "All host actor types should be removed")
+		assert.Empty(t, spec.Hosts, "All hosts should be removed")
+		assert.Empty(t, spec.HostActorTypes, "All host actor types should be removed")
 	})
 }
 
@@ -469,7 +471,7 @@ func TestGetInPlaceholders(t *testing.T) {
 		vals := []string{}
 		args := make([]any, 0)
 		placeholders := getInPlaceholders(vals, args, 0)
-		assert.Equal(t, "", placeholders)
+		assert.Empty(t, placeholders)
 		assert.Empty(t, args)
 	})
 

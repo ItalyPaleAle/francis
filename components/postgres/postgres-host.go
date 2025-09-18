@@ -216,7 +216,6 @@ func (p *PostgresProvider) LookupActor(ctx context.Context, ref ref.ActorRef, op
 			opts.Hosts,
 		).
 		Scan(&res.HostID, &res.Address, &res.IdleTimeout)
-
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// This shouldn't happen with the function design, but handle it just in case

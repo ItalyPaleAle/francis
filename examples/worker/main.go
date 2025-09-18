@@ -141,7 +141,7 @@ func runControlServer(actorService *actor.Service) func(ctx context.Context) err
 				w.WriteHeader(http.StatusOK)
 				enc := json.NewEncoder(w)
 				enc.SetEscapeHTML(false)
-				enc.Encode(data)
+				_ = enc.Encode(data) //nolint:errcheck
 			} else {
 				w.WriteHeader(http.StatusNoContent)
 			}
@@ -190,8 +190,9 @@ func runControlServer(actorService *actor.Service) func(ctx context.Context) err
 		})
 
 		server := &http.Server{
-			Addr:    workerAddress,
-			Handler: mux,
+			Addr:              workerAddress,
+			Handler:           mux,
+			ReadHeaderTimeout: 10 * time.Second,
 		}
 		serveErrCh := make(chan error, 1)
 

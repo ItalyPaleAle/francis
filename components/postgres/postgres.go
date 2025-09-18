@@ -24,10 +24,8 @@ import (
 	"github.com/italypaleale/actors/internal/sql/sqladapter"
 )
 
-var (
-	//go:embed migrations
-	migrationScripts embed.FS
-)
+//go:embed migrations
+var migrationScripts embed.FS
 
 const (
 	DefaultTimeout         = 5 * time.Second
@@ -138,7 +136,7 @@ func (p *PostgresProvider) Run(ctx context.Context) error {
 func (p *PostgresProvider) HealthCheckInterval() time.Duration {
 	// The recommended health check interval is the deadline, less the query timeout, less 1s, then rounded down to the closest 5s
 	interval := (p.cfg.HostHealthCheckDeadline - p.timeout - time.Second).Truncate(time.Second)
-	interval = interval - time.Duration(int64(interval.Seconds())%5)*time.Second
+	interval -= time.Duration(int64(interval.Seconds())%5) * time.Second
 
 	// ...however, there's a minimum of 1s
 	if interval < time.Second {

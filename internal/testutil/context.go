@@ -9,8 +9,10 @@ import (
 	"github.com/italypaleale/actors/internal/ptr"
 )
 
+//nolint:containedctx
 type contextDoneNotifier struct {
 	context.Context
+
 	doneCalled *atomic.Pointer[chan struct{}]
 }
 

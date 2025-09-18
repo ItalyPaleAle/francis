@@ -23,7 +23,7 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 	}
 	hostID := hostIDObj.String()
 
-	_, oErr = transactions.ExecuteInSqlTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
+	_, oErr = transactions.ExecuteInSQLTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
 		now := s.clock.Now().UnixMilli()
 
 		// To start, we need to delete any actor host with the same address that has not sent a health check in the maximum allotted time
@@ -84,7 +84,7 @@ func (s *SQLiteProvider) UpdateActorHost(ctx context.Context, hostID string, req
 		return nil
 	}
 
-	_, oErr := transactions.ExecuteInSqlTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
+	_, oErr := transactions.ExecuteInSQLTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
 		// Update the last health check if needed
 		if req.UpdateLastHealthCheck {
 			err = s.updateActorHostLastHealthCheck(ctx, hostID, tx)
@@ -216,7 +216,7 @@ func (s *SQLiteProvider) UnregisterHost(ctx context.Context, hostID string) erro
 }
 
 func (s *SQLiteProvider) LookupActor(ctx context.Context, ref ref.ActorRef, opts components.LookupActorOpts) (components.LookupActorRes, error) {
-	return transactions.ExecuteInSqlTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (res components.LookupActorRes, err error) {
+	return transactions.ExecuteInSQLTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (res components.LookupActorRes, err error) {
 		now := s.clock.Now().UnixMilli()
 
 		// Build host restrictions clause

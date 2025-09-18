@@ -20,20 +20,6 @@ import (
 	"github.com/italypaleale/actors/internal/ref"
 )
 
-// queueableItem is a test implementation of the Queueable interface
-type queueableItem struct {
-	key     string
-	dueTime time.Time
-}
-
-func (q *queueableItem) Key() string {
-	return q.key
-}
-
-func (q *queueableItem) DueTime() time.Time {
-	return q.dueTime
-}
-
 func TestNewActiveActor(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 	actorRef := ref.NewActorRef("testactor", "actor1")
@@ -88,7 +74,7 @@ func TestNewActiveActorWithZeroIdleTimeout(t *testing.T) {
 func TestUpdateIdleAt(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 
-	var getActiveAct = func(idleTimeout time.Duration) *activeActor {
+	getActiveAct := func(idleTimeout time.Duration) *activeActor {
 		actorRef := ref.NewActorRef("testactor", "actor1")
 		instance := &actor_mocks.MockActorDeactivate{}
 
@@ -165,7 +151,7 @@ func TestUpdateIdleAt(t *testing.T) {
 func TestTryLock(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 
-	var getActiveAct = func() *activeActor {
+	getActiveAct := func() *activeActor {
 		actorRef := ref.NewActorRef("testactor", "actor1")
 		instance := &actor_mocks.MockActorDeactivate{}
 
@@ -240,7 +226,7 @@ func TestTryLock(t *testing.T) {
 func TestLock(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 
-	var getActiveAct = func() *activeActor {
+	getActiveAct := func() *activeActor {
 		actorRef := ref.NewActorRef("testactor", "actor1")
 		instance := &actor_mocks.MockActorDeactivate{}
 
@@ -315,7 +301,7 @@ func TestLock(t *testing.T) {
 func TestUnlock(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 
-	var getActiveAct = func() *activeActor {
+	getActiveAct := func() *activeActor {
 		actorRef := ref.NewActorRef("testactor", "actor1")
 		instance := &actor_mocks.MockActorDeactivate{}
 
@@ -349,7 +335,7 @@ func TestUnlock(t *testing.T) {
 func TestHalt(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 
-	var getActiveAct = func() *activeActor {
+	getActiveAct := func() *activeActor {
 		actorRef := ref.NewActorRef("testactor", "actor1")
 		instance := &actor_mocks.MockActorDeactivate{}
 

@@ -49,9 +49,9 @@ func (m *Migrations) Perform(ctx context.Context, migrationFns []migrations.Migr
 		if success {
 			return
 		}
-		queryCtx, cancel = context.WithTimeout(ctx, time.Minute)
-		_, rollbackErr := m.conn.ExecContext(queryCtx, "ROLLBACK TRANSACTION")
-		cancel()
+		rollbackCtx, rollbackCancel := context.WithTimeout(ctx, time.Minute)
+		_, rollbackErr := m.conn.ExecContext(rollbackCtx, "ROLLBACK TRANSACTION")
+		rollbackCancel()
 		if rollbackErr != nil {
 			// Panicking here, as this forcibly closes the session and thus ensures we are not leaving transactions open
 			logger.ErrorContext(ctx, "Failed to rollback transaction", slog.Any("error", rollbackErr))
@@ -116,7 +116,7 @@ func (m *Migrations) GetConn() *sql.Conn {
 }
 
 // Returns true if a table exists
-func (m Migrations) tableExists(parentCtx context.Context, db sqladapter.DatabaseSQLConn) (bool, error) {
+func (m *Migrations) tableExists(parentCtx context.Context, db sqladapter.DatabaseSQLConn) (bool, error) {
 	ctx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
 	defer cancel()
 
@@ -130,7 +130,7 @@ func (m Migrations) tableExists(parentCtx context.Context, db sqladapter.Databas
 	return exists == "1", err
 }
 
-func (m Migrations) createMetadataTable(ctx context.Context, db sqladapter.DatabaseSQLConn, logger *slog.Logger) error {
+func (m *Migrations) createMetadataTable(ctx context.Context, db sqladapter.DatabaseSQLConn, logger *slog.Logger) error {
 	logger.InfoContext(ctx, "Creating metadata table", slog.String("table", m.MetadataTableName))
 
 	// Add an "IF NOT EXISTS" in case another process is creating the same table at the same time

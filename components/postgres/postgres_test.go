@@ -398,7 +398,7 @@ func TestHostGarbageCollection(t *testing.T) {
 		require.NoError(t, err)
 
 		// Advance clock by 30 seconds
-		p.AdvanceClock(30 * time.Second)
+		_ = p.AdvanceClock(30 * time.Second) //nolint:errcheck
 
 		host2Req := components.RegisterHostReq{
 			Address: "192.168.1.2:8080",
@@ -410,7 +410,7 @@ func TestHostGarbageCollection(t *testing.T) {
 		require.NoError(t, err)
 
 		// Advance clock by another 20 seconds (so host3 is 20s after host2)
-		p.AdvanceClock(20 * time.Second)
+		_ = p.AdvanceClock(20 * time.Second) //nolint:errcheck
 
 		host3Req := components.RegisterHostReq{
 			Address: "192.168.1.3:8080",
@@ -430,7 +430,7 @@ func TestHostGarbageCollection(t *testing.T) {
 		// Advance clock to make only the first host expired (beyond 1 minute health check deadline)
 		// Current state: Host1 at 50s, Host2 at 20s, Host3 at 0s
 		// Advance by 15 seconds: Host1 at 65s (expired), Host2 at 35s (healthy), Host3 at 15s (healthy)
-		p.AdvanceClock(15 * time.Second)
+		_ = p.AdvanceClock(15 * time.Second) //nolint:errcheck
 
 		// Run garbage collection
 		err = p.CleanupExpired()
@@ -463,7 +463,7 @@ func TestHostGarbageCollection(t *testing.T) {
 		// Advance clock to make host2 also expired
 		// Current state: Host2 at 35s, Host3 at 15s
 		// Advance by 30 seconds: Host2 at 65s (expired), Host3 at 45s (healthy)
-		p.AdvanceClock(30 * time.Second)
+		_ = p.AdvanceClock(30 * time.Second) //nolint:errcheck
 
 		// Run garbage collection again
 		err = p.CleanupExpired()
@@ -482,7 +482,7 @@ func TestHostGarbageCollection(t *testing.T) {
 		// Advance clock to make all hosts expired
 		// Current state: Host3 at 45s
 		// Advance by 20 seconds: Host3 at 65s (expired)
-		p.AdvanceClock(20 * time.Second)
+		_ = p.AdvanceClock(20 * time.Second) //nolint:errcheck
 
 		// Run garbage collection one more time
 		err = p.CleanupExpired()
@@ -491,8 +491,8 @@ func TestHostGarbageCollection(t *testing.T) {
 		// Verify all hosts are removed
 		spec, err = p.GetAllHosts(t.Context())
 		require.NoError(t, err)
-		assert.Len(t, spec.Hosts, 0, "All hosts should be removed")
-		assert.Len(t, spec.HostActorTypes, 0, "All host actor types should be removed")
+		assert.Empty(t, spec.Hosts, "All hosts should be removed")
+		assert.Empty(t, spec.HostActorTypes, "All host actor types should be removed")
 	})
 }
 

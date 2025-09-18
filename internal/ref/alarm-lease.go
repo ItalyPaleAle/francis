@@ -1,3 +1,4 @@
+//nolint:recvcheck
 package ref
 
 import (

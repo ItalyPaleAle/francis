@@ -133,7 +133,7 @@ func (s *SQLiteProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req co
 		return nil, nil
 	}
 
-	return transactions.ExecuteInSqlTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) ([]*ref.AlarmLease, error) {
+	return transactions.ExecuteInSQLTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) ([]*ref.AlarmLease, error) {
 		fetcher := newUpcomingAlarmFetcher(tx, s, &req)
 
 		res, err := fetcher.FetchUpcoming(ctx)
@@ -223,6 +223,9 @@ func (s *SQLiteProvider) RenewAlarmLeases(ctx context.Context, req components.Re
 
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
+
+	// Disable the "G202: SQL string concatenation" gosec warning, since there's no risk of SQL injection here
+	// #nosec G202
 	rows, err := s.db.QueryContext(queryCtx,
 		`
 		UPDATE alarms
@@ -318,6 +321,8 @@ func (s *SQLiteProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Alarm
 	// If we want to refresh the lease...
 	var res sql.Result
 	if req.RefreshLease {
+		// Disable the "G202: SQL string concatenation" gosec warning, since there's no risk of SQL injection here
+		// #nosec G202
 		res, err = s.db.ExecContext(queryCtx, `
 			UPDATE alarms
 			SET
@@ -328,6 +333,8 @@ func (s *SQLiteProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Alarm
 			lease.Key(), lease.LeaseID(), now.UnixMilli(),
 		)
 	} else {
+		// Disable the "G202: SQL string concatenation" gosec warning, since there's no risk of SQL injection here
+		// #nosec G202
 		res, err = s.db.ExecContext(queryCtx, `
 			UPDATE alarms
 			SET
@@ -462,6 +469,8 @@ func (u *upcomingAlarmFetcher) getActiveHosts(ctx context.Context) (activeHosts 
 
 	queryCtx, cancel := context.WithTimeout(ctx, u.timeout)
 	defer cancel()
+	// Disable the "G202: SQL string concatenation" gosec warning, since there's no risk of SQL injection here
+	// #nosec G202
 	rows, err := u.tx.
 		QueryContext(queryCtx,
 			// For this connection, we set "temp_store = MEMORY" to tell SQLite to keep the temporary data in-memory
@@ -664,6 +673,8 @@ func (u *upcomingAlarmFetcher) obtainLeases(ctx context.Context, fetchedUpcoming
 	// We add a check to make sure no one else has acquired a (different) lease meanwhile
 	queryCtx, cancel := context.WithTimeout(ctx, u.timeout)
 	defer cancel()
+	// Disable the "G202: SQL string concatenation" gosec warning, since there's no risk of SQL injection here
+	// #nosec G202
 	rows, err := u.tx.QueryContext(queryCtx,
 		`
 		UPDATE alarms
@@ -760,6 +771,8 @@ func (ahl *activeHostsList) HasHost(hostID string) bool {
 func (ahl *activeHostsList) HostForActorType(actorType string) (host *activeHost) {
 	for len(ahl.capacities[actorType]) > 0 {
 		// Select a random index
+		// Disable the "G404: Use of weak random number generator " gosec warning, since this is not used for anything security-related
+		// #nosec G404
 		idx := rand.IntN(len(ahl.capacities[actorType]))
 
 		candidate := ahl.capacities[actorType][idx]
@@ -890,5 +903,5 @@ func (ful fetchedUpcomingAlarmsList) String() string {
 		listStr = "[\n  " + strings.Join(list, "\n  ") + "\n]"
 	}
 
-	return fmt.Sprintf("fetchedUpcomingAlarmList:%s", listStr)
+	return "fetchedUpcomingAlarmList:" + listStr
 }

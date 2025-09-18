@@ -17,7 +17,7 @@ import (
 const (
 	userAgentValue     = "actors/v1"
 	contentTypeMsgpack = "application/vnd.msgpack"
-	headerXHostID      = "X-Host-ID"
+	headerXHostID      = "X-Host-Id"
 	headerContentType  = "Content-Type"
 	headerUserAgent    = "User-Agent"
 )

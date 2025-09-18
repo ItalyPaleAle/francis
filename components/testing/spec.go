@@ -147,14 +147,13 @@ func (s ActorStateSpecCollection) Equal(o ActorStateSpecCollection) bool {
 	}
 
 	visited := make([]bool, len(o))
-	for i := range len(s) {
+	for _, e := range s {
 		found := false
-		element := s[i]
-		for j := range len(o) {
+		for j := range o {
 			if visited[j] {
 				continue
 			}
-			if element.Equal(o[j]) {
+			if e.Equal(o[j]) {
 				visited[j] = true
 				found = true
 				break
@@ -184,14 +183,13 @@ func (s HostSpecCollection) Equal(o HostSpecCollection) bool {
 	}
 
 	visited := make([]bool, len(o))
-	for i := range len(s) {
+	for _, e := range s {
 		found := false
-		element := s[i]
-		for j := range len(o) {
+		for j := range o {
 			if visited[j] {
 				continue
 			}
-			if element.HostID == o[j].HostID && element.Address == o[j].Address {
+			if e.HostID == o[j].HostID && e.Address == o[j].Address {
 				visited[j] = true
 				found = true
 				break
@@ -220,17 +218,16 @@ func (s HostActorTypeSpecCollection) Equal(o HostActorTypeSpecCollection) bool {
 	}
 
 	visited := make([]bool, len(o))
-	for i := range len(s) {
+	for _, e := range s {
 		found := false
-		element := s[i]
-		for j := range len(o) {
+		for j := range o {
 			if visited[j] {
 				continue
 			}
-			if element.HostID == o[j].HostID &&
-				element.ActorType == o[j].ActorType &&
-				element.ActorIdleTimeout == o[j].ActorIdleTimeout &&
-				element.ActorConcurrencyLimit == o[j].ActorConcurrencyLimit {
+			if e.HostID == o[j].HostID &&
+				e.ActorType == o[j].ActorType &&
+				e.ActorIdleTimeout == o[j].ActorIdleTimeout &&
+				e.ActorConcurrencyLimit == o[j].ActorConcurrencyLimit {
 				visited[j] = true
 				found = true
 				break
@@ -251,7 +248,7 @@ func (s HostActorTypeSpecCollection) String() string {
 }
 
 // String implements fmt.Stringer and is used for debugging
-func (s Spec) String() string {
+func (s *Spec) String() string {
 	j, _ := json.Marshal(s)
 	return string(j)
 }

@@ -28,7 +28,7 @@ func TestLookupActor(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 	log := slog.New(slog.DiscardHandler)
 
-	var newHost = func() (*Host, *components_mocks.MockActorProvider) {
+	newHost := func() (*Host, *components_mocks.MockActorProvider) {
 		// Create a mocked actor provider
 		provider := components_mocks.NewMockActorProvider(t)
 
@@ -297,8 +297,9 @@ func TestLookupActor(t *testing.T) {
 		provider.
 			On("LookupActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.LookupActorOpts{}).
 			Run(func(args mock.Arguments) {
-				ctx := args.Get(0).(context.Context)
 				// Wait for context cancellation
+				//nolint:forcetypeassert
+				ctx := args.Get(0).(context.Context)
 				<-ctx.Done()
 			}).
 			Return(components.LookupActorRes{}, context.DeadlineExceeded).
@@ -335,6 +336,8 @@ func TestLookupActor(t *testing.T) {
 		provider.
 			On("LookupActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.LookupActorOpts{}).
 			Run(func(args mock.Arguments) {
+				// Wait for context cancellation
+				//nolint:forcetypeassert
 				ctx := args.Get(0).(context.Context)
 				<-ctx.Done()
 			}).

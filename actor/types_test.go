@@ -87,7 +87,7 @@ func TestAlarmProperties_UnmarshalJSON(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.True(t, alarm.DueTime.IsZero())
-		assert.Equal(t, "", alarm.Interval)
+		assert.Empty(t, alarm.Interval)
 		assert.True(t, alarm.TTL.IsZero())
 	})
 
@@ -100,8 +100,8 @@ func TestAlarmProperties_UnmarshalJSON(t *testing.T) {
 
 		var alarm AlarmProperties
 		err := json.Unmarshal([]byte(jsonData), &alarm)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "invalid dueTime")
+		require.Error(t, err)
+		require.ErrorContains(t, err, "invalid dueTime")
 	})
 
 	t.Run("invalid interval", func(t *testing.T) {
@@ -113,8 +113,8 @@ func TestAlarmProperties_UnmarshalJSON(t *testing.T) {
 
 		var alarm AlarmProperties
 		err := json.Unmarshal([]byte(jsonData), &alarm)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "invalid interval")
+		require.Error(t, err)
+		require.ErrorContains(t, err, "invalid interval")
 	})
 
 	t.Run("invalid ttl", func(t *testing.T) {
@@ -126,7 +126,7 @@ func TestAlarmProperties_UnmarshalJSON(t *testing.T) {
 
 		var alarm AlarmProperties
 		err := json.Unmarshal([]byte(jsonData), &alarm)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "invalid ttl")
+		require.Error(t, err)
+		require.ErrorContains(t, err, "invalid ttl")
 	})
 }

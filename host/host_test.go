@@ -605,6 +605,7 @@ func TestHostHalt(t *testing.T) {
 			On("Deactivate", mock.MatchedBy(testutil.MatchContextInterface)).
 			Run(func(args mock.Arguments) {
 				// Wait for context to be canceled
+				//nolint:forcetypeassert
 				ctx := args.Get(0).(context.Context)
 				<-ctx.Done()
 			}).
@@ -1078,11 +1079,7 @@ func waitForGoroutines(t *testing.T, want int32, counter *atomic.Int32) {
 	t.Helper()
 
 	var i int
-	for {
-		if counter.Load() == want {
-			break
-		}
-
+	for counter.Load() != want {
 		if i == 1000 {
 			t.Fatalf("Waited too long for goroutines to start")
 		}
@@ -1102,7 +1099,7 @@ func TestIdleActorHandling(t *testing.T) {
 		Level: slog.LevelDebug,
 	}))
 
-	var newHost = func() (*Host, *components_mocks.MockActorProvider) {
+	newHost := func() (*Host, *components_mocks.MockActorProvider) {
 		// Create a mocked actor provider
 		provider := components_mocks.NewMockActorProvider(t)
 
@@ -1375,7 +1372,7 @@ func TestIdleActorHandling(t *testing.T) {
 		deactivateCanContinue := make(chan struct{})
 		deactivateCompleted := make(chan int, numActors)
 
-		idleTimeout := 1 * time.Minute
+		const idleTimeout = 1 * time.Minute
 
 		// Create and register multiple active actors
 		for i := range numActors {

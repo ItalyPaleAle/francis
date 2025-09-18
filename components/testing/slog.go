@@ -10,6 +10,7 @@ import (
 // SlogClockHandler is a custom slog.Handler that uses a mockable clock as time source.
 type SlogClockHandler struct {
 	slog.Handler
+
 	clock clock.Clock
 }
 

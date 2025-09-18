@@ -172,7 +172,7 @@ func (s *SQLiteProvider) Run(ctx context.Context) error {
 func (s *SQLiteProvider) HealthCheckInterval() time.Duration {
 	// The recommended health check interval is the deadline, less the query timeout, less 1s, then rounded down to the closest 5s
 	interval := (s.cfg.HostHealthCheckDeadline - s.timeout - time.Second).Truncate(time.Second)
-	interval = interval - time.Duration(int64(interval.Seconds())%5)*time.Second
+	interval -= time.Duration(int64(interval.Seconds())%5) * time.Second
 
 	// ...however, there's a minimum of 1s
 	if interval < time.Second {

@@ -40,7 +40,7 @@ func (h *Host) runServer(ctx context.Context) (err error) {
 	go func() {
 		// Next call blocks until the server is shut down
 		err := srv.ListenAndServe()
-		if err != http.ErrServerClosed {
+		if !errors.Is(err, http.ErrServerClosed) {
 			srvErr <- fmt.Errorf("error running HTTP3 server: %w", err)
 		}
 		srvErr <- nil

@@ -15,9 +15,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ExecuteInSqlTransaction executes a function in a transaction for database/sql.
+// ExecuteInSQLTransaction executes a function in a transaction for database/sql.
 // If the handler returns an error, the transaction is rolled back automatically.
-func ExecuteInSqlTransaction[T any](ctx context.Context, log *slog.Logger, db *sql.DB, fn func(ctx context.Context, tx *sql.Tx) (T, error)) (res T, err error) {
+func ExecuteInSQLTransaction[T any](ctx context.Context, log *slog.Logger, db *sql.DB, fn func(ctx context.Context, tx *sql.Tx) (T, error)) (res T, err error) {
 	// Start the transaction
 	// Note that the context here is tied to the entire transaction
 	tx, err := db.BeginTx(ctx, nil)

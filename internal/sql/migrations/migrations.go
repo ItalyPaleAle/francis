@@ -58,12 +58,13 @@ func Migrate(ctx context.Context, db sqladapter.DatabaseConn, opts MigrationOpti
 	queryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	err = db.QueryRow(queryCtx, opts.GetVersionQuery).Scan(&migrationLevelStr)
 	cancel()
-	if db.IsNoRowsError(err) {
+	switch {
+	case db.IsNoRowsError(err):
 		// If there's no row...
 		migrationLevel = 0
-	} else if err != nil {
+	case err != nil:
 		return fmt.Errorf("failed to read migration level: %w", err)
-	} else {
+	default:
 		migrationLevel, err = strconv.Atoi(migrationLevelStr)
 		if err != nil || migrationLevel < 0 {
 			return fmt.Errorf("invalid migration level found in metadata table: %s", migrationLevelStr)

@@ -2,6 +2,7 @@
 // Copyright (C) 2023 The Dapr Authors
 // License: Apache2
 
+//nolint:errcheck
 package eventqueue
 
 import (

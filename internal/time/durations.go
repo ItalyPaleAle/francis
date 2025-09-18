@@ -2,6 +2,7 @@
 // Copyright (C) 2023 The Dapr Authors
 // License: Apache2
 
+//nolint:recvcheck
 package time
 
 import (
@@ -124,9 +125,9 @@ func ParseISO8601Duration(from string) (d Duration, err error) {
 	}
 
 	var (
-		i, start      int  = 1, 1
-		isParsingTime bool = false
-		isDecimal     bool = false
+		i, start      = 1, 1
+		isParsingTime bool
+		isDecimal     bool
 		tmp           int
 	)
 	for i < l {
@@ -245,10 +246,10 @@ func ParseISO8601Duration(from string) (d Duration, err error) {
 // ParseDurationString creates Duration from either:
 // - ISO8601 duration format
 // - Go duration string format
-func ParseDurationString(from string) (d Duration, err error) {
-	d, err = ParseISO8601Duration(from)
+func ParseDurationString(from string) (Duration, error) {
+	d, err := ParseISO8601Duration(from)
 	if err == nil {
-		return d, err
+		return d, nil
 	}
 
 	// Reset to be safe

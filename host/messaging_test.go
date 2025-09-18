@@ -28,7 +28,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 	log := slog.New(slog.DiscardHandler)
 
-	var newHost = func() *Host {
+	newHost := func() *Host {
 		// Create a minimal host for testing
 		host := &Host{
 			actors:              haxmap.New[string, *activeActor](8),
@@ -239,7 +239,8 @@ func TestLockAndInvokeFn(t *testing.T) {
 		}
 
 		// Now halt the actor while the goroutine is waiting for the lock
-		activeAct.Halt(false)
+		err = activeAct.Halt(false)
+		require.NoError(t, err)
 
 		// The lockAndInvokeFn should return ErrActorHalted
 		select {
@@ -295,7 +296,8 @@ func TestLockAndInvokeFn(t *testing.T) {
 		waiters := clock.Waiters()
 
 		// Now halt the actor, which should signal the halt channel
-		activeAct.Halt(false)
+		err := activeAct.Halt(false)
+		require.NoError(t, err)
 
 		// Wait for the clock to have a new waiter before we advance the time
 		assert.EventuallyWithT(t, func(c *assert.CollectT) {
@@ -360,7 +362,8 @@ func TestLockAndInvokeFn(t *testing.T) {
 		waiters := clock.Waiters()
 
 		// Now halt the actor, which should signal the halt channel
-		activeAct.Halt(false)
+		err := activeAct.Halt(false)
+		require.NoError(t, err)
 
 		// Wait for the clock to have a new waiter before we advance the time
 		assert.EventuallyWithT(t, func(c *assert.CollectT) {
@@ -422,7 +425,8 @@ func TestLockAndInvokeFn(t *testing.T) {
 		runtime.Gosched()
 
 		// Now halt the actor, which should signal the halt channel
-		activeAct.Halt(false)
+		err := activeAct.Halt(false)
+		require.NoError(t, err)
 
 		// The function should complete successfully before the graceful timeout
 		select {
@@ -521,7 +525,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 		}
 
 		// Verify execution was serialized (exactly numInvocations entries)
-		assert.Equal(t, numInvocations, len(executionOrder))
+		assert.Len(t, executionOrder, numInvocations)
 
 		// Only one actor should exist
 		assert.Equal(t, 1, int(host.actors.Len()))

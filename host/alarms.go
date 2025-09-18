@@ -247,6 +247,8 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		h.log.Warn("Error executing alarm - will retry", slog.Any("error", err))
 		// We still hold the lease, so just increment the due time and add re-add it to the queue
 		// We increment it by taking the initial retry delay and multiplying it by 1.5^attempts, with a max of 10, and some jitter
+		// Disable the "G404: Use of weak random number generator " gosec warning, since this is not used for anything security-related
+		// #nosec G404
 		jitter := rand.Float64()*0.2 + 0.9
 		multiplier := min(math.Pow(1.5, float64(lease.Attempts())), 10) * jitter
 		delay := h.actorsConfig[ref.ActorType].InitialRetryDelay * time.Duration(multiplier)

@@ -46,6 +46,7 @@ func (a *AlarmProperties) UnmarshalJSON(data []byte) error {
 	type Alias AlarmProperties
 	aux := &struct {
 		*Alias
+
 		DueTime  any `json:"dueTime"`
 		Interval any `json:"interval"`
 		TTL      any `json:"ttl"`

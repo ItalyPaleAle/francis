@@ -95,7 +95,7 @@ func TestParseDuration_Parser(t *testing.T) {
 	t.Run("empty string returns empty", func(t *testing.T) {
 		out, err := ParseDuration("")
 		require.NoError(t, err)
-		assert.Equal(t, "", out)
+		assert.Empty(t, out)
 	})
 
 	t.Run("nil returns zero duration", func(t *testing.T) {

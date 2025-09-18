@@ -27,7 +27,7 @@ func TestGetAlarm(t *testing.T) {
 
 	testData, _ := msgpack.Marshal("test-data")
 
-	var newHost = func() (*Host, *components_mocks.MockActorProvider) {
+	newHost := func() (*Host, *components_mocks.MockActorProvider) {
 		// Create a mocked actor provider
 		provider := components_mocks.NewMockActorProvider(t)
 
@@ -168,7 +168,7 @@ func TestSetAlarm(t *testing.T) {
 
 	testData, _ := msgpack.Marshal("test-data")
 
-	var newHost = func() (*Host, *components_mocks.MockActorProvider) {
+	newHost := func() (*Host, *components_mocks.MockActorProvider) {
 		// Create a mocked actor provider
 		provider := components_mocks.NewMockActorProvider(t)
 
@@ -341,7 +341,7 @@ func TestDeleteAlarm(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 	log := slog.New(slog.DiscardHandler)
 
-	var newHost = func() (*Host, *components_mocks.MockActorProvider) {
+	newHost := func() (*Host, *components_mocks.MockActorProvider) {
 		// Create a mocked actor provider
 		provider := components_mocks.NewMockActorProvider(t)
 
@@ -536,9 +536,9 @@ func TestAlarmPropertiesConversion(t *testing.T) {
 		req, err := alarmPropertiesToAlarmReq(properties)
 		require.NoError(t, err)
 
-		assert.Equal(t, dueTime, req.AlarmProperties.DueTime)
-		assert.Equal(t, "1h", req.AlarmProperties.Interval)
-		assert.NotEmpty(t, req.AlarmProperties.Data)
+		assert.Equal(t, dueTime, req.DueTime)
+		assert.Equal(t, "1h", req.Interval)
+		assert.NotEmpty(t, req.Data)
 		require.NotNil(t, req.TTL)
 		assert.Equal(t, ttl, *req.TTL)
 	})
@@ -556,8 +556,8 @@ func TestAlarmPropertiesConversion(t *testing.T) {
 		req, err := alarmPropertiesToAlarmReq(properties)
 		require.NoError(t, err)
 
-		assert.Equal(t, dueTime, req.AlarmProperties.DueTime)
-		assert.Equal(t, "2h", req.AlarmProperties.Interval)
+		assert.Equal(t, dueTime, req.DueTime)
+		assert.Equal(t, "2h", req.Interval)
 		assert.NotEmpty(t, properties.Data)
 		assert.Nil(t, req.TTL)
 	})

@@ -153,7 +153,7 @@ func (s Suite) TestRegisterHost(t *testing.T) {
 		require.NoError(t, err)
 
 		// Make the host unhealthy by advancing clock beyond health check deadline
-		s.p.AdvanceClock(2 * time.Minute) // Assuming health check deadline is 1 minute
+		_ = s.p.AdvanceClock(2 * time.Minute) // Assuming health check deadline is 1 minute//nolint:errcheck
 
 		// Register second host with same address but different actor types
 		req2 := components.RegisterHostReq{
@@ -233,7 +233,7 @@ func (s Suite) TestRegisterHost(t *testing.T) {
 		assert.Len(t, spec.HostActorTypes, 3, "should have three actor types total")
 
 		// Advance time to make hosts unhealthy (beyond 1 minute health check deadline)
-		s.p.AdvanceClock(2 * time.Minute)
+		_ = s.p.AdvanceClock(2 * time.Minute) //nolint:errcheck
 
 		// Register a new host - this should clean up all unhealthy hosts
 		req3 := components.RegisterHostReq{
@@ -282,7 +282,7 @@ func (s Suite) TestUpdateActorHost(t *testing.T) {
 		require.NoError(t, err)
 
 		// Advance time to make host appear older
-		s.p.AdvanceClock(30 * time.Second)
+		_ = s.p.AdvanceClock(30 * time.Second) //nolint:errcheck
 
 		// Update just the health check
 		updateReq := components.UpdateActorHostReq{
@@ -357,7 +357,7 @@ func (s Suite) TestUpdateActorHost(t *testing.T) {
 		require.NoError(t, err)
 
 		// Advance time
-		s.p.AdvanceClock(30 * time.Second)
+		_ = s.p.AdvanceClock(30 * time.Second) //nolint:errcheck
 
 		// Update both health check and actor types
 		updateReq := components.UpdateActorHostReq{
@@ -459,7 +459,7 @@ func (s Suite) TestUpdateActorHost(t *testing.T) {
 		require.NoError(t, err)
 
 		// Advance time to make host unhealthy (beyond 1 minute health check deadline)
-		s.p.AdvanceClock(2 * time.Minute)
+		_ = s.p.AdvanceClock(2 * time.Minute) //nolint:errcheck
 
 		// Try to update the now-unhealthy host - only last health check
 		updateReq := components.UpdateActorHostReq{
@@ -487,7 +487,7 @@ func (s Suite) TestUpdateActorHost(t *testing.T) {
 		require.NoError(t, err)
 
 		// Advance time to make host unhealthy (beyond 1 minute health check deadline)
-		s.p.AdvanceClock(2 * time.Minute)
+		_ = s.p.AdvanceClock(2 * time.Minute) //nolint:errcheck
 
 		// Try to update the now-unhealthy host - only actor types
 		updateReq := components.UpdateActorHostReq{
@@ -570,7 +570,7 @@ func (s Suite) TestUnregisterHost(t *testing.T) {
 		require.NoError(t, err)
 
 		// Advance time to make host unhealthy (beyond 1 minute health check deadline)
-		s.p.AdvanceClock(2 * time.Minute)
+		_ = s.p.AdvanceClock(2 * time.Minute) //nolint:errcheck
 
 		// Unregister the now-unhealthy host - should return ErrHostUnregistered but still delete it
 		err = s.p.UnregisterHost(ctx, res.HostID)
@@ -901,7 +901,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		}
 
 		// Verify we could create at least some B actors (B has unlimited capacity on some hosts)
-		assert.Greater(t, createdActors, 0, "should be able to create B actors since they have unlimited capacity")
+		assert.Positive(t, createdActors, "should be able to create B actors since they have unlimited capacity")
 
 		// Verify that A is still at capacity after creating B actors
 		_, err = s.p.LookupActor(ctx, ref.ActorRef{ActorType: "A", ActorID: "A-still-should-fail"}, components.LookupActorOpts{})
@@ -1317,13 +1317,13 @@ func (s Suite) TestConcurrentFetchAlarms(t *testing.T) {
 
 		// Should have leased all 50 alarms exactly once
 		assert.Equal(t, 50, totalLeases, "should have leased all 50 alarms exactly once")
-		assert.Equal(t, 50, len(allLeasedAlarms), "should have 50 unique leased alarms")
+		assert.Len(t, allLeasedAlarms, 50, "should have 50 unique leased alarms")
 
 		// Verify that actors were activated too
 		// Should have exactly 50 active actors (one per alarm)
 		spec, err := s.p.GetAllHosts(ctx)
 		require.NoError(t, err)
-		assert.Equal(t, 50, len(spec.ActiveActors), "should have exactly 50 active actors")
+		assert.Len(t, spec.ActiveActors, 50, "should have exactly 50 active actors")
 	})
 
 	t.Run("parallel fetches for same alarms - with capacity limits", func(t *testing.T) {
@@ -1412,13 +1412,13 @@ func (s Suite) TestConcurrentFetchAlarms(t *testing.T) {
 		// With capacity limits, we should lease at most 20 alarms (one per host max)
 		// Due to race conditions, we might lease fewer than 20
 		assert.LessOrEqual(t, totalLeases, 20, "should have leased at most 20 alarms due to capacity limits")
-		assert.Equal(t, totalLeases, len(allLeasedAlarms), "all leased alarms should be unique")
+		assert.Len(t, allLeasedAlarms, totalLeases, "all leased alarms should be unique")
 
 		// Verify that actors were activated on exactly one host each
 		// Number of active actors should match number of leased alarms
 		spec, err := s.p.GetAllHosts(ctx)
 		require.NoError(t, err)
-		assert.Equal(t, totalLeases, len(spec.ActiveActors), "should have one active actor per leased alarm")
+		assert.Len(t, spec.ActiveActors, totalLeases, "should have one active actor per leased alarm")
 
 		// Verify capacity constraints are respected (at most 1 actor per host)
 		hostActorCounts := make(map[string]int)
@@ -1557,7 +1557,7 @@ func (s Suite) TestConcurrentFetchAlarms(t *testing.T) {
 
 		// Should have leased all 40 alarms exactly once
 		assert.Equal(t, 40, totalLeases, "should have leased all 40 alarms exactly once")
-		assert.Equal(t, 40, len(allLeasedAlarms), "should have 40 unique leased alarms")
+		assert.Len(t, allLeasedAlarms, 40, "should have 40 unique leased alarms")
 		assert.Equal(t, 20, typeACounts, "should have leased all 20 ActorTypeA alarms")
 		assert.Equal(t, 20, typeBCounts, "should have leased all 20 ActorTypeB alarms")
 
@@ -1566,7 +1566,7 @@ func (s Suite) TestConcurrentFetchAlarms(t *testing.T) {
 		spec, err := s.p.GetAllHosts(ctx)
 
 		require.NoError(t, err)
-		assert.Equal(t, 40, len(spec.ActiveActors), "should have exactly 40 active actors")
+		assert.Len(t, spec.ActiveActors, 40, "should have exactly 40 active actors")
 
 		// Verify capacity constraints are respected (at most 4 actors per host per type)
 		// Note that we consider capacity constraints as best-effort in case of high concurrency, so we treat this as a warning but not an error
@@ -1743,7 +1743,7 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 		spec, err = s.p.GetAllHosts(ctx)
 		require.NoError(t, err)
 
-		assert.Equal(t, initialCount-3, len(spec.ActiveActors), "should have 3 fewer active actors")
+		assert.Len(t, spec.ActiveActors, initialCount-3, "should have 3 fewer active actors")
 
 		// Verify none of the removed actors are still present
 		for _, aa := range spec.ActiveActors {
@@ -1901,7 +1901,7 @@ func (s Suite) TestState(t *testing.T) {
 
 		got, err = s.p.GetState(ctx, ref)
 		require.NoError(t, err)
-		assert.Len(t, got, 0)
+		assert.Empty(t, got)
 		expectCollection(t, ActorStateSpecCollection{{ActorType: ref.ActorType, ActorID: ref.ActorID, Data: []byte{}}})
 
 		err = s.p.DeleteState(ctx, ref)
@@ -1927,7 +1927,7 @@ func (s Suite) TestState(t *testing.T) {
 		require.NoError(t, err)
 		expectCollection(t, ActorStateSpecCollection{{ActorType: ref2.ActorType, ActorID: ref2.ActorID, Data: data}})
 
-		s.p.AdvanceClock(1200 * time.Millisecond)
+		_ = s.p.AdvanceClock(1200 * time.Millisecond) //nolint:errcheck
 		err = s.p.CleanupExpired()
 		require.NoError(t, err)
 
@@ -1946,17 +1946,17 @@ func (s Suite) TestState(t *testing.T) {
 		require.NoError(t, err)
 		expectCollection(t, ActorStateSpecCollection{{ActorType: ref3.ActorType, ActorID: ref3.ActorID, Data: data1}})
 
-		s.p.AdvanceClock(time.Second)
+		_ = s.p.AdvanceClock(time.Second) //nolint:errcheck
 		err = s.p.SetState(ctx, ref3, data2, components.SetStateOpts{TTL: 2 * time.Second})
 		require.NoError(t, err)
 		expectCollection(t, ActorStateSpecCollection{{ActorType: ref3.ActorType, ActorID: ref3.ActorID, Data: data2}})
 
-		s.p.AdvanceClock(1200 * time.Millisecond)
+		_ = s.p.AdvanceClock(1200 * time.Millisecond) //nolint:errcheck
 		_, err = s.p.GetState(ctx, ref3)
 		require.NoError(t, err)
 		expectCollection(t, ActorStateSpecCollection{{ActorType: ref3.ActorType, ActorID: ref3.ActorID, Data: data2}})
 
-		s.p.AdvanceClock(1200 * time.Millisecond)
+		_ = s.p.AdvanceClock(1200 * time.Millisecond) //nolint:errcheck
 		_, err = s.p.GetState(ctx, ref3)
 		require.ErrorIs(t, err, components.ErrNoState)
 
@@ -2522,7 +2522,7 @@ func (s Suite) TestGetLeasedAlarm(t *testing.T) {
 		lease := res[0]
 
 		// Advance time beyond lease expiration (lease duration is 1 minute from GetProviderConfig)
-		s.p.AdvanceClock(2 * time.Minute)
+		_ = s.p.AdvanceClock(2 * time.Minute) //nolint:errcheck
 
 		// Try to get the alarm with the now-expired lease
 		_, err = s.p.GetLeasedAlarm(ctx, lease)
@@ -2690,7 +2690,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
 
 		// Advance time partway through lease duration to simulate renewal scenario
-		s.p.AdvanceClock(30 * time.Second)
+		_ = s.p.AdvanceClock(30 * time.Second) //nolint:errcheck
 
 		// Renew leases for H7 only
 		renewReq := components.RenewAlarmLeasesReq{
@@ -2708,7 +2708,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 
 		// Advance time beyond original lease expiration
 		// Total: 75 seconds (beyond original 60s lease)
-		s.p.AdvanceClock(45 * time.Second)
+		_ = s.p.AdvanceClock(45 * time.Second) //nolint:errcheck
 
 		// Renewed leases should still be valid (they were extended)
 		for _, lease := range renewRes.Leases {
@@ -2735,7 +2735,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 		leaseNotRenewed := res[2]
 
 		// Advance time partway through lease duration
-		s.p.AdvanceClock(30 * time.Second)
+		_ = s.p.AdvanceClock(30 * time.Second) //nolint:errcheck
 
 		// Renew only specific leases
 		renewReq := components.RenewAlarmLeasesReq{
@@ -2756,7 +2756,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 
 		// Advance time beyond original lease expiration
 		// Total: 75 seconds
-		s.p.AdvanceClock(45 * time.Second)
+		_ = s.p.AdvanceClock(45 * time.Second) //nolint:errcheck
 
 		// Renewed leases should still be valid
 		for _, lease := range renewRes.Leases {
@@ -2814,7 +2814,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
 
 		// Advance time beyond lease expiration (1 minute)
-		s.p.AdvanceClock(2 * time.Minute)
+		_ = s.p.AdvanceClock(2 * time.Minute) //nolint:errcheck
 
 		// Try to renew expired leases
 		renewReq := components.RenewAlarmLeasesReq{
@@ -2843,7 +2843,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 		invalidLease := ref.NewAlarmLease(validLease.AlarmRef(), "46d1668d-dd68-4320-a562-66176ac4a11f", s.p.Now(), "8a54df5a-2007-4add-af3c-265c4d569e28")
 
 		// Advance time partway through lease duration
-		s.p.AdvanceClock(30 * time.Second)
+		_ = s.p.AdvanceClock(30 * time.Second) //nolint:errcheck
 
 		// Try to renew mix of valid and invalid leases
 		renewReq := components.RenewAlarmLeasesReq{
@@ -2881,7 +2881,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 		totalExpectedLeases := len(res1) + len(res2)
 
 		// Advance time partway through lease duration
-		s.p.AdvanceClock(30 * time.Second)
+		_ = s.p.AdvanceClock(30 * time.Second) //nolint:errcheck
 
 		// Renew all leases for both hosts
 		renewReq := components.RenewAlarmLeasesReq{
@@ -2889,7 +2889,7 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 		}
 		renewRes, err := s.p.RenewAlarmLeases(ctx, renewReq)
 		require.NoError(t, err)
-		assert.Equal(t, totalExpectedLeases, len(renewRes.Leases), "should renew all leases from both hosts")
+		assert.Len(t, renewRes.Leases, totalExpectedLeases, "should renew all leases from both hosts")
 
 		// Verify all renewed leases are valid
 		for _, lease := range renewRes.Leases {
@@ -3019,7 +3019,7 @@ func (s Suite) TestReleaseAlarmLease(t *testing.T) {
 		lease := res[0]
 
 		// Advance time beyond lease expiration (lease duration is 1 minute from GetProviderConfig)
-		s.p.AdvanceClock(2 * time.Minute)
+		_ = s.p.AdvanceClock(2 * time.Minute) //nolint:errcheck
 
 		// Try to release the now-expired lease
 		err = s.p.ReleaseAlarmLease(ctx, lease)
@@ -3237,7 +3237,7 @@ func (s Suite) TestUpdateLeasedAlarm(t *testing.T) {
 		lease := res[0]
 
 		// Advance time beyond lease expiration (lease duration is 1 minute from GetProviderConfig)
-		s.p.AdvanceClock(2 * time.Minute)
+		_ = s.p.AdvanceClock(2 * time.Minute) //nolint:errcheck
 
 		updateReq := components.UpdateLeasedAlarmReq{
 			DueTime:      s.p.Now().Add(1 * time.Hour),
@@ -3384,7 +3384,7 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 		lease := res[0]
 
 		// Advance time beyond lease expiration (lease duration is 1 minute from GetProviderConfig)
-		s.p.AdvanceClock(2 * time.Minute)
+		_ = s.p.AdvanceClock(2 * time.Minute) //nolint:errcheck
 
 		// Try to delete the now-expired lease
 		err = s.p.DeleteLeasedAlarm(ctx, lease)

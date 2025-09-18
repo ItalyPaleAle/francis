@@ -21,7 +21,7 @@ func TestObjectEnvelope(t *testing.T) {
 		err := envelope.Decode(&target)
 
 		require.NoError(t, err)
-		assert.Equal(t, "", target) // target should remain unchanged
+		assert.Empty(t, target) // target should remain unchanged
 	})
 
 	t.Run("decode nil object returns nil", func(t *testing.T) {
@@ -31,7 +31,7 @@ func TestObjectEnvelope(t *testing.T) {
 		err := envelope.Decode(&target)
 
 		require.NoError(t, err)
-		assert.Equal(t, "", target) // target should remain unchanged
+		assert.Empty(t, target) // target should remain unchanged
 	})
 
 	t.Run("decode into nil target returns error", func(t *testing.T) {
@@ -267,10 +267,10 @@ func TestObjectEnvelope(t *testing.T) {
 	t.Run("large data structure", func(t *testing.T) {
 		// Test with a large data structure to ensure msgpack handles it properly
 		original := make(map[string][]int)
-		for i := 0; i < 1000; i++ {
+		for i := range 1000 {
 			key := fmt.Sprintf("key%d", i)
 			original[key] = make([]int, 100)
-			for j := 0; j < 100; j++ {
+			for j := range 100 {
 				original[key][j] = i*100 + j
 			}
 		}
@@ -281,7 +281,7 @@ func TestObjectEnvelope(t *testing.T) {
 		err := envelope.Decode(&target)
 
 		require.NoError(t, err)
-		assert.Equal(t, len(original), len(target))
+		assert.Len(t, target, len(original))
 		// Spot check a few values
 		assert.Equal(t, original["key0"], target["key0"])
 		assert.Equal(t, original["key999"], target["key999"])

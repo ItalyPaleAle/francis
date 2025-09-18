@@ -28,10 +28,14 @@ func (h *Host) RegisterActor(actorType string, factory actor.Factory, opts Regis
 		return err
 	}
 
+	// We have validated in opts.Validate that this is <= MaxInt32
+	// #nosec G115
+	concurrencyLimit := int32(opts.ConcurrencyLimit)
+
 	h.actorsConfig[actorType] = components.ActorHostType{
 		ActorType:           actorType,
 		IdleTimeout:         opts.IdleTimeout,
-		ConcurrencyLimit:    int32(opts.ConcurrencyLimit),
+		ConcurrencyLimit:    concurrencyLimit,
 		DeactivationTimeout: opts.DeactivationTimeout,
 		MaxAttempts:         opts.MaxAttempts,
 		InitialRetryDelay:   opts.InitialRetryDelay,
