@@ -21,9 +21,15 @@ type Host interface {
 	SetAlarm(ctx context.Context, actorType string, actorID string, name string, properties AlarmProperties) error
 	DeleteAlarm(ctx context.Context, actorType string, actorID string, name string) error
 
-	SetState(ctx context.Context, actorType string, actorID string, state any) error
+	SetState(ctx context.Context, actorType string, actorID string, state any, opts *SetStateOpts) error
 	GetState(ctx context.Context, actorType string, actorID string, dest any) error
 	DeleteState(ctx context.Context, actorType string, actorID string) error
+}
+
+// SetStateOpts is the options for the SetState method
+type SetStateOpts struct {
+	// Optional TTL for the state
+	TTL time.Duration
 }
 
 // AlarmProperties contains the options for a new alarm.

@@ -8,7 +8,7 @@ import (
 // Client allows interacting with the actor service, and it's pre-configured for the active actor
 type Client[T any] interface {
 	// SetState saves the actor's state.
-	SetState(ctx context.Context, state T) error
+	SetState(ctx context.Context, state T, opts *SetStateOpts) error
 	// GetState retrieves the actor's state.
 	GetState(ctx context.Context) (state T, err error)
 	// DeleteState deletes the actor's state.
@@ -37,8 +37,8 @@ func NewActorClient[T any](actorType string, actorID string, service *Service) C
 }
 
 // SetState saves the actor's state.
-func (c *client[T]) SetState(ctx context.Context, state T) error {
-	err := c.service.SetState(ctx, c.actorType, c.actorID, state)
+func (c *client[T]) SetState(ctx context.Context, state T, opts *SetStateOpts) error {
+	err := c.service.SetState(ctx, c.actorType, c.actorID, state, opts)
 	if err != nil {
 		return err
 	}

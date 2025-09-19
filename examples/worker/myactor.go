@@ -73,7 +73,7 @@ func (m *MyActor) Invoke(ctx context.Context, method string, data actor.Envelope
 		state.Counter = 0
 	}
 
-	err = m.client.SetState(ctx, state)
+	err = m.client.SetState(ctx, state, nil)
 	if err != nil {
 		return nil, fmt.Errorf("error saving state: %w", err)
 	}

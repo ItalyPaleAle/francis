@@ -37,8 +37,8 @@ func (s Service) Invoke(ctx context.Context, actorType string, actorID string, m
 }
 
 // SetState saves the state for an actor.
-func (s Service) SetState(ctx context.Context, actorType string, actorID string, state any) error {
-	return s.host.SetState(ctx, actorType, actorID, state)
+func (s Service) SetState(ctx context.Context, actorType string, actorID string, state any, opts *SetStateOpts) error {
+	return s.host.SetState(ctx, actorType, actorID, state, opts)
 }
 
 // GetState retrieves the state for an actor.

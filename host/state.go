@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	msgpack "github.com/vmihailenco/msgpack/v5"
 
@@ -12,7 +13,12 @@ import (
 	"github.com/italypaleale/actors/internal/ref"
 )
 
-func (h *Host) SetState(ctx context.Context, actorType string, actorID string, state any) error {
+func (h *Host) SetState(ctx context.Context, actorType string, actorID string, state any, opts *actor.SetStateOpts) error {
+	var ttl time.Duration
+	if opts != nil {
+		ttl = opts.TTL
+	}
+
 	// Encode the state using msgpack
 	data, err := msgpack.Marshal(state)
 	if err != nil {
@@ -20,8 +26,7 @@ func (h *Host) SetState(ctx context.Context, actorType string, actorID string, s
 	}
 
 	err = h.actorProvider.SetState(ctx, ref.NewActorRef(actorType, actorID), data, components.SetStateOpts{
-		// TODO: support TTL
-		TTL: 0,
+		TTL: ttl,
 	})
 	if err != nil {
 		return fmt.Errorf("failed saving state: %w", err)
