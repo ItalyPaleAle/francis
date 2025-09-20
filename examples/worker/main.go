@@ -62,17 +62,17 @@ func initLogger(level slog.Level) *slog.Logger {
 
 func runWorker(ctx context.Context) error {
 	// Create a new actor host
-	h, err := host.NewHost(host.NewHostOptions{
-		Address: actorHostAddress,
-		Logger:  log.With("scope", "actor-host"),
-		ProviderOptions: host.SQLiteProviderOptions{
+	h, err := host.NewHost(
+		host.WithAddress(actorHostAddress),
+		host.WithLogger(log.With("scope", "actor-host")),
+		host.WithSQLiteProvider(host.SQLiteProviderOptions{
 			ConnectionString: "data.db",
-		},
-		ShutdownGracePeriod: 10 * time.Second,
-		TLSOptions: &host.HostTLSOptions{
+		}),
+		host.WithShutdownGracePeriod(10*time.Second),
+		host.WithTLSOptions(&host.HostTLSOptions{
 			InsecureSkipTLSValidation: true,
-		},
-	})
+		}),
+	)
 	if err != nil {
 		return fmt.Errorf("failed to create actor host: %w", err)
 	}

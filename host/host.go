@@ -35,7 +35,7 @@ import (
 
 const (
 	defaultShutdownGracePeriod      = 30 * time.Second
-	defaultActorsMapSize            = 128
+	defaultActorsMapSize            = 128 // Must be a power of 2
 	defaultProviderRequestTimeout   = 15 * time.Second
 	defaultHostHealthCheckDeadline  = 20 * time.Second
 	defaultAlarmsPollInterval       = 1500 * time.Millisecond
@@ -108,53 +108,7 @@ type HostTLSOptions struct {
 	InsecureSkipTLSValidation bool
 }
 
-type NewHostOptions struct {
-	// Address where the host can be reached at
-	Address string
-
-	// Port for the server to listen on
-	// If empty, will be extracted from Address
-	BindPort int
-
-	// Address to bind the server to
-	// If empty, will be extracted from Address
-	BindAddress string
-
-	// TLS options
-	TLSOptions *HostTLSOptions
-
-	// Instance of a slog.Logger
-	Logger *slog.Logger
-
-	// Options for the provider
-	ProviderOptions components.ProviderOptions
-
-	// Maximum interval between pings received from an actor host
-	HostHealthCheckDeadline time.Duration
-
-	// Interval for polling alarms
-	AlarmsPollInterval time.Duration
-
-	// Alarms lease duration
-	AlarmsLeaseDuration time.Duration
-
-	// Pre-fetch interval for alarms
-	AlarmsFetchAheadInterval time.Duration
-
-	// Batch size for pre-fetching alarms
-	AlarmsFetchAheadBatchSize int
-
-	// Grace period for shutting down
-	ShutdownGracePeriod time.Duration
-
-	// Timeout for requests to the provider
-	ProviderRequestTimeout time.Duration
-
-	// Allows setting a clock for testing
-	clock clock.WithTicker
-}
-
-func (o NewHostOptions) getProviderConfig() components.ProviderConfig {
+func (o newHostOptions) getProviderConfig() components.ProviderConfig {
 	return components.ProviderConfig{
 		HostHealthCheckDeadline:   o.HostHealthCheckDeadline,
 		AlarmsLeaseDuration:       o.AlarmsLeaseDuration,
@@ -164,12 +118,21 @@ func (o NewHostOptions) getProviderConfig() components.ProviderConfig {
 }
 
 // NewHost returns a new actor host.
-func NewHost(opts NewHostOptions) (h *Host, err error) {
+func NewHost(opts ...HostOption) (h *Host, err error) {
+	options := &newHostOptions{}
+	for _, opt := range opts {
+		opt(options)
+	}
+
+	return newHost(options)
+}
+
+func newHost(options *newHostOptions) (h *Host, err error) {
 	// Validate the address
-	if opts.Address == "" {
+	if options.Address == "" {
 		return nil, errors.New("option Address is required")
 	}
-	addrHost, addrPortStr, err := net.SplitHostPort(opts.Address)
+	addrHost, addrPortStr, err := net.SplitHostPort(options.Address)
 	if err != nil {
 		return nil, fmt.Errorf("option Address is invalid: cannot split host and port: %w", err)
 	}
@@ -179,65 +142,65 @@ func NewHost(opts NewHostOptions) (h *Host, err error) {
 	}
 
 	// Set a default logger, which sends logs to /dev/null, if none is passed
-	if opts.Logger == nil {
-		opts.Logger = slog.New(slog.DiscardHandler)
+	if options.Logger == nil {
+		options.Logger = slog.New(slog.DiscardHandler)
 	}
 
 	// Set other default values
-	if opts.BindAddress == "" {
-		opts.BindAddress = addrHost
+	if options.BindAddress == "" {
+		options.BindAddress = addrHost
 	}
-	if opts.BindPort <= 0 {
-		opts.BindPort = addrPort
+	if options.BindPort <= 0 {
+		options.BindPort = addrPort
 	}
-	if opts.ShutdownGracePeriod <= 0 {
-		opts.ShutdownGracePeriod = defaultShutdownGracePeriod
+	if options.ShutdownGracePeriod <= 0 {
+		options.ShutdownGracePeriod = defaultShutdownGracePeriod
 	}
-	if opts.ProviderRequestTimeout <= 0 {
-		opts.ProviderRequestTimeout = defaultProviderRequestTimeout
+	if options.ProviderRequestTimeout <= 0 {
+		options.ProviderRequestTimeout = defaultProviderRequestTimeout
 	}
-	if opts.HostHealthCheckDeadline < time.Second {
-		opts.HostHealthCheckDeadline = defaultHostHealthCheckDeadline
+	if options.HostHealthCheckDeadline < time.Second {
+		options.HostHealthCheckDeadline = defaultHostHealthCheckDeadline
 	}
-	if opts.AlarmsPollInterval <= 100*time.Millisecond {
-		opts.AlarmsPollInterval = defaultAlarmsPollInterval
+	if options.AlarmsPollInterval <= 100*time.Millisecond {
+		options.AlarmsPollInterval = defaultAlarmsPollInterval
 	}
-	if opts.AlarmsLeaseDuration < time.Second {
-		opts.AlarmsLeaseDuration = defaultAlarmsLeaseDuration
+	if options.AlarmsLeaseDuration < time.Second {
+		options.AlarmsLeaseDuration = defaultAlarmsLeaseDuration
 	}
-	if opts.AlarmsFetchAheadInterval < 100*time.Millisecond {
-		opts.AlarmsFetchAheadInterval = defaultAlarmsFetchAheadInterval
+	if options.AlarmsFetchAheadInterval < 100*time.Millisecond {
+		options.AlarmsFetchAheadInterval = defaultAlarmsFetchAheadInterval
 	}
-	if opts.AlarmsFetchAheadBatchSize <= 0 {
-		opts.AlarmsFetchAheadBatchSize = defaultAlarmsFetchAheadBatch
+	if options.AlarmsFetchAheadBatchSize <= 0 {
+		options.AlarmsFetchAheadBatchSize = defaultAlarmsFetchAheadBatch
 	}
 
 	// Init a real clock if none is passed
-	if opts.clock == nil {
-		opts.clock = &clock.RealClock{}
+	if options.clock == nil {
+		options.clock = &clock.RealClock{}
 	}
 
 	// Get the provider
 	var actorProvider components.ActorProvider
-	switch x := opts.ProviderOptions.(type) {
+	switch x := options.ProviderOptions.(type) {
 	case sqlite.SQLiteProviderOptions:
-		actorProvider, err = sqlite.NewSQLiteProvider(opts.Logger, x, opts.getProviderConfig())
+		actorProvider, err = sqlite.NewSQLiteProvider(options.Logger, x, options.getProviderConfig())
 		if err != nil {
 			return nil, fmt.Errorf("failed to create SQLite provider: %w", err)
 		}
 	case *sqlite.SQLiteProviderOptions:
-		actorProvider, err = sqlite.NewSQLiteProvider(opts.Logger, *x, opts.getProviderConfig())
+		actorProvider, err = sqlite.NewSQLiteProvider(options.Logger, *x, options.getProviderConfig())
 		if err != nil {
 			return nil, fmt.Errorf("failed to create SQLite provider: %w", err)
 		}
 	case nil:
 		return nil, errors.New("option ProviderOptions is required")
 	default:
-		return nil, fmt.Errorf("unsupported value for ProviderOptions: %T", opts.ProviderOptions)
+		return nil, fmt.Errorf("unsupported value for ProviderOptions: %T", options.ProviderOptions)
 	}
 
 	h = &Host{
-		address:                opts.Address,
+		address:                options.Address,
 		actorProvider:          actorProvider,
 		actorsConfig:           map[string]components.ActorHostType{},
 		actorFactories:         map[string]actor.Factory{},
@@ -245,17 +208,17 @@ func NewHost(opts NewHostOptions) (h *Host, err error) {
 		activeAlarmsLock:       &sync.Mutex{},
 		activeAlarms:           map[string]struct{}{},
 		retryingAlarms:         map[string]struct{}{},
-		alarmsPollInterval:     opts.AlarmsPollInterval,
-		shutdownGracePeriod:    opts.ShutdownGracePeriod,
-		providerRequestTimeout: opts.ProviderRequestTimeout,
-		bind:                   net.JoinHostPort(opts.BindAddress, strconv.Itoa(opts.BindPort)),
-		logSource:              opts.Logger,
-		clock:                  opts.clock,
+		alarmsPollInterval:     options.AlarmsPollInterval,
+		shutdownGracePeriod:    options.ShutdownGracePeriod,
+		providerRequestTimeout: options.ProviderRequestTimeout,
+		bind:                   net.JoinHostPort(options.BindAddress, strconv.Itoa(options.BindPort)),
+		logSource:              options.Logger,
+		clock:                  options.clock,
 	}
 	h.service = actor.NewService(h)
 
 	// Init the TLS certificate for the server
-	clientTLSConfig, err := h.initTLS(opts.TLSOptions)
+	clientTLSConfig, err := h.initTLS(options.TLSOptions)
 	if err != nil {
 		return nil, err
 	}
