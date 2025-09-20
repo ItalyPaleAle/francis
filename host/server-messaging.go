@@ -92,10 +92,7 @@ func (h *Host) handleMessageRequest(w http.ResponseWriter, r *http.Request) {
 	// Set the content type for msgpack if we have a body
 	w.Header().Set(headerContentType, contentTypeMsgpack)
 	w.WriteHeader(http.StatusOK)
-	enc := msgpack.GetEncoder()
-	defer msgpack.PutEncoder(enc)
-	enc.Reset(w)
-	err = enc.Encode(outData)
+	err = outData.(*objectEnvelope).Encode(w) //nolint:forcetypeassert
 	if err != nil {
 		// At this point all we can do is log the error
 		h.log.ErrorContext(r.Context(), "Error writing response body", slog.Any("error", err))

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 
 	msgpack "github.com/vmihailenco/msgpack/v5"
@@ -61,7 +62,24 @@ func (o *objectEnvelope) Decode(into any) error {
 	dec.Reset(&buf)
 	err = dec.Decode(into)
 	if err != nil {
-		return fmt.Errorf("failed to deserialize state using msgpack: %w", err)
+		return fmt.Errorf("failed to deserialize data using msgpack: %w", err)
+	}
+
+	return nil
+}
+
+func (o *objectEnvelope) Encode(w io.Writer) error {
+	if o == nil || o.object == nil {
+		return nil
+	}
+
+	enc := msgpack.GetEncoder()
+	defer msgpack.PutEncoder(enc)
+
+	enc.Reset(w)
+	err := enc.Encode(o.object)
+	if err != nil {
+		return fmt.Errorf("failed to serialize data using msgpack: %w", err)
 	}
 
 	return nil

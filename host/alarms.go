@@ -439,7 +439,7 @@ func alarmPropertiesFromAlarmRes(res components.GetAlarmRes) (actor.AlarmPropert
 		defer msgpack.PutDecoder(dec)
 		err := dec.Decode(&o.Data)
 		if err != nil {
-			return actor.AlarmProperties{}, fmt.Errorf("failed to deserialize state using msgpack: %w", err)
+			return actor.AlarmProperties{}, fmt.Errorf("failed to deserialize data using msgpack: %w", err)
 		}
 	}
 

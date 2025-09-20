@@ -83,7 +83,7 @@ func getMTLSHostOption() (host.HostOption, error) {
 	// Parse the CA certificate
 	caBlock, _ := pem.Decode(caData)
 	if caBlock == nil {
-		return nil, fmt.Errorf("failed to parse PEM block from CA certificate")
+		return nil, errors.New("failed to parse PEM block from CA certificate")
 	}
 
 	caCert, err := x509.ParseCertificate(caBlock.Bytes)

@@ -179,7 +179,7 @@ func TestObjectEnvelope(t *testing.T) {
 		err := envelope.Decode(&target)
 
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to deserialize state using msgpack")
+		assert.Contains(t, err.Error(), "failed to deserialize data using msgpack")
 	})
 
 	t.Run("complex nested struct", func(t *testing.T) {
