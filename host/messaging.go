@@ -119,13 +119,18 @@ func (h *Host) doInvokeRemote(ctx context.Context, aRef ref.ActorRef, ap *actorP
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// TODO: Auth
 	req.Header.Set(headerUserAgent, userAgentValue)
 	req.Header.Set(headerXHostID, ap.HostID)
 
 	if br != nil {
 		// Set the content type for msgpack if we have a body
 		req.Header.Set(headerContentType, contentTypeMsgpack)
+	}
+
+	// Peer authenticator may modify the request header
+	err = h.peerAuth.UpdateRequest(req)
+	if err != nil {
+		return nil, fmt.Errorf("peer authenticator failed to modify the request: %w", err)
 	}
 
 	res, err := h.client.Do(req)

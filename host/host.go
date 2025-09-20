@@ -80,12 +80,13 @@ type Host struct {
 	actorsConfig map[string]components.ActorHostType
 
 	// List of currently-active alarms
-	activeAlarmsLock *sync.Mutex
+	activeAlarmsLock sync.Mutex
 	activeAlarms     map[string]struct{}
 	retryingAlarms   map[string]struct{}
 
 	bind                   string
 	serverTLSConfig        *tls.Config
+	peerAuth               peerAuthenticationMethod
 	alarmsPollInterval     time.Duration
 	providerRequestTimeout time.Duration
 	shutdownGracePeriod    time.Duration
@@ -199,18 +200,33 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 		return nil, fmt.Errorf("unsupported value for ProviderOptions: %T", options.ProviderOptions)
 	}
 
+	// Get the peer authentication method
+	var peerAuth peerAuthenticationMethod
+	switch x := options.PeerAuthentication.(type) {
+	case *PeerAuthenticationSharedKey:
+		err = x.Validate()
+		if err != nil {
+			return nil, fmt.Errorf("failed to validate PeerAuthenticationSharedKey: %w", err)
+		}
+		peerAuth = x
+	case nil:
+		return nil, errors.New("option PeerAuthentication is required")
+	default:
+		return nil, fmt.Errorf("unsupported value for PeerAuthentication: %T", options.PeerAuthentication)
+	}
+
 	h = &Host{
 		address:                options.Address,
 		actorProvider:          actorProvider,
 		actorsConfig:           map[string]components.ActorHostType{},
 		actorFactories:         map[string]actor.Factory{},
 		actors:                 haxmap.New[string, *activeActor](defaultActorsMapSize),
-		activeAlarmsLock:       &sync.Mutex{},
 		activeAlarms:           map[string]struct{}{},
 		retryingAlarms:         map[string]struct{}{},
 		alarmsPollInterval:     options.AlarmsPollInterval,
 		shutdownGracePeriod:    options.ShutdownGracePeriod,
 		providerRequestTimeout: options.ProviderRequestTimeout,
+		peerAuth:               peerAuth,
 		bind:                   net.JoinHostPort(options.BindAddress, strconv.Itoa(options.BindPort)),
 		logSource:              options.Logger,
 		clock:                  options.clock,

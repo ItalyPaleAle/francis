@@ -27,6 +27,8 @@ var (
 	workerAddress    string
 )
 
+const peerAuthKey = "test-auth-key-1234567890"
+
 func main() {
 	flag.StringVar(&actorHostAddress, "actor-host-address", "127.0.0.1:7571", "Address and port for the actor host to bind to")
 	flag.StringVar(&workerAddress, "worker-address", "127.0.0.1:8081", "Address and port for the example worker to bind to")
@@ -72,6 +74,7 @@ func runWorker(ctx context.Context) error {
 		host.WithTLSOptions(&host.HostTLSOptions{
 			InsecureSkipTLSValidation: true,
 		}),
+		host.WithPeerAuthenticationSharedKey(peerAuthKey),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create actor host: %w", err)

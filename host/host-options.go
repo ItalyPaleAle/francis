@@ -41,21 +41,20 @@ func WithLogger(logger *slog.Logger) HostOption {
 
 // WithSQLiteProvider sets the SQLite provider
 func WithSQLiteProvider(opts sqlite.SQLiteProviderOptions) HostOption {
-	return func(o *newHostOptions) {
-		if o.ProviderOptions != nil {
-			panic("provider options are already set")
-		}
-		o.ProviderOptions = opts
-	}
+	return func(o *newHostOptions) { o.ProviderOptions = opts }
 }
 
 // WithPostgresProvider sets the Postgres provider
 func WithPostgresProvider(opts postgres.PostgresProviderOptions) HostOption {
+	return func(o *newHostOptions) { o.ProviderOptions = opts }
+}
+
+// WithPeerAuthenticationSharedKey configures peer authentication to use a pre-shared key
+func WithPeerAuthenticationSharedKey(key string) HostOption {
 	return func(o *newHostOptions) {
-		if o.ProviderOptions != nil {
-			panic("provider options are already set")
+		o.PeerAuthentication = &PeerAuthenticationSharedKey{
+			Key: key,
 		}
-		o.ProviderOptions = opts
 	}
 }
 
@@ -101,6 +100,7 @@ type newHostOptions struct {
 	TLSOptions                *HostTLSOptions
 	Logger                    *slog.Logger
 	ProviderOptions           components.ProviderOptions
+	PeerAuthentication        peerAuthenticationMethod
 	HostHealthCheckDeadline   time.Duration
 	AlarmsPollInterval        time.Duration
 	AlarmsLeaseDuration       time.Duration

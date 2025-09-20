@@ -14,14 +14,11 @@ import (
 	"log/slog"
 	"math/big"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
-	msgpack "github.com/vmihailenco/msgpack/v5"
-
-	"github.com/italypaleale/actors/actor"
+	sloghttp "github.com/samber/slog-http"
 )
 
 func (h *Host) runServer(ctx context.Context) (err error) {
@@ -74,101 +71,18 @@ func (h *Host) getServerHandler() http.Handler {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	mux.HandleFunc("POST /v1/invoke/{actorType}/{actorID}/{method}", func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
+	mux.HandleFunc("POST /v1/invoke/{actorType}/{actorID}/{method}", h.handleMessageRequest)
 
-		var (
-			err     error
-			reqData any
-		)
-
-		// Validate the request is for the correct host
-		// It can happen that clients make calls to incorrect hosts if the app just (re-)started and their cached data is stale
-		reqHostID := r.Header.Get(headerXHostID)
-		if reqHostID == "" {
-			errApiReqInvokeHostIdEmpty.WriteResponse(w)
-			return
-		} else if reqHostID != h.hostID {
-			errApiReqInvokeHostIdMismatch.WriteResponse(w)
-			return
-		}
-
-		// Read the request body
-		ct := r.Header.Get(headerContentType)
-		switch ct {
-		case contentTypeMsgpack:
-			dec := msgpack.GetDecoder()
-			defer msgpack.PutDecoder(dec)
-			dec.Reset(r.Body)
-			err = dec.Decode(&reqData)
-			if err != nil {
-				errApiReqInvokeBody.
-					Clone(withInnerError(err)).
-					WriteResponse(w)
-				return
-			}
-		case "":
-			// Ignore the body if the content type is unsupported
-		default:
-			errApiReqInvokeContentType.WriteResponse(w)
-			return
-		}
-
-		// Invoke the actor
-		actorType := r.PathValue("actorType")
-		outData, err := h.InvokeLocal(r.Context(), actorType, r.PathValue("actorID"), r.PathValue("method"), reqData)
-		switch {
-		case errors.Is(err, actor.ErrActorNotHosted):
-			errApiActorNotHosted.WriteResponse(w)
-			return
-		case errors.Is(err, actor.ErrActorHalted):
-			// Get the deactivation timeout for the actor type (in ms), and include the ActorDeactivationTimeout metadata key to aid the caller in deciding how long to wait
-			dt := h.deactivationTimeoutForActorType(actorType).Milliseconds()
-			errApiActorHalted.
-				Clone(withMetadata(map[string]string{
-					errMetadataActorDeactivationTimeout: strconv.FormatInt(dt, 10),
-				})).
-				WriteResponse(w)
-			return
-		case err != nil:
-			errApiInvokeFailed.
-				Clone(withInnerError(err)).
-				WriteResponse(w)
-			return
-		}
-
-		// If there's no output data, respond with 204 No Content
-		if outData == nil {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-
-		// Respond with the body
-		// Set the content type for msgpack if we have a body
-		w.Header().Set(headerContentType, contentTypeMsgpack)
-		w.WriteHeader(http.StatusOK)
-		enc := msgpack.GetEncoder()
-		defer msgpack.PutEncoder(enc)
-		enc.Reset(w)
-		err = enc.Encode(outData)
-		if err != nil {
-			// At this point all we can do is log the error
-			h.log.ErrorContext(r.Context(), "Error writing response body", slog.Any("error", err))
-			return
-		}
-	})
-
-	// Add the middleware adding the host ID to each response
-	handler := h.hostIdHeaderServerMiddleware(mux)
+	handler := Use(mux,
+		// Recover from panics
+		sloghttp.Recovery,
+		// Add the middleware adding the host ID to each response
+		middlewareHostIDHeader(h.hostID),
+		// Log requests
+		sloghttp.New(h.log),
+	)
 
 	return handler
-}
-
-func (h *Host) hostIdHeaderServerMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		w.Header().Add(headerXHostID, h.hostID)
-		next.ServeHTTP(w, req)
-	})
 }
 
 func (h *Host) initTLS(opts *HostTLSOptions) (clientTLSConfig *tls.Config, err error) {

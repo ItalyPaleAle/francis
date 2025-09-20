@@ -14,11 +14,13 @@ const (
 var (
 	errApiReqInvokeHostIdEmpty    = newApiError("req_invoke_hostid_empty", http.StatusBadRequest, headerXHostID+" header is missing in the request")
 	errApiReqInvokeHostIdMismatch = newApiError("req_invoke_hostid_mismatch", http.StatusConflict, "Request is for a different host ID")
+	errApiReqInvokeUnauthorized   = newApiError("req_invoke_unauthorized", http.StatusForbidden, "Request authorization failed")
 	errApiReqInvokeBody           = newApiError("req_invoke_body", http.StatusBadRequest, "Failed to parse request body")
 	errApiReqInvokeContentType    = newApiError("req_invoke_content_type", http.StatusBadRequest, "Unsupported content type")
 	errApiActorNotHosted          = newApiError("actor_not_hosted", http.StatusNotFound, "Actor is not active on the current host")
 	errApiActorHalted             = newApiError("actor_halted", http.StatusServiceUnavailable, "Actor is halted")
 	errApiInvokeFailed            = newApiError("invoke_failed", http.StatusInternalServerError, "Actor invocation failed")
+	errInternal                   = newApiError("internal", http.StatusInternalServerError, "Internal error")
 )
 
 type apiError struct {
