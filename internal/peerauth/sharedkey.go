@@ -1,4 +1,4 @@
-package host
+package peerauth
 
 import (
 	"errors"
@@ -10,18 +10,6 @@ const (
 	headerAuthorization          = "Authorization"
 	authorizationHeaderSharedKey = "PSK"
 )
-
-// Interface implemented by all peer authentication methods
-type peerAuthenticationMethod interface {
-	// Validate the peer authentication method
-	Validate() error
-
-	// UpdateRequest updates a request object while messaging another host
-	UpdateRequest(r *http.Request) error
-
-	// ValidateIncomingRequest checks if the incoming request is authorized
-	ValidateIncomingRequest(r *http.Request) (bool, error)
-}
 
 // PeerAuthenticationSharedKey configures peer authentication to use a shared key
 type PeerAuthenticationSharedKey struct {

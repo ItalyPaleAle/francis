@@ -1,12 +1,16 @@
 package host
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"log/slog"
 	"time"
 
 	"github.com/italypaleale/actors/components"
 	"github.com/italypaleale/actors/components/postgres"
 	"github.com/italypaleale/actors/components/sqlite"
+	"github.com/italypaleale/actors/internal/hosttls"
+	"github.com/italypaleale/actors/internal/peerauth"
 	"k8s.io/utils/clock"
 )
 
@@ -29,9 +33,35 @@ func WithBindAddress(addr string) HostOption {
 	return func(o *newHostOptions) { o.BindAddress = addr }
 }
 
-// WithTLSOptions sets TLS options
-func WithTLSOptions(tls *HostTLSOptions) HostOption {
-	return func(o *newHostOptions) { o.TLSOptions = tls }
+// WithServerTLSCertificate sets the TLS certificate for the host
+func WithServerTLSCertificate(cert *tls.Certificate) HostOption {
+	return func(o *newHostOptions) {
+		if o.TLSOptions == nil {
+			o.TLSOptions = &hosttls.HostTLSOptions{}
+		}
+		o.TLSOptions.ServerCertificate = cert
+	}
+}
+
+// WithServerTLSCA sets the TLS CA certificate for the host
+func WithServerTLSCA(ca *x509.Certificate) HostOption {
+	return func(o *newHostOptions) {
+		if o.TLSOptions == nil {
+			o.TLSOptions = &hosttls.HostTLSOptions{}
+		}
+		o.TLSOptions.CACertificate = ca
+	}
+}
+
+// WithServerTLSInsecureSkipTLSValidation configures the node to skip validating TLS certificates when communicating with other hosts
+// This is automatically set when using self-signed certificates.
+func WithServerTLSInsecureSkipTLSValidation() HostOption {
+	return func(o *newHostOptions) {
+		if o.TLSOptions == nil {
+			o.TLSOptions = &hosttls.HostTLSOptions{}
+		}
+		o.TLSOptions.InsecureSkipTLSValidation = true
+	}
 }
 
 // WithLogger sets the instance of the slog logger
@@ -52,8 +82,19 @@ func WithPostgresProvider(opts postgres.PostgresProviderOptions) HostOption {
 // WithPeerAuthenticationSharedKey configures peer authentication to use a pre-shared key
 func WithPeerAuthenticationSharedKey(key string) HostOption {
 	return func(o *newHostOptions) {
-		o.PeerAuthentication = &PeerAuthenticationSharedKey{
+		o.PeerAuthentication = &peerauth.PeerAuthenticationSharedKey{
 			Key: key,
+		}
+	}
+}
+
+// WithPeerAuthenticationMTLS configures peer authentication to use mTLS
+func WithPeerAuthenticationMTLS(ca []byte, certificate []byte, key []byte) HostOption {
+	return func(o *newHostOptions) {
+		o.PeerAuthentication = &peerauth.PeerAuthenticationMTLS{
+			CA:          ca,
+			Certificate: certificate,
+			Key:         key,
 		}
 	}
 }
@@ -97,10 +138,10 @@ type newHostOptions struct {
 	Address                   string
 	BindPort                  int
 	BindAddress               string
-	TLSOptions                *HostTLSOptions
+	TLSOptions                *hosttls.HostTLSOptions
 	Logger                    *slog.Logger
 	ProviderOptions           components.ProviderOptions
-	PeerAuthentication        peerAuthenticationMethod
+	PeerAuthentication        peerauth.PeerAuthenticationMethod
 	HostHealthCheckDeadline   time.Duration
 	AlarmsPollInterval        time.Duration
 	AlarmsLeaseDuration       time.Duration

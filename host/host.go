@@ -3,7 +3,6 @@ package host
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -24,6 +23,8 @@ import (
 	"github.com/italypaleale/actors/components"
 	"github.com/italypaleale/actors/components/sqlite"
 	"github.com/italypaleale/actors/internal/eventqueue"
+	"github.com/italypaleale/actors/internal/hosttls"
+	"github.com/italypaleale/actors/internal/peerauth"
 	"github.com/italypaleale/actors/internal/ref"
 	"github.com/italypaleale/actors/internal/servicerunner"
 	"github.com/italypaleale/actors/internal/ttlcache"
@@ -45,8 +46,6 @@ const (
 
 	// If an idle actor is getting deactivated, but it's still busy, will be re-enqueued with its idle timeout increased by this duration
 	actorBusyReEnqueueInterval = 10 * time.Second
-
-	minTLSVersion = tls.VersionTLS13
 )
 
 // Re-export provider options
@@ -86,7 +85,7 @@ type Host struct {
 
 	bind                   string
 	serverTLSConfig        *tls.Config
-	peerAuth               peerAuthenticationMethod
+	peerAuth               peerauth.PeerAuthenticationMethod
 	alarmsPollInterval     time.Duration
 	providerRequestTimeout time.Duration
 	shutdownGracePeriod    time.Duration
@@ -94,19 +93,6 @@ type Host struct {
 	logSource *slog.Logger
 	log       *slog.Logger
 	clock     clock.WithTicker
-}
-
-// HostTLSOptions contains the options for the host's TLS configuration.
-// All fields are optional
-type HostTLSOptions struct {
-	// CA Certificate, used by all nodes in the cluster
-	CACertificate *x509.Certificate
-	// TLS certificate and key for the server
-	// If empty, uses a self-signed certificate
-	ServerCertificate *tls.Certificate
-	// If true, skips validating TLS certificates presented by other hosts
-	// This is required when using self-signed certificates
-	InsecureSkipTLSValidation bool
 }
 
 func (o newHostOptions) getProviderConfig() components.ProviderConfig {
@@ -201,13 +187,35 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 	}
 
 	// Get the peer authentication method
-	var peerAuth peerAuthenticationMethod
+	var peerAuth peerauth.PeerAuthenticationMethod
 	switch x := options.PeerAuthentication.(type) {
-	case *PeerAuthenticationSharedKey:
+	case *peerauth.PeerAuthenticationSharedKey:
 		err = x.Validate()
 		if err != nil {
 			return nil, fmt.Errorf("failed to validate PeerAuthenticationSharedKey: %w", err)
 		}
+		peerAuth = x
+	case *peerauth.PeerAuthenticationMTLS:
+		err = x.Validate()
+		if err != nil {
+			return nil, fmt.Errorf("failed to validate PeerAuthenticationMTLS: %w", err)
+		}
+
+		// Cannot set certain TLSOption when peer authentication uses mTLS
+		if options.TLSOptions == nil {
+			options.TLSOptions = &hosttls.HostTLSOptions{}
+		} else {
+			if options.TLSOptions.CACertificate != nil {
+				return nil, errors.New("cannot set TLSOptions.CACertificate when peer authentication is mTLS")
+			}
+			if options.TLSOptions.ServerCertificate != nil {
+				return nil, errors.New("cannot set TLSOptions.ServerCertificate when peer authentication is mTLS")
+			}
+			if options.TLSOptions.InsecureSkipTLSValidation {
+				return nil, errors.New("cannot set TLSOptions.InsecureSkipTLSValidation when peer authentication is mTLS")
+			}
+		}
+
 		peerAuth = x
 	case nil:
 		return nil, errors.New("option PeerAuthentication is required")
@@ -215,6 +223,13 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 		return nil, fmt.Errorf("unsupported value for PeerAuthentication: %T", options.PeerAuthentication)
 	}
 
+	// Init the TLS configuration for the server and client
+	serverTLSConfig, clientTLSConfig, err := options.TLSOptions.GetTLSConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	// Create the host
 	h = &Host{
 		address:                options.Address,
 		actorProvider:          actorProvider,
@@ -229,15 +244,10 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 		peerAuth:               peerAuth,
 		bind:                   net.JoinHostPort(options.BindAddress, strconv.Itoa(options.BindPort)),
 		logSource:              options.Logger,
+		serverTLSConfig:        serverTLSConfig,
 		clock:                  options.clock,
 	}
 	h.service = actor.NewService(h)
-
-	// Init the TLS certificate for the server
-	clientTLSConfig, err := h.initTLS(options.TLSOptions)
-	if err != nil {
-		return nil, err
-	}
 
 	// Init the HTTP client for the host
 	// This is configured with HTTP3 support
