@@ -34,34 +34,20 @@ func WithBindAddress(addr string) HostOption {
 }
 
 // WithServerTLSCertificate sets the TLS certificate for the host
+// If empty, uses a self-signed certificate
 func WithServerTLSCertificate(cert *tls.Certificate) HostOption {
-	return func(o *newHostOptions) {
-		if o.TLSOptions == nil {
-			o.TLSOptions = &hosttls.HostTLSOptions{}
-		}
-		o.TLSOptions.ServerCertificate = cert
-	}
+	return func(o *newHostOptions) { o.TLSOptions.ServerCertificate = cert }
 }
 
-// WithServerTLSCA sets the TLS CA certificate for the host
+// WithServerTLSCA sets the TLS CA certificate used by all hosts in the cluster
 func WithServerTLSCA(ca *x509.Certificate) HostOption {
-	return func(o *newHostOptions) {
-		if o.TLSOptions == nil {
-			o.TLSOptions = &hosttls.HostTLSOptions{}
-		}
-		o.TLSOptions.CACertificate = ca
-	}
+	return func(o *newHostOptions) { o.TLSOptions.CACertificate = ca }
 }
 
 // WithServerTLSInsecureSkipTLSValidation configures the node to skip validating TLS certificates when communicating with other hosts
-// This is automatically set when using self-signed certificates.
+// This is automatically set when using self-signed certificates
 func WithServerTLSInsecureSkipTLSValidation() HostOption {
-	return func(o *newHostOptions) {
-		if o.TLSOptions == nil {
-			o.TLSOptions = &hosttls.HostTLSOptions{}
-		}
-		o.TLSOptions.InsecureSkipTLSValidation = true
-	}
+	return func(o *newHostOptions) { o.TLSOptions.InsecureSkipTLSValidation = true }
 }
 
 // WithLogger sets the instance of the slog logger
@@ -89,12 +75,11 @@ func WithPeerAuthenticationSharedKey(key string) HostOption {
 }
 
 // WithPeerAuthenticationMTLS configures peer authentication to use mTLS
-func WithPeerAuthenticationMTLS(ca []byte, certificate []byte, key []byte) HostOption {
+func WithPeerAuthenticationMTLS(certificate *tls.Certificate, ca *x509.Certificate) HostOption {
 	return func(o *newHostOptions) {
 		o.PeerAuthentication = &peerauth.PeerAuthenticationMTLS{
 			CA:          ca,
 			Certificate: certificate,
-			Key:         key,
 		}
 	}
 }
@@ -138,7 +123,7 @@ type newHostOptions struct {
 	Address                   string
 	BindPort                  int
 	BindAddress               string
-	TLSOptions                *hosttls.HostTLSOptions
+	TLSOptions                hosttls.HostTLSOptions
 	Logger                    *slog.Logger
 	ProviderOptions           components.ProviderOptions
 	PeerAuthentication        peerauth.PeerAuthenticationMethod

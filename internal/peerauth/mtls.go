@@ -1,62 +1,66 @@
 package peerauth
 
 import (
-	"crypto"
+	"crypto/tls"
 	"crypto/x509"
-	"encoding/pem"
 	"errors"
-	"fmt"
 	"net/http"
+
+	"github.com/italypaleale/actors/internal/hosttls"
 )
 
 // PeerAuthenticationMTLS configures peer authentication to use mTLS.
 type PeerAuthenticationMTLS struct {
-	// Certification Authority certificate, PEM-encoded
-	CA []byte
-	// Certificate, PEM-encoded
-	Certificate []byte
-	// Private key, PEM-encoded
-	Key []byte
-
-	// Parsed objects
-	parsedCA   *x509.Certificate
-	parsedCert *x509.Certificate
-	parsedKey  crypto.PrivateKey
+	// Certification Authority certificate
+	CA *x509.Certificate
+	// Certificate and key
+	Certificate *tls.Certificate
 }
 
 func (p *PeerAuthenticationMTLS) Validate() (err error) {
-	// Parse CA certificate
-	p.parsedCA, err = parsePEMCert(p.CA)
-	if err != nil {
-		return err
+	if p.CA == nil {
+		return errors.New("property CA certificate is empty")
+	}
+	if p.Certificate == nil {
+		return errors.New("property Certificate is empty")
+	}
+	if len(p.Certificate.Certificate) == 0 || p.Certificate.PrivateKey == nil {
+		return errors.New("property Certificate is not valid: must contain both a certificate and private key")
 	}
 
-	// Parse certificate
-	p.parsedCert, err = parsePEMCert(p.Certificate)
+	// Parse the certificate to validate its extended key usage
+	cert, err := x509.ParseCertificate(p.Certificate.Certificate[0])
 	if err != nil {
-		return err
+		return errors.New("failed to parse certificate: " + err.Error())
 	}
 
-	// Parse private key
-	keyBlock, _ := pem.Decode(p.Key)
-	if keyBlock == nil {
-		return errors.New("invalid key PEM")
+	// Check if certificate can be used for both server auth and client auth
+	var hasServerAuth, hasClientAuth bool
+	for _, usage := range cert.ExtKeyUsage {
+		if usage == x509.ExtKeyUsageServerAuth {
+			hasServerAuth = true
+		}
+		if usage == x509.ExtKeyUsageClientAuth {
+			hasClientAuth = true
+		}
 	}
-	switch keyBlock.Type {
-	case "RSA PRIVATE KEY":
-		p.parsedKey, err = x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
-	case "EC PRIVATE KEY":
-		p.parsedKey, err = x509.ParseECPrivateKey(keyBlock.Bytes)
-	case "PRIVATE KEY":
-		p.parsedKey, err = x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
-	default:
-		return fmt.Errorf("unsupported private key type: %s", keyBlock.Type)
+
+	if !hasServerAuth {
+		return errors.New("certificate does not have server authentication extended key usage")
 	}
-	if err != nil {
-		return fmt.Errorf("invalid private key: %w", err)
+	if !hasClientAuth {
+		return errors.New("certificate does not have client authentication extended key usage")
 	}
 
 	return nil
+}
+
+func (p *PeerAuthenticationMTLS) SetTLSOptions(opts *hosttls.HostTLSOptions) {
+	opts.InsecureSkipTLSValidation = false
+	opts.CACertificate = p.CA
+	opts.ClientCertificate = p.Certificate
+	opts.ServerCertificate = p.Certificate
+	opts.ClientAuth = tls.RequireAndVerifyClientCert
 }
 
 func (p *PeerAuthenticationMTLS) UpdateRequest(r *http.Request) error {
@@ -67,16 +71,4 @@ func (p *PeerAuthenticationMTLS) UpdateRequest(r *http.Request) error {
 func (p *PeerAuthenticationMTLS) ValidateIncomingRequest(r *http.Request) (bool, error) {
 	// No-op in this implementation
 	return true, nil
-}
-
-func parsePEMCert(data []byte) (cert *x509.Certificate, err error) {
-	certBlock, _ := pem.Decode(data)
-	if certBlock == nil || certBlock.Type != "CERTIFICATE" {
-		return nil, errors.New("invalid certificate PEM")
-	}
-	cert, err = x509.ParseCertificate(certBlock.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("invalid certificate: %w", err)
-	}
-	return cert, nil
 }

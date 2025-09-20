@@ -23,7 +23,6 @@ import (
 	"github.com/italypaleale/actors/components"
 	"github.com/italypaleale/actors/components/sqlite"
 	"github.com/italypaleale/actors/internal/eventqueue"
-	"github.com/italypaleale/actors/internal/hosttls"
 	"github.com/italypaleale/actors/internal/peerauth"
 	"github.com/italypaleale/actors/internal/ref"
 	"github.com/italypaleale/actors/internal/servicerunner"
@@ -187,14 +186,12 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 	}
 
 	// Get the peer authentication method
-	var peerAuth peerauth.PeerAuthenticationMethod
 	switch x := options.PeerAuthentication.(type) {
 	case *peerauth.PeerAuthenticationSharedKey:
 		err = x.Validate()
 		if err != nil {
 			return nil, fmt.Errorf("failed to validate PeerAuthenticationSharedKey: %w", err)
 		}
-		peerAuth = x
 	case *peerauth.PeerAuthenticationMTLS:
 		err = x.Validate()
 		if err != nil {
@@ -202,21 +199,21 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 		}
 
 		// Cannot set certain TLSOption when peer authentication uses mTLS
-		if options.TLSOptions == nil {
-			options.TLSOptions = &hosttls.HostTLSOptions{}
-		} else {
-			if options.TLSOptions.CACertificate != nil {
-				return nil, errors.New("cannot set TLSOptions.CACertificate when peer authentication is mTLS")
-			}
-			if options.TLSOptions.ServerCertificate != nil {
-				return nil, errors.New("cannot set TLSOptions.ServerCertificate when peer authentication is mTLS")
-			}
-			if options.TLSOptions.InsecureSkipTLSValidation {
-				return nil, errors.New("cannot set TLSOptions.InsecureSkipTLSValidation when peer authentication is mTLS")
-			}
+		if options.TLSOptions.CACertificate != nil {
+			return nil, errors.New("cannot set TLSOptions.CACertificate when peer authentication is mTLS")
+		}
+		if options.TLSOptions.ServerCertificate != nil {
+			return nil, errors.New("cannot set TLSOptions.ServerCertificate when peer authentication is mTLS")
+		}
+		if options.TLSOptions.ClientCertificate != nil {
+			return nil, errors.New("cannot set TLSOptions.ClientCertificate when peer authentication is mTLS")
+		}
+		if options.TLSOptions.InsecureSkipTLSValidation {
+			return nil, errors.New("cannot set TLSOptions.InsecureSkipTLSValidation when peer authentication is mTLS")
 		}
 
-		peerAuth = x
+		// Update the TLS options
+		x.SetTLSOptions(&options.TLSOptions)
 	case nil:
 		return nil, errors.New("option PeerAuthentication is required")
 	default:
@@ -241,7 +238,7 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 		alarmsPollInterval:     options.AlarmsPollInterval,
 		shutdownGracePeriod:    options.ShutdownGracePeriod,
 		providerRequestTimeout: options.ProviderRequestTimeout,
-		peerAuth:               peerAuth,
+		peerAuth:               options.PeerAuthentication,
 		bind:                   net.JoinHostPort(options.BindAddress, strconv.Itoa(options.BindPort)),
 		logSource:              options.Logger,
 		serverTLSConfig:        serverTLSConfig,

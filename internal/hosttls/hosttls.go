@@ -27,14 +27,20 @@ type HostTLSOptions struct {
 	// If empty, uses a self-signed certificate
 	ServerCertificate *tls.Certificate
 	// If true, skips validating TLS certificates presented by other hosts
-	// This is required when using self-signed certificates
+	// This should be set to true when using self-signed certificates
 	InsecureSkipTLSValidation bool
+	// TLS certificate and key for the client
+	ClientCertificate *tls.Certificate
+	// Configures the client auth type in the server
+	// This is used to enable mTLS, for example
+	ClientAuth tls.ClientAuthType
 }
 
 func (opts HostTLSOptions) GetTLSConfig() (serverConfig *tls.Config, clientConfig *tls.Config, err error) {
 	// TLS configuration for the server
 	serverConfig = &tls.Config{
 		MinVersion: minTLSVersion,
+		ClientAuth: opts.ClientAuth,
 	}
 
 	// TLS configuration for the client
@@ -51,6 +57,7 @@ func (opts HostTLSOptions) GetTLSConfig() (serverConfig *tls.Config, clientConfi
 
 		// Set the cert pool on the server and client
 		serverConfig.RootCAs = caCertPool
+		serverConfig.ClientCAs = caCertPool
 		clientConfig.RootCAs = caCertPool
 	}
 
@@ -64,20 +71,23 @@ func (opts HostTLSOptions) GetTLSConfig() (serverConfig *tls.Config, clientConfi
 		if len(opts.ServerCertificate.Certificate) == 0 || opts.ServerCertificate.PrivateKey == nil {
 			return nil, nil, errors.New("option TLSOptions.ServerCertificate is not valid: must contain both a certificate and private key")
 		}
-
-		// Set the certificate in the object
 		serverConfig.Certificates = []tls.Certificate{*opts.ServerCertificate}
-
-		return serverConfig, clientConfig, nil
+	} else {
+		// Generate a self-signed certificate
+		cert, err := generateSelfSignedServerCert()
+		if err != nil {
+			return nil, nil, err
+		}
+		serverConfig.Certificates = []tls.Certificate{*cert}
 	}
 
-	// Generate a self-signed certificate
-	cert, err := generateSelfSignedServerCert()
-	if err != nil {
-		return nil, nil, err
+	// If we have a client certificate, configure it in the client
+	if opts.ClientCertificate != nil {
+		if len(opts.ClientCertificate.Certificate) == 0 || opts.ClientCertificate.PrivateKey == nil {
+			return nil, nil, errors.New("option TLSOptions.ClientCertificate is not valid: must contain both a certificate and private key")
+		}
+		clientConfig.Certificates = []tls.Certificate{*opts.ClientCertificate}
 	}
-
-	serverConfig.Certificates = []tls.Certificate{*cert}
 
 	return serverConfig, clientConfig, nil
 }
