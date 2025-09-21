@@ -17,6 +17,7 @@ type Host interface {
 
 	HaltAll() error
 	Halt(actorType string, actorID string) error
+	HaltDeferred(actorType string, actorID string)
 
 	GetAlarm(ctx context.Context, actorType string, actorID string, name string) (AlarmProperties, error)
 	SetAlarm(ctx context.Context, actorType string, actorID string, name string, properties AlarmProperties) error

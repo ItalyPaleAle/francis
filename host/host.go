@@ -421,6 +421,22 @@ func (h *Host) Halt(actorType string, actorID string) error {
 	return nil
 }
 
+// HaltDeferred gracefully halts an actor that is hosted on the current host
+// This is a non-blocking variant of the Halt method, which runs in background
+func (h *Host) HaltDeferred(actorType string, actorID string) {
+	go func() {
+		err := h.Halt(actorType, actorID)
+		if err != nil {
+			// Log the error, not much else we can do
+			h.log.Error(
+				"Failed to halt actor",
+				slog.String("actorRef", ref.NewActorRef(actorType, actorID).String()),
+				slog.Any("error", err),
+			)
+		}
+	}()
+}
+
 func (h *Host) runHealthChecks(parentCtx context.Context) error {
 	var err error
 

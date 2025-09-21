@@ -17,6 +17,8 @@ type Client[T any] interface {
 	SetAlarm(ctx context.Context, alarmName string, properties AlarmProperties) error
 	// DeleteAlarm deletes an alarm.
 	DeleteAlarm(ctx context.Context, alarmName string) error
+	// Halt the current actor upon returning.
+	Halt()
 }
 
 type client[T any] struct {
@@ -87,4 +89,10 @@ func (c *client[T]) SetAlarm(ctx context.Context, alarmName string, properties A
 // DeleteAlarm deletes an alarm.
 func (c *client[T]) DeleteAlarm(ctx context.Context, alarmName string) error {
 	return c.service.DeleteAlarm(ctx, c.actorType, c.actorID, alarmName)
+}
+
+// Halt the current actor upon returning.
+func (c *client[T]) Halt() {
+	// We use the deferred halt because otherwise it would block the current goroutine, causing a deadlock.
+	c.service.HaltDeferred(c.actorType, c.actorID)
 }

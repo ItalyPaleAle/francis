@@ -76,3 +76,9 @@ func (s Service) HaltAll() error {
 func (s Service) Halt(actorType string, actorID string) error {
 	return s.host.Halt(actorType, actorID)
 }
+
+// HaltDeferred halts an actor currently active on the host.
+// This is a non-blocking variant of the Halt method, which runs in background
+func (s Service) HaltDeferred(actorType string, actorID string) {
+	s.host.HaltDeferred(actorType, actorID)
+}
