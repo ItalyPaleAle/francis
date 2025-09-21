@@ -13,12 +13,12 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 	clocktesting "k8s.io/utils/clock/testing"
 
-	"github.com/italypaleale/actors/actor"
-	"github.com/italypaleale/actors/components"
-	"github.com/italypaleale/actors/internal/eventqueue"
-	components_mocks "github.com/italypaleale/actors/internal/mocks/components"
-	"github.com/italypaleale/actors/internal/ref"
-	"github.com/italypaleale/actors/internal/testutil"
+	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/eventqueue"
+	components_mocks "github.com/italypaleale/francis/internal/mocks/components"
+	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/testutil"
 )
 
 func TestGetAlarm(t *testing.T) {

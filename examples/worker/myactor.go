@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/italypaleale/actors/actor"
+	"github.com/italypaleale/francis/actor"
 )
 
 type MyActor struct {

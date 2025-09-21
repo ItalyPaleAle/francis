@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/italypaleale/actors/actor"
+	"github.com/italypaleale/francis/actor"
 )
 
 // Compile-time interface assertion

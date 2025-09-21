@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/italypaleale/actors/components"
-	"github.com/italypaleale/actors/internal/ref"
+	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/ref"
 )
 
 func (p *PostgresProvider) GetState(ctx context.Context, ref ref.ActorRef) (data []byte, err error) {

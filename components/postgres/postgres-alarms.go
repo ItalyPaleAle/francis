@@ -10,9 +10,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/italypaleale/actors/components"
-	"github.com/italypaleale/actors/internal/ptr"
-	"github.com/italypaleale/actors/internal/ref"
+	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/ptr"
+	"github.com/italypaleale/francis/internal/ref"
 )
 
 func (p *PostgresProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res components.GetAlarmRes, err error) {

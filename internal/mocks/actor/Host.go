@@ -9,7 +9,7 @@ package actor_mocks
 import (
 	"context"
 
-	"github.com/italypaleale/actors/actor"
+	"github.com/italypaleale/francis/actor"
 	mock "github.com/stretchr/testify/mock"
 )
 

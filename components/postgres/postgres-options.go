@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"k8s.io/utils/clock"
 
-	"github.com/italypaleale/actors/components"
+	"github.com/italypaleale/francis/components"
 )
 
 type PostgresProviderOptions struct {

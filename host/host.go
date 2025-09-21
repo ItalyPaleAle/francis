@@ -19,14 +19,14 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"k8s.io/utils/clock"
 
-	"github.com/italypaleale/actors/actor"
-	"github.com/italypaleale/actors/components"
-	"github.com/italypaleale/actors/components/sqlite"
-	"github.com/italypaleale/actors/internal/eventqueue"
-	"github.com/italypaleale/actors/internal/peerauth"
-	"github.com/italypaleale/actors/internal/ref"
-	"github.com/italypaleale/actors/internal/servicerunner"
-	"github.com/italypaleale/actors/internal/ttlcache"
+	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/components/sqlite"
+	"github.com/italypaleale/francis/internal/eventqueue"
+	"github.com/italypaleale/francis/internal/peerauth"
+	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/servicerunner"
+	"github.com/italypaleale/francis/internal/ttlcache"
 )
 
 // This file contains code adapted from https://github.com/dapr/dapr/tree/v1.14.5/

@@ -9,10 +9,10 @@ import (
 
 	"k8s.io/utils/clock"
 
-	"github.com/italypaleale/actors/actor"
-	"github.com/italypaleale/actors/internal/eventqueue"
-	"github.com/italypaleale/actors/internal/locker"
-	"github.com/italypaleale/actors/internal/ref"
+	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/internal/eventqueue"
+	"github.com/italypaleale/francis/internal/locker"
+	"github.com/italypaleale/francis/internal/ref"
 )
 
 // This file contains code adapted from https://github.com/dapr/dapr/tree/v1.14.5/

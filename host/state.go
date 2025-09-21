@@ -8,9 +8,9 @@ import (
 
 	msgpack "github.com/vmihailenco/msgpack/v5"
 
-	"github.com/italypaleale/actors/actor"
-	"github.com/italypaleale/actors/components"
-	"github.com/italypaleale/actors/internal/ref"
+	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/ref"
 )
 
 func (h *Host) SetState(ctx context.Context, actorType string, actorID string, state any, opts *actor.SetStateOpts) error {

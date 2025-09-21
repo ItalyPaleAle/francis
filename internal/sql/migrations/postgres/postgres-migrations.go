@@ -15,8 +15,8 @@ import (
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/italypaleale/actors/internal/sql/migrations"
-	"github.com/italypaleale/actors/internal/sql/sqladapter"
+	"github.com/italypaleale/francis/internal/sql/migrations"
+	"github.com/italypaleale/francis/internal/sql/sqladapter"
 )
 
 // Migrations performs migrations for the database schema

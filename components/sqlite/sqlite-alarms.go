@@ -12,10 +12,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/italypaleale/actors/components"
-	"github.com/italypaleale/actors/internal/ptr"
-	"github.com/italypaleale/actors/internal/ref"
-	"github.com/italypaleale/actors/internal/sql/transactions"
+	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/ptr"
+	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/sql/transactions"
 )
 
 func (s *SQLiteProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res components.GetAlarmRes, err error) {

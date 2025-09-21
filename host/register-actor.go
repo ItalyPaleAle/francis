@@ -5,8 +5,8 @@ import (
 	"math"
 	"time"
 
-	"github.com/italypaleale/actors/actor"
-	"github.com/italypaleale/actors/components"
+	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/components"
 )
 
 const (

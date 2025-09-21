@@ -3,7 +3,7 @@ package ref
 import (
 	"time"
 
-	timeutils "github.com/italypaleale/actors/internal/time"
+	timeutils "github.com/italypaleale/francis/internal/time"
 )
 
 // Properties for an alarm

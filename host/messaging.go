@@ -10,9 +10,9 @@ import (
 
 	msgpack "github.com/vmihailenco/msgpack/v5"
 
-	"github.com/italypaleale/actors/actor"
-	"github.com/italypaleale/actors/internal/ref"
-	"github.com/italypaleale/actors/internal/types"
+	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/types"
 )
 
 const (

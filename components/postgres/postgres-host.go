@@ -9,9 +9,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/italypaleale/actors/components"
-	"github.com/italypaleale/actors/internal/ref"
-	"github.com/italypaleale/actors/internal/sql/transactions"
+	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/sql/transactions"
 )
 
 func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {

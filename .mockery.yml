@@ -13,5 +13,5 @@ template-data:
   boilerplate-file: .mockery-boilerplate
   unroll-variadic: true
 packages:
-  github.com/italypaleale/actors/components: {}
-  github.com/italypaleale/actors/actor: {}
+  github.com/italypaleale/francis/components: {}
+  github.com/italypaleale/francis/actor: {}

@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/italypaleale/actors/components"
-	"github.com/italypaleale/actors/internal/ref"
+	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/ref"
 )
 
 // Suite implements a test suite for actor provider components.

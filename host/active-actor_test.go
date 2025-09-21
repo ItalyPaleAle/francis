@@ -14,10 +14,10 @@ import (
 	"github.com/stretchr/testify/require"
 	clocktesting "k8s.io/utils/clock/testing"
 
-	"github.com/italypaleale/actors/actor"
-	"github.com/italypaleale/actors/internal/eventqueue"
-	actor_mocks "github.com/italypaleale/actors/internal/mocks/actor"
-	"github.com/italypaleale/actors/internal/ref"
+	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/internal/eventqueue"
+	actor_mocks "github.com/italypaleale/francis/internal/mocks/actor"
+	"github.com/italypaleale/francis/internal/ref"
 )
 
 func TestNewActiveActor(t *testing.T) {

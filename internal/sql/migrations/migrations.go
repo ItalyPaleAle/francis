@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/italypaleale/actors/internal/sql/sqladapter"
+	"github.com/italypaleale/francis/internal/sql/sqladapter"
 )
 
 // MigrationOptions contains options for the Migrate function.

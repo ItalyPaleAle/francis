@@ -17,11 +17,11 @@ import (
 	"go.uber.org/goleak"
 	clocktesting "k8s.io/utils/clock/testing"
 
-	"github.com/italypaleale/actors/actor"
-	"github.com/italypaleale/actors/components"
-	"github.com/italypaleale/actors/internal/eventqueue"
-	actor_mocks "github.com/italypaleale/actors/internal/mocks/actor"
-	"github.com/italypaleale/actors/internal/ref"
+	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/eventqueue"
+	actor_mocks "github.com/italypaleale/francis/internal/mocks/actor"
+	"github.com/italypaleale/francis/internal/ref"
 )
 
 func TestLockAndInvokeFn(t *testing.T) {

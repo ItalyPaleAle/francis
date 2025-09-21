@@ -10,8 +10,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/italypaleale/actors/components"
-	"github.com/italypaleale/actors/internal/ref"
+	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/ref"
 	mock "github.com/stretchr/testify/mock"
 )
 

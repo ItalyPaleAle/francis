@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/italypaleale/actors/components"
+	"github.com/italypaleale/francis/components"
 )
 
 // ActorProviderTesting extends the ActorProvider interface adding test-only methods

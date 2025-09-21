@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/italypaleale/actors/internal/sql/sqladapter"
+	"github.com/italypaleale/francis/internal/sql/sqladapter"
 	"k8s.io/utils/clock"
 )
 

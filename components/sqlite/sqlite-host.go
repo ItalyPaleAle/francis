@@ -11,9 +11,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/italypaleale/actors/components"
-	"github.com/italypaleale/actors/internal/ref"
-	"github.com/italypaleale/actors/internal/sql/transactions"
+	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/sql/transactions"
 )
 
 func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {

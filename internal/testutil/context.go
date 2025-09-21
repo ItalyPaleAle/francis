@@ -6,7 +6,7 @@ import (
 	"context"
 	"sync/atomic"
 
-	"github.com/italypaleale/actors/internal/ptr"
+	"github.com/italypaleale/francis/internal/ptr"
 )
 
 //nolint:containedctx

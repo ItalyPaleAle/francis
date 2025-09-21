@@ -8,7 +8,7 @@ import (
 
 	msgpack "github.com/vmihailenco/msgpack/v5"
 
-	"github.com/italypaleale/actors/actor"
+	"github.com/italypaleale/francis/actor"
 )
 
 // Handler for POST /v1/invoke/{actorType}/{actorID}/{method}

@@ -20,11 +20,11 @@ import (
 	"github.com/stretchr/testify/require"
 	clocktesting "k8s.io/utils/clock/testing"
 
-	"github.com/italypaleale/actors/components"
-	comptesting "github.com/italypaleale/actors/components/testing"
-	"github.com/italypaleale/actors/internal/ptr"
-	"github.com/italypaleale/actors/internal/sql/transactions"
-	"github.com/italypaleale/actors/internal/testutil"
+	"github.com/italypaleale/francis/components"
+	comptesting "github.com/italypaleale/francis/components/testing"
+	"github.com/italypaleale/francis/internal/ptr"
+	"github.com/italypaleale/francis/internal/sql/transactions"
+	"github.com/italypaleale/francis/internal/testutil"
 )
 
 const testConnectionString = "postgres://actors:actors@localhost:5432/actors"

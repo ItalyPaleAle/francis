@@ -16,11 +16,11 @@ import (
 	"k8s.io/utils/clock"
 	"modernc.org/sqlite"
 
-	"github.com/italypaleale/actors/components"
-	"github.com/italypaleale/actors/internal/sql/cleanup"
-	"github.com/italypaleale/actors/internal/sql/migrations"
-	sqlitemigrations "github.com/italypaleale/actors/internal/sql/migrations/sqlite"
-	"github.com/italypaleale/actors/internal/sql/sqladapter"
+	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/sql/cleanup"
+	"github.com/italypaleale/francis/internal/sql/migrations"
+	sqlitemigrations "github.com/italypaleale/francis/internal/sql/migrations/sqlite"
+	"github.com/italypaleale/francis/internal/sql/sqladapter"
 )
 
 var (

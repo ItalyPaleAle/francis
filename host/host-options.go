@@ -6,11 +6,11 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/italypaleale/actors/components"
-	"github.com/italypaleale/actors/components/postgres"
-	"github.com/italypaleale/actors/components/sqlite"
-	"github.com/italypaleale/actors/internal/hosttls"
-	"github.com/italypaleale/actors/internal/peerauth"
+	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/components/postgres"
+	"github.com/italypaleale/francis/components/sqlite"
+	"github.com/italypaleale/francis/internal/hosttls"
+	"github.com/italypaleale/francis/internal/peerauth"
 	"k8s.io/utils/clock"
 )
 

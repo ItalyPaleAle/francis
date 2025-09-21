@@ -6,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/italypaleale/actors/components"
-	"github.com/italypaleale/actors/internal/ptr"
-	"github.com/italypaleale/actors/internal/ref"
+	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/ptr"
+	"github.com/italypaleale/francis/internal/ref"
 )
 
 func (s *SQLiteProvider) GetState(ctx context.Context, ref ref.ActorRef) (data []byte, err error) {

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	timeutils "github.com/italypaleale/actors/internal/time"
-	"github.com/italypaleale/actors/internal/types"
+	timeutils "github.com/italypaleale/francis/internal/time"
+	"github.com/italypaleale/francis/internal/types"
 )
 
 type Duration = timeutils.Duration

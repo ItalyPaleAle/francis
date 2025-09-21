@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/italypaleale/actors/actor"
-	"github.com/italypaleale/actors/components"
-	"github.com/italypaleale/actors/internal/ref"
+	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/ref"
 )
 
 const placementCacheMaxTTL = 5 * time.Second

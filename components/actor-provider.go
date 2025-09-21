@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/italypaleale/actors/internal/ref"
+	"github.com/italypaleale/francis/internal/ref"
 )
 
 const (

@@ -6,7 +6,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/italypaleale/actors/internal/hosttls"
+	"github.com/italypaleale/francis/internal/hosttls"
 )
 
 // PeerAuthenticationMTLS configures peer authentication to use mTLS.

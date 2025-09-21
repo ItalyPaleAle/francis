@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/italypaleale/actors/components"
-	"github.com/italypaleale/actors/internal/ptr"
+	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/ptr"
 )
 
 // Test host UUIDs - human readable patterns for easier debugging

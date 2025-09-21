@@ -1,4 +1,4 @@
-module github.com/italypaleale/actors
+module github.com/italypaleale/francis
 
 go 1.25
 

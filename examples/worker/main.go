@@ -18,10 +18,10 @@ import (
 	"github.com/lmittmann/tint"
 	"github.com/mattn/go-isatty"
 
-	"github.com/italypaleale/actors/actor"
-	"github.com/italypaleale/actors/host"
-	"github.com/italypaleale/actors/internal/servicerunner"
-	"github.com/italypaleale/actors/internal/signals"
+	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/host"
+	"github.com/italypaleale/francis/internal/servicerunner"
+	"github.com/italypaleale/francis/internal/signals"
 )
 
 var (

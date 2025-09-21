@@ -17,11 +17,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"k8s.io/utils/clock"
 
-	"github.com/italypaleale/actors/components"
-	"github.com/italypaleale/actors/internal/sql/cleanup"
-	"github.com/italypaleale/actors/internal/sql/migrations"
-	postgresmigrations "github.com/italypaleale/actors/internal/sql/migrations/postgres"
-	"github.com/italypaleale/actors/internal/sql/sqladapter"
+	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/sql/cleanup"
+	"github.com/italypaleale/francis/internal/sql/migrations"
+	postgresmigrations "github.com/italypaleale/francis/internal/sql/migrations/postgres"
+	"github.com/italypaleale/francis/internal/sql/sqladapter"
 )
 
 //go:embed migrations
