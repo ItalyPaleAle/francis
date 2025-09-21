@@ -85,14 +85,14 @@ func TestLookupActor(t *testing.T) {
 		provider.AssertNotCalled(t, "LookupActor")
 
 		// Test lookup with skipCache = false
-		result, err := host.lookupActor(t.Context(), actorRef, false)
+		result, err := host.lookupActor(t.Context(), actorRef, false, false)
 		require.NoError(t, err)
 		require.NotNil(t, result)
 		assert.Equal(t, "test-host-123", result.HostID)
 		assert.Equal(t, "localhost:8080", result.Address)
 
 		// Test lookup with skipCache = true
-		result2, err := host.lookupActor(t.Context(), actorRef, true)
+		result2, err := host.lookupActor(t.Context(), actorRef, true, false)
 		require.NoError(t, err)
 		require.NotNil(t, result2)
 		assert.Equal(t, "test-host-123", result2.HostID)
@@ -119,7 +119,7 @@ func TestLookupActor(t *testing.T) {
 		provider.AssertNotCalled(t, "LookupActor")
 
 		// Test lookup with skipCache = false (should use cache)
-		result, err := host.lookupActor(t.Context(), actorRef, false)
+		result, err := host.lookupActor(t.Context(), actorRef, false, false)
 		require.NoError(t, err)
 		require.NotNil(t, result)
 		assert.Equal(t, "cached-host-456", result.HostID)
@@ -154,7 +154,7 @@ func TestLookupActor(t *testing.T) {
 			Once()
 
 		// Test lookup with skipCache = true (should call provider)
-		result, err := host.lookupActor(t.Context(), actorRef, true)
+		result, err := host.lookupActor(t.Context(), actorRef, true, false)
 		require.NoError(t, err)
 		require.NotNil(t, result)
 		assert.Equal(t, "provider-host-789", result.HostID)
@@ -191,7 +191,7 @@ func TestLookupActor(t *testing.T) {
 			Once()
 
 		// Test lookup
-		result, err := host.lookupActor(t.Context(), actorRef, false)
+		result, err := host.lookupActor(t.Context(), actorRef, false, false)
 		require.NoError(t, err)
 		require.NotNil(t, result)
 		assert.Equal(t, "remote-host-999", result.HostID)
@@ -230,7 +230,7 @@ func TestLookupActor(t *testing.T) {
 			Once()
 
 		// Test lookup with skipCache=true to force provider call
-		result, err := host.lookupActor(t.Context(), actorRef, true)
+		result, err := host.lookupActor(t.Context(), actorRef, true, false)
 		require.Error(t, err)
 		require.ErrorIs(t, err, actor.ErrActorTypeUnsupported)
 		assert.Nil(t, result)
@@ -267,7 +267,7 @@ func TestLookupActor(t *testing.T) {
 			Once()
 
 		// Test lookup with skipCache=true to force provider call
-		result, err := host.lookupActor(t.Context(), actorRef, true)
+		result, err := host.lookupActor(t.Context(), actorRef, true, false)
 		require.Error(t, err)
 		require.ErrorContains(t, err, "provider returned an error")
 		require.ErrorContains(t, err, "database connection failed")
@@ -307,7 +307,7 @@ func TestLookupActor(t *testing.T) {
 
 		// Test lookup
 		start := time.Now()
-		result, err := host.lookupActor(t.Context(), actorRef, false)
+		result, err := host.lookupActor(t.Context(), actorRef, false, false)
 
 		require.Error(t, err)
 		require.ErrorIs(t, err, context.DeadlineExceeded)
@@ -347,7 +347,7 @@ func TestLookupActor(t *testing.T) {
 		// Start lookup in a goroutine
 		errCh := make(chan error, 1)
 		go func() {
-			_, err := host.lookupActor(ctx, actorRef, false)
+			_, err := host.lookupActor(ctx, actorRef, false, false)
 			errCh <- err
 		}()
 
@@ -389,7 +389,7 @@ func TestLookupActor(t *testing.T) {
 			Once()
 
 		// Test lookup
-		result, err := host.lookupActor(t.Context(), actorRef, false)
+		result, err := host.lookupActor(t.Context(), actorRef, false, false)
 		require.NoError(t, err)
 		require.NotNil(t, result)
 		assert.Equal(t, "zero-timeout-host", result.HostID)
@@ -425,7 +425,7 @@ func TestLookupActor(t *testing.T) {
 			Once()
 
 		// Test lookup
-		result, err := host.lookupActor(t.Context(), actorRef, false)
+		result, err := host.lookupActor(t.Context(), actorRef, false, false)
 		require.NoError(t, err)
 		require.NotNil(t, result)
 		assert.Equal(t, "timeout-host", result.HostID)
@@ -470,7 +470,7 @@ func TestLookupActor(t *testing.T) {
 		done := make(chan struct{})
 		for i := range numGoroutines {
 			go func(i int) {
-				results[i], errors[i] = host.lookupActor(t.Context(), actorRef, false)
+				results[i], errors[i] = host.lookupActor(t.Context(), actorRef, false, false)
 				done <- struct{}{}
 			}(i)
 		}
@@ -528,7 +528,7 @@ func TestLookupActor(t *testing.T) {
 		done := make(chan struct{})
 		for i := range numActors {
 			go func(index int) {
-				results[index], errors[index] = host.lookupActor(t.Context(), actorRefs[index], false)
+				results[index], errors[index] = host.lookupActor(t.Context(), actorRefs[index], false, false)
 				done <- struct{}{}
 			}(i)
 		}
@@ -554,6 +554,134 @@ func TestLookupActor(t *testing.T) {
 		}
 
 		// Verify provider expectations
+		provider.AssertExpectations(t)
+	})
+
+	t.Run("activeOnly true - returns existing active actor", func(t *testing.T) {
+		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+
+		host, provider := newHost()
+		defer host.idleActorProcessor.Close()
+		defer host.placementCache.Stop()
+
+		actorRef := ref.NewActorRef("testactor", "active-local-actor")
+
+		// Create and register an active actor locally
+		instance := &actor_mocks.MockActorDeactivate{}
+		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+		host.actors.Set(actorRef.String(), activeAct)
+
+		// No provider calls should be made when actor is local
+		provider.AssertNotCalled(t, "LookupActor")
+
+		// Test lookup with activeOnly = true
+		result, err := host.lookupActor(t.Context(), actorRef, false, true)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Equal(t, "test-host-123", result.HostID)
+		assert.Equal(t, "localhost:8080", result.Address)
+	})
+
+	t.Run("activeOnly true - returns active actor from provider", func(t *testing.T) {
+		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+
+		host, provider := newHost()
+		defer host.idleActorProcessor.Close()
+		defer host.placementCache.Stop()
+
+		actorRef := ref.NewActorRef("testactor", "active-remote-actor")
+
+		// Set up provider expectation with ActiveOnly: true
+		providerResponse := components.LookupActorRes{
+			HostID:      "remote-active-host",
+			Address:     "remote-active.example.com:8080",
+			IdleTimeout: 10 * time.Minute,
+		}
+		provider.
+			On("LookupActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.LookupActorOpts{ActiveOnly: true}).
+			Return(providerResponse, nil).
+			Once()
+
+		// Test lookup with activeOnly = true
+		result, err := host.lookupActor(t.Context(), actorRef, false, true)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Equal(t, "remote-active-host", result.HostID)
+		assert.Equal(t, "remote-active.example.com:8080", result.Address)
+
+		// Verify provider was called with ActiveOnly: true
+		provider.AssertExpectations(t)
+
+		// Verify the result was cached
+		cached, ok := host.placementCache.Get(actorRef.String())
+		assert.True(t, ok)
+		assert.Equal(t, "remote-active-host", cached.HostID)
+	})
+
+	t.Run("activeOnly true - returns ErrActorNotActive for inactive actor", func(t *testing.T) {
+		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+
+		host, provider := newHost()
+		defer host.idleActorProcessor.Close()
+		defer host.placementCache.Stop()
+
+		actorRef := ref.NewActorRef("testactor", "inactive-actor")
+
+		// Set up provider to return ErrNoActor for activeOnly lookup
+		provider.
+			On("LookupActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.LookupActorOpts{ActiveOnly: true}).
+			Return(components.LookupActorRes{}, components.ErrNoActor).
+			Once()
+
+		// Test lookup with activeOnly = true
+		result, err := host.lookupActor(t.Context(), actorRef, false, true)
+		require.Error(t, err)
+		require.ErrorIs(t, err, actor.ErrActorNotActive)
+		assert.Nil(t, result)
+
+		// Verify provider was called
+		provider.AssertExpectations(t)
+	})
+
+	t.Run("activeOnly false vs true - different provider calls", func(t *testing.T) {
+		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+
+		host, provider := newHost()
+		defer host.idleActorProcessor.Close()
+		defer host.placementCache.Stop()
+
+		actorRef := ref.NewActorRef("testactor", "placement-actor")
+
+		// Set up provider expectation for activeOnly = false
+		placementResponse := components.LookupActorRes{
+			HostID:      "placement-host",
+			Address:     "placement.example.com:8080",
+			IdleTimeout: 5 * time.Minute,
+		}
+		provider.
+			On("LookupActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.LookupActorOpts{ActiveOnly: false}).
+			Return(placementResponse, nil).
+			Once()
+
+		// Set up provider expectation for activeOnly = true
+		provider.
+			On("LookupActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.LookupActorOpts{ActiveOnly: true}).
+			Return(components.LookupActorRes{}, components.ErrNoActor).
+			Once()
+
+		// Test lookup with activeOnly = false (should succeed and create actor)
+		result1, err1 := host.lookupActor(t.Context(), actorRef, true, false)
+		require.NoError(t, err1)
+		require.NotNil(t, result1)
+		assert.Equal(t, "placement-host", result1.HostID)
+
+		// Test lookup with activeOnly = true (should fail because actor is not active)
+		result2, err2 := host.lookupActor(t.Context(), actorRef, true, true)
+		require.Error(t, err2)
+		require.ErrorIs(t, err2, actor.ErrActorNotActive)
+		assert.Nil(t, result2)
+
+		// Verify both provider calls were made with different options
 		provider.AssertExpectations(t)
 	})
 }

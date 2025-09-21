@@ -253,8 +253,8 @@ func (s *SQLiteProvider) lookupActiveActor(ctx context.Context, ref ref.ActorRef
 
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		// If no row was retrieved, the actor is currently not active and not activable
-		return components.LookupActorRes{}, components.ErrNoHost
+		// If no row was retrieved, the actor is currently not active or not active on the host list
+		return components.LookupActorRes{}, components.ErrNoActor
 	case err != nil:
 		// Query error
 		return res, fmt.Errorf("error looking up actor: %w", err)

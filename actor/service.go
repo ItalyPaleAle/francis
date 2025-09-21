@@ -12,6 +12,8 @@ var (
 	ErrAlarmNotFound = errors.New("alarm not found")
 	// ErrActorNotHosted is returned by Halt when the actor is not active on the current host.
 	ErrActorNotHosted = errors.New("actor is not active on the current host")
+	// ErrActorNotActive is returned by Invoke when requesting to invoke only active actors and the actor isn't active.
+	ErrActorNotActive = errors.New("actor is not currently active")
 	// ErrActorHalted is returned by methods that perform invocation when the actor is halted on the host where it was previously active.
 	// Callers should retry after a delay.
 	ErrActorHalted = errors.New("actor is halted")

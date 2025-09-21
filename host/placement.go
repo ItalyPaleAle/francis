@@ -13,7 +13,7 @@ import (
 
 const placementCacheMaxTTL = 5 * time.Second
 
-func (h *Host) lookupActor(parentCtx context.Context, aRef ref.ActorRef, skipCache bool) (res *actorPlacement, err error) {
+func (h *Host) lookupActor(parentCtx context.Context, aRef ref.ActorRef, skipCache bool, activeOnly bool) (res *actorPlacement, err error) {
 	key := aRef.String()
 
 	// First, check if the actor is active locally
@@ -21,6 +21,7 @@ func (h *Host) lookupActor(parentCtx context.Context, aRef ref.ActorRef, skipCac
 	_, ok := h.actors.Get(key)
 	if ok {
 		// Actor is running on the current host, so we can just return that
+		// Note that we don't need to do anything with activeOnly, since the actor is definitely active
 		return &actorPlacement{
 			HostID:  h.hostID,
 			Address: h.address,
@@ -32,6 +33,8 @@ func (h *Host) lookupActor(parentCtx context.Context, aRef ref.ActorRef, skipCac
 		res, ok = h.placementCache.Get(key)
 		if ok {
 			// We have a cached value, so just use that
+			// Note that we don't need to do anything with activeOnly, since the actor is likely active
+			// If not, the invocation will fail later on
 			return res, nil
 		}
 	}
@@ -39,14 +42,20 @@ func (h *Host) lookupActor(parentCtx context.Context, aRef ref.ActorRef, skipCac
 	// Perform a lookup with the provider
 	ctx, cancel := context.WithTimeout(parentCtx, h.providerRequestTimeout)
 	defer cancel()
-	lar, err := h.actorProvider.LookupActor(ctx, aRef, components.LookupActorOpts{})
-	if err != nil {
+	lar, err := h.actorProvider.LookupActor(ctx, aRef, components.LookupActorOpts{
+		ActiveOnly: activeOnly,
+	})
+
+	switch {
+	case errors.Is(err, components.ErrNoHost):
 		// Delete from the cache in case it's present
 		h.placementCache.Delete(key)
-
-		if errors.Is(err, components.ErrNoHost) {
-			return nil, actor.ErrActorTypeUnsupported
-		}
+		return nil, actor.ErrActorTypeUnsupported
+	case errors.Is(err, components.ErrNoActor) && activeOnly:
+		return nil, actor.ErrActorNotActive
+	case err != nil:
+		// Delete from the cache in case it's present
+		h.placementCache.Delete(key)
 		return nil, fmt.Errorf("provider returned an error: %w", err)
 	}
 

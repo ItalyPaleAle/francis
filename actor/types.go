@@ -7,12 +7,13 @@ import (
 	"time"
 
 	timeutils "github.com/italypaleale/actors/internal/time"
+	"github.com/italypaleale/actors/internal/types"
 )
 
 type Duration = timeutils.Duration
 
 type Host interface {
-	Invoke(ctx context.Context, actorType string, actorID string, method string, data any) (Envelope, error)
+	Invoke(ctx context.Context, actorType string, actorID string, method string, data any, opts ...InvokeOption) (Envelope, error)
 
 	HaltAll() error
 	Halt(actorType string, actorID string) error
@@ -86,4 +87,13 @@ func (a *AlarmProperties) UnmarshalJSON(data []byte) error {
 
 	a.Data = aux.Data
 	return nil
+}
+
+type InvokeOption func(*types.InvokeOpts)
+
+// WithInvokeActiveOnly causes the invocation to not allocate an actor if it isn't already active
+func WithInvokeActiveOnly() InvokeOption {
+	return func(o *types.InvokeOpts) {
+		o.ActiveOnly = true
+	}
 }

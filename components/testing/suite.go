@@ -950,7 +950,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		assert.Equal(t, 5*time.Minute, res.IdleTimeout)
 	})
 
-	t.Run("ActiveOnly - returns ErrNoHost for inactive actor", func(t *testing.T) {
+	t.Run("ActiveOnly - returns ErrNoActor for inactive actor", func(t *testing.T) {
 		ctx := t.Context()
 
 		// Seed with the test data
@@ -960,10 +960,10 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		ref := ref.ActorRef{ActorType: "B", ActorID: "B-nonexistent"}
 		_, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{ActiveOnly: true})
 		require.Error(t, err)
-		require.ErrorIs(t, err, components.ErrNoHost)
+		require.ErrorIs(t, err, components.ErrNoActor)
 	})
 
-	t.Run("ActiveOnly - returns ErrNoHost for actor on unhealthy host", func(t *testing.T) {
+	t.Run("ActiveOnly - returns ErrNoActor for actor on unhealthy host", func(t *testing.T) {
 		ctx := t.Context()
 
 		// Seed with the test data
@@ -974,17 +974,17 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		ref := ref.ActorRef{ActorType: "D", ActorID: "D-1"}
 		_, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{ActiveOnly: true})
 		require.Error(t, err)
-		require.ErrorIs(t, err, components.ErrNoHost)
+		require.ErrorIs(t, err, components.ErrNoActor)
 	})
 
-	t.Run("ActiveOnly - returns ErrNoHost for actor on disallowed host", func(t *testing.T) {
+	t.Run("ActiveOnly - returns ErrNoActor for actor on disallowed host", func(t *testing.T) {
 		ctx := t.Context()
 
 		// Seed with the test data
 		require.NoError(t, s.p.Seed(ctx, GetSpec()))
 
 		// Look up actor B-1 which is active on H1, but restrict to only H2
-		// This should return ErrNoHost because the actor is on a disallowed host
+		// This should return ErrNoActor because the actor is on a disallowed host
 		ref := ref.ActorRef{ActorType: "B", ActorID: "B-1"}
 		opts := components.LookupActorOpts{
 			ActiveOnly: true,
@@ -992,7 +992,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		}
 		_, err := s.p.LookupActor(ctx, ref, opts)
 		require.Error(t, err)
-		require.ErrorIs(t, err, components.ErrNoHost)
+		require.ErrorIs(t, err, components.ErrNoActor)
 	})
 }
 

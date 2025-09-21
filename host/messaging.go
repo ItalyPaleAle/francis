@@ -12,6 +12,7 @@ import (
 
 	"github.com/italypaleale/actors/actor"
 	"github.com/italypaleale/actors/internal/ref"
+	"github.com/italypaleale/actors/internal/types"
 )
 
 const (
@@ -23,11 +24,16 @@ const (
 )
 
 // Invoke performs the synchronous invocation of an actor running anywhere.
-func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, method string, data any) (actor.Envelope, error) {
+func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, method string, data any, optsFn ...actor.InvokeOption) (actor.Envelope, error) {
+	opts := &types.InvokeOpts{}
+	for _, fn := range optsFn {
+		fn(opts)
+	}
+
 	aRef := ref.NewActorRef(actorType, actorID)
 
 	// Look up the actor
-	ap, err := h.lookupActor(ctx, aRef, false)
+	ap, err := h.lookupActor(ctx, aRef, false, opts.ActiveOnly)
 	if err != nil {
 		return nil, fmt.Errorf("failed to look up actor: %w", err)
 	}
@@ -44,11 +50,16 @@ func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, met
 // InvokeLocal performs the synchronous invocation of an actor running on the current node.
 // Returns ErrActorNotHosted if the actor is active on a different node.
 // Returns ErrActorHalted if the actor is being halted (callers should retry after a delay).
-func (h *Host) InvokeLocal(ctx context.Context, actorType string, actorID string, method string, data any) (actor.Envelope, error) {
+func (h *Host) InvokeLocal(ctx context.Context, actorType string, actorID string, method string, data any, optsFn ...actor.InvokeOption) (actor.Envelope, error) {
+	opts := &types.InvokeOpts{}
+	for _, fn := range optsFn {
+		fn(opts)
+	}
+
 	aRef := ref.NewActorRef(actorType, actorID)
 
 	// Look up the actor
-	ap, err := h.lookupActor(ctx, aRef, false)
+	ap, err := h.lookupActor(ctx, aRef, false, opts.ActiveOnly)
 	if err != nil {
 		return nil, fmt.Errorf("failed to look up actor: %w", err)
 	}

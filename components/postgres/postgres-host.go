@@ -226,12 +226,18 @@ func (p *PostgresProvider) LookupActor(ctx context.Context, ref ref.ActorRef, op
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// This shouldn't happen with the function design, but handle it just in case
+			if opts.ActiveOnly {
+				return components.LookupActorRes{}, components.ErrNoActor
+			}
 			return components.LookupActorRes{}, components.ErrNoHost
 		}
 
 		// Check for our custom error code indicating no host available
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "P0001" && pgErr.Message == "NO_HOST_AVAILABLE" {
+			if opts.ActiveOnly {
+				return components.LookupActorRes{}, components.ErrNoActor
+			}
 			return components.LookupActorRes{}, components.ErrNoHost
 		}
 
