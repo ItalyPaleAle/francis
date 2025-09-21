@@ -215,11 +215,65 @@ func (s *SQLiteProvider) UnregisterHost(ctx context.Context, hostID string) erro
 	return nil
 }
 
+func (s *SQLiteProvider) lookupActiveActor(ctx context.Context, ref ref.ActorRef, hosts []string) (components.LookupActorRes, error) {
+	now := s.clock.Now().UnixMilli()
+
+	params := make([]any, 0, len(hosts)+3)
+	params = append(params,
+		ref.ActorType, ref.ActorID, now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
+	)
+
+	// Build host restrictions clause
+	hostClause, params := buildLookupActorHostClause(hosts, params)
+
+	q := `
+		SELECT 
+			h.host_id, h.host_address, aa.actor_idle_timeout
+		FROM active_actors AS aa
+		JOIN hosts AS h ON
+			aa.host_id = h.host_id
+		WHERE 
+			aa.actor_type = ? 
+			AND aa.actor_id = ?
+			AND h.host_last_health_check >= ?
+			` + hostClause + `
+		LIMIT 1`
+
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+
+	var (
+		res           components.LookupActorRes
+		idleTimeoutMs int64
+	)
+
+	err := s.db.
+		QueryRowContext(queryCtx, q, params...).
+		Scan(&res.HostID, &res.Address, &idleTimeoutMs)
+
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// If no row was retrieved, the actor is currently not active and not activable
+		return components.LookupActorRes{}, components.ErrNoHost
+	case err != nil:
+		// Query error
+		return res, fmt.Errorf("error looking up actor: %w", err)
+	default:
+		// We have an active actor
+		res.IdleTimeout = time.Duration(idleTimeoutMs) * time.Millisecond
+		return res, nil
+	}
+}
+
 func (s *SQLiteProvider) LookupActor(ctx context.Context, ref ref.ActorRef, opts components.LookupActorOpts) (components.LookupActorRes, error) {
+	// If we only want actors that are already active, use a simpler path
+	if opts.ActiveOnly {
+		return s.lookupActiveActor(ctx, ref, opts.Hosts)
+	}
+
 	return transactions.ExecuteInSQLTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (res components.LookupActorRes, err error) {
 		now := s.clock.Now().UnixMilli()
 
-		// Build host restrictions clause
 		params := make([]any, 0, len(opts.Hosts)+8)
 		params = append(params,
 			// Parameters for existing_actor CTE
@@ -228,19 +282,8 @@ func (s *SQLiteProvider) LookupActor(ctx context.Context, ref ref.ActorRef, opts
 			ref.ActorType, now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
 		)
 
-		hostClause := strings.Builder{}
-		if len(opts.Hosts) > 0 {
-			hostClause.Grow(len("AND h.host_id IN (") + len(opts.Hosts)*2 + len(")"))
-			hostClause.WriteString("AND h.host_id IN (")
-			for i, host := range opts.Hosts {
-				params = append(params, host)
-				if i > 0 {
-					hostClause.WriteString(",")
-				}
-				hostClause.WriteString("?")
-			}
-			hostClause.WriteString(")")
-		}
+		// Build host restrictions clause
+		hostClause, params := buildLookupActorHostClause(opts.Hosts, params)
 
 		// Parameters for insert_new_actor CTE
 		params = append(params,
@@ -319,7 +362,7 @@ func (s *SQLiteProvider) LookupActor(ctx context.Context, ref ref.ActorRef, opts
 						hat.actor_concurrency_limit = 0
 						OR COALESCE(haac.active_count, 0) < hat.actor_concurrency_limit
 					)
-					` + hostClause.String() + `
+					` + hostClause + `
 				ORDER BY random()
 				LIMIT 1
 			),
@@ -409,6 +452,27 @@ func (s *SQLiteProvider) RemoveActor(ctx context.Context, ref ref.ActorRef) erro
 	}
 
 	return nil
+}
+
+func buildLookupActorHostClause(hosts []string, params []any) (string, []any) {
+	if len(hosts) == 0 {
+		return "", params
+	}
+
+	hostClause := strings.Builder{}
+	hostClause.Grow(len("AND h.host_id IN (") + (len(hosts) * 2) + len(")"))
+
+	hostClause.WriteString("AND h.host_id IN (")
+	for i, host := range hosts {
+		params = append(params, host)
+		if i > 0 {
+			hostClause.WriteString(",")
+		}
+		hostClause.WriteString("?")
+	}
+	hostClause.WriteString(")")
+
+	return hostClause.String(), params
 }
 
 func (s *SQLiteProvider) insertHostActorTypes(ctx context.Context, tx *sql.Tx, hostID string, actorTypes []components.ActorHostType) error {

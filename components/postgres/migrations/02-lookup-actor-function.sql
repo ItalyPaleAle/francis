@@ -1,5 +1,5 @@
 -- Helper function to check if an actor is already active and enforce host restrictions
-CREATE OR REPLACE FUNCTION check_active_actor_v1(
+CREATE OR REPLACE FUNCTION lookup_active_actor_v1(
     p_actor_type text,
     p_actor_id text,
     p_host_health_check_deadline interval,
@@ -18,9 +18,10 @@ BEGIN
     -- Check if the actor is already active on any healthy host
     SELECT h.host_id, h.host_address, aa.actor_idle_timeout
     INTO v_host_id, v_host_address, v_idle_timeout
-    FROM active_actors aa
-    JOIN hosts h ON aa.host_id = h.host_id
-    WHERE aa.actor_type = p_actor_type
+    FROM active_actors AS aa
+    JOIN hosts AS h ON aa.host_id = h.host_id
+    WHERE
+        aa.actor_type = p_actor_type
         AND aa.actor_id = p_actor_id
         AND h.host_last_health_check >= (now() - p_host_health_check_deadline);
 
@@ -55,10 +56,10 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Performs a lookup for an actor
+-- Performs a lookup for an actor or allocates one
 -- If the actor is active, returns it, unless it violates the allowed host constraints
 -- Otherwise, activates the actor on one of the allowed hosts
-CREATE OR REPLACE FUNCTION lookup_actor_v1(
+CREATE OR REPLACE FUNCTION lookup_allocate_actor_v1(
     p_actor_type text,
     p_actor_id text,
     p_host_health_check_deadline interval,
@@ -78,7 +79,7 @@ DECLARE
 BEGIN
     -- First, check if the actor is already active on any healthy host
     SELECT * INTO v_result 
-    FROM check_active_actor_v1(p_actor_type, p_actor_id, p_host_health_check_deadline, p_allowed_hosts);
+    FROM lookup_active_actor_v1(p_actor_type, p_actor_id, p_host_health_check_deadline, p_allowed_hosts);
 
     IF FOUND THEN
         host_id := v_result.host_id;
@@ -98,7 +99,7 @@ BEGIN
 
     -- Check again if the actor is already active, as it may have gotten activated since we got the lock
     SELECT * INTO v_result 
-    FROM check_active_actor_v1(p_actor_type, p_actor_id, p_host_health_check_deadline, p_allowed_hosts);
+    FROM lookup_active_actor_v1(p_actor_type, p_actor_id, p_host_health_check_deadline, p_allowed_hosts);
 
     IF FOUND THEN
         host_id := v_result.host_id;

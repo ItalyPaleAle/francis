@@ -146,6 +146,8 @@ type LookupActorOpts struct {
 	// List of hosts on which the actor can be activated.
 	// If the actor is active on a different host, ErrNoActorHost is returned.
 	Hosts []string
+	// If true, performs a lookup for an actor that's currently active only
+	ActiveOnly bool
 }
 
 // LookupActorRes is the response object for the LookupActor method.

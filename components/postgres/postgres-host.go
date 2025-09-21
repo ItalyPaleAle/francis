@@ -206,10 +206,17 @@ func (p *PostgresProvider) LookupActor(ctx context.Context, ref ref.ActorRef, op
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
+	var funcName string
+	if opts.ActiveOnly {
+		funcName = "lookup_active_actor_v1"
+	} else {
+		funcName = "lookup_allocate_actor_v1"
+	}
+
 	err := p.db.
 		QueryRow(queryCtx,
 			`SELECT host_id, host_address, idle_timeout 
-			FROM lookup_actor_v1($1, $2, $3, $4)`,
+			FROM `+funcName+`($1, $2, $3, $4)`,
 			ref.ActorType,
 			ref.ActorID,
 			p.cfg.HostHealthCheckDeadline,
