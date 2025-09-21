@@ -10,11 +10,28 @@ env:
   GOLANGCI_LINT_VERSION: "v2.4.0"
 
 permissions:
-  contents: read
+  contents: "read"
 
 jobs:
-  build:
+  ci:
     runs-on: "ubuntu-latest"
+
+    services:
+      postgres:
+        image: "postgres:17-alpine"
+        env:
+          POSTGRES_USER: "actors"
+          POSTGRES_PASSWORD: "actors"
+          POSTGRES_DB: "actors"
+        ports:
+          - "5432:5432"
+        # Set health checks to wait until postgres has started
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: "Check out code"
         uses: actions/checkout@v4
@@ -30,5 +47,7 @@ jobs:
           version: "${{ env.GOLANGCI_LINT_VERSION }}"
 
       - name: "Test"
+        env:
+          TEST_POSTGRES_CONNSTRING: "postgres://actors:actors@localhost:5432/actors"
         run: |
-          go test -tags unit ./...
+          go test -v -tags unit ./...

@@ -27,7 +27,10 @@ import (
 	"github.com/italypaleale/francis/internal/testutil"
 )
 
-const testConnectionString = "postgres://actors:actors@localhost:5432/actors"
+// Name of the environmental variable containing the connection string to the test database.
+// Example:
+// TEST_POSTGRES_CONNSTRING=postgres://actors:actors@localhost:5432/actors
+const connstringEnvVar = "TEST_POSTGRES_CONNSTRING"
 
 //go:embed test-queries/test-setup.sql
 var queryTestSetup string
@@ -35,7 +38,7 @@ var queryTestSetup string
 // Uncomment this test to have a test database, including seed data, populated
 // It is not removed automatically at the end of the test
 func TestPostgresCreateTestDB(t *testing.T) {
-	// Comment out to have the schem created
+	// Comment out to have the schema created for manual testing
 	t.SkipNow()
 
 	p, testSchema, _ := initTestProvider(t)
@@ -64,6 +67,11 @@ func TestPostgresProvider(t *testing.T) {
 }
 
 func initTestProvider(t *testing.T) (p *PostgresProvider, testSchema string, cleanupFn func()) {
+	connString := os.Getenv(connstringEnvVar)
+	if connString == "" {
+		t.Skip(`To run these tests, set the env var ` + connstringEnvVar + ` with the connection string for Postgres database. Example: "` + connstringEnvVar + `=postgres://actors:actors@localhost:5432/actors"`)
+	}
+
 	clock := clocktesting.NewFakeClock(time.Now())
 	h := comptesting.NewSlogClockHandler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
@@ -75,7 +83,7 @@ func initTestProvider(t *testing.T) (p *PostgresProvider, testSchema string, cle
 	t.Log("Test schema:", testSchema)
 
 	// Connect to the database beforehand so we can create a new schema for the tests
-	conn, cleanupFnT := connectTestDatabase(t, testSchema)
+	conn, cleanupFnT := connectTestDatabase(t, connString, testSchema)
 	cleanupFn = func() { cleanupFnT(t) }
 
 	providerOpts := PostgresProviderOptions{
@@ -505,11 +513,11 @@ func generateTestSchemaName(t *testing.T) string {
 	return "test_" + hex.EncodeToString(testSchemaB)
 }
 
-func connectTestDatabase(t *testing.T, testSchema string) (conn *pgxpool.Pool, cleanupFn func(t *testing.T)) {
+func connectTestDatabase(t *testing.T, connString string, testSchema string) (conn *pgxpool.Pool, cleanupFn func(t *testing.T)) {
 	t.Helper()
 
 	// Parse the connection string
-	cfg, err := pgxpool.ParseConfig(testConnectionString)
+	cfg, err := pgxpool.ParseConfig(connString)
 	require.NoError(t, err)
 
 	// Set a callback so we can make sure that the schema exists after connecting, and setting the correct search path
