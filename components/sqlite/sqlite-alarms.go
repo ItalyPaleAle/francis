@@ -85,14 +85,25 @@ func (s *SQLiteProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req com
 	// Any upsert will cause the lease to be lost
 	_, err = s.db.
 		ExecContext(queryCtx,
-			`REPLACE INTO alarms
+			`INSERT INTO alarms
 				(alarm_id, actor_type, actor_id, alarm_name,
 				alarm_due_time, alarm_interval, alarm_ttl_time, alarm_data,
 				alarm_lease_id, alarm_lease_expiration_time)
 			VALUES
-				(?, ?, ?, ?,
-				?, ?, ?, ?,
-				NULL, NULL)`,
+				(?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+			ON CONFLICT (actor_type, actor_id, alarm_name) DO UPDATE SET
+				alarm_id = EXCLUDED.alarm_id,
+				alarm_due_time = EXCLUDED.alarm_due_time,
+				alarm_interval = EXCLUDED.alarm_interval,
+				alarm_ttl_time = EXCLUDED.alarm_ttl_time,
+				alarm_data = EXCLUDED.alarm_data,
+				alarm_lease_id = NULL,
+				alarm_lease_expiration_time = NULL
+			WHERE
+				alarms.alarm_due_time != EXCLUDED.alarm_due_time
+				OR alarms.alarm_interval IS NOT EXCLUDED.alarm_interval
+				OR alarms.alarm_ttl_time IS NOT EXCLUDED.alarm_ttl_time
+				OR alarms.alarm_data IS NOT EXCLUDED.alarm_data`,
 			alarmID, ref.ActorType, ref.ActorID, ref.Name,
 			req.DueTime.UnixMilli(), interval, ttlTime, req.Data)
 	if err != nil {

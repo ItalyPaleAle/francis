@@ -10,8 +10,6 @@ import (
 	"github.com/italypaleale/francis/internal/types"
 )
 
-type Duration = timeutils.Duration
-
 type Host interface {
 	Invoke(ctx context.Context, actorType string, actorID string, method string, data any, opts ...InvokeOption) (Envelope, error)
 

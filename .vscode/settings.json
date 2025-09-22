@@ -1,3 +1,9 @@
 {
-    "go.buildTags": "unit"
+    "go.buildTags": "unit",
+    "terminal.integrated.env.linux": {
+        "TEST_POSTGRES_CONNSTRING":"postgres://actors:actors@localhost:5432/actors"
+    },
+    "terminal.integrated.env.osx": {
+        "TEST_POSTGRES_CONNSTRING":"postgres://actors:actors@localhost:5432/actors"
+    }
 }

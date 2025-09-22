@@ -65,6 +65,7 @@ func (p *PostgresProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req c
 
 	// We do an upsert to replace alarms with the same actor ID, actor type, and alarm name
 	// Any upsert will cause the lease to be lost
+	// To avoid updating rows if there's nothing changed and canceling leases, we add conditions so if the alarm being added is the same as the existing, nothing is changed
 	_, err = p.db.
 		Exec(queryCtx,
 			`
@@ -73,7 +74,7 @@ func (p *PostgresProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req c
 				alarm_due_time, alarm_interval, alarm_ttl_time, alarm_data,
 				alarm_lease_id, alarm_lease_expiration_time)
 			VALUES
-				($1, $2, $3, $4, $5, $6, $7, $8,NULL, NULL)
+				($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL)
 			ON CONFLICT (actor_type, actor_id, alarm_name) DO UPDATE SET
 				alarm_id = EXCLUDED.alarm_id,
 				alarm_due_time = EXCLUDED.alarm_due_time,
@@ -82,6 +83,11 @@ func (p *PostgresProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req c
 				alarm_data = EXCLUDED.alarm_data,
 				alarm_lease_id = NULL,
 				alarm_lease_expiration_time = NULL
+			WHERE
+				alarms.alarm_due_time != EXCLUDED.alarm_due_time
+				OR alarms.alarm_interval IS DISTINCT FROM EXCLUDED.alarm_interval
+				OR alarms.alarm_ttl_time IS DISTINCT FROM EXCLUDED.alarm_ttl_time
+				OR alarms.alarm_data IS DISTINCT FROM EXCLUDED.alarm_data
 			`,
 			alarmID, ref.ActorType, ref.ActorID, ref.Name,
 			req.DueTime, interval, req.TTL, req.Data)

@@ -35,6 +35,10 @@ func (s Suite) RunTests(t *testing.T) {
 
 	t.Run("actor state", s.TestState)
 
+	t.Run("get alarm", s.TestGetAlarm)
+	t.Run("set alarm", s.TestSetAlarm)
+	t.Run("delete alarm", s.TestDeleteAlarm)
+
 	t.Run("fetch alarms", s.TestFetchAlarms)
 	t.Run("get leased alarm", s.TestGetLeasedAlarm)
 	t.Run("renew alarm leases", s.TestRenewAlarmLeases)
@@ -2029,6 +2033,628 @@ func (s Suite) TestState(t *testing.T) {
 		err = s.p.CleanupExpired()
 		require.NoError(t, err)
 		expectCollection(t, ActorStateSpecCollection{})
+	})
+}
+
+func (s Suite) TestGetAlarm(t *testing.T) {
+	t.Run("get alarm from test spec", func(t *testing.T) {
+		// Seed with test data
+		err := s.p.Seed(t.Context(), GetSpec())
+		require.NoError(t, err)
+
+		// Get an existing alarm from the test spec
+		alarmRef := ref.AlarmRef{
+			ActorType: "A",
+			ActorID:   "A-1",
+			Name:      "Alarm-A-1",
+		}
+
+		res, err := s.p.GetAlarm(t.Context(), alarmRef)
+		require.NoError(t, err)
+
+		// Verify it exists (exact values depend on the test spec)
+		assert.False(t, res.DueTime.IsZero())
+		assert.Equal(t, []byte("active-A-1"), res.Data)
+	})
+
+	t.Run("get existing alarm with all fields", func(t *testing.T) {
+		// Seed with empty database
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
+
+		// Create an alarm with all fields
+		alarmRef := ref.AlarmRef{
+			ActorType: "TestActor",
+			ActorID:   "test-id",
+			Name:      "test-alarm",
+		}
+
+		alarmData := []byte(`{"message": "test data"}`)
+		now := time.Now()
+		dueTime := now.Add(1 * time.Hour)
+		ttl := now.Add(24 * time.Hour)
+
+		setReq := components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{
+				DueTime:  dueTime,
+				Interval: "1h",
+				TTL:      &ttl,
+				Data:     alarmData,
+			},
+		}
+
+		err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
+		require.NoError(t, err)
+
+		// Get the alarm
+		res, err := s.p.GetAlarm(t.Context(), alarmRef)
+		require.NoError(t, err)
+
+		// Verify all fields
+		assert.WithinDuration(t, dueTime, res.DueTime, time.Second)
+		assert.Equal(t, "1h", res.Interval)
+		require.NotNil(t, res.TTL)
+		assert.WithinDuration(t, ttl, *res.TTL, time.Second)
+		assert.Equal(t, alarmData, res.Data)
+	})
+
+	t.Run("get existing alarm with minimal fields", func(t *testing.T) {
+		// Seed with empty database
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
+
+		// Create an alarm with only required fields
+		alarmRef := ref.AlarmRef{
+			ActorType: "TestActor",
+			ActorID:   "test-id-minimal",
+			Name:      "test-alarm-minimal",
+		}
+
+		now := time.Now()
+		dueTime := now.Add(1 * time.Hour)
+
+		setReq := components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{
+				DueTime: dueTime,
+				// Leave Interval, TTL, and Data as defaults
+			},
+		}
+
+		err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
+		require.NoError(t, err)
+
+		// Get the alarm
+		res, err := s.p.GetAlarm(t.Context(), alarmRef)
+		require.NoError(t, err)
+
+		// Verify fields
+		assert.WithinDuration(t, dueTime, res.DueTime, time.Second)
+		assert.Empty(t, res.Interval)
+		assert.Nil(t, res.TTL)
+		assert.Nil(t, res.Data)
+	})
+
+	t.Run("returns ErrNoAlarm for non-existent alarm", func(t *testing.T) {
+		// Seed with empty database
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
+
+		// Try to get a non-existent alarm
+		alarmRef := ref.AlarmRef{
+			ActorType: "NonExistentActor",
+			ActorID:   "non-existent-id",
+			Name:      "non-existent-alarm",
+		}
+
+		_, err = s.p.GetAlarm(t.Context(), alarmRef)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
+	})
+}
+
+func (s Suite) TestSetAlarm(t *testing.T) {
+	t.Run("create new alarm with all fields", func(t *testing.T) {
+		// Seed with empty database
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
+
+		// Create an alarm with all fields
+		alarmRef := ref.AlarmRef{
+			ActorType: "TestActor",
+			ActorID:   "test-id",
+			Name:      "test-alarm",
+		}
+
+		alarmData := []byte(`{"message": "test data"}`)
+		now := time.Now()
+		dueTime := now.Add(1 * time.Hour)
+		ttl := now.Add(24 * time.Hour)
+
+		setReq := components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{
+				DueTime:  dueTime,
+				Interval: "1h",
+				TTL:      &ttl,
+				Data:     alarmData,
+			},
+		}
+
+		err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
+		require.NoError(t, err)
+
+		// Verify the alarm was created by getting it
+		res, err := s.p.GetAlarm(t.Context(), alarmRef)
+		require.NoError(t, err)
+
+		assert.WithinDuration(t, dueTime, res.DueTime, time.Second)
+		assert.Equal(t, "1h", res.Interval)
+		require.NotNil(t, res.TTL)
+		assert.WithinDuration(t, ttl, *res.TTL, time.Second)
+		assert.Equal(t, alarmData, res.Data)
+	})
+
+	t.Run("create new alarm with minimal fields", func(t *testing.T) {
+		// Seed with empty database
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
+
+		// Create an alarm with only required fields
+		alarmRef := ref.AlarmRef{
+			ActorType: "TestActor",
+			ActorID:   "test-id-minimal",
+			Name:      "test-alarm-minimal",
+		}
+
+		now := time.Now()
+		dueTime := now.Add(1 * time.Hour)
+
+		setReq := components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{
+				DueTime: dueTime,
+			},
+		}
+
+		err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
+		require.NoError(t, err)
+
+		// Verify the alarm was created
+		res, err := s.p.GetAlarm(t.Context(), alarmRef)
+		require.NoError(t, err)
+
+		assert.WithinDuration(t, dueTime, res.DueTime, time.Second)
+		assert.Empty(t, res.Interval)
+		assert.Nil(t, res.TTL)
+		assert.Nil(t, res.Data)
+	})
+
+	t.Run("update existing alarm replaces all fields", func(t *testing.T) {
+		// Seed with empty database
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
+
+		alarmRef := ref.AlarmRef{
+			ActorType: "TestActor",
+			ActorID:   "test-id",
+			Name:      "test-alarm",
+		}
+
+		// Create initial alarm
+		now := time.Now()
+		initialDueTime := now.Add(1 * time.Hour)
+		initialData := []byte(`{"version": 1}`)
+		initialTTL := now.Add(12 * time.Hour)
+
+		initialReq := components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{
+				DueTime:  initialDueTime,
+				Interval: "1h",
+				TTL:      &initialTTL,
+				Data:     initialData,
+			},
+		}
+
+		err = s.p.SetAlarm(t.Context(), alarmRef, initialReq)
+		require.NoError(t, err)
+
+		// Update the alarm with different values
+		updatedDueTime := now.Add(2 * time.Hour)
+		updatedData := []byte(`{"version": 2}`)
+		updatedTTL := now.Add(24 * time.Hour)
+
+		updateReq := components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{
+				DueTime:  updatedDueTime,
+				Interval: "2h",
+				TTL:      &updatedTTL,
+				Data:     updatedData,
+			},
+		}
+
+		err = s.p.SetAlarm(t.Context(), alarmRef, updateReq)
+		require.NoError(t, err)
+
+		// Verify the alarm was updated
+		res, err := s.p.GetAlarm(t.Context(), alarmRef)
+		require.NoError(t, err)
+
+		assert.WithinDuration(t, updatedDueTime, res.DueTime, time.Second)
+		assert.Equal(t, "2h", res.Interval)
+		require.NotNil(t, res.TTL)
+		assert.WithinDuration(t, updatedTTL, *res.TTL, time.Second)
+		assert.Equal(t, updatedData, res.Data)
+	})
+
+	t.Run("update existing alarm clears optional fields when not provided", func(t *testing.T) {
+		// Seed with empty database
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
+
+		alarmRef := ref.AlarmRef{
+			ActorType: "TestActor",
+			ActorID:   "test-id",
+			Name:      "test-alarm",
+		}
+
+		// Create initial alarm with all fields
+		now := time.Now()
+		initialDueTime := now.Add(1 * time.Hour)
+		initialData := []byte(`{"version": 1}`)
+		initialTTL := now.Add(12 * time.Hour)
+
+		initialReq := components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{
+				DueTime:  initialDueTime,
+				Interval: "1h",
+				TTL:      &initialTTL,
+				Data:     initialData,
+			},
+		}
+
+		err = s.p.SetAlarm(t.Context(), alarmRef, initialReq)
+		require.NoError(t, err)
+
+		// Update with minimal fields (should clear optional fields)
+		updatedDueTime := now.Add(2 * time.Hour)
+
+		updateReq := components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{
+				DueTime: updatedDueTime,
+				// No Interval, TTL, or Data
+			},
+		}
+
+		err = s.p.SetAlarm(t.Context(), alarmRef, updateReq)
+		require.NoError(t, err)
+
+		// Verify optional fields were cleared
+		res, err := s.p.GetAlarm(t.Context(), alarmRef)
+		require.NoError(t, err)
+
+		assert.WithinDuration(t, updatedDueTime, res.DueTime, time.Second)
+		assert.Empty(t, res.Interval)
+		assert.Nil(t, res.TTL)
+		assert.Nil(t, res.Data)
+	})
+
+	t.Run("set alarm with empty data array becomes nil", func(t *testing.T) {
+		// Seed with empty database
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
+
+		alarmRef := ref.AlarmRef{
+			ActorType: "TestActor",
+			ActorID:   "test-id",
+			Name:      "test-alarm",
+		}
+
+		now := time.Now()
+		dueTime := now.Add(1 * time.Hour)
+
+		setReq := components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{
+				DueTime: dueTime,
+				Data:    []byte{}, // Empty but non-nil slice
+			},
+		}
+
+		err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
+		require.NoError(t, err)
+
+		// Verify empty data becomes nil
+		res, err := s.p.GetAlarm(t.Context(), alarmRef)
+		require.NoError(t, err)
+
+		assert.Nil(t, res.Data) // Should be nil, not empty slice
+	})
+
+	t.Run("set alarm with identical properties preserves lease", func(t *testing.T) {
+		// Seed with test data that includes leased alarms
+		err := s.p.Seed(t.Context(), GetSpec())
+		require.NoError(t, err)
+
+		// Get an alarm that should have a lease (from the spec, C-001 through C-005 have valid leases)
+		alarmRef := ref.AlarmRef{
+			ActorType: "C",
+			ActorID:   "C-001",
+			Name:      "C-001",
+		}
+
+		// First, verify the alarm exists and get its current properties
+		originalAlarm, err := s.p.GetAlarm(t.Context(), alarmRef)
+		require.NoError(t, err)
+
+		// Get all hosts/alarms to check the current lease status
+		originalSpec, err := s.p.GetAllHosts(t.Context())
+		require.NoError(t, err)
+
+		// Find the original alarm in the spec to get lease information
+		var originalAlarmSpec *AlarmSpec
+		for i := range originalSpec.Alarms {
+			alarm := &originalSpec.Alarms[i]
+			if alarm.ActorType == alarmRef.ActorType &&
+				alarm.ActorID == alarmRef.ActorID &&
+				alarm.Name == alarmRef.Name {
+				originalAlarmSpec = alarm
+				break
+			}
+		}
+		require.NotNil(t, originalAlarmSpec, "Original alarm should exist in spec")
+		require.NotNil(t, originalAlarmSpec.LeaseID, "Original alarm should have a lease")
+
+		// Now call SetAlarm with exactly the same properties
+		setReq := components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{
+				DueTime:  originalAlarm.DueTime,
+				Interval: originalAlarm.Interval,
+				TTL:      originalAlarm.TTL,
+				Data:     originalAlarm.Data,
+			},
+		}
+
+		err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
+		require.NoError(t, err)
+
+		// Get the alarm spec again to verify the lease is preserved
+		updatedSpec, err := s.p.GetAllHosts(t.Context())
+		require.NoError(t, err)
+
+		// Find the updated alarm in the spec
+		var updatedAlarmSpec *AlarmSpec
+		for i := range updatedSpec.Alarms {
+			alarm := &updatedSpec.Alarms[i]
+			if alarm.ActorType == alarmRef.ActorType &&
+				alarm.ActorID == alarmRef.ActorID &&
+				alarm.Name == alarmRef.Name {
+				updatedAlarmSpec = alarm
+				break
+			}
+		}
+		require.NotNil(t, updatedAlarmSpec, "Updated alarm should exist in spec")
+
+		// Verify the lease is preserved (same lease ID and expiration)
+		assert.NotNil(t, updatedAlarmSpec.LeaseID, "Lease should still exist")
+		assert.Equal(t, *originalAlarmSpec.LeaseID, *updatedAlarmSpec.LeaseID, "Lease ID should be preserved")
+
+		if originalAlarmSpec.LeaseExp != nil && updatedAlarmSpec.LeaseExp != nil {
+			assert.Equal(t, *originalAlarmSpec.LeaseExp, *updatedAlarmSpec.LeaseExp, "Lease expiration should be preserved")
+		}
+
+		// Verify that the alarm properties are still the same
+		updatedAlarm, err := s.p.GetAlarm(t.Context(), alarmRef)
+		require.NoError(t, err)
+
+		assert.WithinDuration(t, originalAlarm.DueTime, updatedAlarm.DueTime, time.Second/10)
+		assert.Equal(t, originalAlarm.Interval, updatedAlarm.Interval)
+		if originalAlarm.TTL != nil && updatedAlarm.TTL != nil {
+			assert.WithinDuration(t, *originalAlarm.TTL, *updatedAlarm.TTL, time.Second/10)
+		} else {
+			assert.Equal(t, originalAlarm.TTL, updatedAlarm.TTL)
+		}
+		assert.Equal(t, originalAlarm.Data, updatedAlarm.Data)
+	})
+
+	t.Run("set alarm with different properties nullifies lease", func(t *testing.T) {
+		// Seed with test data that includes leased alarms
+		err := s.p.Seed(t.Context(), GetSpec())
+		require.NoError(t, err)
+
+		// Get an alarm that should have a lease (from the spec, C-002 has a valid lease)
+		alarmRef := ref.AlarmRef{
+			ActorType: "C",
+			ActorID:   "C-002",
+			Name:      "C-002",
+		}
+
+		// First, verify the alarm exists and has a lease
+		originalAlarm, err := s.p.GetAlarm(t.Context(), alarmRef)
+		require.NoError(t, err)
+
+		// Get all hosts/alarms to check the current lease status
+		originalSpec, err := s.p.GetAllHosts(t.Context())
+		require.NoError(t, err)
+
+		// Find the original alarm in the spec to get lease information
+		var originalAlarmSpec *AlarmSpec
+		for i := range originalSpec.Alarms {
+			alarm := &originalSpec.Alarms[i]
+			if alarm.ActorType == alarmRef.ActorType &&
+				alarm.ActorID == alarmRef.ActorID &&
+				alarm.Name == alarmRef.Name {
+				originalAlarmSpec = alarm
+				break
+			}
+		}
+		require.NotNil(t, originalAlarmSpec, "Original alarm should exist in spec")
+		require.NotNil(t, originalAlarmSpec.LeaseID, "Original alarm should have a lease")
+
+		// Now call SetAlarm with different properties (change due time)
+		newDueTime := originalAlarm.DueTime.Add(1 * time.Hour)
+		setReq := components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{
+				DueTime:  newDueTime,
+				Interval: originalAlarm.Interval,
+				TTL:      originalAlarm.TTL,
+				Data:     originalAlarm.Data,
+			},
+		}
+
+		err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
+		require.NoError(t, err)
+
+		// Get the alarm spec again to verify the lease is nullified
+		updatedSpec, err := s.p.GetAllHosts(t.Context())
+		require.NoError(t, err)
+
+		// Find the updated alarm in the spec
+		var updatedAlarmSpec *AlarmSpec
+		for i := range updatedSpec.Alarms {
+			alarm := &updatedSpec.Alarms[i]
+			if alarm.ActorType == alarmRef.ActorType &&
+				alarm.ActorID == alarmRef.ActorID &&
+				alarm.Name == alarmRef.Name {
+				updatedAlarmSpec = alarm
+				break
+			}
+		}
+		require.NotNil(t, updatedAlarmSpec, "Updated alarm should exist in spec")
+
+		// Verify the lease is nullified
+		assert.Nil(t, updatedAlarmSpec.LeaseID, "Lease should be nullified when properties change")
+		assert.Nil(t, updatedAlarmSpec.LeaseExp, "Lease expiration should be nullified when properties change")
+
+		// Verify that the alarm properties were updated
+		updatedAlarm, err := s.p.GetAlarm(t.Context(), alarmRef)
+		require.NoError(t, err)
+
+		assert.WithinDuration(t, newDueTime, updatedAlarm.DueTime, time.Second/10)
+	})
+}
+
+func (s Suite) TestDeleteAlarm(t *testing.T) {
+	t.Run("delete existing alarm", func(t *testing.T) {
+		// Seed with test data
+		err := s.p.Seed(t.Context(), GetSpec())
+		require.NoError(t, err)
+
+		// Delete an existing alarm from the test spec
+		alarmRef := ref.AlarmRef{
+			ActorType: "A",
+			ActorID:   "A-1",
+			Name:      "Alarm-A-1",
+		}
+
+		// Verify alarm exists first
+		_, err = s.p.GetAlarm(t.Context(), alarmRef)
+		require.NoError(t, err)
+
+		// Delete the alarm
+		err = s.p.DeleteAlarm(t.Context(), alarmRef)
+		require.NoError(t, err)
+
+		// Verify alarm no longer exists
+		_, err = s.p.GetAlarm(t.Context(), alarmRef)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
+	})
+
+	t.Run("returns ErrNoAlarm for non-existent alarm", func(t *testing.T) {
+		// Seed with empty database
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
+
+		// Try to delete a non-existent alarm
+		alarmRef := ref.AlarmRef{
+			ActorType: "NonExistentActor",
+			ActorID:   "non-existent-id",
+			Name:      "non-existent-alarm",
+		}
+
+		err = s.p.DeleteAlarm(t.Context(), alarmRef)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
+	})
+
+	t.Run("delete one alarm does not affect others", func(t *testing.T) {
+		// Seed with empty database
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
+
+		// Create multiple alarms for the same actor
+		actorType := "TestActor"
+		actorID := "test-id"
+		now := time.Now()
+
+		alarm1Ref := ref.AlarmRef{ActorType: actorType, ActorID: actorID, Name: "alarm1"}
+		alarm2Ref := ref.AlarmRef{ActorType: actorType, ActorID: actorID, Name: "alarm2"}
+		alarm3Ref := ref.AlarmRef{ActorType: actorType, ActorID: actorID, Name: "alarm3"}
+
+		for i, alarmRef := range []ref.AlarmRef{alarm1Ref, alarm2Ref, alarm3Ref} {
+			setReq := components.SetAlarmReq{
+				AlarmProperties: ref.AlarmProperties{
+					DueTime: now.Add(time.Duration(i+1) * time.Hour),
+					Data:    fmt.Appendf(nil, `{"alarm": %d}`, i+1),
+				},
+			}
+
+			err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
+			require.NoError(t, err)
+		}
+
+		// Verify all alarms exist
+		for _, alarmRef := range []ref.AlarmRef{alarm1Ref, alarm2Ref, alarm3Ref} {
+			_, err = s.p.GetAlarm(t.Context(), alarmRef)
+			require.NoError(t, err)
+		}
+
+		// Delete the middle alarm
+		err = s.p.DeleteAlarm(t.Context(), alarm2Ref)
+		require.NoError(t, err)
+
+		// Verify alarm2 no longer exists
+		_, err = s.p.GetAlarm(t.Context(), alarm2Ref)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
+
+		// Verify other alarms still exist
+		_, err = s.p.GetAlarm(t.Context(), alarm1Ref)
+		require.NoError(t, err)
+		_, err = s.p.GetAlarm(t.Context(), alarm3Ref)
+		require.NoError(t, err)
+	})
+
+	t.Run("delete alarm with different actor types", func(t *testing.T) {
+		// Seed with empty database
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
+
+		// Create alarms with same actor ID but different types
+		now := time.Now()
+		actorID := "shared-id"
+		alarmName := "shared-name"
+
+		alarm1Ref := ref.AlarmRef{ActorType: "TypeA", ActorID: actorID, Name: alarmName}
+		alarm2Ref := ref.AlarmRef{ActorType: "TypeB", ActorID: actorID, Name: alarmName}
+
+		for _, alarmRef := range []ref.AlarmRef{alarm1Ref, alarm2Ref} {
+			setReq := components.SetAlarmReq{
+				AlarmProperties: ref.AlarmProperties{
+					DueTime: now.Add(1 * time.Hour),
+					Data:    fmt.Appendf(nil, `{"type": "%s"}`, alarmRef.ActorType),
+				},
+			}
+
+			err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
+			require.NoError(t, err)
+		}
+
+		// Delete alarm for TypeA
+		err = s.p.DeleteAlarm(t.Context(), alarm1Ref)
+		require.NoError(t, err)
+
+		// Verify TypeA alarm no longer exists
+		_, err = s.p.GetAlarm(t.Context(), alarm1Ref)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
+
+		// Verify TypeB alarm still exists
+		res, err := s.p.GetAlarm(t.Context(), alarm2Ref)
+		require.NoError(t, err)
+		assert.Contains(t, string(res.Data), "TypeB")
 	})
 }
 
