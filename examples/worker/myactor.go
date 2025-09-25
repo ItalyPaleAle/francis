@@ -105,7 +105,7 @@ func (m *MyActor) Alarm(ctx context.Context, name string, data actor.Envelope) e
 }
 
 func (m *MyActor) Deactivate(ctx context.Context) error {
-	time.Sleep(2 * time.Second)
+	time.Sleep(time.Second)
 	m.log.InfoContext(ctx, "Actor deactivated", "invocations", m.invocations)
 	return nil
 }
