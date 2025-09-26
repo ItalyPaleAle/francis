@@ -11,6 +11,8 @@ import (
 	msgpack "github.com/vmihailenco/msgpack/v5"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/internal/activeactor"
+	"github.com/italypaleale/francis/internal/objectenvelope"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/types"
 )
@@ -73,15 +75,15 @@ func (h *Host) InvokeLocal(ctx context.Context, actorType string, actorID string
 }
 
 func (h *Host) doInvokeLocal(ctx context.Context, ref ref.ActorRef, method string, data any) (actor.Envelope, error) {
-	res, err := h.lockAndInvokeFn(ctx, ref, func(ctx context.Context, act *activeActor) (any, error) {
-		obj, ok := act.instance.(actor.ActorInvoke)
+	res, err := h.lockAndInvokeFn(ctx, ref, func(ctx context.Context, act *activeactor.Instance) (any, error) {
+		obj, ok := act.Instance().(actor.ActorInvoke)
 		if !ok {
 			return nil, fmt.Errorf("actor of type '%s' does not implement the Invoke method", act.ActorType())
 		}
 
 		// Invoke the actor
 		// We wrap the data in an envelope as the receiver expects
-		res, err := obj.Invoke(ctx, method, newObjectEnvelope(data))
+		res, err := obj.Invoke(ctx, method, objectenvelope.NewEnvelope(data))
 		if err != nil {
 			return nil, fmt.Errorf("error from actor: %w", err)
 		}
@@ -94,7 +96,7 @@ func (h *Host) doInvokeLocal(ctx context.Context, ref ref.ActorRef, method strin
 
 	// If there's a response, wrap in an envelope
 	if res != nil {
-		return newObjectEnvelope(res), nil
+		return objectenvelope.NewEnvelope(res), nil
 	}
 
 	return nil, nil
@@ -188,13 +190,13 @@ func (h *Host) doInvokeRemote(ctx context.Context, aRef ref.ActorRef, ap *actorP
 			return nil, fmt.Errorf("failed to decode response body using msgpack: %w", err)
 		}
 
-		return newObjectEnvelope(out), nil
+		return objectenvelope.NewEnvelope(out), nil
 	}
 
 	return nil, nil
 }
 
-func (h *Host) lockAndInvokeFn(parentCtx context.Context, ref ref.ActorRef, fn func(context.Context, *activeActor) (any, error)) (any, error) {
+func (h *Host) lockAndInvokeFn(parentCtx context.Context, ref ref.ActorRef, fn func(context.Context, *activeactor.Instance) (any, error)) (any, error) {
 	// Get the actor, which may create it
 	act, err := h.getOrCreateActor(ref)
 	if err != nil {
@@ -238,7 +240,7 @@ func (h *Host) lockAndInvokeFn(parentCtx context.Context, ref ref.ActorRef, fn f
 	return fn(ctx, act)
 }
 
-func (h *Host) getOrCreateActor(ref ref.ActorRef) (*activeActor, error) {
+func (h *Host) getOrCreateActor(ref ref.ActorRef) (*activeactor.Instance, error) {
 	// Get the factory function
 	fn, err := h.createActorFn(ref)
 	if err != nil {
@@ -251,7 +253,7 @@ func (h *Host) getOrCreateActor(ref ref.ActorRef) (*activeActor, error) {
 	return actor, nil
 }
 
-func (h *Host) createActorFn(ref ref.ActorRef) (func() *activeActor, error) {
+func (h *Host) createActorFn(ref ref.ActorRef) (func() *activeactor.Instance, error) {
 	// We don't need a locking mechanism here as these maps are "locked" after the service has started
 	factoryFn := h.actorFactories[ref.ActorType]
 	if factoryFn == nil {
@@ -259,8 +261,8 @@ func (h *Host) createActorFn(ref ref.ActorRef) (func() *activeActor, error) {
 	}
 
 	idleTimeout := h.actorsConfig[ref.ActorType].IdleTimeout
-	return func() *activeActor {
+	return func() *activeactor.Instance {
 		instance := factoryFn(ref.ActorID, h.service)
-		return newActiveActor(ref, instance, idleTimeout, h.idleActorProcessor, h.clock)
+		return activeactor.NewInstance(ref, instance, idleTimeout, h.idleActorProcessor, h.clock)
 	}, nil
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/activeactor"
 	"github.com/italypaleale/francis/internal/eventqueue"
 	"github.com/italypaleale/francis/internal/ref"
 )
@@ -152,7 +153,7 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 
 	// Get and lock the actor
 	ref := lease.ActorRef()
-	statusAny, err := h.lockAndInvokeFn(ctx, ref, func(parentCtx context.Context, act *activeActor) (any, error) {
+	statusAny, err := h.lockAndInvokeFn(ctx, ref, func(parentCtx context.Context, act *activeactor.Instance) (any, error) {
 		// Before we execute an alarm we need to fetch it again using the lease
 		// This is because alarms we have in-memory could have been here for a few seconds, and they may not represent the accurate
 		// state of the data in the provider. For example, it could have been edited or deleted, or the lease could have been broken.
@@ -170,7 +171,7 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		}
 
 		// Ensure the actor implements the Alarm method
-		obj, ok := act.instance.(actor.ActorAlarm)
+		obj, ok := act.Instance().(actor.ActorAlarm)
 		if !ok {
 			// This is a fatal error, which causes us to drop the alarm since there's no way it can be completed
 			return executeAlarmStatusFatal, fmt.Errorf("actor of type '%s' does not implement the Alarm method", act.ActorType())

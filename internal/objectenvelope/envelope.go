@@ -1,4 +1,4 @@
-package host
+package objectenvelope
 
 import (
 	"bytes"
@@ -10,18 +10,18 @@ import (
 	msgpack "github.com/vmihailenco/msgpack/v5"
 )
 
-// objectEnvelope implements actor.Envelope to return an object that was not serialized
-type objectEnvelope struct {
+// Envelope implements actor.Envelope to return an object that was not serialized
+type Envelope struct {
 	object any
 }
 
-func newObjectEnvelope(obj any) *objectEnvelope {
-	return &objectEnvelope{
+func NewEnvelope(obj any) *Envelope {
+	return &Envelope{
 		object: obj,
 	}
 }
 
-func (o *objectEnvelope) Decode(into any) error {
+func (o *Envelope) Decode(into any) error {
 	if o == nil || o.object == nil {
 		return nil
 	}
@@ -68,7 +68,7 @@ func (o *objectEnvelope) Decode(into any) error {
 	return nil
 }
 
-func (o *objectEnvelope) Encode(w io.Writer) error {
+func (o *Envelope) Encode(w io.Writer) error {
 	if o == nil || o.object == nil {
 		return nil
 	}

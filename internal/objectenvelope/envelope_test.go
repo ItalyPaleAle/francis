@@ -1,4 +1,4 @@
-package host
+package objectenvelope
 
 import (
 	"fmt"
@@ -11,11 +11,11 @@ import (
 )
 
 // Compile-time interface assertion
-var _ actor.Envelope = (*objectEnvelope)(nil)
+var _ actor.Envelope = (*Envelope)(nil)
 
 func TestObjectEnvelope(t *testing.T) {
 	t.Run("nil envelope returns nil", func(t *testing.T) {
-		var envelope *objectEnvelope
+		var envelope *Envelope
 		var target string
 
 		err := envelope.Decode(&target)
@@ -25,7 +25,7 @@ func TestObjectEnvelope(t *testing.T) {
 	})
 
 	t.Run("decode nil object returns nil", func(t *testing.T) {
-		envelope := newObjectEnvelope(nil)
+		envelope := NewEnvelope(nil)
 		var target string
 
 		err := envelope.Decode(&target)
@@ -35,7 +35,7 @@ func TestObjectEnvelope(t *testing.T) {
 	})
 
 	t.Run("decode into nil target returns error", func(t *testing.T) {
-		envelope := newObjectEnvelope("test")
+		envelope := NewEnvelope("test")
 
 		err := envelope.Decode(nil)
 
@@ -44,7 +44,7 @@ func TestObjectEnvelope(t *testing.T) {
 	})
 
 	t.Run("decode into non-pointer returns error", func(t *testing.T) {
-		envelope := newObjectEnvelope("test")
+		envelope := NewEnvelope("test")
 		var target string
 
 		err := envelope.Decode(target) // passing value instead of pointer
@@ -54,7 +54,7 @@ func TestObjectEnvelope(t *testing.T) {
 	})
 
 	t.Run("decode into nil pointer returns error", func(t *testing.T) {
-		envelope := newObjectEnvelope("test")
+		envelope := NewEnvelope("test")
 		var target *string // nil pointer
 
 		err := envelope.Decode(target)
@@ -65,7 +65,7 @@ func TestObjectEnvelope(t *testing.T) {
 
 	t.Run("decode zero value object returns nil", func(t *testing.T) {
 		var zeroValue int
-		envelope := newObjectEnvelope(zeroValue)
+		envelope := NewEnvelope(zeroValue)
 		var target int
 
 		err := envelope.Decode(&target)
@@ -75,7 +75,7 @@ func TestObjectEnvelope(t *testing.T) {
 
 	t.Run("fast path - direct assignment for same type", func(t *testing.T) {
 		original := "test string"
-		envelope := newObjectEnvelope(original)
+		envelope := NewEnvelope(original)
 		var target string
 
 		err := envelope.Decode(&target)
@@ -87,7 +87,7 @@ func TestObjectEnvelope(t *testing.T) {
 	t.Run("fast path - direct assignment for assignable types", func(t *testing.T) {
 		type customString string
 		original := customString("test")
-		envelope := newObjectEnvelope(original)
+		envelope := NewEnvelope(original)
 		var target customString
 
 		err := envelope.Decode(&target)
@@ -98,7 +98,7 @@ func TestObjectEnvelope(t *testing.T) {
 
 	t.Run("fast path - int to int assignment", func(t *testing.T) {
 		original := 42
-		envelope := newObjectEnvelope(original)
+		envelope := NewEnvelope(original)
 		var target int
 
 		err := envelope.Decode(&target)
@@ -114,7 +114,7 @@ func TestObjectEnvelope(t *testing.T) {
 		}
 
 		original := testStruct{Name: "John", Age: 30}
-		envelope := newObjectEnvelope(original)
+		envelope := NewEnvelope(original)
 		var target testStruct
 
 		err := envelope.Decode(&target)
@@ -128,7 +128,7 @@ func TestObjectEnvelope(t *testing.T) {
 			"key1": "value1",
 			"key2": 42,
 		}
-		envelope := newObjectEnvelope(original)
+		envelope := NewEnvelope(original)
 		var target map[string]interface{}
 
 		err := envelope.Decode(&target)
@@ -139,7 +139,7 @@ func TestObjectEnvelope(t *testing.T) {
 
 	t.Run("msgpack serialization path for slice", func(t *testing.T) {
 		original := []string{"a", "b", "c"}
-		envelope := newObjectEnvelope(original)
+		envelope := NewEnvelope(original)
 		var target []string
 
 		err := envelope.Decode(&target)
@@ -160,7 +160,7 @@ func TestObjectEnvelope(t *testing.T) {
 			City string `msgpack:"city"`
 		}
 
-		envelope := newObjectEnvelope(original)
+		envelope := NewEnvelope(original)
 		var target Person
 
 		err := envelope.Decode(&target)
@@ -173,7 +173,7 @@ func TestObjectEnvelope(t *testing.T) {
 	t.Run("msgpack deserialization failure", func(t *testing.T) {
 		// Create a scenario where serialization works but deserialization fails
 		original := "not a number"
-		envelope := newObjectEnvelope(original)
+		envelope := NewEnvelope(original)
 		var target int // trying to decode string into int
 
 		err := envelope.Decode(&target)
@@ -203,7 +203,7 @@ func TestObjectEnvelope(t *testing.T) {
 			},
 		}
 
-		envelope := newObjectEnvelope(original)
+		envelope := NewEnvelope(original)
 		var target Person
 
 		err := envelope.Decode(&target)
@@ -214,7 +214,7 @@ func TestObjectEnvelope(t *testing.T) {
 
 	t.Run("pointer types", func(t *testing.T) {
 		original := "test string"
-		envelope := newObjectEnvelope(&original)
+		envelope := NewEnvelope(&original)
 		var target *string
 
 		err := envelope.Decode(&target)
@@ -226,7 +226,7 @@ func TestObjectEnvelope(t *testing.T) {
 
 	t.Run("any types", func(t *testing.T) {
 		original := any("test string")
-		envelope := newObjectEnvelope(original)
+		envelope := NewEnvelope(original)
 		var target any
 
 		err := envelope.Decode(&target)
@@ -238,7 +238,7 @@ func TestObjectEnvelope(t *testing.T) {
 	t.Run("zero value non-zero type", func(t *testing.T) {
 		// Test with a type that has a non-zero value as zero (like empty slice)
 		var original []string // nil slice
-		envelope := newObjectEnvelope(original)
+		envelope := NewEnvelope(original)
 		var target []string
 
 		err := envelope.Decode(&target)
@@ -253,7 +253,7 @@ func TestObjectEnvelope(t *testing.T) {
 
 		for _, original := range tests {
 			t.Run(fmt.Sprintf("boolean_%t", original), func(t *testing.T) {
-				envelope := newObjectEnvelope(original)
+				envelope := NewEnvelope(original)
 				var target bool
 
 				err := envelope.Decode(&target)
@@ -275,7 +275,7 @@ func TestObjectEnvelope(t *testing.T) {
 			}
 		}
 
-		envelope := newObjectEnvelope(original)
+		envelope := NewEnvelope(original)
 		var target map[string][]int
 
 		err := envelope.Decode(&target)
@@ -289,7 +289,7 @@ func TestObjectEnvelope(t *testing.T) {
 
 	t.Run("decode same envelope multiple times", func(t *testing.T) {
 		original := map[string]int{"a": 1, "b": 2}
-		envelope := newObjectEnvelope(original)
+		envelope := NewEnvelope(original)
 
 		// Decode multiple times to ensure envelope is reusable
 		var target1, target2 map[string]int
@@ -307,7 +307,7 @@ func TestObjectEnvelope(t *testing.T) {
 
 func BenchmarkObjectEnvelope(b *testing.B) {
 	b.Run("fast path string", func(b *testing.B) {
-		envelope := newObjectEnvelope("test string")
+		envelope := NewEnvelope("test string")
 		var target string
 
 		b.ResetTimer()
@@ -322,7 +322,7 @@ func BenchmarkObjectEnvelope(b *testing.B) {
 			Age  int    `msgpack:"age"`
 		}
 
-		envelope := newObjectEnvelope(testStruct{Name: "John", Age: 30})
+		envelope := NewEnvelope(testStruct{Name: "John", Age: 30})
 		var target testStruct
 
 		b.ResetTimer()
@@ -337,7 +337,7 @@ func BenchmarkObjectEnvelope(b *testing.B) {
 			"key2": 42,
 			"key3": []string{"a", "b", "c"},
 		}
-		envelope := newObjectEnvelope(original)
+		envelope := NewEnvelope(original)
 		var target map[string]any
 
 		b.ResetTimer()
@@ -353,7 +353,7 @@ func BenchmarkObjectEnvelope(b *testing.B) {
 			Age  int    `msgpack:"age"`
 		}
 
-		envelope := newObjectEnvelope(testStruct{Name: "John", Age: 30})
+		envelope := NewEnvelope(testStruct{Name: "John", Age: 30})
 		var target map[string]any
 
 		b.ResetTimer()

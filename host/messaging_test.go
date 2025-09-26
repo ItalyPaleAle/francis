@@ -19,6 +19,7 @@ import (
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/activeactor"
 	"github.com/italypaleale/francis/internal/eventqueue"
 	actor_mocks "github.com/italypaleale/francis/internal/mocks/actor"
 	"github.com/italypaleale/francis/internal/ref"
@@ -31,7 +32,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 	newHost := func() *Host {
 		// Create a minimal host for testing
 		host := &Host{
-			actors:              haxmap.New[string, *activeActor](8),
+			actors:              haxmap.New[string, *activeactor.Instance](8),
 			log:                 log,
 			clock:               clock,
 			shutdownGracePeriod: 5 * time.Second,
@@ -47,7 +48,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 			},
 		}
 		host.service = actor.NewService(host)
-		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
+		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeactor.Instance]{
 			ExecuteFn: host.handleIdleActor,
 			Clock:     clock,
 		})
@@ -64,7 +65,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 
 		// Create a mock function that returns a test value
 		testValue := "test-result"
-		mockFn := func(ctx context.Context, act *activeActor) (any, error) {
+		mockFn := func(ctx context.Context, act *activeactor.Instance) (any, error) {
 			return testValue, nil
 		}
 
@@ -89,7 +90,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 
 		// Create a mock function that returns an error
 		testError := errors.New("test error")
-		mockFn := func(ctx context.Context, act *activeActor) (any, error) {
+		mockFn := func(ctx context.Context, act *activeactor.Instance) (any, error) {
 			return nil, testError
 		}
 
@@ -107,7 +108,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 
 		actorRef := ref.NewActorRef("unsupported", "actor1")
 
-		mockFn := func(ctx context.Context, act *activeActor) (any, error) {
+		mockFn := func(ctx context.Context, act *activeactor.Instance) (any, error) {
 			return "result", nil
 		}
 
@@ -128,7 +129,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 
 		// Create and register an active actor, then lock it
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// Acquire the lock first
@@ -141,7 +142,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 		defer cancel()
 
-		mockFn := func(ctx context.Context, act *activeActor) (any, error) {
+		mockFn := func(ctx context.Context, act *activeactor.Instance) (any, error) {
 			return "result", nil
 		}
 
@@ -166,14 +167,14 @@ func TestLockAndInvokeFn(t *testing.T) {
 
 		// Create and register an active actor
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// Halt the actor first
 		err := activeAct.Halt(false)
 		require.NoError(t, err)
 
-		mockFn := func(ctx context.Context, act *activeActor) (any, error) {
+		mockFn := func(ctx context.Context, act *activeactor.Instance) (any, error) {
 			return "result", nil
 		}
 
@@ -193,7 +194,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 
 		// Create and register an active actor
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// Acquire the lock first
@@ -201,7 +202,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotNil(t, haltCh)
 
-		mockFn := func(ctx context.Context, act *activeActor) (any, error) {
+		mockFn := func(ctx context.Context, act *activeactor.Instance) (any, error) {
 			return "result", nil
 		}
 
@@ -263,7 +264,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 
 		// Create and register an active actor
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// Launch lockAndInvokeFn in a separate goroutine
@@ -271,7 +272,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 		errCh := make(chan error, 1)
 		startedCh := make(chan struct{})
 		go func() {
-			_, err := host.lockAndInvokeFn(t.Context(), actorRef, func(ctx context.Context, act *activeActor) (any, error) {
+			_, err := host.lockAndInvokeFn(t.Context(), actorRef, func(ctx context.Context, act *activeactor.Instance) (any, error) {
 				close(startedCh)
 				// Wait for context cancellation
 				select {
@@ -331,14 +332,14 @@ func TestLockAndInvokeFn(t *testing.T) {
 
 		// Create and register an active actor
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// Launch lockAndInvokeFn in a separate goroutine
 		errCh := make(chan error, 1)
 		startedCh := make(chan struct{})
 		go func() {
-			_, err := host.lockAndInvokeFn(ctx, actorRef, func(ctx context.Context, act *activeActor) (any, error) {
+			_, err := host.lockAndInvokeFn(ctx, actorRef, func(ctx context.Context, act *activeactor.Instance) (any, error) {
 				close(startedCh)
 				// Wait for context cancellation
 				select {
@@ -393,13 +394,13 @@ func TestLockAndInvokeFn(t *testing.T) {
 
 		// Create and register an active actor
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// Create a function that completes quickly
 		const testValue = "quick-result"
 		startedCh := make(chan struct{})
-		mockFn := func(ctx context.Context, act *activeActor) (any, error) {
+		mockFn := func(ctx context.Context, act *activeactor.Instance) (any, error) {
 			close(startedCh)
 			return testValue, nil
 		}
@@ -456,7 +457,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 				actorRef := ref.NewActorRef("testactor", fmt.Sprintf("actor%d", actorID))
 				expectedResult := fmt.Sprintf("result%d", actorID)
 
-				mockFn := func(ctx context.Context, act *activeActor) (any, error) {
+				mockFn := func(ctx context.Context, act *activeactor.Instance) (any, error) {
 					// Add small delay to simulate work
 					time.Sleep(10 * time.Millisecond)
 					return expectedResult, nil
@@ -500,7 +501,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 			go func(invocationID int) {
 				defer wg.Done()
 
-				mockFn := func(ctx context.Context, act *activeActor) (any, error) {
+				mockFn := func(ctx context.Context, act *activeactor.Instance) (any, error) {
 					orderMutex.Lock()
 					executionOrder = append(executionOrder, invocationID)
 					orderMutex.Unlock()
@@ -543,7 +544,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 		defer cancel()
 
-		mockFn := func(ctx context.Context, act *activeActor) (any, error) {
+		mockFn := func(ctx context.Context, act *activeactor.Instance) (any, error) {
 			// Wait longer than the context timeout
 			select {
 			case <-ctx.Done():

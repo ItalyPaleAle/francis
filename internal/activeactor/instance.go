@@ -1,4 +1,4 @@
-package host
+package activeactor
 
 import (
 	"context"
@@ -19,12 +19,12 @@ import (
 // Copyright (C) 2024 The Dapr Authors
 // License: Apache2
 
-type idleActorProcessor = *eventqueue.Processor[string, *activeActor]
+type idleActorProcessor = *eventqueue.Processor[string, *Instance]
 
-var errActiveActorAlreadyHalted = errors.New("actor is already halted")
+var ErrActiveActorAlreadyHalted = errors.New("actor is already halted")
 
-// activeActor references an actor that is currently active on this host
-type activeActor struct {
+// Instance references an actor that is currently active on this host
+type Instance struct {
 	// Actor reference
 	ref ref.ActorRef
 
@@ -50,12 +50,12 @@ type activeActor struct {
 	clock         clock.Clock
 }
 
-func newActiveActor(ref ref.ActorRef, instance actor.Actor, idleTimeout time.Duration, idleProcessor idleActorProcessor, cl clock.Clock) *activeActor {
+func NewInstance(ref ref.ActorRef, instance actor.Actor, idleTimeout time.Duration, idleProcessor idleActorProcessor, cl clock.Clock) *Instance {
 	if cl == nil {
 		cl = &clock.RealClock{}
 	}
 
-	a := &activeActor{
+	a := &Instance{
 		ref:           ref,
 		instance:      instance,
 		idleTimeout:   idleTimeout,
@@ -64,14 +64,14 @@ func newActiveActor(ref ref.ActorRef, instance actor.Actor, idleTimeout time.Dur
 		idleProcessor: idleProcessor,
 		clock:         cl,
 	}
-	a.updateIdleAt(0)
+	a.UpdateIdleAt(0)
 
 	return a
 }
 
-// Updates the idle timeout property (i.e. time the actor becomes idle at)
+// UpdateIdleAt updates the idle timeout property (i.e. time the actor becomes idle at)
 // d allows overriding the idle interval; if zero, uses the default for the actor type
-func (a *activeActor) updateIdleAt(d time.Duration) {
+func (a *Instance) UpdateIdleAt(d time.Duration) {
 	if a.idleTimeout <= 0 {
 		// Actor doesn't have an idle timeout
 		return
@@ -90,7 +90,7 @@ func (a *activeActor) updateIdleAt(d time.Duration) {
 }
 
 // TryLock tries to lock the actor for turn-based concurrency, if the actor isn't already locked.
-func (a *activeActor) TryLock() (bool, chan struct{}, error) {
+func (a *Instance) TryLock() (bool, chan struct{}, error) {
 	if a.halted.Load() {
 		return false, nil, actor.ErrActorHalted
 	}
@@ -110,14 +110,14 @@ func (a *activeActor) TryLock() (bool, chan struct{}, error) {
 	}
 
 	// Update the time the actor became idle at
-	a.updateIdleAt(0)
+	a.UpdateIdleAt(0)
 
 	return true, a.haltCh, nil
 }
 
 // Lock the actor for turn-based concurrency.
 // This function blocks until the lock is acquired
-func (a *activeActor) Lock(ctx context.Context) (chan struct{}, error) {
+func (a *Instance) Lock(ctx context.Context) (chan struct{}, error) {
 	if a.halted.Load() {
 		return nil, actor.ErrActorHalted
 	}
@@ -134,20 +134,20 @@ func (a *activeActor) Lock(ctx context.Context) (chan struct{}, error) {
 	}
 
 	// Update the time the actor became idle at
-	a.updateIdleAt(0)
+	a.UpdateIdleAt(0)
 
 	return a.haltCh, nil
 }
 
 // Unlock releases the lock for turn-based concurrency
-func (a *activeActor) Unlock() {
+func (a *Instance) Unlock() {
 	a.locker.Unlock()
 }
 
 // Halt the active actor
-func (a *activeActor) Halt(drain bool) error {
+func (a *Instance) Halt(drain bool) error {
 	if !a.halted.CompareAndSwap(false, true) {
-		return errActiveActorAlreadyHalted
+		return ErrActiveActorAlreadyHalted
 	}
 
 	// Stop the turn-based locker
@@ -171,19 +171,34 @@ func (a *activeActor) Halt(drain bool) error {
 	return nil
 }
 
+// Instance returns the instance of the actor
+func (a *Instance) Instance() actor.Actor {
+	return a.instance
+}
+
 // ActorType returns the type of the actor.
-func (a *activeActor) ActorType() string {
+func (a *Instance) ActorType() string {
 	return a.ref.ActorType
 }
 
 // Key returns the key for the actor.
 // This is implemented to comply with the queueable interface.
-func (a *activeActor) Key() string {
+func (a *Instance) Key() string {
 	return a.ref.String()
 }
 
 // DueTime returns the time the actor becomes idle at.
 // This is implemented to comply with the queueable interface.
-func (a *activeActor) DueTime() time.Time {
+func (a *Instance) DueTime() time.Time {
 	return *a.idleAt.Load()
+}
+
+// Halted returns true if the actor is halted.
+func (a *Instance) Halted() bool {
+	return a.halted.Load()
+}
+
+// ActorRef returns the actor ref
+func (a *Instance) ActorRef() ref.ActorRef {
+	return a.ref
 }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/activeactor"
 	"github.com/italypaleale/francis/internal/eventqueue"
 	components_mocks "github.com/italypaleale/francis/internal/mocks/components"
 	"github.com/italypaleale/francis/internal/ref"
@@ -34,7 +35,7 @@ func TestGetAlarm(t *testing.T) {
 		// Create a minimal host for testing
 		host := &Host{
 			actorProvider: provider,
-			actors:        haxmap.New[string, *activeActor](8),
+			actors:        haxmap.New[string, *activeactor.Instance](8),
 			log:           log,
 			clock:         clock,
 			actorsConfig: map[string]components.ActorHostType{
@@ -44,7 +45,7 @@ func TestGetAlarm(t *testing.T) {
 			},
 			providerRequestTimeout: 30 * time.Second,
 		}
-		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
+		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeactor.Instance]{
 			ExecuteFn: host.handleIdleActor,
 			Clock:     clock,
 		})
@@ -175,7 +176,7 @@ func TestSetAlarm(t *testing.T) {
 		// Create a minimal host for testing
 		host := &Host{
 			actorProvider: provider,
-			actors:        haxmap.New[string, *activeActor](8),
+			actors:        haxmap.New[string, *activeactor.Instance](8),
 			log:           log,
 			clock:         clock,
 			actorsConfig: map[string]components.ActorHostType{
@@ -185,7 +186,7 @@ func TestSetAlarm(t *testing.T) {
 			},
 			providerRequestTimeout: 30 * time.Second,
 		}
-		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
+		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeactor.Instance]{
 			ExecuteFn: host.handleIdleActor,
 			Clock:     clock,
 		})
@@ -348,7 +349,7 @@ func TestDeleteAlarm(t *testing.T) {
 		// Create a minimal host for testing
 		host := &Host{
 			actorProvider: provider,
-			actors:        haxmap.New[string, *activeActor](8),
+			actors:        haxmap.New[string, *activeactor.Instance](8),
 			log:           log,
 			clock:         clock,
 			actorsConfig: map[string]components.ActorHostType{
@@ -358,7 +359,7 @@ func TestDeleteAlarm(t *testing.T) {
 			},
 			providerRequestTimeout: 30 * time.Second,
 		}
-		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
+		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeactor.Instance]{
 			ExecuteFn: host.handleIdleActor,
 			Clock:     clock,
 		})

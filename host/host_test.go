@@ -19,6 +19,7 @@ import (
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/activeactor"
 	"github.com/italypaleale/francis/internal/eventqueue"
 	actor_mocks "github.com/italypaleale/francis/internal/mocks/actor"
 	components_mocks "github.com/italypaleale/francis/internal/mocks/components"
@@ -42,7 +43,7 @@ func TestHostHalt(t *testing.T) {
 	// Create a minimal host for testing
 	host := &Host{
 		actorProvider: provider,
-		actors:        haxmap.New[string, *activeActor](8),
+		actors:        haxmap.New[string, *activeactor.Instance](8),
 		log:           log,
 		clock:         clock,
 		actorsConfig: map[string]components.ActorHostType{
@@ -53,7 +54,7 @@ func TestHostHalt(t *testing.T) {
 		},
 		providerRequestTimeout: 30 * time.Second,
 	}
-	host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
+	host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeactor.Instance]{
 		ExecuteFn: host.handleIdleActor,
 		Clock:     clock,
 	})
@@ -69,7 +70,7 @@ func TestHostHalt(t *testing.T) {
 			Return(nil).
 			Once()
 
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider
@@ -87,7 +88,7 @@ func TestHostHalt(t *testing.T) {
 		assert.False(t, exists, "Actor should be removed from the map after halting")
 
 		// Verify the actor is marked as halted
-		assert.True(t, activeAct.halted.Load(), "Actor should be marked as halted")
+		assert.True(t, activeAct.Halted(), "Actor should be marked as halted")
 
 		// Assert expected method calls on provider and instance
 		provider.AssertExpectations(t)
@@ -125,7 +126,7 @@ func TestHostHalt(t *testing.T) {
 			Return(nil).
 			Once()
 
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider
@@ -158,7 +159,7 @@ func TestHostHalt(t *testing.T) {
 			Return(nil).
 			Once()
 
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider
@@ -221,7 +222,7 @@ func TestHostHalt(t *testing.T) {
 			Return(nil).
 			Once()
 
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider
@@ -273,7 +274,7 @@ func TestHostHalt(t *testing.T) {
 		assert.False(t, exists, "Actor should be removed from the map after halting")
 
 		// Verify the actor is marked as halted
-		assert.True(t, activeAct.halted.Load(), "Actor should be marked as halted")
+		assert.True(t, activeAct.Halted(), "Actor should be marked as halted")
 
 		// Assert expected method calls on provider and instance
 		provider.AssertExpectations(t)
@@ -291,7 +292,7 @@ func TestHostHalt(t *testing.T) {
 			Return(nil).
 			Once()
 
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider
@@ -320,7 +321,7 @@ func TestHostHalt(t *testing.T) {
 		}
 
 		// Wait for goroutines to start
-		waitForGoroutines(t, numWaiters, startCounter)
+		testutil.WaitForGoroutines(t, numWaiters, startCounter)
 
 		// Launch halt in a separate goroutine
 		haltErrCh := make(chan error, 1)
@@ -371,7 +372,7 @@ func TestHostHalt(t *testing.T) {
 		assert.False(t, exists, "Actor should be removed from the map after halting")
 
 		// Verify the actor is marked as halted
-		assert.True(t, activeAct.halted.Load(), "Actor should be marked as halted")
+		assert.True(t, activeAct.Halted(), "Actor should be marked as halted")
 
 		// Assert expected method calls on provider
 		provider.AssertExpectations(t)
@@ -387,7 +388,7 @@ func TestHostHalt(t *testing.T) {
 		// The Deactivate method should NOT be called
 		instance := &actor_mocks.MockActorDeactivate{}
 
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider
@@ -405,7 +406,7 @@ func TestHostHalt(t *testing.T) {
 		assert.False(t, exists, "Actor should be removed from the map after halting")
 
 		// Verify the actor is marked as halted
-		assert.True(t, activeAct.halted.Load(), "Actor should be marked as halted")
+		assert.True(t, activeAct.Halted(), "Actor should be marked as halted")
 
 		// Assert expected method calls on provider
 		provider.AssertExpectations(t)
@@ -418,7 +419,7 @@ func TestHostHalt(t *testing.T) {
 		actorRef := ref.NewActorRef("testactor", "noDeactivate")
 		instance := &actor_mocks.MockActorInvoke{}
 
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider
@@ -436,7 +437,7 @@ func TestHostHalt(t *testing.T) {
 		assert.False(t, exists, "Actor should be removed from the map after halting")
 
 		// Verify the actor is marked as halted
-		assert.True(t, activeAct.halted.Load(), "Actor should be marked as halted")
+		assert.True(t, activeAct.Halted(), "Actor should be marked as halted")
 
 		// Assert expected method calls on provider
 		provider.AssertExpectations(t)
@@ -453,7 +454,7 @@ func TestHostHalt(t *testing.T) {
 			Return(errors.New("deactivate failed")).
 			Once()
 
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider
@@ -476,7 +477,7 @@ func TestHostHalt(t *testing.T) {
 		assert.False(t, exists, "Actor should be removed from the map after halting")
 
 		// Verify the actor is marked as halted
-		assert.True(t, activeAct.halted.Load(), "Actor should be marked as halted")
+		assert.True(t, activeAct.Halted(), "Actor should be marked as halted")
 
 		// Assert expected method calls on provider and instance
 		provider.AssertExpectations(t)
@@ -494,7 +495,7 @@ func TestHostHalt(t *testing.T) {
 			Return(nil).
 			Once()
 
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider to return an error
@@ -510,7 +511,7 @@ func TestHostHalt(t *testing.T) {
 		require.ErrorIs(t, err, providerErr)
 
 		// Verify the actor is marked as halted
-		assert.True(t, activeAct.halted.Load(), "Actor should be marked as halted")
+		assert.True(t, activeAct.Halted(), "Actor should be marked as halted")
 
 		// Verify the actor was removed from the map despite provider error
 		_, exists := host.actors.Get(actorRef.String())
@@ -530,7 +531,7 @@ func TestHostHalt(t *testing.T) {
 		// The Deactivate method should NOT be called
 		instance := &actor_mocks.MockActorDeactivate{}
 
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// Halt the actor first
@@ -558,7 +559,7 @@ func TestHostHalt(t *testing.T) {
 			Return(nil).
 			Once()
 
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 		// Don't add to host.actors map, so GetAndDel will return nil
 
 		// Test haltActiveActor directly - should succeed without calling RemoveActor
@@ -566,7 +567,7 @@ func TestHostHalt(t *testing.T) {
 		require.NoError(t, err)
 
 		// Verify the actor is marked as halted
-		assert.True(t, activeAct.halted.Load(), "Actor should be marked as halted")
+		assert.True(t, activeAct.Halted(), "Actor should be marked as halted")
 
 		// RemoveActor should NOT be called since GetAndDel returned nil
 		// Assert expected method calls on instance
@@ -582,7 +583,7 @@ func TestHostHalt(t *testing.T) {
 		// Create a host with very short deactivation timeout
 		shortTimeoutHost := &Host{
 			actorProvider: timeoutProvider,
-			actors:        haxmap.New[string, *activeActor](8),
+			actors:        haxmap.New[string, *activeactor.Instance](8),
 			log:           log,
 			clock:         clock,
 			actorsConfig: map[string]components.ActorHostType{
@@ -593,7 +594,7 @@ func TestHostHalt(t *testing.T) {
 			},
 			providerRequestTimeout: 30 * time.Second,
 		}
-		shortTimeoutHost.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
+		shortTimeoutHost.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeactor.Instance]{
 			ExecuteFn: shortTimeoutHost.handleIdleActor,
 			Clock:     clock,
 		})
@@ -612,7 +613,7 @@ func TestHostHalt(t *testing.T) {
 			Return(context.DeadlineExceeded).
 			Once()
 
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, shortTimeoutHost.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, shortTimeoutHost.idleActorProcessor, clock)
 		shortTimeoutHost.actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider
@@ -635,7 +636,7 @@ func TestHostHalt(t *testing.T) {
 		assert.False(t, exists, "Actor should be removed from the map after halting")
 
 		// Verify the actor is marked as halted
-		assert.True(t, activeAct.halted.Load(), "Actor should be marked as halted")
+		assert.True(t, activeAct.Halted(), "Actor should be marked as halted")
 
 		// Assert expected method calls on timeoutProvider and instance
 		timeoutProvider.AssertExpectations(t)
@@ -662,7 +663,7 @@ func TestHostHaltAll(t *testing.T) {
 		// Create a minimal host for testing
 		host := &Host{
 			actorProvider: provider,
-			actors:        haxmap.New[string, *activeActor](8),
+			actors:        haxmap.New[string, *activeactor.Instance](8),
 			log:           log,
 			clock:         clock,
 			actorsConfig: map[string]components.ActorHostType{
@@ -672,7 +673,7 @@ func TestHostHaltAll(t *testing.T) {
 			},
 			providerRequestTimeout: 30 * time.Second,
 		}
-		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
+		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeactor.Instance]{
 			ExecuteFn: host.handleIdleActor,
 			Clock:     clock,
 		})
@@ -694,7 +695,7 @@ func TestHostHaltAll(t *testing.T) {
 		// Create a minimal host for testing
 		host := &Host{
 			actorProvider: provider,
-			actors:        haxmap.New[string, *activeActor](8),
+			actors:        haxmap.New[string, *activeactor.Instance](8),
 			log:           log,
 			clock:         clock,
 			actorsConfig: map[string]components.ActorHostType{
@@ -704,7 +705,7 @@ func TestHostHaltAll(t *testing.T) {
 			},
 			providerRequestTimeout: 30 * time.Second,
 		}
-		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
+		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeactor.Instance]{
 			ExecuteFn: host.handleIdleActor,
 			Clock:     clock,
 		})
@@ -717,7 +718,7 @@ func TestHostHaltAll(t *testing.T) {
 			Return(nil).
 			Once()
 
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider
@@ -734,7 +735,7 @@ func TestHostHaltAll(t *testing.T) {
 		assert.Equal(t, uintptr(0), host.actors.Len(), "No actors should remain after HaltAll")
 
 		// Verify the actor is marked as halted
-		assert.True(t, activeAct.halted.Load(), "Actor should be marked as halted")
+		assert.True(t, activeAct.Halted(), "Actor should be marked as halted")
 
 		// Assert expected method calls
 		provider.AssertExpectations(t)
@@ -750,7 +751,7 @@ func TestHostHaltAll(t *testing.T) {
 		// Create a minimal host for testing
 		host := &Host{
 			actorProvider: provider,
-			actors:        haxmap.New[string, *activeActor](8),
+			actors:        haxmap.New[string, *activeactor.Instance](8),
 			log:           log,
 			clock:         clock,
 			actorsConfig: map[string]components.ActorHostType{
@@ -760,13 +761,13 @@ func TestHostHaltAll(t *testing.T) {
 			},
 			providerRequestTimeout: 30 * time.Second,
 		}
-		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
+		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeactor.Instance]{
 			ExecuteFn: host.handleIdleActor,
 			Clock:     clock,
 		})
 
 		const numActors = 5
-		activeActors := make([]*activeActor, numActors)
+		activeActors := make([]*activeactor.Instance, numActors)
 		instances := make([]*actor_mocks.MockActorDeactivate, numActors)
 
 		// Create and register multiple active actors
@@ -778,7 +779,7 @@ func TestHostHaltAll(t *testing.T) {
 				Return(nil).
 				Once()
 
-			activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+			activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 			host.actors.Set(actorRef.String(), activeAct)
 
 			activeActors[i] = activeAct
@@ -803,7 +804,7 @@ func TestHostHaltAll(t *testing.T) {
 
 		// Verify all actors are marked as halted
 		for i, activeAct := range activeActors {
-			assert.True(t, activeAct.halted.Load(), "Actor %d should be marked as halted", i)
+			assert.True(t, activeAct.Halted(), "Actor %d should be marked as halted", i)
 		}
 
 		// Assert expected method calls
@@ -822,7 +823,7 @@ func TestHostHaltAll(t *testing.T) {
 		// Create a minimal host for testing
 		host := &Host{
 			actorProvider: provider,
-			actors:        haxmap.New[string, *activeActor](8),
+			actors:        haxmap.New[string, *activeactor.Instance](8),
 			log:           log,
 			clock:         clock,
 			actorsConfig: map[string]components.ActorHostType{
@@ -832,7 +833,7 @@ func TestHostHaltAll(t *testing.T) {
 			},
 			providerRequestTimeout: 30 * time.Second,
 		}
-		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
+		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeactor.Instance]{
 			ExecuteFn: host.handleIdleActor,
 			Clock:     clock,
 		})
@@ -847,7 +848,7 @@ func TestHostHaltAll(t *testing.T) {
 			On("Deactivate", mock.MatchedBy(testutil.MatchContextInterface)).
 			Return(nil).
 			Once()
-		activeAct0 := newActiveActor(actorRef0, instance0, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct0 := activeactor.NewInstance(actorRef0, instance0, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef0.String(), activeAct0)
 		provider.
 			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef0).
@@ -861,7 +862,7 @@ func TestHostHaltAll(t *testing.T) {
 			On("Deactivate", mock.MatchedBy(testutil.MatchContextInterface)).
 			Return(errors.New("deactivate failed")).
 			Once()
-		activeAct1 := newActiveActor(actorRef1, instance1, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct1 := activeactor.NewInstance(actorRef1, instance1, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef1.String(), activeAct1)
 		provider.
 			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef1).
@@ -875,7 +876,7 @@ func TestHostHaltAll(t *testing.T) {
 			On("Deactivate", mock.MatchedBy(testutil.MatchContextInterface)).
 			Return(nil).
 			Once()
-		activeAct2 := newActiveActor(actorRef2, instance2, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct2 := activeactor.NewInstance(actorRef2, instance2, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef2.String(), activeAct2)
 		provider.
 			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef2).
@@ -889,7 +890,7 @@ func TestHostHaltAll(t *testing.T) {
 			On("Deactivate", mock.MatchedBy(testutil.MatchContextInterface)).
 			Return(nil).
 			Once()
-		activeAct3 := newActiveActor(actorRef3, instance3, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct3 := activeactor.NewInstance(actorRef3, instance3, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef3.String(), activeAct3)
 		provider.
 			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef3).
@@ -915,10 +916,10 @@ func TestHostHaltAll(t *testing.T) {
 		assert.LessOrEqual(t, host.actors.Len(), uintptr(1), "Most actors should be removed from map")
 
 		// Verify all actors are marked as halted
-		assert.True(t, activeAct0.halted.Load(), "Actor 0 should be marked as halted")
-		assert.True(t, activeAct1.halted.Load(), "Actor 1 should be marked as halted")
-		assert.True(t, activeAct2.halted.Load(), "Actor 2 should be marked as halted")
-		assert.True(t, activeAct3.halted.Load(), "Actor 3 should be marked as halted")
+		assert.True(t, activeAct0.Halted(), "Actor 0 should be marked as halted")
+		assert.True(t, activeAct1.Halted(), "Actor 1 should be marked as halted")
+		assert.True(t, activeAct2.Halted(), "Actor 2 should be marked as halted")
+		assert.True(t, activeAct3.Halted(), "Actor 3 should be marked as halted")
 
 		// Assert expected method calls
 		provider.AssertExpectations(t)
@@ -937,7 +938,7 @@ func TestHostHaltAll(t *testing.T) {
 		// Create a minimal host for testing
 		host := &Host{
 			actorProvider: provider,
-			actors:        haxmap.New[string, *activeActor](8),
+			actors:        haxmap.New[string, *activeactor.Instance](8),
 			log:           log,
 			clock:         clock,
 			actorsConfig: map[string]components.ActorHostType{
@@ -947,13 +948,13 @@ func TestHostHaltAll(t *testing.T) {
 			},
 			providerRequestTimeout: 30 * time.Second,
 		}
-		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
+		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeactor.Instance]{
 			ExecuteFn: host.handleIdleActor,
 			Clock:     clock,
 		})
 
 		const numActors = 3
-		activeActors := make([]*activeActor, numActors)
+		activeActors := make([]*activeactor.Instance, numActors)
 
 		// Create and register active actors
 		for i := range numActors {
@@ -961,7 +962,7 @@ func TestHostHaltAll(t *testing.T) {
 			instance := &actor_mocks.MockActorDeactivate{}
 			// No expectations set since actors are already halted
 
-			activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+			activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 			host.actors.Set(actorRef.String(), activeAct)
 			activeActors[i] = activeAct
 
@@ -979,7 +980,7 @@ func TestHostHaltAll(t *testing.T) {
 
 		// Verify all actors are still marked as halted
 		for i, activeAct := range activeActors {
-			assert.True(t, activeAct.halted.Load(), "Actor %d should still be marked as halted", i)
+			assert.True(t, activeAct.Halted(), "Actor %d should still be marked as halted", i)
 		}
 
 		// No provider expectations should be called since actors were already halted
@@ -995,7 +996,7 @@ func TestHostHaltAll(t *testing.T) {
 		// Create a minimal host for testing
 		host := &Host{
 			actorProvider: provider,
-			actors:        haxmap.New[string, *activeActor](8),
+			actors:        haxmap.New[string, *activeactor.Instance](8),
 			log:           log,
 			clock:         clock,
 			actorsConfig: map[string]components.ActorHostType{
@@ -1005,13 +1006,13 @@ func TestHostHaltAll(t *testing.T) {
 			},
 			providerRequestTimeout: 30 * time.Second,
 		}
-		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
+		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeactor.Instance]{
 			ExecuteFn: host.handleIdleActor,
 			Clock:     clock,
 		})
 
 		const numActors = 3
-		activeActors := make([]*activeActor, numActors)
+		activeActors := make([]*activeactor.Instance, numActors)
 
 		// Create and register active actors
 		for i := range numActors {
@@ -1022,7 +1023,7 @@ func TestHostHaltAll(t *testing.T) {
 				Return(nil).
 				Once()
 
-			activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+			activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 			host.actors.Set(actorRef.String(), activeAct)
 			activeActors[i] = activeAct
 
@@ -1067,26 +1068,12 @@ func TestHostHaltAll(t *testing.T) {
 
 		// Verify all actors are marked as halted
 		for i, activeAct := range activeActors {
-			assert.True(t, activeAct.halted.Load(), "Actor %d should be marked as halted", i)
+			assert.True(t, activeAct.Halted(), "Actor %d should be marked as halted", i)
 		}
 
 		// Assert expectations
 		provider.AssertExpectations(t)
 	})
-}
-
-func waitForGoroutines(t *testing.T, want int32, counter *atomic.Int32) {
-	t.Helper()
-
-	var i int
-	for counter.Load() != want {
-		if i == 1000 {
-			t.Fatalf("Waited too long for goroutines to start")
-		}
-		i++
-
-		time.Sleep(500 * time.Microsecond)
-	}
 }
 
 func TestIdleActorHandling(t *testing.T) {
@@ -1106,7 +1093,7 @@ func TestIdleActorHandling(t *testing.T) {
 		// Create a minimal host for testing
 		host := &Host{
 			actorProvider: provider,
-			actors:        haxmap.New[string, *activeActor](8),
+			actors:        haxmap.New[string, *activeactor.Instance](8),
 			log:           log,
 			clock:         clock,
 			actorsConfig: map[string]components.ActorHostType{
@@ -1116,7 +1103,7 @@ func TestIdleActorHandling(t *testing.T) {
 			},
 			providerRequestTimeout: 30 * time.Second,
 		}
-		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
+		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeactor.Instance]{
 			ExecuteFn: host.handleIdleActor,
 			Clock:     clock,
 		})
@@ -1139,7 +1126,7 @@ func TestIdleActorHandling(t *testing.T) {
 			Once()
 
 		idleTimeout := 1 * time.Minute
-		activeAct := newActiveActor(actorRef, instance, idleTimeout, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, idleTimeout, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider
@@ -1149,7 +1136,7 @@ func TestIdleActorHandling(t *testing.T) {
 			Once()
 
 		// Update idle time to trigger processing
-		activeAct.updateIdleAt(0)
+		activeAct.UpdateIdleAt(0)
 
 		// Verify actor is in the processor queue by advancing time
 		clock.Step(idleTimeout + time.Second)
@@ -1161,7 +1148,7 @@ func TestIdleActorHandling(t *testing.T) {
 		}, 2*time.Second, 50*time.Millisecond, "Actor should be removed from host after idle processing")
 
 		// Verify the actor is marked as halted
-		assert.True(t, activeAct.halted.Load(), "Actor should be marked as halted")
+		assert.True(t, activeAct.Halted(), "Actor should be marked as halted")
 
 		// Assert expected method calls
 		provider.AssertExpectations(t)
@@ -1179,7 +1166,7 @@ func TestIdleActorHandling(t *testing.T) {
 		instance := &actor_mocks.MockActorDeactivate{}
 
 		idleTimeout := 1 * time.Minute
-		activeAct := newActiveActor(actorRef, instance, idleTimeout, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, idleTimeout, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// Lock the actor to make it "busy"
@@ -1188,7 +1175,7 @@ func TestIdleActorHandling(t *testing.T) {
 		assert.NotNil(t, haltCh)
 
 		// Update idle time to trigger processing
-		activeAct.updateIdleAt(0) // Use default idle timeout
+		activeAct.UpdateIdleAt(0) // Use default idle timeout
 
 		// Advance time to when the actor should be processed
 		clock.Step(idleTimeout + 1*time.Second)
@@ -1204,7 +1191,7 @@ func TestIdleActorHandling(t *testing.T) {
 		assert.True(t, exists, "Busy actor should remain in host")
 
 		// Verify the actor is NOT marked as halted
-		assert.False(t, activeAct.halted.Load(), "Busy actor should not be marked as halted")
+		assert.False(t, activeAct.Halted(), "Busy actor should not be marked as halted")
 
 		// Unlock the actor now so it can be processed
 		activeAct.Unlock()
@@ -1229,7 +1216,7 @@ func TestIdleActorHandling(t *testing.T) {
 		}, 2*time.Second, 50*time.Millisecond, "Actor should be removed from host after successful processing")
 
 		// Verify the actor is marked as halted
-		assert.True(t, activeAct.halted.Load(), "Actor should be marked as halted after unlock")
+		assert.True(t, activeAct.Halted(), "Actor should be marked as halted after unlock")
 
 		// Assert expected method calls
 		provider.AssertExpectations(t)
@@ -1247,11 +1234,11 @@ func TestIdleActorHandling(t *testing.T) {
 		actorRef := ref.NewActorRef("testactor", "noIdleTimeout")
 		instance := &actor_mocks.MockActorDeactivate{}
 
-		activeAct := newActiveActor(actorRef, instance, 0, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, 0, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// Try to update idle time - should be a no-op
-		activeAct.updateIdleAt(0)
+		activeAct.UpdateIdleAt(0)
 
 		// Advance time significantly
 		clock.Step(10 * time.Minute)
@@ -1263,7 +1250,7 @@ func TestIdleActorHandling(t *testing.T) {
 		}, 250*time.Millisecond, 50*time.Millisecond, "Actor with zero idle timeout should remain in host")
 
 		// Verify the actor is NOT marked as halted
-		assert.False(t, activeAct.halted.Load(), "Actor with zero idle timeout should not be halted")
+		assert.False(t, activeAct.Halted(), "Actor with zero idle timeout should not be halted")
 
 		// No provider expectations since nothing should be called
 		provider.AssertExpectations(t)
@@ -1281,7 +1268,7 @@ func TestIdleActorHandling(t *testing.T) {
 		instance := &actor_mocks.MockActorDeactivate{}
 
 		idleTimeout := 1 * time.Minute
-		activeAct := newActiveActor(actorRef, instance, idleTimeout, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, idleTimeout, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// Halt the actor first to cause TryLock to return an error
@@ -1289,7 +1276,7 @@ func TestIdleActorHandling(t *testing.T) {
 		require.NoError(t, err)
 
 		// Update idle time to trigger processing
-		activeAct.updateIdleAt(0)
+		activeAct.UpdateIdleAt(0)
 
 		// Advance time to when the actor should be processed
 		clock.Step(idleTimeout + 1*time.Second)
@@ -1301,7 +1288,7 @@ func TestIdleActorHandling(t *testing.T) {
 		}, 1*time.Second, 50*time.Millisecond, "Should log TryLock error")
 
 		// The actor should remain halted
-		assert.True(t, activeAct.halted.Load(), "Actor should remain halted")
+		assert.True(t, activeAct.Halted(), "Actor should remain halted")
 
 		// No provider expectations since handleIdleActor returned early due to error
 		provider.AssertExpectations(t)
@@ -1323,7 +1310,7 @@ func TestIdleActorHandling(t *testing.T) {
 			Once()
 
 		idleTimeout := 1 * time.Minute
-		activeAct := newActiveActor(actorRef, instance, idleTimeout, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, idleTimeout, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// Set up provider to return an error
@@ -1334,7 +1321,7 @@ func TestIdleActorHandling(t *testing.T) {
 			Once()
 
 		// Update idle time to trigger processing
-		activeAct.updateIdleAt(0)
+		activeAct.UpdateIdleAt(0)
 
 		// Advance time to when the actor should be processed
 		clock.Step(idleTimeout + 1*time.Second)
@@ -1346,7 +1333,7 @@ func TestIdleActorHandling(t *testing.T) {
 		}, 2*time.Second, 50*time.Millisecond, "Should log halt error")
 
 		// The actor should be marked as halted (halt succeeds even if provider fails)
-		assert.True(t, activeAct.halted.Load(), "Actor should be marked as halted")
+		assert.True(t, activeAct.Halted(), "Actor should be marked as halted")
 
 		// Verify the actor was removed from the host map despite provider error
 		_, exists := host.actors.Get(actorRef.String())
@@ -1364,7 +1351,7 @@ func TestIdleActorHandling(t *testing.T) {
 		host, provider := newHost()
 
 		const numActors = 5
-		activeActors := make([]*activeActor, numActors)
+		activeActors := make([]*activeactor.Instance, numActors)
 		instances := make([]*actor_mocks.MockActorDeactivate, numActors)
 
 		// Synchronization for parallel processing validation
@@ -1399,7 +1386,7 @@ func TestIdleActorHandling(t *testing.T) {
 				Return(nil).
 				Once()
 
-			activeAct := newActiveActor(actorRef, instance, idleTimeout, host.idleActorProcessor, clock)
+			activeAct := activeactor.NewInstance(actorRef, instance, idleTimeout, host.idleActorProcessor, clock)
 			host.actors.Set(actorRef.String(), activeAct)
 
 			activeActors[i] = activeAct
@@ -1412,7 +1399,7 @@ func TestIdleActorHandling(t *testing.T) {
 				Once()
 
 			// Update idle time to trigger processing
-			activeAct.updateIdleAt(0)
+			activeAct.UpdateIdleAt(0)
 		}
 
 		// Verify initial state
@@ -1474,7 +1461,7 @@ func TestIdleActorHandling(t *testing.T) {
 
 		// Verify all actors are marked as halted
 		for i, activeAct := range activeActors {
-			assert.True(t, activeAct.halted.Load(), "Actor %d should be marked as halted", i)
+			assert.True(t, activeAct.Halted(), "Actor %d should be marked as halted", i)
 		}
 
 		// Verify that we got all expected actors in both started and completed lists

@@ -9,6 +9,7 @@ import (
 	msgpack "github.com/vmihailenco/msgpack/v5"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/internal/objectenvelope"
 )
 
 // Handler for POST /v1/invoke/{actorType}/{actorID}/{method}
@@ -92,7 +93,7 @@ func (h *Host) handleMessageRequest(w http.ResponseWriter, r *http.Request) {
 	// Set the content type for msgpack if we have a body
 	w.Header().Set(headerContentType, contentTypeMsgpack)
 	w.WriteHeader(http.StatusOK)
-	err = outData.(*objectEnvelope).Encode(w) //nolint:forcetypeassert
+	err = outData.(*objectenvelope.Envelope).Encode(w) //nolint:forcetypeassert
 	if err != nil {
 		// At this point all we can do is log the error
 		h.log.ErrorContext(r.Context(), "Error writing response body", slog.Any("error", err))

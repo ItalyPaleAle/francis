@@ -1,4 +1,4 @@
-package host
+package activeactor
 
 import (
 	"context"
@@ -18,6 +18,7 @@ import (
 	"github.com/italypaleale/francis/internal/eventqueue"
 	actor_mocks "github.com/italypaleale/francis/internal/mocks/actor"
 	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/testutil"
 )
 
 func TestNewActiveActor(t *testing.T) {
@@ -26,12 +27,12 @@ func TestNewActiveActor(t *testing.T) {
 	instance := &actor_mocks.MockActorDeactivate{}
 	idleTimeout := 5 * time.Minute
 
-	processor := eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
-		ExecuteFn: func(a *activeActor) {},
+	processor := eventqueue.NewProcessor(eventqueue.Options[string, *Instance]{
+		ExecuteFn: func(a *Instance) {},
 		Clock:     clock,
 	})
 
-	activeAct := newActiveActor(actorRef, instance, idleTimeout, processor, clock)
+	activeAct := NewInstance(actorRef, instance, idleTimeout, processor, clock)
 
 	assert.Equal(t, actorRef, activeAct.ref)
 	assert.Equal(t, instance, activeAct.instance)
@@ -61,11 +62,11 @@ func TestNewActiveActorWithZeroIdleTimeout(t *testing.T) {
 	instance := &actor_mocks.MockActorDeactivate{}
 	idleTimeout := time.Duration(0)
 
-	processor := eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
-		ExecuteFn: func(a *activeActor) {},
+	processor := eventqueue.NewProcessor(eventqueue.Options[string, *Instance]{
+		ExecuteFn: func(a *Instance) {},
 	})
 
-	activeAct := newActiveActor(actorRef, instance, idleTimeout, processor, nil)
+	activeAct := NewInstance(actorRef, instance, idleTimeout, processor, nil)
 
 	// idleAt should be nil since idleTimeout is 0 (updateIdleAt returns early)
 	assert.Nil(t, activeAct.idleAt.Load())
@@ -74,16 +75,16 @@ func TestNewActiveActorWithZeroIdleTimeout(t *testing.T) {
 func TestUpdateIdleAt(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 
-	getActiveAct := func(idleTimeout time.Duration) *activeActor {
+	getActiveAct := func(idleTimeout time.Duration) *Instance {
 		actorRef := ref.NewActorRef("testactor", "actor1")
 		instance := &actor_mocks.MockActorDeactivate{}
 
-		processor := eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
-			ExecuteFn: func(a *activeActor) {},
+		processor := eventqueue.NewProcessor(eventqueue.Options[string, *Instance]{
+			ExecuteFn: func(a *Instance) {},
 			Clock:     clock,
 		})
 
-		return newActiveActor(actorRef, instance, idleTimeout, processor, clock)
+		return NewInstance(actorRef, instance, idleTimeout, processor, clock)
 	}
 
 	t.Run("updates idle time with default timeout", func(t *testing.T) {
@@ -94,7 +95,7 @@ func TestUpdateIdleAt(t *testing.T) {
 		clock.Step(1 * time.Minute)
 		oldIdleAt := *activeAct.idleAt.Load()
 
-		activeAct.updateIdleAt(0)
+		activeAct.UpdateIdleAt(0)
 		newIdleAt := *activeAct.idleAt.Load()
 
 		// New idle time should be later than the old one
@@ -108,7 +109,7 @@ func TestUpdateIdleAt(t *testing.T) {
 		activeAct := getActiveAct(idleTimeout)
 
 		customDuration := 10 * time.Minute
-		activeAct.updateIdleAt(customDuration)
+		activeAct.UpdateIdleAt(customDuration)
 
 		actualIdleAt := *activeAct.idleAt.Load()
 		expectedIdleAt := clock.Now().Add(customDuration)
@@ -121,7 +122,7 @@ func TestUpdateIdleAt(t *testing.T) {
 		oldIdleAt := activeAct.idleAt.Load()
 
 		clock.Step(1 * time.Minute)
-		activeAct.updateIdleAt(0)
+		activeAct.UpdateIdleAt(0)
 
 		newIdleAt := activeAct.idleAt.Load()
 		// Should not have changed since idle timeout is 0
@@ -137,7 +138,7 @@ func TestUpdateIdleAt(t *testing.T) {
 		oldIdleAt := activeAct.idleAt.Load()
 
 		clock.Step(1 * time.Minute)
-		activeAct.updateIdleAt(0)
+		activeAct.UpdateIdleAt(0)
 
 		newIdleAt := activeAct.idleAt.Load()
 		// Should not have changed since idle timeout is negative
@@ -151,16 +152,16 @@ func TestUpdateIdleAt(t *testing.T) {
 func TestTryLock(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 
-	getActiveAct := func() *activeActor {
+	getActiveAct := func() *Instance {
 		actorRef := ref.NewActorRef("testactor", "actor1")
 		instance := &actor_mocks.MockActorDeactivate{}
 
-		processor := eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
-			ExecuteFn: func(a *activeActor) {},
+		processor := eventqueue.NewProcessor(eventqueue.Options[string, *Instance]{
+			ExecuteFn: func(a *Instance) {},
 			Clock:     clock,
 		})
 
-		return newActiveActor(actorRef, instance, 5*time.Minute, processor, clock)
+		return NewInstance(actorRef, instance, 5*time.Minute, processor, clock)
 	}
 
 	t.Run("successful lock acquisition", func(t *testing.T) {
@@ -226,16 +227,16 @@ func TestTryLock(t *testing.T) {
 func TestLock(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 
-	getActiveAct := func() *activeActor {
+	getActiveAct := func() *Instance {
 		actorRef := ref.NewActorRef("testactor", "actor1")
 		instance := &actor_mocks.MockActorDeactivate{}
 
-		processor := eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
-			ExecuteFn: func(a *activeActor) {},
+		processor := eventqueue.NewProcessor(eventqueue.Options[string, *Instance]{
+			ExecuteFn: func(a *Instance) {},
 			Clock:     clock,
 		})
 
-		return newActiveActor(actorRef, instance, 5*time.Minute, processor, clock)
+		return NewInstance(actorRef, instance, 5*time.Minute, processor, clock)
 	}
 
 	t.Run("successful lock acquisition", func(t *testing.T) {
@@ -301,16 +302,16 @@ func TestLock(t *testing.T) {
 func TestUnlock(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 
-	getActiveAct := func() *activeActor {
+	getActiveAct := func() *Instance {
 		actorRef := ref.NewActorRef("testactor", "actor1")
 		instance := &actor_mocks.MockActorDeactivate{}
 
-		processor := eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
-			ExecuteFn: func(a *activeActor) {},
+		processor := eventqueue.NewProcessor(eventqueue.Options[string, *Instance]{
+			ExecuteFn: func(a *Instance) {},
 			Clock:     clock,
 		})
 
-		return newActiveActor(actorRef, instance, 5*time.Minute, processor, clock)
+		return NewInstance(actorRef, instance, 5*time.Minute, processor, clock)
 	}
 
 	t.Run("successful unlock", func(t *testing.T) {
@@ -335,16 +336,16 @@ func TestUnlock(t *testing.T) {
 func TestHalt(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 
-	getActiveAct := func() *activeActor {
+	getActiveAct := func() *Instance {
 		actorRef := ref.NewActorRef("testactor", "actor1")
 		instance := &actor_mocks.MockActorDeactivate{}
 
-		processor := eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
-			ExecuteFn: func(a *activeActor) {},
+		processor := eventqueue.NewProcessor(eventqueue.Options[string, *Instance]{
+			ExecuteFn: func(a *Instance) {},
 			Clock:     clock,
 		})
 
-		return newActiveActor(actorRef, instance, 5*time.Minute, processor, clock)
+		return NewInstance(actorRef, instance, 5*time.Minute, processor, clock)
 	}
 
 	t.Run("successful halt without drain", func(t *testing.T) {
@@ -390,7 +391,7 @@ func TestHalt(t *testing.T) {
 
 		// Second halt should return error
 		err2 := activeAct.Halt(false)
-		require.ErrorIs(t, err2, errActiveActorAlreadyHalted)
+		require.ErrorIs(t, err2, ErrActiveActorAlreadyHalted)
 	})
 
 	t.Run("halt signals to current lock holders", func(t *testing.T) {
@@ -469,11 +470,11 @@ func TestConcurrentLockUnlock(t *testing.T) {
 	actorRef := ref.NewActorRef("testactor", "actor1")
 	instance := &actor_mocks.MockActorDeactivate{}
 
-	processor := eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
-		ExecuteFn: func(a *activeActor) {},
+	processor := eventqueue.NewProcessor(eventqueue.Options[string, *Instance]{
+		ExecuteFn: func(a *Instance) {},
 	})
 
-	activeAct := newActiveActor(actorRef, instance, 5*time.Minute, processor, nil)
+	activeAct := NewInstance(actorRef, instance, 5*time.Minute, processor, nil)
 
 	const numGoroutines = 100
 	const numIterations = 10
@@ -509,11 +510,11 @@ func TestConcurrentTryLock(t *testing.T) {
 	actorRef := ref.NewActorRef("testactor", "actor1")
 	instance := &actor_mocks.MockActorDeactivate{}
 
-	processor := eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
-		ExecuteFn: func(a *activeActor) {},
+	processor := eventqueue.NewProcessor(eventqueue.Options[string, *Instance]{
+		ExecuteFn: func(a *Instance) {},
 	})
 
-	activeAct := newActiveActor(actorRef, instance, 5*time.Minute, processor, nil)
+	activeAct := NewInstance(actorRef, instance, 5*time.Minute, processor, nil)
 
 	const numGoroutines = 50
 
@@ -567,11 +568,11 @@ func TestConcurrentLockAndHalt(t *testing.T) {
 	actorRef := ref.NewActorRef("testactor", "actor1")
 	instance := &actor_mocks.MockActorDeactivate{}
 
-	processor := eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
-		ExecuteFn: func(a *activeActor) {},
+	processor := eventqueue.NewProcessor(eventqueue.Options[string, *Instance]{
+		ExecuteFn: func(a *Instance) {},
 	})
 
-	activeAct := newActiveActor(actorRef, instance, 5*time.Minute, processor, nil)
+	activeAct := NewInstance(actorRef, instance, 5*time.Minute, processor, nil)
 
 	const numGoroutines = 20
 
@@ -612,7 +613,7 @@ func TestConcurrentLockAndHalt(t *testing.T) {
 	}
 
 	// Wait for goroutines to start
-	waitForGoroutines(t, numGoroutines, lockAttempts)
+	testutil.WaitForGoroutines(t, numGoroutines, lockAttempts)
 
 	// Halt the actor
 	wg.Go(func() {
@@ -638,11 +639,11 @@ func TestConcurrentIdleTimeUpdates(t *testing.T) {
 	actorRef := ref.NewActorRef("testactor", "actor1")
 	instance := &actor_mocks.MockActorDeactivate{}
 
-	processor := eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
-		ExecuteFn: func(a *activeActor) {},
+	processor := eventqueue.NewProcessor(eventqueue.Options[string, *Instance]{
+		ExecuteFn: func(a *Instance) {},
 	})
 
-	activeAct := newActiveActor(actorRef, instance, 5*time.Minute, processor, nil)
+	activeAct := NewInstance(actorRef, instance, 5*time.Minute, processor, nil)
 
 	const numGoroutines = 50
 
@@ -654,7 +655,7 @@ func TestConcurrentIdleTimeUpdates(t *testing.T) {
 			defer wg.Done()
 
 			customDuration := time.Duration(id+1) * time.Minute
-			activeAct.updateIdleAt(customDuration)
+			activeAct.UpdateIdleAt(customDuration)
 		}(i)
 	}
 
@@ -673,12 +674,12 @@ func TestConcurrentHaltCalls(t *testing.T) {
 	actorRef := ref.NewActorRef("testactor", "actor1")
 	instance := &actor_mocks.MockActorDeactivate{}
 
-	processor := eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
-		ExecuteFn: func(a *activeActor) {},
+	processor := eventqueue.NewProcessor(eventqueue.Options[string, *Instance]{
+		ExecuteFn: func(a *Instance) {},
 		Clock:     clock,
 	})
 
-	activeAct := newActiveActor(actorRef, instance, 5*time.Minute, processor, clock)
+	activeAct := NewInstance(actorRef, instance, 5*time.Minute, processor, clock)
 
 	const numGoroutines = 10
 
@@ -693,7 +694,7 @@ func TestConcurrentHaltCalls(t *testing.T) {
 			switch {
 			case err == nil:
 				successCount.Add(1)
-			case errors.Is(err, errActiveActorAlreadyHalted):
+			case errors.Is(err, ErrActiveActorAlreadyHalted):
 				errorCount.Add(1)
 			default:
 				errCh <- fmt.Errorf("unexpected error: %w", err)
@@ -721,11 +722,11 @@ func TestRaceConditionLockAndHalt(t *testing.T) {
 			actorRef := ref.NewActorRef("testactor", "actor1")
 			instance := &actor_mocks.MockActorDeactivate{}
 
-			processor := eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
-				ExecuteFn: func(a *activeActor) {},
+			processor := eventqueue.NewProcessor(eventqueue.Options[string, *Instance]{
+				ExecuteFn: func(a *Instance) {},
 			})
 
-			activeAct := newActiveActor(actorRef, instance, 5*time.Minute, processor, nil)
+			activeAct := NewInstance(actorRef, instance, 5*time.Minute, processor, nil)
 
 			var wg sync.WaitGroup
 			lockDone := make(chan error, 1)
@@ -761,7 +762,7 @@ func TestRaceConditionLockAndHalt(t *testing.T) {
 
 			// Halt should either succeed or fail with already halted error
 			if haltErr != nil {
-				require.ErrorIs(t, haltErr, errActiveActorAlreadyHalted)
+				require.ErrorIs(t, haltErr, ErrActiveActorAlreadyHalted)
 			}
 
 			// Actor should be halted at the end

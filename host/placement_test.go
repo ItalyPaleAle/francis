@@ -16,6 +16,7 @@ import (
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/activeactor"
 	"github.com/italypaleale/francis/internal/eventqueue"
 	actor_mocks "github.com/italypaleale/francis/internal/mocks/actor"
 	components_mocks "github.com/italypaleale/francis/internal/mocks/components"
@@ -37,7 +38,7 @@ func TestLookupActor(t *testing.T) {
 			hostID:                 "test-host-123",
 			address:                "localhost:8080",
 			actorProvider:          provider,
-			actors:                 haxmap.New[string, *activeActor](8),
+			actors:                 haxmap.New[string, *activeactor.Instance](8),
 			log:                    log,
 			clock:                  clock,
 			providerRequestTimeout: 30 * time.Second,
@@ -53,7 +54,7 @@ func TestLookupActor(t *testing.T) {
 			},
 		}
 		host.service = actor.NewService(host)
-		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
+		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeactor.Instance]{
 			ExecuteFn: host.handleIdleActor,
 			Clock:     clock,
 		})
@@ -78,7 +79,7 @@ func TestLookupActor(t *testing.T) {
 
 		// Create and register an active actor locally
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// No provider calls should be made when actor is local
@@ -568,7 +569,7 @@ func TestLookupActor(t *testing.T) {
 
 		// Create and register an active actor locally
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
+		activeAct := activeactor.NewInstance(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
 		host.actors.Set(actorRef.String(), activeAct)
 
 		// No provider calls should be made when actor is local
