@@ -15,6 +15,7 @@ import (
 	"github.com/lmittmann/tint"
 	"github.com/mattn/go-isatty"
 
+	"github.com/italypaleale/francis/components/sqlite"
 	"github.com/italypaleale/francis/host"
 	"github.com/italypaleale/francis/internal/servicerunner"
 	"github.com/italypaleale/francis/internal/signals"
@@ -51,7 +52,7 @@ func runWorker(ctx context.Context) error {
 	opts := []host.HostOption{
 		host.WithAddress(actorHostAddress),
 		host.WithLogger(log.With("scope", "actor-host")),
-		host.WithSQLiteProvider(host.SQLiteProviderOptions{
+		host.WithSQLiteProvider(sqlite.SQLiteProviderOptions{
 			ConnectionString: "data.db",
 		}),
 		host.WithShutdownGracePeriod(10 * time.Second),

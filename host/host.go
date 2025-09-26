@@ -47,9 +47,6 @@ const (
 	actorBusyReEnqueueInterval = 10 * time.Second
 )
 
-// Re-export provider options
-type SQLiteProviderOptions = sqlite.SQLiteProviderOptions
-
 // Host is an actor host.
 type Host struct {
 	// Address the host is reachable at
@@ -441,46 +438,66 @@ func (h *Host) runHealthChecks(parentCtx context.Context) error {
 	var err error
 
 	// Perform periodic health checks
-	interval := h.actorProvider.HealthCheckInterval()
+	interval := h.HealthCheckInterval()
 	h.log.DebugContext(parentCtx, "Starting background health checks", slog.Any("interval", interval))
 	defer h.log.Debug("Stopped background health checks")
 
 	t := h.clock.NewTicker(interval)
 	defer t.Stop()
 
-	retryOpts := []backoff.RetryOption{
-		backoff.WithBackOff(backoff.NewConstantBackOff(500 * time.Millisecond)),
-		backoff.WithMaxTries(3),
-	}
-
 	for {
 		select {
 		case <-t.C():
-			h.log.DebugContext(parentCtx, "Sending health check to the provider")
-			_, err = backoff.Retry(parentCtx, func() (r struct{}, rErr error) {
-				ctx, cancel := context.WithTimeout(parentCtx, h.providerRequestTimeout)
-				defer cancel()
-				rErr = h.actorProvider.UpdateActorHost(ctx, h.hostID, components.UpdateActorHostReq{UpdateLastHealthCheck: true})
-				switch {
-				case errors.Is(rErr, components.ErrHostUnregistered):
-					// Registration has expired, so no point in retrying anymore
-					return r, backoff.Permanent(rErr)
-				case rErr != nil:
-					h.log.WarnContext(parentCtx, "Health check error; will retry", slog.Any("error", rErr))
-					return r, rErr
-				default:
-					return r, nil
-				}
-			}, retryOpts...)
+			// Perform the health check
+			err = h.HostHealthCheck(parentCtx, h.hostID)
 			if err != nil {
-				h.log.ErrorContext(parentCtx, "Health check failed", slog.Any("error", err))
-				return fmt.Errorf("failed to perform health check: %w", err)
+				// In case of errors, return, which causes the task to stop and makes the entire host shut down
+				return err
 			}
 		case <-parentCtx.Done():
 			// Stop when the context is canceled
 			return parentCtx.Err()
 		}
 	}
+}
+
+// HealthCheckInterval returns the recommended health check interval for hosts.
+func (h *Host) HealthCheckInterval() time.Duration {
+	return h.actorProvider.HealthCheckInterval()
+}
+
+// HostHealthCheck performs the health-check for a host.
+func (h *Host) HostHealthCheck(parentCtx context.Context, hostID string) error {
+	log := h.log.With(slog.String("hostId", hostID))
+
+	log.DebugContext(parentCtx, "Sending health check to the provider")
+
+	_, err := backoff.Retry(parentCtx,
+		func() (r struct{}, rErr error) {
+			ctx, cancel := context.WithTimeout(parentCtx, h.providerRequestTimeout)
+			defer cancel()
+			rErr = h.actorProvider.UpdateActorHost(ctx, hostID, components.UpdateActorHostReq{UpdateLastHealthCheck: true})
+			switch {
+			case errors.Is(rErr, components.ErrHostUnregistered):
+				// Registration has expired, so no point in retrying anymore
+				return r, backoff.Permanent(rErr)
+			case rErr != nil:
+				log.WarnContext(parentCtx, "Health check error; will retry", slog.Any("error", rErr))
+				return r, rErr
+			default:
+				return r, nil
+			}
+		},
+		backoff.WithBackOff(backoff.NewConstantBackOff(500*time.Millisecond)),
+		backoff.WithMaxTries(3),
+	)
+
+	if err != nil {
+		log.ErrorContext(parentCtx, "Health check failed", slog.Any("error", err))
+		return fmt.Errorf("failed to perform health check: %w", err)
+	}
+
+	return nil
 }
 
 func (h *Host) handleIdleActor(act *activeActor) {
