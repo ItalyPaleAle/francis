@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -23,6 +22,7 @@ import (
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/sqlite"
 	"github.com/italypaleale/francis/internal/activeactor"
+	"github.com/italypaleale/francis/internal/alarmprocessor"
 	"github.com/italypaleale/francis/internal/eventqueue"
 	"github.com/italypaleale/francis/internal/peerauth"
 	"github.com/italypaleale/francis/internal/ref"
@@ -56,10 +56,10 @@ type Host struct {
 	// Host ID for the registered host
 	hostID string
 
-	running       atomic.Bool
-	actorProvider components.ActorProvider
-	service       *actor.Service
-	client        *http.Client
+	running        atomic.Bool
+	actorProvider  components.ActorProvider
+	service        *actor.Service
+	alarmProcessor *alarmprocessor.Processor
 
 	// Actor factory methods; key is actor type
 	actorFactories map[string]actor.Factory
@@ -67,7 +67,6 @@ type Host struct {
 	// Active actors; key is "actorType/actorID"
 	actors             *haxmap.Map[string, *activeactor.Instance]
 	idleActorProcessor *eventqueue.Processor[string, *activeactor.Instance]
-	alarmProcessor     *eventqueue.Processor[string, *ref.AlarmLease]
 
 	// Actor placement cache
 	placementCache *ttlcache.Cache[*actorPlacement]
@@ -75,18 +74,13 @@ type Host struct {
 	// Map of actor configuration objects; key is actor type
 	actorsConfig map[string]components.ActorHostType
 
-	// List of currently-active alarms
-	activeAlarmsLock sync.Mutex
-	activeAlarms     map[string]struct{}
-	retryingAlarms   map[string]struct{}
-
 	bind                   string
 	serverTLSConfig        *tls.Config
 	peerAuth               peerauth.PeerAuthenticationMethod
-	alarmsPollInterval     time.Duration
 	providerRequestTimeout time.Duration
 	shutdownGracePeriod    time.Duration
 
+	client    *http.Client
 	logSource *slog.Logger
 	log       *slog.Logger
 	clock     clock.WithTicker
@@ -231,9 +225,6 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 		actorsConfig:           map[string]components.ActorHostType{},
 		actorFactories:         map[string]actor.Factory{},
 		actors:                 haxmap.New[string, *activeactor.Instance](defaultActorsMapSize),
-		activeAlarms:           map[string]struct{}{},
-		retryingAlarms:         map[string]struct{}{},
-		alarmsPollInterval:     options.AlarmsPollInterval,
 		shutdownGracePeriod:    options.ShutdownGracePeriod,
 		providerRequestTimeout: options.ProviderRequestTimeout,
 		peerAuth:               options.PeerAuthentication,
@@ -253,6 +244,20 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 			QUICConfig:      &quic.Config{},
 		},
 	}
+
+	// Init the alarm processor
+	h.alarmProcessor = alarmprocessor.NewProcessor(alarmprocessor.AlarmProcessorOpts{
+		PollInterval:           options.AlarmsPollInterval,
+		ProviderRequestTimeout: options.ProviderRequestTimeout,
+		ActorProvider:          h.actorProvider,
+		LockAndInvokeFn:        h.lockAndInvokeFn,
+		ActorsConfig:           h.actorsConfig,
+		Log:                    options.Logger,
+		Clock:                  h.clock,
+		HostIDs: func() []string {
+			return []string{h.hostID}
+		},
+	})
 
 	return h, nil
 }
@@ -349,10 +354,10 @@ func (h *Host) Run(parentCtx context.Context) error {
 			h.runHealthChecks,
 
 			// Run the alarm fetcher in background
-			h.runAlarmFetcher,
+			h.alarmProcessor.RunAlarmFetcher,
 
 			// In background also renew leases
-			h.runLeaseRenewal,
+			h.alarmProcessor.RunLeaseRenewal,
 
 			// Run the server that allows receiving requests from other nodes
 			h.runServer,
