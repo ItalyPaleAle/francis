@@ -13,14 +13,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	sqladapter "github.com/italypaleale/go-sql-utils/adapter/sql"
+	"github.com/italypaleale/go-sql-utils/cleanup"
+	"github.com/italypaleale/go-sql-utils/migrations"
+	sqlitemigrations "github.com/italypaleale/go-sql-utils/migrations/sqlite"
 	"k8s.io/utils/clock"
 	"modernc.org/sqlite"
 
 	"github.com/italypaleale/francis/components"
-	"github.com/italypaleale/francis/internal/sql/cleanup"
-	"github.com/italypaleale/francis/internal/sql/migrations"
-	sqlitemigrations "github.com/italypaleale/francis/internal/sql/migrations/sqlite"
-	"github.com/italypaleale/francis/internal/sql/sqladapter"
 )
 
 var (

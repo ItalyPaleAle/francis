@@ -6,12 +6,12 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	postgrestransactions "github.com/italypaleale/go-sql-utils/transactions/postgres"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
-	"github.com/italypaleale/francis/internal/sql/transactions"
 )
 
 func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {
@@ -21,7 +21,7 @@ func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.Regi
 	}
 	hostID := hostIDObj.String()
 
-	_, oErr = transactions.ExecuteInPgxTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (zero struct{}, err error) {
+	_, oErr = postgrestransactions.ExecuteInTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (zero struct{}, err error) {
 		// To start, we need to delete any actor host with the same address that has not sent a health check in the maximum allotted time
 		// We need to do this because the hosts table has a unique index on the address, so two apps can't have the same address
 		// If it's the same app that's restarted after a crash, then it will be able to re-register once the health checks have timed out
@@ -79,7 +79,7 @@ func (p *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, r
 		return nil
 	}
 
-	_, oErr := transactions.ExecuteInPgxTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (zero struct{}, err error) {
+	_, oErr := postgrestransactions.ExecuteInTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (zero struct{}, err error) {
 		// Update the last health check if needed
 		if req.UpdateLastHealthCheck {
 			err = p.updateActorHostLastHealthCheck(ctx, hostID, tx)
