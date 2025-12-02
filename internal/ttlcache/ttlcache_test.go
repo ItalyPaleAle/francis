@@ -87,3 +87,24 @@ func TestCache(t *testing.T) {
 		}
 	}, time.Second, 20*time.Millisecond)
 }
+
+func TestCacheCleanupRemovesExpiredEntriesAtBoundary(t *testing.T) {
+	clock := &clocktesting.FakeClock{}
+	clock.SetTime(time.Now())
+
+	cache := NewCache[string](&CacheOptions{
+		CleanupInterval: time.Hour,
+		clock:           clock,
+	})
+	defer cache.Stop()
+
+	cache.Set("key", "value", time.Second)
+
+	clock.Step(time.Second)
+	cache.Cleanup()
+
+	_, ok := cache.Get("key")
+	require.False(t, ok)
+
+	assert.EqualValues(t, 0, cache.m.Len())
+}

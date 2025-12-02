@@ -114,7 +114,7 @@ func (c *Cache[V]) Cleanup() {
 	// This is considered acceptable in this case as this is just a cache.
 	keys := make([]string, 0)
 	c.m.ForEach(func(k string, v cacheEntry[V]) bool {
-		if v.exp.Before(now) {
+		if !v.exp.After(now) {
 			keys = append(keys, k)
 		}
 		return true
