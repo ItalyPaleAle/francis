@@ -14,6 +14,7 @@ import (
 	_ "embed"
 
 	"github.com/google/uuid"
+	postgrestransactions "github.com/italypaleale/go-sql-utils/transactions/postgres"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -23,7 +24,6 @@ import (
 	"github.com/italypaleale/francis/components"
 	comptesting "github.com/italypaleale/francis/components/testing"
 	"github.com/italypaleale/francis/internal/ptr"
-	"github.com/italypaleale/francis/internal/sql/transactions"
 	"github.com/italypaleale/francis/internal/testutil"
 )
 
@@ -153,7 +153,7 @@ func (p *PostgresProvider) setCurrentFrozenTime() error {
 }
 
 func (p *PostgresProvider) Seed(ctx context.Context, spec comptesting.Spec) error {
-	_, tErr := transactions.ExecuteInPgxTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (z struct{}, err error) {
+	_, tErr := postgrestransactions.ExecuteInTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (z struct{}, err error) {
 		// We need to get the current time here because we cannot use "now()" when using CopyFrom
 		// However, since time in the database is "frozen" and synced with the mock clock, it should be the same
 		now := p.clock.Now()
@@ -304,7 +304,7 @@ func (p *PostgresProvider) GetAllActorState(ctx context.Context) (comptesting.Ac
 }
 
 func (p *PostgresProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, error) {
-	return transactions.ExecuteInPgxTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (res comptesting.Spec, err error) {
+	return postgrestransactions.ExecuteInTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (res comptesting.Spec, err error) {
 		// Load all hosts
 		rows, err := tx.Query(ctx, "SELECT host_id, host_address, now() - host_last_health_check FROM hosts")
 		if err != nil {

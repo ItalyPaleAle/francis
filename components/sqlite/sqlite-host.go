@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	sqltransactions "github.com/italypaleale/go-sql-utils/transactions/sql"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
-	"github.com/italypaleale/francis/internal/sql/transactions"
 )
 
 func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {
@@ -23,7 +23,7 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 	}
 	hostID := hostIDObj.String()
 
-	_, oErr = transactions.ExecuteInSQLTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
+	_, oErr = sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
 		now := s.clock.Now().UnixMilli()
 
 		// To start, we need to delete any actor host with the same address that has not sent a health check in the maximum allotted time
@@ -84,7 +84,7 @@ func (s *SQLiteProvider) UpdateActorHost(ctx context.Context, hostID string, req
 		return nil
 	}
 
-	_, oErr := transactions.ExecuteInSQLTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
+	_, oErr := sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
 		// Update the last health check if needed
 		if req.UpdateLastHealthCheck {
 			err = s.updateActorHostLastHealthCheck(ctx, hostID, tx)
@@ -271,7 +271,7 @@ func (s *SQLiteProvider) LookupActor(ctx context.Context, ref ref.ActorRef, opts
 		return s.lookupActiveActor(ctx, ref, opts.Hosts)
 	}
 
-	return transactions.ExecuteInSQLTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (res components.LookupActorRes, err error) {
+	return sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (res components.LookupActorRes, err error) {
 		now := s.clock.Now().UnixMilli()
 
 		params := make([]any, 0, len(opts.Hosts)+8)

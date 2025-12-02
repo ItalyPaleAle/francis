@@ -11,11 +11,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	sqltransactions "github.com/italypaleale/go-sql-utils/transactions/sql"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ptr"
 	"github.com/italypaleale/francis/internal/ref"
-	"github.com/italypaleale/francis/internal/sql/transactions"
 )
 
 func (s *SQLiteProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res components.GetAlarmRes, err error) {
@@ -144,7 +144,7 @@ func (s *SQLiteProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req co
 		return nil, nil
 	}
 
-	return transactions.ExecuteInSQLTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) ([]*ref.AlarmLease, error) {
+	return sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) ([]*ref.AlarmLease, error) {
 		fetcher := newUpcomingAlarmFetcher(tx, s, &req)
 
 		res, err := fetcher.FetchUpcoming(ctx)

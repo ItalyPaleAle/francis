@@ -12,16 +12,16 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	postgresadapter "github.com/italypaleale/go-sql-utils/adapter/postgres"
+	"github.com/italypaleale/go-sql-utils/cleanup"
+	"github.com/italypaleale/go-sql-utils/migrations"
+	postgresmigrations "github.com/italypaleale/go-sql-utils/migrations/postgres"
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/components"
-	"github.com/italypaleale/francis/internal/sql/cleanup"
-	"github.com/italypaleale/francis/internal/sql/migrations"
-	postgresmigrations "github.com/italypaleale/francis/internal/sql/migrations/postgres"
-	"github.com/italypaleale/francis/internal/sql/sqladapter"
 )
 
 //go:embed migrations
@@ -234,7 +234,7 @@ func (p *PostgresProvider) initGC() (err error) {
 			},
 		},
 		CleanupInterval: p.cleanupInterval,
-		DB:              sqladapter.AdaptPgxConn(p.db),
+		DB:              postgresadapter.AdaptPgxConn(p.db),
 	})
 	return err
 }
