@@ -15,6 +15,9 @@ import (
 
 	"github.com/alphadose/haxmap"
 	backoff "github.com/cenkalti/backoff/v5"
+	"github.com/italypaleale/go-kit/eventqueue"
+	"github.com/italypaleale/go-kit/servicerunner"
+	"github.com/italypaleale/go-kit/ttlcache"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"k8s.io/utils/clock"
@@ -22,11 +25,8 @@ import (
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/sqlite"
-	"github.com/italypaleale/francis/internal/eventqueue"
 	"github.com/italypaleale/francis/internal/peerauth"
 	"github.com/italypaleale/francis/internal/ref"
-	"github.com/italypaleale/francis/internal/servicerunner"
-	"github.com/italypaleale/francis/internal/ttlcache"
 )
 
 // This file contains code adapted from https://github.com/dapr/dapr/tree/v1.14.5/
@@ -72,7 +72,7 @@ type Host struct {
 	alarmProcessor     *eventqueue.Processor[string, *ref.AlarmLease]
 
 	// Actor placement cache
-	placementCache *ttlcache.Cache[*actorPlacement]
+	placementCache *ttlcache.Cache[string, *actorPlacement]
 
 	// Map of actor configuration objects; key is actor type
 	actorsConfig map[string]components.ActorHostType
@@ -282,7 +282,7 @@ func (h *Host) Run(parentCtx context.Context) error {
 	})
 	defer h.idleActorProcessor.Close()
 
-	h.placementCache = ttlcache.NewCache[*actorPlacement](&ttlcache.CacheOptions{
+	h.placementCache = ttlcache.NewCache[string, *actorPlacement](&ttlcache.CacheOptions{
 		MaxTTL: placementCacheMaxTTL,
 	})
 	defer h.placementCache.Stop()

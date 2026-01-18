@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/alphadose/haxmap"
+	"github.com/italypaleale/go-kit/eventqueue"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -19,7 +20,6 @@ import (
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
-	"github.com/italypaleale/francis/internal/eventqueue"
 	actor_mocks "github.com/italypaleale/francis/internal/mocks/actor"
 	components_mocks "github.com/italypaleale/francis/internal/mocks/components"
 	"github.com/italypaleale/francis/internal/ref"

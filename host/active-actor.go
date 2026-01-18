@@ -7,10 +7,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/italypaleale/go-kit/eventqueue"
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/actor"
-	"github.com/italypaleale/francis/internal/eventqueue"
 	"github.com/italypaleale/francis/internal/locker"
 	"github.com/italypaleale/francis/internal/ref"
 )

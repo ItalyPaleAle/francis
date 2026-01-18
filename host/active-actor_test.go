@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/italypaleale/go-kit/eventqueue"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	clocktesting "k8s.io/utils/clock/testing"
 
 	"github.com/italypaleale/francis/actor"
-	"github.com/italypaleale/francis/internal/eventqueue"
 	actor_mocks "github.com/italypaleale/francis/internal/mocks/actor"
 	"github.com/italypaleale/francis/internal/ref"
 )

@@ -12,12 +12,12 @@ import (
 	"os"
 	"time"
 
+	"github.com/italypaleale/go-kit/servicerunner"
+	"github.com/italypaleale/go-kit/signals"
 	"github.com/lmittmann/tint"
 	"github.com/mattn/go-isatty"
 
 	"github.com/italypaleale/francis/host"
-	"github.com/italypaleale/francis/internal/servicerunner"
-	"github.com/italypaleale/francis/internal/signals"
 )
 
 var (
@@ -37,7 +37,7 @@ func main() {
 
 	log = initLogger(slog.LevelDebug)
 
-	ctx := signals.SignalContext(context.Background(), log)
+	ctx := signals.SignalContext(context.Background())
 
 	err := runWorker(ctx)
 	if err != nil {

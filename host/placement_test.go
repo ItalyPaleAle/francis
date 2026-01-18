@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/alphadose/haxmap"
+	"github.com/italypaleale/go-kit/eventqueue"
+	"github.com/italypaleale/go-kit/ttlcache"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -16,12 +18,10 @@ import (
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
-	"github.com/italypaleale/francis/internal/eventqueue"
 	actor_mocks "github.com/italypaleale/francis/internal/mocks/actor"
 	components_mocks "github.com/italypaleale/francis/internal/mocks/components"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/testutil"
-	"github.com/italypaleale/francis/internal/ttlcache"
 )
 
 func TestLookupActor(t *testing.T) {
@@ -59,7 +59,7 @@ func TestLookupActor(t *testing.T) {
 		})
 
 		// Initialize placement cache
-		host.placementCache = ttlcache.NewCache[*actorPlacement](&ttlcache.CacheOptions{
+		host.placementCache = ttlcache.NewCache[string, *actorPlacement](&ttlcache.CacheOptions{
 			MaxTTL:      placementCacheMaxTTL,
 			InitialSize: 8,
 		})

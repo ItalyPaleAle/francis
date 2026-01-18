@@ -10,11 +10,11 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"github.com/italypaleale/go-kit/eventqueue"
 	msgpack "github.com/vmihailenco/msgpack/v5"
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
-	"github.com/italypaleale/francis/internal/eventqueue"
 	"github.com/italypaleale/francis/internal/ref"
 )
 

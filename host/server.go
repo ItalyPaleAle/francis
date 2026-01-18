@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/italypaleale/go-kit/httpserver"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	sloghttp "github.com/samber/slog-http"
@@ -65,11 +66,13 @@ func (h *Host) getServerHandler() http.Handler {
 
 	mux.HandleFunc("POST /v1/invoke/{actorType}/{actorID}/{method}", h.handleMessageRequest)
 
-	handler := Use(mux,
+	// TODO: Enable the MaxBodySize middleware
+
+	handler := httpserver.Use(mux,
 		// Recover from panics
 		sloghttp.Recovery,
 		// Add the middleware adding the host ID to each response
-		middlewareHostIDHeader(h.hostID),
+		httpserver.MiddlewareHostIDHeader(h.hostID),
 		// Log requests
 		sloghttp.New(h.log),
 	)
