@@ -175,10 +175,7 @@ func (s *SQLiteProvider) HealthCheckInterval() time.Duration {
 	interval -= time.Duration(int64(interval.Seconds())%5) * time.Second
 
 	// ...however, there's a minimum of 1s
-	if interval < time.Second {
-		interval = time.Second
-	}
-	return interval
+	return max(interval, time.Second)
 }
 
 func (s *SQLiteProvider) RenewLeaseInterval() time.Duration {
