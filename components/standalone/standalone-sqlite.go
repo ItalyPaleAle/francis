@@ -16,6 +16,7 @@ import (
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/components/standalone/internal"
 )
 
 //go:embed migrations/sqlite/*.sql
@@ -25,7 +26,8 @@ var sqliteMigrations embed.FS
 // All data is kept in memory for fast access, but changes are persisted to SQLite
 // so that state survives process restarts.
 type StandaloneSQLiteBacked struct {
-	*provider
+	*internal.Provider
+
 	db      *sql.DB
 	timeout time.Duration
 	log     *slog.Logger
@@ -71,28 +73,30 @@ func NewStandaloneSQLiteBacked(log *slog.Logger, opts StandaloneSQLiteOptions, p
 	}
 
 	// Create the core provider with this as the persistence hook
-	p, err := newProvider(log, providerOptions{
+	p, err := internal.NewProvider(log, internal.ProviderOptions{
 		ProviderOptions: opts.ProviderOptions,
 		Clock:           opts.Clock,
 		CleanupInterval: opts.CleanupInterval,
-		PersistHook:     s, // StandaloneSQLiteBacked implements PersistHook
+		PersistHook:     s,
 	}, providerConfig)
 	if err != nil {
 		return nil, err
 	}
-	s.provider = p
+	s.Provider = p
 
 	return s, nil
 }
 
 func (s *StandaloneSQLiteBacked) Init(ctx context.Context) error {
 	// Run migrations
-	if err := s.runMigrations(ctx); err != nil {
+	err := s.runMigrations(ctx)
+	if err != nil {
 		return fmt.Errorf("failed to run migrations: %w", err)
 	}
 
 	// Load all data from DB into memory
-	if err := s.loadFromDB(ctx); err != nil {
+	err = s.loadFromDB(ctx)
+	if err != nil {
 		return fmt.Errorf("failed to load data from database: %w", err)
 	}
 
@@ -145,37 +149,42 @@ func (s *StandaloneSQLiteBacked) runMigrations(ctx context.Context) error {
 }
 
 func (s *StandaloneSQLiteBacked) loadFromDB(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
 
-	s.stateMu.Lock()
-	defer s.stateMu.Unlock()
+	s.StateMu.Lock()
+	defer s.StateMu.Unlock()
 
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
 	// Load hosts
-	if err := s.loadHosts(queryCtx); err != nil {
+	err := s.loadHosts(queryCtx)
+	if err != nil {
 		return fmt.Errorf("failed to load hosts: %w", err)
 	}
 
 	// Load host actor types
-	if err := s.loadHostActorTypes(queryCtx); err != nil {
+	err = s.loadHostActorTypes(queryCtx)
+	if err != nil {
 		return fmt.Errorf("failed to load host actor types: %w", err)
 	}
 
 	// Load active actors
-	if err := s.loadActiveActors(queryCtx); err != nil {
+	err = s.loadActiveActors(queryCtx)
+	if err != nil {
 		return fmt.Errorf("failed to load active actors: %w", err)
 	}
 
 	// Load alarms
-	if err := s.loadAlarms(queryCtx); err != nil {
+	err = s.loadAlarms(queryCtx)
+	if err != nil {
 		return fmt.Errorf("failed to load alarms: %w", err)
 	}
 
 	// Load actor state
-	if err := s.loadActorState(queryCtx); err != nil {
+	err = s.loadActorState(queryCtx)
+	if err != nil {
 		return fmt.Errorf("failed to load actor state: %w", err)
 	}
 
@@ -190,14 +199,17 @@ func (s *StandaloneSQLiteBacked) loadHosts(ctx context.Context) error {
 	defer rows.Close()
 
 	for rows.Next() {
-		var h host
-		var healthCheckMs int64
-		if err := rows.Scan(&h.id, &h.address, &healthCheckMs); err != nil {
+		var (
+			h             internal.Host
+			healthCheckMs int64
+		)
+		err := rows.Scan(&h.ID, &h.Address, &healthCheckMs)
+		if err != nil {
 			return err
 		}
-		h.lastHealthCheck = time.UnixMilli(healthCheckMs)
-		s.hosts[h.id] = &h
-		s.hostsByAddress[h.address] = h.id
+		h.LastHealthCheck = time.UnixMilli(healthCheckMs)
+		s.Hosts[h.ID] = &h
+		s.HostsByAddress[h.Address] = h.ID
 	}
 
 	return rows.Err()
@@ -211,16 +223,19 @@ func (s *StandaloneSQLiteBacked) loadHostActorTypes(ctx context.Context) error {
 	defer rows.Close()
 
 	for rows.Next() {
-		var hat hostActorType
-		var idleTimeoutMs int64
-		if err := rows.Scan(&hat.hostID, &hat.actorType, &idleTimeoutMs, &hat.concurrencyLimit); err != nil {
+		var (
+			hat           internal.HostActorType
+			idleTimeoutMs int64
+		)
+		err := rows.Scan(&hat.HostID, &hat.ActorType, &idleTimeoutMs, &hat.ConcurrencyLimit)
+		if err != nil {
 			return err
 		}
-		hat.idleTimeout = time.Duration(idleTimeoutMs) * time.Millisecond
-		if s.hostActorTypes[hat.hostID] == nil {
-			s.hostActorTypes[hat.hostID] = make([]*hostActorType, 0)
+		hat.IdleTimeout = time.Duration(idleTimeoutMs) * time.Millisecond
+		if s.HostActorTypes[hat.HostID] == nil {
+			s.HostActorTypes[hat.HostID] = make([]*internal.HostActorType, 0)
 		}
-		s.hostActorTypes[hat.hostID] = append(s.hostActorTypes[hat.hostID], &hat)
+		s.HostActorTypes[hat.HostID] = append(s.HostActorTypes[hat.HostID], &hat)
 	}
 
 	return rows.Err()
@@ -234,15 +249,18 @@ func (s *StandaloneSQLiteBacked) loadActiveActors(ctx context.Context) error {
 	defer rows.Close()
 
 	for rows.Next() {
-		var aa activeActor
-		var idleTimeoutMs, activationMs int64
-		if err := rows.Scan(&aa.actorType, &aa.actorID, &aa.hostID, &idleTimeoutMs, &activationMs); err != nil {
+		var (
+			aa                          internal.ActiveActor
+			idleTimeoutMs, activationMs int64
+		)
+		err := rows.Scan(&aa.ActorType, &aa.ActorID, &aa.HostID, &idleTimeoutMs, &activationMs)
+		if err != nil {
 			return err
 		}
-		aa.idleTimeout = time.Duration(idleTimeoutMs) * time.Millisecond
-		aa.activation = time.UnixMilli(activationMs)
-		key := newActorKey(aa.actorType, aa.actorID)
-		s.activeActors[key] = &aa
+		aa.IdleTimeout = time.Duration(idleTimeoutMs) * time.Millisecond
+		aa.Activation = time.UnixMilli(activationMs)
+		key := internal.NewActorKey(aa.ActorType, aa.ActorID)
+		s.ActiveActors[key] = &aa
 	}
 
 	return rows.Err()
@@ -261,41 +279,46 @@ func (s *StandaloneSQLiteBacked) loadAlarms(ctx context.Context) error {
 	defer rows.Close()
 
 	for rows.Next() {
-		var a alarm
-		var dueTimeMs int64
-		var interval sql.NullString
-		var ttlMs sql.NullInt64
-		var data []byte
-		var leaseID sql.NullString
-		var leaseExpMs sql.NullInt64
+		var (
+			a          internal.Alarm
+			dueTimeMs  int64
+			interval   sql.NullString
+			ttlMs      sql.NullInt64
+			data       []byte
+			leaseID    sql.NullString
+			leaseExpMs sql.NullInt64
+		)
 
-		if err := rows.Scan(&a.id, &a.actorType, &a.actorID, &a.name, &dueTimeMs,
-			&interval, &ttlMs, &data, &leaseID, &leaseExpMs); err != nil {
+		err := rows.Scan(
+			&a.ID, &a.ActorType, &a.ActorID, &a.Name, &dueTimeMs,
+			&interval, &ttlMs, &data, &leaseID, &leaseExpMs,
+		)
+		if err != nil {
 			return err
 		}
 
-		a.dueTime = time.UnixMilli(dueTimeMs)
+		a.DueTime = time.UnixMilli(dueTimeMs)
 		if interval.Valid {
-			a.interval = interval.String
+			a.Interval = interval.String
 		}
 		if ttlMs.Valid {
 			t := time.UnixMilli(ttlMs.Int64)
-			a.ttl = &t
+			a.TTL = &t
 		}
 		if len(data) > 0 {
-			a.data = data
+			a.Data = data
 		}
 		if leaseID.Valid {
-			a.leaseID = &leaseID.String
+			a.LeaseID = &leaseID.String
 		}
 		if leaseExpMs.Valid {
 			t := time.UnixMilli(leaseExpMs.Int64)
-			a.leaseExpiration = &t
+			a.LeaseExpiration = &t
 		}
 
-		key := newAlarmKey(a.actorType, a.actorID, a.name)
-		s.alarms[key] = &a
-		s.alarmsByID[a.id] = &a
+		key := internal.NewAlarmKey(a.ActorType, a.ActorID, a.Name)
+		s.Alarms[key] = &a
+		s.AlarmsByID[a.ID] = &a
 	}
 
 	return rows.Err()
@@ -309,32 +332,35 @@ func (s *StandaloneSQLiteBacked) loadActorState(ctx context.Context) error {
 	defer rows.Close()
 
 	for rows.Next() {
-		var actorType, actorID string
-		var data []byte
-		var expMs sql.NullInt64
+		var (
+			actorType, actorID string
+			data               []byte
+			expMs              sql.NullInt64
+		)
 
-		if err := rows.Scan(&actorType, &actorID, &data, &expMs); err != nil {
+		err := rows.Scan(&actorType, &actorID, &data, &expMs)
+		if err != nil {
 			return err
 		}
 
-		entry := &stateEntry{
-			data: data,
+		entry := &internal.StateEntry{
+			Data: data,
 		}
 		if expMs.Valid {
 			t := time.UnixMilli(expMs.Int64)
-			entry.expiration = &t
+			entry.Expiration = &t
 		}
 
-		key := newActorKey(actorType, actorID)
-		s.actorState[key] = entry
+		key := internal.NewActorKey(actorType, actorID)
+		s.ActorState[key] = entry
 	}
 
 	return rows.Err()
 }
 
 // PersistChanges implements PersistHook.
-func (s *StandaloneSQLiteBacked) PersistChanges(ctx context.Context, changes *changes) error {
-	if changes.isEmpty() {
+func (s *StandaloneSQLiteBacked) PersistChanges(ctx context.Context, changes *internal.Changes) error {
+	if changes.IsEmpty() {
 		return nil
 	}
 
@@ -345,41 +371,52 @@ func (s *StandaloneSQLiteBacked) PersistChanges(ctx context.Context, changes *ch
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback() //nolint:errcheck
+	defer func() {
+		rollbackErr := tx.Rollback()
+		if rollbackErr != nil {
+			s.log.WarnContext(ctx, "Error while rolling back transaction", slog.Any("error", rollbackErr))
+		}
+	}()
 
 	// Process host changes
-	if err := s.persistHostChanges(queryCtx, tx, changes); err != nil {
+	err = s.persistHostChanges(queryCtx, tx, changes)
+	if err != nil {
 		return err
 	}
 
 	// Process host actor type changes
-	if err := s.persistHostActorTypeChanges(queryCtx, tx, changes); err != nil {
+	err = s.persistHostActorTypeChanges(queryCtx, tx, changes)
+	if err != nil {
 		return err
 	}
 
 	// Process active actor changes
-	if err := s.persistActiveActorChanges(queryCtx, tx, changes); err != nil {
+	err = s.persistActiveActorChanges(queryCtx, tx, changes)
+	if err != nil {
 		return err
 	}
 
 	// Process alarm changes
-	if err := s.persistAlarmChanges(queryCtx, tx, changes); err != nil {
+	err = s.persistAlarmChanges(queryCtx, tx, changes)
+	if err != nil {
 		return err
 	}
 
 	// Process actor state changes
-	if err := s.persistActorStateChanges(queryCtx, tx, changes); err != nil {
+	err = s.persistActorStateChanges(queryCtx, tx, changes)
+	if err != nil {
 		return err
 	}
 
-	if err := tx.Commit(); err != nil {
+	err = tx.Commit()
+	if err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	return nil
 }
 
-func (s *StandaloneSQLiteBacked) persistHostChanges(ctx context.Context, tx *sql.Tx, changes *changes) error {
+func (s *StandaloneSQLiteBacked) persistHostChanges(ctx context.Context, tx *sql.Tx, changes *internal.Changes) error {
 	// Deletes
 	for _, hostID := range changes.Hosts.Delete {
 		_, err := tx.ExecContext(ctx, "DELETE FROM hosts WHERE host_id = ?", hostID)
@@ -392,9 +429,10 @@ func (s *StandaloneSQLiteBacked) persistHostChanges(ctx context.Context, tx *sql
 	for _, h := range changes.Hosts.Create {
 		_, err := tx.ExecContext(ctx,
 			"INSERT INTO hosts (host_id, host_address, host_last_health_check) VALUES (?, ?, ?)",
-			h.id, h.address, h.lastHealthCheck.UnixMilli())
+			h.ID, h.Address, h.LastHealthCheck.UnixMilli(),
+		)
 		if err != nil {
-			return fmt.Errorf("failed to insert host %s: %w", h.id, err)
+			return fmt.Errorf("failed to insert host %s: %w", h.ID, err)
 		}
 	}
 
@@ -402,21 +440,23 @@ func (s *StandaloneSQLiteBacked) persistHostChanges(ctx context.Context, tx *sql
 	for _, h := range changes.Hosts.Update {
 		_, err := tx.ExecContext(ctx,
 			"UPDATE hosts SET host_address = ?, host_last_health_check = ? WHERE host_id = ?",
-			h.address, h.lastHealthCheck.UnixMilli(), h.id)
+			h.Address, h.LastHealthCheck.UnixMilli(), h.ID,
+		)
 		if err != nil {
-			return fmt.Errorf("failed to update host %s: %w", h.id, err)
+			return fmt.Errorf("failed to update host %s: %w", h.ID, err)
 		}
 	}
 
 	return nil
 }
 
-func (s *StandaloneSQLiteBacked) persistHostActorTypeChanges(ctx context.Context, tx *sql.Tx, changes *changes) error {
+func (s *StandaloneSQLiteBacked) persistHostActorTypeChanges(ctx context.Context, tx *sql.Tx, changes *internal.Changes) error {
 	// Deletes
 	for _, key := range changes.HostActorTypes.Delete {
 		_, err := tx.ExecContext(ctx,
 			"DELETE FROM host_actor_types WHERE host_id = ? AND actor_type = ?",
-			key.hostID, key.actorType)
+			key.HostID, key.ActorType,
+		)
 		if err != nil {
 			return fmt.Errorf("failed to delete host actor type: %w", err)
 		}
@@ -426,7 +466,8 @@ func (s *StandaloneSQLiteBacked) persistHostActorTypeChanges(ctx context.Context
 	for _, hat := range changes.HostActorTypes.Create {
 		_, err := tx.ExecContext(ctx,
 			"INSERT INTO host_actor_types (host_id, actor_type, actor_idle_timeout, actor_concurrency_limit) VALUES (?, ?, ?, ?)",
-			hat.hostID, hat.actorType, hat.idleTimeout.Milliseconds(), hat.concurrencyLimit)
+			hat.HostID, hat.ActorType, hat.IdleTimeout.Milliseconds(), hat.ConcurrencyLimit,
+		)
 		if err != nil {
 			return fmt.Errorf("failed to insert host actor type: %w", err)
 		}
@@ -435,12 +476,13 @@ func (s *StandaloneSQLiteBacked) persistHostActorTypeChanges(ctx context.Context
 	return nil
 }
 
-func (s *StandaloneSQLiteBacked) persistActiveActorChanges(ctx context.Context, tx *sql.Tx, changes *changes) error {
+func (s *StandaloneSQLiteBacked) persistActiveActorChanges(ctx context.Context, tx *sql.Tx, changes *internal.Changes) error {
 	// Deletes
 	for _, key := range changes.ActiveActors.Delete {
 		_, err := tx.ExecContext(ctx,
 			"DELETE FROM active_actors WHERE actor_type = ? AND actor_id = ?",
-			key.actorType, key.actorID)
+			key.ActorType, key.ActorID,
+		)
 		if err != nil {
 			return fmt.Errorf("failed to delete active actor: %w", err)
 		}
@@ -450,7 +492,8 @@ func (s *StandaloneSQLiteBacked) persistActiveActorChanges(ctx context.Context, 
 	for _, aa := range changes.ActiveActors.Create {
 		_, err := tx.ExecContext(ctx,
 			"INSERT INTO active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation) VALUES (?, ?, ?, ?, ?)",
-			aa.actorType, aa.actorID, aa.hostID, aa.idleTimeout.Milliseconds(), aa.activation.UnixMilli())
+			aa.ActorType, aa.ActorID, aa.HostID, aa.IdleTimeout.Milliseconds(), aa.Activation.UnixMilli(),
+		)
 		if err != nil {
 			return fmt.Errorf("failed to insert active actor: %w", err)
 		}
@@ -460,7 +503,8 @@ func (s *StandaloneSQLiteBacked) persistActiveActorChanges(ctx context.Context, 
 	for _, aa := range changes.ActiveActors.Update {
 		_, err := tx.ExecContext(ctx,
 			"UPDATE active_actors SET host_id = ?, actor_idle_timeout = ?, actor_activation = ? WHERE actor_type = ? AND actor_id = ?",
-			aa.hostID, aa.idleTimeout.Milliseconds(), aa.activation.UnixMilli(), aa.actorType, aa.actorID)
+			aa.HostID, aa.IdleTimeout.Milliseconds(), aa.Activation.UnixMilli(), aa.ActorType, aa.ActorID,
+		)
 		if err != nil {
 			return fmt.Errorf("failed to update active actor: %w", err)
 		}
@@ -469,7 +513,7 @@ func (s *StandaloneSQLiteBacked) persistActiveActorChanges(ctx context.Context, 
 	return nil
 }
 
-func (s *StandaloneSQLiteBacked) persistAlarmChanges(ctx context.Context, tx *sql.Tx, changes *changes) error {
+func (s *StandaloneSQLiteBacked) persistAlarmChanges(ctx context.Context, tx *sql.Tx, changes *internal.Changes) error {
 	// Deletes
 	for _, alarmID := range changes.Alarms.Delete {
 		_, err := tx.ExecContext(ctx, "DELETE FROM alarms WHERE alarm_id = ?", alarmID)
@@ -480,73 +524,82 @@ func (s *StandaloneSQLiteBacked) persistAlarmChanges(ctx context.Context, tx *sq
 
 	// Creates
 	for _, a := range changes.Alarms.Create {
-		var intervalVal, leaseIDVal any
-		var ttlVal, leaseExpVal any
+		var (
+			intervalVal, leaseIDVal any
+			ttlVal, leaseExpVal     any
+		)
 
-		if a.interval != "" {
-			intervalVal = a.interval
+		if a.Interval != "" {
+			intervalVal = a.Interval
 		}
-		if a.ttl != nil {
-			ttlVal = a.ttl.UnixMilli()
+		if a.TTL != nil {
+			ttlVal = a.TTL.UnixMilli()
 		}
-		if a.leaseID != nil {
-			leaseIDVal = *a.leaseID
+		if a.LeaseID != nil {
+			leaseIDVal = *a.LeaseID
 		}
-		if a.leaseExpiration != nil {
-			leaseExpVal = a.leaseExpiration.UnixMilli()
+		if a.LeaseExpiration != nil {
+			leaseExpVal = a.LeaseExpiration.UnixMilli()
 		}
 
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO alarms (alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
-			                     alarm_interval, alarm_ttl_time, alarm_data,
-			                     alarm_lease_id, alarm_lease_expiration_time)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			a.id, a.actorType, a.actorID, a.name, a.dueTime.UnixMilli(),
-			intervalVal, ttlVal, a.data, leaseIDVal, leaseExpVal)
+			`INSERT INTO alarms (
+				alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
+			    alarm_interval, alarm_ttl_time, alarm_data,
+			    alarm_lease_id, alarm_lease_expiration_time
+			)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			a.ID, a.ActorType, a.ActorID, a.Name, a.DueTime.UnixMilli(),
+			intervalVal, ttlVal, a.Data, leaseIDVal, leaseExpVal,
+		)
 		if err != nil {
-			return fmt.Errorf("failed to insert alarm %s: %w", a.id, err)
+			return fmt.Errorf("failed to insert alarm %s: %w", a.ID, err)
 		}
 	}
 
 	// Updates
 	for _, a := range changes.Alarms.Update {
-		var intervalVal, leaseIDVal any
-		var ttlVal, leaseExpVal any
+		var (
+			intervalVal, leaseIDVal any
+			ttlVal, leaseExpVal     any
+		)
 
-		if a.interval != "" {
-			intervalVal = a.interval
+		if a.Interval != "" {
+			intervalVal = a.Interval
 		}
-		if a.ttl != nil {
-			ttlVal = a.ttl.UnixMilli()
+		if a.TTL != nil {
+			ttlVal = a.TTL.UnixMilli()
 		}
-		if a.leaseID != nil {
-			leaseIDVal = *a.leaseID
+		if a.LeaseID != nil {
+			leaseIDVal = *a.LeaseID
 		}
-		if a.leaseExpiration != nil {
-			leaseExpVal = a.leaseExpiration.UnixMilli()
+		if a.LeaseExpiration != nil {
+			leaseExpVal = a.LeaseExpiration.UnixMilli()
 		}
 
 		_, err := tx.ExecContext(ctx,
-			`UPDATE alarms SET actor_type = ?, actor_id = ?, alarm_name = ?, alarm_due_time = ?,
-			                   alarm_interval = ?, alarm_ttl_time = ?, alarm_data = ?,
-			                   alarm_lease_id = ?, alarm_lease_expiration_time = ?
-			 WHERE alarm_id = ?`,
-			a.actorType, a.actorID, a.name, a.dueTime.UnixMilli(),
-			intervalVal, ttlVal, a.data, leaseIDVal, leaseExpVal, a.id)
+			`UPDATE alarms SET
+				actor_type = ?, actor_id = ?, alarm_name = ?, alarm_due_time = ?,
+			    alarm_interval = ?, alarm_ttl_time = ?, alarm_data = ?,
+			    alarm_lease_id = ?, alarm_lease_expiration_time = ?
+			WHERE alarm_id = ?`,
+			a.ActorType, a.ActorID, a.Name, a.DueTime.UnixMilli(),
+			intervalVal, ttlVal, a.Data, leaseIDVal, leaseExpVal, a.ID)
 		if err != nil {
-			return fmt.Errorf("failed to update alarm %s: %w", a.id, err)
+			return fmt.Errorf("failed to update alarm %s: %w", a.ID, err)
 		}
 	}
 
 	return nil
 }
 
-func (s *StandaloneSQLiteBacked) persistActorStateChanges(ctx context.Context, tx *sql.Tx, changes *changes) error {
+func (s *StandaloneSQLiteBacked) persistActorStateChanges(ctx context.Context, tx *sql.Tx, changes *internal.Changes) error {
 	// Deletes
 	for _, key := range changes.ActorState.Delete {
 		_, err := tx.ExecContext(ctx,
 			"DELETE FROM actor_state WHERE actor_type = ? AND actor_id = ?",
-			key.actorType, key.actorID)
+			key.ActorType, key.ActorID,
+		)
 		if err != nil {
 			return fmt.Errorf("failed to delete actor state: %w", err)
 		}
@@ -555,13 +608,14 @@ func (s *StandaloneSQLiteBacked) persistActorStateChanges(ctx context.Context, t
 	// Creates
 	for key, entry := range changes.ActorState.Create {
 		var expVal any
-		if entry.expiration != nil {
-			expVal = entry.expiration.UnixMilli()
+		if entry.Expiration != nil {
+			expVal = entry.Expiration.UnixMilli()
 		}
 
 		_, err := tx.ExecContext(ctx,
 			"INSERT INTO actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time) VALUES (?, ?, ?, ?)",
-			key.actorType, key.actorID, entry.data, expVal)
+			key.ActorType, key.ActorID, entry.Data, expVal,
+		)
 		if err != nil {
 			return fmt.Errorf("failed to insert actor state: %w", err)
 		}
@@ -570,13 +624,14 @@ func (s *StandaloneSQLiteBacked) persistActorStateChanges(ctx context.Context, t
 	// Updates
 	for key, entry := range changes.ActorState.Update {
 		var expVal any
-		if entry.expiration != nil {
-			expVal = entry.expiration.UnixMilli()
+		if entry.Expiration != nil {
+			expVal = entry.Expiration.UnixMilli()
 		}
 
 		_, err := tx.ExecContext(ctx,
 			"UPDATE actor_state SET actor_state_data = ?, actor_state_expiration_time = ? WHERE actor_type = ? AND actor_id = ?",
-			entry.data, expVal, key.actorType, key.actorID)
+			entry.Data, expVal, key.ActorType, key.ActorID,
+		)
 		if err != nil {
 			return fmt.Errorf("failed to update actor state: %w", err)
 		}

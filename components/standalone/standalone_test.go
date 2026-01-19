@@ -19,6 +19,7 @@ import (
 	clocktesting "k8s.io/utils/clock/testing"
 	_ "modernc.org/sqlite"
 
+	"github.com/italypaleale/francis/components/standalone/internal"
 	comptesting "github.com/italypaleale/francis/components/testing"
 	"github.com/italypaleale/francis/internal/ptr"
 )
@@ -232,101 +233,101 @@ func initTestProvider(t *testing.T) *StandaloneMemory {
 
 // CleanupExpired performs garbage collection of expired records.
 func (p *StandaloneMemory) CleanupExpired() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.Mu.Lock()
+	defer p.Mu.Unlock()
 
-	changes := newChanges()
+	changes := internal.NewChanges()
 
 	// Clean up unhealthy hosts
-	p.cleanupUnhealthyHostsWithChanges(changes)
+	p.CleanupUnhealthyHosts(changes)
 
 	// Clean up expired state
-	p.cleanupExpiredStateWithChanges(changes)
+	p.CleanupExpiredState(changes)
 
 	return nil
 }
 
 func (p *StandaloneMemory) clearData() {
-	p.hosts = make(map[string]*host)
-	p.hostsByAddress = make(map[string]string)
-	p.hostActorTypes = make(map[string][]*hostActorType)
-	p.activeActors = make(map[actorKey]*activeActor)
-	p.alarms = make(map[alarmKey]*alarm)
-	p.alarmsByID = make(map[string]*alarm)
-	p.actorState = make(map[actorKey]*stateEntry)
+	p.Hosts = make(map[string]*internal.Host)
+	p.HostsByAddress = make(map[string]string)
+	p.HostActorTypes = make(map[string][]*internal.HostActorType)
+	p.ActiveActors = make(map[internal.ActorKey]*internal.ActiveActor)
+	p.Alarms = make(map[internal.AlarmKey]*internal.Alarm)
+	p.AlarmsByID = make(map[string]*internal.Alarm)
+	p.ActorState = make(map[internal.ActorKey]*internal.StateEntry)
 }
 
 // Seed seeds the data into the provider.
 func (p *StandaloneMemory) Seed(ctx context.Context, spec comptesting.Spec) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.Mu.Lock()
+	defer p.Mu.Unlock()
 
-	now := p.clock.Now()
+	now := p.Clock.Now()
 
 	// Clear all data
 	p.clearData()
 
 	// Seed hosts
 	for _, h := range spec.Hosts {
-		host := &host{
-			id:              h.HostID,
-			address:         h.Address,
-			lastHealthCheck: now.Add(-h.LastHealthAgo),
+		host := &internal.Host{
+			ID:              h.HostID,
+			Address:         h.Address,
+			LastHealthCheck: now.Add(-h.LastHealthAgo),
 		}
-		p.hosts[h.HostID] = host
-		p.hostsByAddress[h.Address] = h.HostID
+		p.Hosts[h.HostID] = host
+		p.HostsByAddress[h.Address] = h.HostID
 	}
 
 	// Seed host actor types
 	for _, hat := range spec.HostActorTypes {
-		if p.hostActorTypes[hat.HostID] == nil {
-			p.hostActorTypes[hat.HostID] = make([]*hostActorType, 0)
+		if p.HostActorTypes[hat.HostID] == nil {
+			p.HostActorTypes[hat.HostID] = make([]*internal.HostActorType, 0)
 		}
-		p.hostActorTypes[hat.HostID] = append(p.hostActorTypes[hat.HostID], &hostActorType{
-			hostID:           hat.HostID,
-			actorType:        hat.ActorType,
-			idleTimeout:      hat.ActorIdleTimeout,
-			concurrencyLimit: int32(hat.ActorConcurrencyLimit), // #nosec G115
+		p.HostActorTypes[hat.HostID] = append(p.HostActorTypes[hat.HostID], &internal.HostActorType{
+			HostID:           hat.HostID,
+			ActorType:        hat.ActorType,
+			IdleTimeout:      hat.ActorIdleTimeout,
+			ConcurrencyLimit: int32(hat.ActorConcurrencyLimit), // #nosec G115
 		})
 	}
 
 	// Seed active actors
 	for _, aa := range spec.ActiveActors {
-		key := newActorKey(aa.ActorType, aa.ActorID)
-		p.activeActors[key] = &activeActor{
-			actorType:   aa.ActorType,
-			actorID:     aa.ActorID,
-			hostID:      aa.HostID,
-			idleTimeout: aa.ActorIdleTimeout,
-			activation:  now.Add(-aa.ActivationAgo),
+		key := internal.NewActorKey(aa.ActorType, aa.ActorID)
+		p.ActiveActors[key] = &internal.ActiveActor{
+			ActorType:   aa.ActorType,
+			ActorID:     aa.ActorID,
+			HostID:      aa.HostID,
+			IdleTimeout: aa.ActorIdleTimeout,
+			Activation:  now.Add(-aa.ActivationAgo),
 		}
 	}
 
 	// Seed alarms
 	for _, a := range spec.Alarms {
-		key := newAlarmKey(a.ActorType, a.ActorID, a.Name)
-		alm := &alarm{
-			id:        a.AlarmID,
-			actorType: a.ActorType,
-			actorID:   a.ActorID,
-			name:      a.Name,
-			dueTime:   now.Add(a.DueIn),
-			interval:  a.Interval,
-			data:      a.Data,
+		key := internal.NewAlarmKey(a.ActorType, a.ActorID, a.Name)
+		alm := &internal.Alarm{
+			ID:        a.AlarmID,
+			ActorType: a.ActorType,
+			ActorID:   a.ActorID,
+			Name:      a.Name,
+			DueTime:   now.Add(a.DueIn),
+			Interval:  a.Interval,
+			Data:      a.Data,
 		}
 
 		if a.TTL > 0 {
-			alm.ttl = ptr.Of(now.Add(a.TTL))
+			alm.TTL = ptr.Of(now.Add(a.TTL))
 		}
 
 		if a.LeaseTTL != nil {
 			leaseExp := now.Add(*a.LeaseTTL)
-			alm.leaseExpiration = &leaseExp
-			alm.leaseID = ptr.Of(uuid.New().String())
+			alm.LeaseExpiration = &leaseExp
+			alm.LeaseID = ptr.Of(uuid.New().String())
 		}
 
-		p.alarms[key] = alm
-		p.alarmsByID[a.AlarmID] = alm
+		p.Alarms[key] = alm
+		p.AlarmsByID[a.AlarmID] = alm
 	}
 
 	return nil
@@ -334,26 +335,26 @@ func (p *StandaloneMemory) Seed(ctx context.Context, spec comptesting.Spec) erro
 
 // Now returns the current time.
 func (p *StandaloneMemory) Now() time.Time {
-	return p.clock.Now()
+	return p.Clock.Now()
 }
 
 // AdvanceClock advances the clock.
 func (p *StandaloneMemory) AdvanceClock(d time.Duration) error {
-	p.clock.Sleep(d)
+	p.Clock.Sleep(d)
 	return nil
 }
 
 // GetAllActorState returns all stored actor state.
 func (p *StandaloneMemory) GetAllActorState(ctx context.Context) (comptesting.ActorStateSpecCollection, error) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.Mu.RLock()
+	defer p.Mu.RUnlock()
 
-	result := make(comptesting.ActorStateSpecCollection, 0, len(p.actorState))
-	for key, state := range p.actorState {
+	result := make(comptesting.ActorStateSpecCollection, 0, len(p.ActorState))
+	for key, state := range p.ActorState {
 		result = append(result, comptesting.ActorStateSpec{
-			ActorType: key.actorType,
-			ActorID:   key.actorID,
-			Data:      state.data,
+			ActorType: key.ActorType,
+			ActorID:   key.ActorID,
+			Data:      state.Data,
 		})
 	}
 
@@ -362,70 +363,70 @@ func (p *StandaloneMemory) GetAllActorState(ctx context.Context) (comptesting.Ac
 
 // GetAllHosts returns all stored hosts, host actor types, active actors, and alarms.
 func (p *StandaloneMemory) GetAllHosts(ctx context.Context) (comptesting.Spec, error) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.Mu.RLock()
+	defer p.Mu.RUnlock()
 
-	now := p.clock.Now()
+	now := p.Clock.Now()
 	spec := comptesting.Spec{}
 
 	// Hosts
-	spec.Hosts = make([]comptesting.HostSpec, 0, len(p.hosts))
-	for _, h := range p.hosts {
+	spec.Hosts = make([]comptesting.HostSpec, 0, len(p.Hosts))
+	for _, h := range p.Hosts {
 		spec.Hosts = append(spec.Hosts, comptesting.HostSpec{
-			HostID:        h.id,
-			Address:       h.address,
-			LastHealthAgo: now.Sub(h.lastHealthCheck),
+			HostID:        h.ID,
+			Address:       h.Address,
+			LastHealthAgo: now.Sub(h.LastHealthCheck),
 		})
 	}
 
 	// Host actor types
 	spec.HostActorTypes = make([]comptesting.HostActorTypeSpec, 0)
-	for hostID, types := range p.hostActorTypes {
+	for hostID, types := range p.HostActorTypes {
 		for _, hat := range types {
 			spec.HostActorTypes = append(spec.HostActorTypes, comptesting.HostActorTypeSpec{
 				HostID:                hostID,
-				ActorType:             hat.actorType,
-				ActorIdleTimeout:      hat.idleTimeout,
-				ActorConcurrencyLimit: int(hat.concurrencyLimit),
+				ActorType:             hat.ActorType,
+				ActorIdleTimeout:      hat.IdleTimeout,
+				ActorConcurrencyLimit: int(hat.ConcurrencyLimit),
 			})
 		}
 	}
 
 	// Active actors
-	spec.ActiveActors = make([]comptesting.ActiveActorSpec, 0, len(p.activeActors))
-	for _, aa := range p.activeActors {
+	spec.ActiveActors = make([]comptesting.ActiveActorSpec, 0, len(p.ActiveActors))
+	for _, aa := range p.ActiveActors {
 		spec.ActiveActors = append(spec.ActiveActors, comptesting.ActiveActorSpec{
-			ActorType:        aa.actorType,
-			ActorID:          aa.actorID,
-			HostID:           aa.hostID,
-			ActorIdleTimeout: aa.idleTimeout,
-			ActivationAgo:    now.Sub(aa.activation),
+			ActorType:        aa.ActorType,
+			ActorID:          aa.ActorID,
+			HostID:           aa.HostID,
+			ActorIdleTimeout: aa.IdleTimeout,
+			ActivationAgo:    now.Sub(aa.Activation),
 		})
 	}
 
 	// Alarms
-	spec.Alarms = make([]comptesting.AlarmSpec, 0, len(p.alarms))
-	for _, a := range p.alarms {
+	spec.Alarms = make([]comptesting.AlarmSpec, 0, len(p.Alarms))
+	for _, a := range p.Alarms {
 		as := comptesting.AlarmSpec{
-			AlarmID:   a.id,
-			ActorType: a.actorType,
-			ActorID:   a.actorID,
-			Name:      a.name,
-			DueIn:     a.dueTime.Sub(now),
-			Interval:  a.interval,
-			Data:      a.data,
+			AlarmID:   a.ID,
+			ActorType: a.ActorType,
+			ActorID:   a.ActorID,
+			Name:      a.Name,
+			DueIn:     a.DueTime.Sub(now),
+			Interval:  a.Interval,
+			Data:      a.Data,
 		}
 
-		if a.ttl != nil {
-			as.TTL = a.ttl.Sub(now)
+		if a.TTL != nil {
+			as.TTL = a.TTL.Sub(now)
 		}
 
-		if a.leaseID != nil {
-			as.LeaseID = a.leaseID
+		if a.LeaseID != nil {
+			as.LeaseID = a.LeaseID
 		}
 
-		if a.leaseExpiration != nil {
-			as.LeaseExp = ptr.Of(*a.leaseExpiration)
+		if a.LeaseExpiration != nil {
+			as.LeaseExp = ptr.Of(*a.LeaseExpiration)
 		}
 
 		spec.Alarms = append(spec.Alarms, as)
@@ -438,33 +439,34 @@ func (p *StandaloneMemory) GetAllHosts(ctx context.Context) (comptesting.Spec, e
 
 // CleanupExpired performs garbage collection of expired records.
 func (p *StandaloneSQLiteBacked) CleanupExpired() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.Mu.Lock()
+	defer p.Mu.Unlock()
 
-	changes := newChanges()
+	changes := internal.NewChanges()
 
 	// Clean up unhealthy hosts
-	p.cleanupUnhealthyHostsWithChanges(changes)
+	p.CleanupUnhealthyHosts(changes)
 
 	// Clean up expired state
-	p.cleanupExpiredStateWithChanges(changes)
+	p.CleanupExpiredState(changes)
 
 	return nil
 }
 
 func (p *StandaloneSQLiteBacked) clearData() {
-	p.hosts = make(map[string]*host)
-	p.hostsByAddress = make(map[string]string)
-	p.hostActorTypes = make(map[string][]*hostActorType)
-	p.activeActors = make(map[actorKey]*activeActor)
-	p.alarms = make(map[alarmKey]*alarm)
-	p.alarmsByID = make(map[string]*alarm)
-	p.actorState = make(map[actorKey]*stateEntry)
+	p.Hosts = make(map[string]*internal.Host)
+	p.HostsByAddress = make(map[string]string)
+	p.HostActorTypes = make(map[string][]*internal.HostActorType)
+	p.ActiveActors = make(map[internal.ActorKey]*internal.ActiveActor)
+	p.Alarms = make(map[internal.AlarmKey]*internal.Alarm)
+	p.AlarmsByID = make(map[string]*internal.Alarm)
+	p.ActorState = make(map[internal.ActorKey]*internal.StateEntry)
 }
 
 func (p *StandaloneSQLiteBacked) clearDatabase(ctx context.Context) error {
 	tables := []string{"alarms", "active_actors", "host_actor_types", "hosts", "actor_state"}
 	for _, table := range tables {
+		//nolint:gosec
 		_, err := p.db.ExecContext(ctx, "DELETE FROM "+table)
 		if err != nil {
 			return err
@@ -475,80 +477,81 @@ func (p *StandaloneSQLiteBacked) clearDatabase(ctx context.Context) error {
 
 // Seed seeds the data into the provider.
 func (p *StandaloneSQLiteBacked) Seed(ctx context.Context, spec comptesting.Spec) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.Mu.Lock()
+	defer p.Mu.Unlock()
 
-	now := p.clock.Now()
+	now := p.Clock.Now()
 
 	// Clear all data from memory
 	p.clearData()
 
 	// Clear all data from database
-	if err := p.clearDatabase(ctx); err != nil {
+	err := p.clearDatabase(ctx)
+	if err != nil {
 		return err
 	}
 
 	// Seed hosts
 	for _, h := range spec.Hosts {
-		host := &host{
-			id:              h.HostID,
-			address:         h.Address,
-			lastHealthCheck: now.Add(-h.LastHealthAgo),
+		host := &internal.Host{
+			ID:              h.HostID,
+			Address:         h.Address,
+			LastHealthCheck: now.Add(-h.LastHealthAgo),
 		}
-		p.hosts[h.HostID] = host
-		p.hostsByAddress[h.Address] = h.HostID
+		p.Hosts[h.HostID] = host
+		p.HostsByAddress[h.Address] = h.HostID
 	}
 
 	// Seed host actor types
 	for _, hat := range spec.HostActorTypes {
-		if p.hostActorTypes[hat.HostID] == nil {
-			p.hostActorTypes[hat.HostID] = make([]*hostActorType, 0)
+		if p.HostActorTypes[hat.HostID] == nil {
+			p.HostActorTypes[hat.HostID] = make([]*internal.HostActorType, 0)
 		}
-		p.hostActorTypes[hat.HostID] = append(p.hostActorTypes[hat.HostID], &hostActorType{
-			hostID:           hat.HostID,
-			actorType:        hat.ActorType,
-			idleTimeout:      hat.ActorIdleTimeout,
-			concurrencyLimit: int32(hat.ActorConcurrencyLimit), // #nosec G115
+		p.HostActorTypes[hat.HostID] = append(p.HostActorTypes[hat.HostID], &internal.HostActorType{
+			HostID:           hat.HostID,
+			ActorType:        hat.ActorType,
+			IdleTimeout:      hat.ActorIdleTimeout,
+			ConcurrencyLimit: int32(hat.ActorConcurrencyLimit), // #nosec G115
 		})
 	}
 
 	// Seed active actors
 	for _, aa := range spec.ActiveActors {
-		key := newActorKey(aa.ActorType, aa.ActorID)
-		p.activeActors[key] = &activeActor{
-			actorType:   aa.ActorType,
-			actorID:     aa.ActorID,
-			hostID:      aa.HostID,
-			idleTimeout: aa.ActorIdleTimeout,
-			activation:  now.Add(-aa.ActivationAgo),
+		key := internal.NewActorKey(aa.ActorType, aa.ActorID)
+		p.ActiveActors[key] = &internal.ActiveActor{
+			ActorType:   aa.ActorType,
+			ActorID:     aa.ActorID,
+			HostID:      aa.HostID,
+			IdleTimeout: aa.ActorIdleTimeout,
+			Activation:  now.Add(-aa.ActivationAgo),
 		}
 	}
 
 	// Seed alarms
 	for _, a := range spec.Alarms {
-		key := newAlarmKey(a.ActorType, a.ActorID, a.Name)
-		alm := &alarm{
-			id:        a.AlarmID,
-			actorType: a.ActorType,
-			actorID:   a.ActorID,
-			name:      a.Name,
-			dueTime:   now.Add(a.DueIn),
-			interval:  a.Interval,
-			data:      a.Data,
+		key := internal.NewAlarmKey(a.ActorType, a.ActorID, a.Name)
+		alm := &internal.Alarm{
+			ID:        a.AlarmID,
+			ActorType: a.ActorType,
+			ActorID:   a.ActorID,
+			Name:      a.Name,
+			DueTime:   now.Add(a.DueIn),
+			Interval:  a.Interval,
+			Data:      a.Data,
 		}
 
 		if a.TTL > 0 {
-			alm.ttl = ptr.Of(now.Add(a.TTL))
+			alm.TTL = ptr.Of(now.Add(a.TTL))
 		}
 
 		if a.LeaseTTL != nil {
 			leaseExp := now.Add(*a.LeaseTTL)
-			alm.leaseExpiration = &leaseExp
-			alm.leaseID = ptr.Of(uuid.New().String())
+			alm.LeaseExpiration = &leaseExp
+			alm.LeaseID = ptr.Of(uuid.New().String())
 		}
 
-		p.alarms[key] = alm
-		p.alarmsByID[a.AlarmID] = alm
+		p.Alarms[key] = alm
+		p.AlarmsByID[a.AlarmID] = alm
 	}
 
 	return nil
@@ -556,26 +559,26 @@ func (p *StandaloneSQLiteBacked) Seed(ctx context.Context, spec comptesting.Spec
 
 // Now returns the current time.
 func (p *StandaloneSQLiteBacked) Now() time.Time {
-	return p.clock.Now()
+	return p.Clock.Now()
 }
 
 // AdvanceClock advances the clock.
 func (p *StandaloneSQLiteBacked) AdvanceClock(d time.Duration) error {
-	p.clock.Sleep(d)
+	p.Clock.Sleep(d)
 	return nil
 }
 
 // GetAllActorState returns all stored actor state.
 func (p *StandaloneSQLiteBacked) GetAllActorState(ctx context.Context) (comptesting.ActorStateSpecCollection, error) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.Mu.RLock()
+	defer p.Mu.RUnlock()
 
-	result := make(comptesting.ActorStateSpecCollection, 0, len(p.actorState))
-	for key, state := range p.actorState {
+	result := make(comptesting.ActorStateSpecCollection, 0, len(p.ActorState))
+	for key, state := range p.ActorState {
 		result = append(result, comptesting.ActorStateSpec{
-			ActorType: key.actorType,
-			ActorID:   key.actorID,
-			Data:      state.data,
+			ActorType: key.ActorType,
+			ActorID:   key.ActorID,
+			Data:      state.Data,
 		})
 	}
 
@@ -584,70 +587,70 @@ func (p *StandaloneSQLiteBacked) GetAllActorState(ctx context.Context) (comptest
 
 // GetAllHosts returns all stored hosts, host actor types, active actors, and alarms.
 func (p *StandaloneSQLiteBacked) GetAllHosts(ctx context.Context) (comptesting.Spec, error) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.Mu.RLock()
+	defer p.Mu.RUnlock()
 
-	now := p.clock.Now()
+	now := p.Clock.Now()
 	spec := comptesting.Spec{}
 
 	// Hosts
-	spec.Hosts = make([]comptesting.HostSpec, 0, len(p.hosts))
-	for _, h := range p.hosts {
+	spec.Hosts = make([]comptesting.HostSpec, 0, len(p.Hosts))
+	for _, h := range p.Hosts {
 		spec.Hosts = append(spec.Hosts, comptesting.HostSpec{
-			HostID:        h.id,
-			Address:       h.address,
-			LastHealthAgo: now.Sub(h.lastHealthCheck),
+			HostID:        h.ID,
+			Address:       h.Address,
+			LastHealthAgo: now.Sub(h.LastHealthCheck),
 		})
 	}
 
 	// Host actor types
 	spec.HostActorTypes = make([]comptesting.HostActorTypeSpec, 0)
-	for hostID, types := range p.hostActorTypes {
+	for hostID, types := range p.HostActorTypes {
 		for _, hat := range types {
 			spec.HostActorTypes = append(spec.HostActorTypes, comptesting.HostActorTypeSpec{
 				HostID:                hostID,
-				ActorType:             hat.actorType,
-				ActorIdleTimeout:      hat.idleTimeout,
-				ActorConcurrencyLimit: int(hat.concurrencyLimit),
+				ActorType:             hat.ActorType,
+				ActorIdleTimeout:      hat.IdleTimeout,
+				ActorConcurrencyLimit: int(hat.ConcurrencyLimit),
 			})
 		}
 	}
 
 	// Active actors
-	spec.ActiveActors = make([]comptesting.ActiveActorSpec, 0, len(p.activeActors))
-	for _, aa := range p.activeActors {
+	spec.ActiveActors = make([]comptesting.ActiveActorSpec, 0, len(p.ActiveActors))
+	for _, aa := range p.ActiveActors {
 		spec.ActiveActors = append(spec.ActiveActors, comptesting.ActiveActorSpec{
-			ActorType:        aa.actorType,
-			ActorID:          aa.actorID,
-			HostID:           aa.hostID,
-			ActorIdleTimeout: aa.idleTimeout,
-			ActivationAgo:    now.Sub(aa.activation),
+			ActorType:        aa.ActorType,
+			ActorID:          aa.ActorID,
+			HostID:           aa.HostID,
+			ActorIdleTimeout: aa.IdleTimeout,
+			ActivationAgo:    now.Sub(aa.Activation),
 		})
 	}
 
 	// Alarms
-	spec.Alarms = make([]comptesting.AlarmSpec, 0, len(p.alarms))
-	for _, a := range p.alarms {
+	spec.Alarms = make([]comptesting.AlarmSpec, 0, len(p.Alarms))
+	for _, a := range p.Alarms {
 		as := comptesting.AlarmSpec{
-			AlarmID:   a.id,
-			ActorType: a.actorType,
-			ActorID:   a.actorID,
-			Name:      a.name,
-			DueIn:     a.dueTime.Sub(now),
-			Interval:  a.interval,
-			Data:      a.data,
+			AlarmID:   a.ID,
+			ActorType: a.ActorType,
+			ActorID:   a.ActorID,
+			Name:      a.Name,
+			DueIn:     a.DueTime.Sub(now),
+			Interval:  a.Interval,
+			Data:      a.Data,
 		}
 
-		if a.ttl != nil {
-			as.TTL = a.ttl.Sub(now)
+		if a.TTL != nil {
+			as.TTL = a.TTL.Sub(now)
 		}
 
-		if a.leaseID != nil {
-			as.LeaseID = a.leaseID
+		if a.LeaseID != nil {
+			as.LeaseID = a.LeaseID
 		}
 
-		if a.leaseExpiration != nil {
-			as.LeaseExp = ptr.Of(*a.leaseExpiration)
+		if a.LeaseExpiration != nil {
+			as.LeaseExp = ptr.Of(*a.LeaseExpiration)
 		}
 
 		spec.Alarms = append(spec.Alarms, as)
@@ -660,28 +663,28 @@ func (p *StandaloneSQLiteBacked) GetAllHosts(ctx context.Context) (comptesting.S
 
 // CleanupExpired performs garbage collection of expired records.
 func (p *StandalonePostgresBacked) CleanupExpired() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.Mu.Lock()
+	defer p.Mu.Unlock()
 
-	changes := newChanges()
+	changes := internal.NewChanges()
 
 	// Clean up unhealthy hosts
-	p.cleanupUnhealthyHostsWithChanges(changes)
+	p.CleanupUnhealthyHosts(changes)
 
 	// Clean up expired state
-	p.cleanupExpiredStateWithChanges(changes)
+	p.CleanupExpiredState(changes)
 
 	return nil
 }
 
 func (p *StandalonePostgresBacked) clearData() {
-	p.hosts = make(map[string]*host)
-	p.hostsByAddress = make(map[string]string)
-	p.hostActorTypes = make(map[string][]*hostActorType)
-	p.activeActors = make(map[actorKey]*activeActor)
-	p.alarms = make(map[alarmKey]*alarm)
-	p.alarmsByID = make(map[string]*alarm)
-	p.actorState = make(map[actorKey]*stateEntry)
+	p.Hosts = make(map[string]*internal.Host)
+	p.HostsByAddress = make(map[string]string)
+	p.HostActorTypes = make(map[string][]*internal.HostActorType)
+	p.ActiveActors = make(map[internal.ActorKey]*internal.ActiveActor)
+	p.Alarms = make(map[internal.AlarmKey]*internal.Alarm)
+	p.AlarmsByID = make(map[string]*internal.Alarm)
+	p.ActorState = make(map[internal.ActorKey]*internal.StateEntry)
 }
 
 func (p *StandalonePostgresBacked) clearDatabase(ctx context.Context) error {
@@ -697,80 +700,81 @@ func (p *StandalonePostgresBacked) clearDatabase(ctx context.Context) error {
 
 // Seed seeds the data into the provider.
 func (p *StandalonePostgresBacked) Seed(ctx context.Context, spec comptesting.Spec) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.Mu.Lock()
+	defer p.Mu.Unlock()
 
-	now := p.clock.Now()
+	now := p.Clock.Now()
 
 	// Clear all data from memory
 	p.clearData()
 
 	// Clear all data from database
-	if err := p.clearDatabase(ctx); err != nil {
+	err := p.clearDatabase(ctx)
+	if err != nil {
 		return err
 	}
 
 	// Seed hosts
 	for _, h := range spec.Hosts {
-		host := &host{
-			id:              h.HostID,
-			address:         h.Address,
-			lastHealthCheck: now.Add(-h.LastHealthAgo),
+		host := &internal.Host{
+			ID:              h.HostID,
+			Address:         h.Address,
+			LastHealthCheck: now.Add(-h.LastHealthAgo),
 		}
-		p.hosts[h.HostID] = host
-		p.hostsByAddress[h.Address] = h.HostID
+		p.Hosts[h.HostID] = host
+		p.HostsByAddress[h.Address] = h.HostID
 	}
 
 	// Seed host actor types
 	for _, hat := range spec.HostActorTypes {
-		if p.hostActorTypes[hat.HostID] == nil {
-			p.hostActorTypes[hat.HostID] = make([]*hostActorType, 0)
+		if p.HostActorTypes[hat.HostID] == nil {
+			p.HostActorTypes[hat.HostID] = make([]*internal.HostActorType, 0)
 		}
-		p.hostActorTypes[hat.HostID] = append(p.hostActorTypes[hat.HostID], &hostActorType{
-			hostID:           hat.HostID,
-			actorType:        hat.ActorType,
-			idleTimeout:      hat.ActorIdleTimeout,
-			concurrencyLimit: int32(hat.ActorConcurrencyLimit), // #nosec G115
+		p.HostActorTypes[hat.HostID] = append(p.HostActorTypes[hat.HostID], &internal.HostActorType{
+			HostID:           hat.HostID,
+			ActorType:        hat.ActorType,
+			IdleTimeout:      hat.ActorIdleTimeout,
+			ConcurrencyLimit: int32(hat.ActorConcurrencyLimit), // #nosec G115
 		})
 	}
 
 	// Seed active actors
 	for _, aa := range spec.ActiveActors {
-		key := newActorKey(aa.ActorType, aa.ActorID)
-		p.activeActors[key] = &activeActor{
-			actorType:   aa.ActorType,
-			actorID:     aa.ActorID,
-			hostID:      aa.HostID,
-			idleTimeout: aa.ActorIdleTimeout,
-			activation:  now.Add(-aa.ActivationAgo),
+		key := internal.NewActorKey(aa.ActorType, aa.ActorID)
+		p.ActiveActors[key] = &internal.ActiveActor{
+			ActorType:   aa.ActorType,
+			ActorID:     aa.ActorID,
+			HostID:      aa.HostID,
+			IdleTimeout: aa.ActorIdleTimeout,
+			Activation:  now.Add(-aa.ActivationAgo),
 		}
 	}
 
 	// Seed alarms
 	for _, a := range spec.Alarms {
-		key := newAlarmKey(a.ActorType, a.ActorID, a.Name)
-		alm := &alarm{
-			id:        a.AlarmID,
-			actorType: a.ActorType,
-			actorID:   a.ActorID,
-			name:      a.Name,
-			dueTime:   now.Add(a.DueIn),
-			interval:  a.Interval,
-			data:      a.Data,
+		key := internal.NewAlarmKey(a.ActorType, a.ActorID, a.Name)
+		alm := &internal.Alarm{
+			ID:        a.AlarmID,
+			ActorType: a.ActorType,
+			ActorID:   a.ActorID,
+			Name:      a.Name,
+			DueTime:   now.Add(a.DueIn),
+			Interval:  a.Interval,
+			Data:      a.Data,
 		}
 
 		if a.TTL > 0 {
-			alm.ttl = ptr.Of(now.Add(a.TTL))
+			alm.TTL = ptr.Of(now.Add(a.TTL))
 		}
 
 		if a.LeaseTTL != nil {
 			leaseExp := now.Add(*a.LeaseTTL)
-			alm.leaseExpiration = &leaseExp
-			alm.leaseID = ptr.Of(uuid.New().String())
+			alm.LeaseExpiration = &leaseExp
+			alm.LeaseID = ptr.Of(uuid.New().String())
 		}
 
-		p.alarms[key] = alm
-		p.alarmsByID[a.AlarmID] = alm
+		p.Alarms[key] = alm
+		p.AlarmsByID[a.AlarmID] = alm
 	}
 
 	return nil
@@ -778,26 +782,26 @@ func (p *StandalonePostgresBacked) Seed(ctx context.Context, spec comptesting.Sp
 
 // Now returns the current time.
 func (p *StandalonePostgresBacked) Now() time.Time {
-	return p.clock.Now()
+	return p.Clock.Now()
 }
 
 // AdvanceClock advances the clock.
 func (p *StandalonePostgresBacked) AdvanceClock(d time.Duration) error {
-	p.clock.Sleep(d)
+	p.Clock.Sleep(d)
 	return nil
 }
 
 // GetAllActorState returns all stored actor state.
 func (p *StandalonePostgresBacked) GetAllActorState(ctx context.Context) (comptesting.ActorStateSpecCollection, error) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.Mu.RLock()
+	defer p.Mu.RUnlock()
 
-	result := make(comptesting.ActorStateSpecCollection, 0, len(p.actorState))
-	for key, state := range p.actorState {
+	result := make(comptesting.ActorStateSpecCollection, 0, len(p.ActorState))
+	for key, state := range p.ActorState {
 		result = append(result, comptesting.ActorStateSpec{
-			ActorType: key.actorType,
-			ActorID:   key.actorID,
-			Data:      state.data,
+			ActorType: key.ActorType,
+			ActorID:   key.ActorID,
+			Data:      state.Data,
 		})
 	}
 
@@ -806,70 +810,70 @@ func (p *StandalonePostgresBacked) GetAllActorState(ctx context.Context) (compte
 
 // GetAllHosts returns all stored hosts, host actor types, active actors, and alarms.
 func (p *StandalonePostgresBacked) GetAllHosts(ctx context.Context) (comptesting.Spec, error) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.Mu.RLock()
+	defer p.Mu.RUnlock()
 
-	now := p.clock.Now()
+	now := p.Clock.Now()
 	spec := comptesting.Spec{}
 
 	// Hosts
-	spec.Hosts = make([]comptesting.HostSpec, 0, len(p.hosts))
-	for _, h := range p.hosts {
+	spec.Hosts = make([]comptesting.HostSpec, 0, len(p.Hosts))
+	for _, h := range p.Hosts {
 		spec.Hosts = append(spec.Hosts, comptesting.HostSpec{
-			HostID:        h.id,
-			Address:       h.address,
-			LastHealthAgo: now.Sub(h.lastHealthCheck),
+			HostID:        h.ID,
+			Address:       h.Address,
+			LastHealthAgo: now.Sub(h.LastHealthCheck),
 		})
 	}
 
 	// Host actor types
 	spec.HostActorTypes = make([]comptesting.HostActorTypeSpec, 0)
-	for hostID, types := range p.hostActorTypes {
+	for hostID, types := range p.HostActorTypes {
 		for _, hat := range types {
 			spec.HostActorTypes = append(spec.HostActorTypes, comptesting.HostActorTypeSpec{
 				HostID:                hostID,
-				ActorType:             hat.actorType,
-				ActorIdleTimeout:      hat.idleTimeout,
-				ActorConcurrencyLimit: int(hat.concurrencyLimit),
+				ActorType:             hat.ActorType,
+				ActorIdleTimeout:      hat.IdleTimeout,
+				ActorConcurrencyLimit: int(hat.ConcurrencyLimit),
 			})
 		}
 	}
 
 	// Active actors
-	spec.ActiveActors = make([]comptesting.ActiveActorSpec, 0, len(p.activeActors))
-	for _, aa := range p.activeActors {
+	spec.ActiveActors = make([]comptesting.ActiveActorSpec, 0, len(p.ActiveActors))
+	for _, aa := range p.ActiveActors {
 		spec.ActiveActors = append(spec.ActiveActors, comptesting.ActiveActorSpec{
-			ActorType:        aa.actorType,
-			ActorID:          aa.actorID,
-			HostID:           aa.hostID,
-			ActorIdleTimeout: aa.idleTimeout,
-			ActivationAgo:    now.Sub(aa.activation),
+			ActorType:        aa.ActorType,
+			ActorID:          aa.ActorID,
+			HostID:           aa.HostID,
+			ActorIdleTimeout: aa.IdleTimeout,
+			ActivationAgo:    now.Sub(aa.Activation),
 		})
 	}
 
 	// Alarms
-	spec.Alarms = make([]comptesting.AlarmSpec, 0, len(p.alarms))
-	for _, a := range p.alarms {
+	spec.Alarms = make([]comptesting.AlarmSpec, 0, len(p.Alarms))
+	for _, a := range p.Alarms {
 		as := comptesting.AlarmSpec{
-			AlarmID:   a.id,
-			ActorType: a.actorType,
-			ActorID:   a.actorID,
-			Name:      a.name,
-			DueIn:     a.dueTime.Sub(now),
-			Interval:  a.interval,
-			Data:      a.data,
+			AlarmID:   a.ID,
+			ActorType: a.ActorType,
+			ActorID:   a.ActorID,
+			Name:      a.Name,
+			DueIn:     a.DueTime.Sub(now),
+			Interval:  a.Interval,
+			Data:      a.Data,
 		}
 
-		if a.ttl != nil {
-			as.TTL = a.ttl.Sub(now)
+		if a.TTL != nil {
+			as.TTL = a.TTL.Sub(now)
 		}
 
-		if a.leaseID != nil {
-			as.LeaseID = a.leaseID
+		if a.LeaseID != nil {
+			as.LeaseID = a.LeaseID
 		}
 
-		if a.leaseExpiration != nil {
-			as.LeaseExp = ptr.Of(*a.leaseExpiration)
+		if a.LeaseExpiration != nil {
+			as.LeaseExp = ptr.Of(*a.LeaseExpiration)
 		}
 
 		spec.Alarms = append(spec.Alarms, as)

@@ -7,12 +7,13 @@ import (
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/components/standalone/internal"
 )
 
 // StandaloneMemory is a pure in-memory provider with no persistence.
 // All data is lost when the process exits.
 type StandaloneMemory struct {
-	*provider
+	*internal.Provider
 }
 
 // StandaloneMemoryOptions contains options for creating a StandaloneMemory provider.
@@ -29,15 +30,15 @@ type StandaloneMemoryOptions struct {
 
 // NewStandaloneMemory creates a new pure in-memory ActorProvider.
 func NewStandaloneMemory(log *slog.Logger, opts StandaloneMemoryOptions, providerConfig components.ProviderConfig) (*StandaloneMemory, error) {
-	p, err := newProvider(log, providerOptions{
+	p, err := internal.NewProvider(log, internal.ProviderOptions{
 		ProviderOptions: opts.ProviderOptions,
 		Clock:           opts.Clock,
 		CleanupInterval: opts.CleanupInterval,
-		PersistHook:     &noopPersistHook{},
+		PersistHook:     &internal.NoopPersistHook{},
 	}, providerConfig)
 	if err != nil {
 		return nil, err
 	}
 
-	return &StandaloneMemory{provider: p}, nil
+	return &StandaloneMemory{Provider: p}, nil
 }

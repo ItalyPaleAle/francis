@@ -17,6 +17,7 @@ import (
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/components/standalone/internal"
 )
 
 //go:embed migrations/postgres/*.sql
@@ -26,7 +27,8 @@ var postgresMigrations embed.FS
 // All data is kept in memory for fast access, but changes are persisted to PostgreSQL
 // so that state survives process restarts.
 type StandalonePostgresBacked struct {
-	*provider
+	*internal.Provider
+
 	db      *pgxpool.Pool
 	timeout time.Duration
 	log     *slog.Logger
@@ -72,7 +74,7 @@ func NewStandalonePostgresBacked(log *slog.Logger, opts StandalonePostgresOption
 	}
 
 	// Create the core provider with this as the persistence hook
-	p, err := newProvider(log, providerOptions{
+	p, err := internal.NewProvider(log, internal.ProviderOptions{
 		ProviderOptions: opts.ProviderOptions,
 		Clock:           opts.Clock,
 		CleanupInterval: opts.CleanupInterval,
@@ -81,19 +83,21 @@ func NewStandalonePostgresBacked(log *slog.Logger, opts StandalonePostgresOption
 	if err != nil {
 		return nil, err
 	}
-	s.provider = p
+	s.Provider = p
 
 	return s, nil
 }
 
 func (s *StandalonePostgresBacked) Init(ctx context.Context) error {
 	// Run migrations
-	if err := s.runMigrations(ctx); err != nil {
+	err := s.runMigrations(ctx)
+	if err != nil {
 		return fmt.Errorf("failed to run migrations: %w", err)
 	}
 
 	// Load all data from DB into memory
-	if err := s.loadFromDB(ctx); err != nil {
+	err = s.loadFromDB(ctx)
+	if err != nil {
 		return fmt.Errorf("failed to load data from database: %w", err)
 	}
 
@@ -146,37 +150,42 @@ func (s *StandalonePostgresBacked) runMigrations(ctx context.Context) error {
 }
 
 func (s *StandalonePostgresBacked) loadFromDB(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
 
-	s.stateMu.Lock()
-	defer s.stateMu.Unlock()
+	s.StateMu.Lock()
+	defer s.StateMu.Unlock()
 
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
 	// Load hosts
-	if err := s.loadHosts(queryCtx); err != nil {
+	err := s.loadHosts(queryCtx)
+	if err != nil {
 		return fmt.Errorf("failed to load hosts: %w", err)
 	}
 
 	// Load host actor types
-	if err := s.loadHostActorTypes(queryCtx); err != nil {
+	err = s.loadHostActorTypes(queryCtx)
+	if err != nil {
 		return fmt.Errorf("failed to load host actor types: %w", err)
 	}
 
 	// Load active actors
-	if err := s.loadActiveActors(queryCtx); err != nil {
+	err = s.loadActiveActors(queryCtx)
+	if err != nil {
 		return fmt.Errorf("failed to load active actors: %w", err)
 	}
 
 	// Load alarms
-	if err := s.loadAlarms(queryCtx); err != nil {
+	err = s.loadAlarms(queryCtx)
+	if err != nil {
 		return fmt.Errorf("failed to load alarms: %w", err)
 	}
 
 	// Load actor state
-	if err := s.loadActorState(queryCtx); err != nil {
+	err = s.loadActorState(queryCtx)
+	if err != nil {
 		return fmt.Errorf("failed to load actor state: %w", err)
 	}
 
@@ -191,12 +200,13 @@ func (s *StandalonePostgresBacked) loadHosts(ctx context.Context) error {
 	defer rows.Close()
 
 	for rows.Next() {
-		var h host
-		if err := rows.Scan(&h.id, &h.address, &h.lastHealthCheck); err != nil {
+		var h internal.Host
+		err := rows.Scan(&h.ID, &h.Address, &h.LastHealthCheck)
+		if err != nil {
 			return err
 		}
-		s.hosts[h.id] = &h
-		s.hostsByAddress[h.address] = h.id
+		s.Hosts[h.ID] = &h
+		s.HostsByAddress[h.Address] = h.ID
 	}
 
 	return rows.Err()
@@ -210,16 +220,19 @@ func (s *StandalonePostgresBacked) loadHostActorTypes(ctx context.Context) error
 	defer rows.Close()
 
 	for rows.Next() {
-		var hat hostActorType
-		var idleTimeoutMs int64
-		if err := rows.Scan(&hat.hostID, &hat.actorType, &idleTimeoutMs, &hat.concurrencyLimit); err != nil {
+		var (
+			hat           internal.HostActorType
+			idleTimeoutMs int64
+		)
+		err := rows.Scan(&hat.HostID, &hat.ActorType, &idleTimeoutMs, &hat.ConcurrencyLimit)
+		if err != nil {
 			return err
 		}
-		hat.idleTimeout = time.Duration(idleTimeoutMs) * time.Millisecond
-		if s.hostActorTypes[hat.hostID] == nil {
-			s.hostActorTypes[hat.hostID] = make([]*hostActorType, 0)
+		hat.IdleTimeout = time.Duration(idleTimeoutMs) * time.Millisecond
+		if s.HostActorTypes[hat.HostID] == nil {
+			s.HostActorTypes[hat.HostID] = make([]*internal.HostActorType, 0)
 		}
-		s.hostActorTypes[hat.hostID] = append(s.hostActorTypes[hat.hostID], &hat)
+		s.HostActorTypes[hat.HostID] = append(s.HostActorTypes[hat.HostID], &hat)
 	}
 
 	return rows.Err()
@@ -233,14 +246,17 @@ func (s *StandalonePostgresBacked) loadActiveActors(ctx context.Context) error {
 	defer rows.Close()
 
 	for rows.Next() {
-		var aa activeActor
-		var idleTimeoutMs int64
-		if err := rows.Scan(&aa.actorType, &aa.actorID, &aa.hostID, &idleTimeoutMs, &aa.activation); err != nil {
+		var (
+			aa            internal.ActiveActor
+			idleTimeoutMs int64
+		)
+		err := rows.Scan(&aa.ActorType, &aa.ActorID, &aa.HostID, &idleTimeoutMs, &aa.Activation)
+		if err != nil {
 			return err
 		}
-		aa.idleTimeout = time.Duration(idleTimeoutMs) * time.Millisecond
-		key := newActorKey(aa.actorType, aa.actorID)
-		s.activeActors[key] = &aa
+		aa.IdleTimeout = time.Duration(idleTimeoutMs) * time.Millisecond
+		key := internal.NewActorKey(aa.ActorType, aa.ActorID)
+		s.ActiveActors[key] = &aa
 	}
 
 	return rows.Err()
@@ -259,37 +275,42 @@ func (s *StandalonePostgresBacked) loadAlarms(ctx context.Context) error {
 	defer rows.Close()
 
 	for rows.Next() {
-		var a alarm
-		var interval *string
-		var ttl *time.Time
-		var data []byte
-		var leaseID *string
-		var leaseExp *time.Time
+		var (
+			a        internal.Alarm
+			interval *string
+			ttl      *time.Time
+			data     []byte
+			leaseID  *string
+			leaseExp *time.Time
+		)
 
-		if err := rows.Scan(&a.id, &a.actorType, &a.actorID, &a.name, &a.dueTime,
-			&interval, &ttl, &data, &leaseID, &leaseExp); err != nil {
+		err := rows.Scan(
+			&a.ID, &a.ActorType, &a.ActorID, &a.Name, &a.DueTime,
+			&interval, &ttl, &data, &leaseID, &leaseExp,
+		)
+		if err != nil {
 			return err
 		}
 
 		if interval != nil {
-			a.interval = *interval
+			a.Interval = *interval
 		}
 		if ttl != nil {
-			a.ttl = ttl
+			a.TTL = ttl
 		}
 		if len(data) > 0 {
-			a.data = data
+			a.Data = data
 		}
 		if leaseID != nil {
-			a.leaseID = leaseID
+			a.LeaseID = leaseID
 		}
 		if leaseExp != nil {
-			a.leaseExpiration = leaseExp
+			a.LeaseExpiration = leaseExp
 		}
 
-		key := newAlarmKey(a.actorType, a.actorID, a.name)
-		s.alarms[key] = &a
-		s.alarmsByID[a.id] = &a
+		key := internal.NewAlarmKey(a.ActorType, a.ActorID, a.Name)
+		s.Alarms[key] = &a
+		s.AlarmsByID[a.ID] = &a
 	}
 
 	return rows.Err()
@@ -303,29 +324,32 @@ func (s *StandalonePostgresBacked) loadActorState(ctx context.Context) error {
 	defer rows.Close()
 
 	for rows.Next() {
-		var actorType, actorID string
-		var data []byte
-		var exp *time.Time
+		var (
+			actorType, actorID string
+			data               []byte
+			exp                *time.Time
+		)
 
-		if err := rows.Scan(&actorType, &actorID, &data, &exp); err != nil {
+		err := rows.Scan(&actorType, &actorID, &data, &exp)
+		if err != nil {
 			return err
 		}
 
-		entry := &stateEntry{
-			data:       data,
-			expiration: exp,
+		entry := &internal.StateEntry{
+			Data:       data,
+			Expiration: exp,
 		}
 
-		key := newActorKey(actorType, actorID)
-		s.actorState[key] = entry
+		key := internal.NewActorKey(actorType, actorID)
+		s.ActorState[key] = entry
 	}
 
 	return rows.Err()
 }
 
 // PersistChanges implements PersistHook.
-func (s *StandalonePostgresBacked) PersistChanges(ctx context.Context, changes *changes) error {
-	if changes.isEmpty() {
+func (s *StandalonePostgresBacked) PersistChanges(ctx context.Context, changes *internal.Changes) error {
+	if changes.IsEmpty() {
 		return nil
 	}
 
@@ -336,41 +360,54 @@ func (s *StandalonePostgresBacked) PersistChanges(ctx context.Context, changes *
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback(queryCtx) //nolint:errcheck
+	defer func() {
+		rollbackCtx, rollbackCancel := context.WithTimeout(ctx, s.timeout)
+		rollbackErr := tx.Rollback(rollbackCtx)
+		rollbackCancel()
+		if rollbackErr != nil {
+			s.log.WarnContext(ctx, "Error while rolling back transaction", slog.Any("error", rollbackErr))
+		}
+	}()
 
 	// Process host changes
-	if err := s.persistHostChanges(queryCtx, tx, changes); err != nil {
+	err = s.persistHostChanges(queryCtx, tx, changes)
+	if err != nil {
 		return err
 	}
 
 	// Process host actor type changes
-	if err := s.persistHostActorTypeChanges(queryCtx, tx, changes); err != nil {
+	err = s.persistHostActorTypeChanges(queryCtx, tx, changes)
+	if err != nil {
 		return err
 	}
 
 	// Process active actor changes
-	if err := s.persistActiveActorChanges(queryCtx, tx, changes); err != nil {
+	err = s.persistActiveActorChanges(queryCtx, tx, changes)
+	if err != nil {
 		return err
 	}
 
 	// Process alarm changes
-	if err := s.persistAlarmChanges(queryCtx, tx, changes); err != nil {
+	err = s.persistAlarmChanges(queryCtx, tx, changes)
+	if err != nil {
 		return err
 	}
 
 	// Process actor state changes
-	if err := s.persistActorStateChanges(queryCtx, tx, changes); err != nil {
+	err = s.persistActorStateChanges(queryCtx, tx, changes)
+	if err != nil {
 		return err
 	}
 
-	if err := tx.Commit(queryCtx); err != nil {
+	err = tx.Commit(queryCtx)
+	if err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	return nil
 }
 
-func (s *StandalonePostgresBacked) persistHostChanges(ctx context.Context, tx pgx.Tx, changes *changes) error {
+func (s *StandalonePostgresBacked) persistHostChanges(ctx context.Context, tx pgx.Tx, changes *internal.Changes) error {
 	// Deletes
 	for _, hostID := range changes.Hosts.Delete {
 		_, err := tx.Exec(ctx, "DELETE FROM hosts WHERE host_id = $1", hostID)
@@ -383,9 +420,10 @@ func (s *StandalonePostgresBacked) persistHostChanges(ctx context.Context, tx pg
 	for _, h := range changes.Hosts.Create {
 		_, err := tx.Exec(ctx,
 			"INSERT INTO hosts (host_id, host_address, host_last_health_check) VALUES ($1, $2, $3)",
-			h.id, h.address, h.lastHealthCheck.UTC())
+			h.ID, h.Address, h.LastHealthCheck.UTC(),
+		)
 		if err != nil {
-			return fmt.Errorf("failed to insert host %s: %w", h.id, err)
+			return fmt.Errorf("failed to insert host %s: %w", h.ID, err)
 		}
 	}
 
@@ -393,21 +431,23 @@ func (s *StandalonePostgresBacked) persistHostChanges(ctx context.Context, tx pg
 	for _, h := range changes.Hosts.Update {
 		_, err := tx.Exec(ctx,
 			"UPDATE hosts SET host_address = $1, host_last_health_check = $2 WHERE host_id = $3",
-			h.address, h.lastHealthCheck.UTC(), h.id)
+			h.Address, h.LastHealthCheck.UTC(), h.ID,
+		)
 		if err != nil {
-			return fmt.Errorf("failed to update host %s: %w", h.id, err)
+			return fmt.Errorf("failed to update host %s: %w", h.ID, err)
 		}
 	}
 
 	return nil
 }
 
-func (s *StandalonePostgresBacked) persistHostActorTypeChanges(ctx context.Context, tx pgx.Tx, changes *changes) error {
+func (s *StandalonePostgresBacked) persistHostActorTypeChanges(ctx context.Context, tx pgx.Tx, changes *internal.Changes) error {
 	// Deletes
 	for _, key := range changes.HostActorTypes.Delete {
 		_, err := tx.Exec(ctx,
 			"DELETE FROM host_actor_types WHERE host_id = $1 AND actor_type = $2",
-			key.hostID, key.actorType)
+			key.HostID, key.ActorType,
+		)
 		if err != nil {
 			return fmt.Errorf("failed to delete host actor type: %w", err)
 		}
@@ -417,7 +457,8 @@ func (s *StandalonePostgresBacked) persistHostActorTypeChanges(ctx context.Conte
 	for _, hat := range changes.HostActorTypes.Create {
 		_, err := tx.Exec(ctx,
 			"INSERT INTO host_actor_types (host_id, actor_type, actor_idle_timeout, actor_concurrency_limit) VALUES ($1, $2, $3, $4)",
-			hat.hostID, hat.actorType, hat.idleTimeout.Milliseconds(), hat.concurrencyLimit)
+			hat.HostID, hat.ActorType, hat.IdleTimeout.Milliseconds(), hat.ConcurrencyLimit,
+		)
 		if err != nil {
 			return fmt.Errorf("failed to insert host actor type: %w", err)
 		}
@@ -426,12 +467,13 @@ func (s *StandalonePostgresBacked) persistHostActorTypeChanges(ctx context.Conte
 	return nil
 }
 
-func (s *StandalonePostgresBacked) persistActiveActorChanges(ctx context.Context, tx pgx.Tx, changes *changes) error {
+func (s *StandalonePostgresBacked) persistActiveActorChanges(ctx context.Context, tx pgx.Tx, changes *internal.Changes) error {
 	// Deletes
 	for _, key := range changes.ActiveActors.Delete {
 		_, err := tx.Exec(ctx,
 			"DELETE FROM active_actors WHERE actor_type = $1 AND actor_id = $2",
-			key.actorType, key.actorID)
+			key.ActorType, key.ActorID,
+		)
 		if err != nil {
 			return fmt.Errorf("failed to delete active actor: %w", err)
 		}
@@ -441,7 +483,8 @@ func (s *StandalonePostgresBacked) persistActiveActorChanges(ctx context.Context
 	for _, aa := range changes.ActiveActors.Create {
 		_, err := tx.Exec(ctx,
 			"INSERT INTO active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation) VALUES ($1, $2, $3, $4, $5)",
-			aa.actorType, aa.actorID, aa.hostID, aa.idleTimeout.Milliseconds(), aa.activation.UTC())
+			aa.ActorType, aa.ActorID, aa.HostID, aa.IdleTimeout.Milliseconds(), aa.Activation.UTC(),
+		)
 		if err != nil {
 			return fmt.Errorf("failed to insert active actor: %w", err)
 		}
@@ -451,7 +494,8 @@ func (s *StandalonePostgresBacked) persistActiveActorChanges(ctx context.Context
 	for _, aa := range changes.ActiveActors.Update {
 		_, err := tx.Exec(ctx,
 			"UPDATE active_actors SET host_id = $1, actor_idle_timeout = $2, actor_activation = $3 WHERE actor_type = $4 AND actor_id = $5",
-			aa.hostID, aa.idleTimeout.Milliseconds(), aa.activation.UTC(), aa.actorType, aa.actorID)
+			aa.HostID, aa.IdleTimeout.Milliseconds(), aa.Activation.UTC(), aa.ActorType, aa.ActorID,
+		)
 		if err != nil {
 			return fmt.Errorf("failed to update active actor: %w", err)
 		}
@@ -460,7 +504,7 @@ func (s *StandalonePostgresBacked) persistActiveActorChanges(ctx context.Context
 	return nil
 }
 
-func (s *StandalonePostgresBacked) persistAlarmChanges(ctx context.Context, tx pgx.Tx, changes *changes) error {
+func (s *StandalonePostgresBacked) persistAlarmChanges(ctx context.Context, tx pgx.Tx, changes *internal.Changes) error {
 	// Deletes
 	for _, alarmID := range changes.Alarms.Delete {
 		_, err := tx.Exec(ctx, "DELETE FROM alarms WHERE alarm_id = $1", alarmID)
@@ -471,73 +515,82 @@ func (s *StandalonePostgresBacked) persistAlarmChanges(ctx context.Context, tx p
 
 	// Creates
 	for _, a := range changes.Alarms.Create {
-		var intervalVal, leaseIDVal any
-		var ttlVal, leaseExpVal any
+		var (
+			intervalVal, leaseIDVal any
+			ttlVal, leaseExpVal     any
+		)
 
-		if a.interval != "" {
-			intervalVal = a.interval
+		if a.Interval != "" {
+			intervalVal = a.Interval
 		}
-		if a.ttl != nil {
-			ttlVal = a.ttl.UTC()
+		if a.TTL != nil {
+			ttlVal = a.TTL.UTC()
 		}
-		if a.leaseID != nil {
-			leaseIDVal = *a.leaseID
+		if a.LeaseID != nil {
+			leaseIDVal = *a.LeaseID
 		}
-		if a.leaseExpiration != nil {
-			leaseExpVal = a.leaseExpiration.UTC()
+		if a.LeaseExpiration != nil {
+			leaseExpVal = a.LeaseExpiration.UTC()
 		}
 
 		_, err := tx.Exec(ctx,
-			`INSERT INTO alarms (alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
-			                     alarm_interval, alarm_ttl_time, alarm_data,
-			                     alarm_lease_id, alarm_lease_expiration_time)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-			a.id, a.actorType, a.actorID, a.name, a.dueTime.UTC(),
-			intervalVal, ttlVal, a.data, leaseIDVal, leaseExpVal)
+			`INSERT INTO alarms (
+				alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
+			    alarm_interval, alarm_ttl_time, alarm_data,
+			    alarm_lease_id, alarm_lease_expiration_time)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			a.ID, a.ActorType, a.ActorID, a.Name, a.DueTime.UTC(),
+			intervalVal, ttlVal, a.Data, leaseIDVal, leaseExpVal,
+		)
 		if err != nil {
-			return fmt.Errorf("failed to insert alarm %s: %w", a.id, err)
+			return fmt.Errorf("failed to insert alarm %s: %w", a.ID, err)
 		}
 	}
 
 	// Updates
 	for _, a := range changes.Alarms.Update {
-		var intervalVal, leaseIDVal any
-		var ttlVal, leaseExpVal any
+		var (
+			intervalVal, leaseIDVal any
+			ttlVal, leaseExpVal     any
+		)
 
-		if a.interval != "" {
-			intervalVal = a.interval
+		if a.Interval != "" {
+			intervalVal = a.Interval
 		}
-		if a.ttl != nil {
-			ttlVal = a.ttl.UTC()
+		if a.TTL != nil {
+			ttlVal = a.TTL.UTC()
 		}
-		if a.leaseID != nil {
-			leaseIDVal = *a.leaseID
+		if a.LeaseID != nil {
+			leaseIDVal = *a.LeaseID
 		}
-		if a.leaseExpiration != nil {
-			leaseExpVal = a.leaseExpiration.UTC()
+		if a.LeaseExpiration != nil {
+			leaseExpVal = a.LeaseExpiration.UTC()
 		}
 
 		_, err := tx.Exec(ctx,
-			`UPDATE alarms SET actor_type = $1, actor_id = $2, alarm_name = $3, alarm_due_time = $4,
-			                   alarm_interval = $5, alarm_ttl_time = $6, alarm_data = $7,
-			                   alarm_lease_id = $8, alarm_lease_expiration_time = $9
-			 WHERE alarm_id = $10`,
-			a.actorType, a.actorID, a.name, a.dueTime.UTC(),
-			intervalVal, ttlVal, a.data, leaseIDVal, leaseExpVal, a.id)
+			`UPDATE alarms SET
+				actor_type = $1, actor_id = $2, alarm_name = $3, alarm_due_time = $4,
+			    alarm_interval = $5, alarm_ttl_time = $6, alarm_data = $7,
+			    alarm_lease_id = $8, alarm_lease_expiration_time = $9
+			WHERE alarm_id = $10`,
+			a.ActorType, a.ActorID, a.Name, a.DueTime.UTC(),
+			intervalVal, ttlVal, a.Data, leaseIDVal, leaseExpVal, a.ID,
+		)
 		if err != nil {
-			return fmt.Errorf("failed to update alarm %s: %w", a.id, err)
+			return fmt.Errorf("failed to update alarm %s: %w", a.ID, err)
 		}
 	}
 
 	return nil
 }
 
-func (s *StandalonePostgresBacked) persistActorStateChanges(ctx context.Context, tx pgx.Tx, changes *changes) error {
+func (s *StandalonePostgresBacked) persistActorStateChanges(ctx context.Context, tx pgx.Tx, changes *internal.Changes) error {
 	// Deletes
 	for _, key := range changes.ActorState.Delete {
 		_, err := tx.Exec(ctx,
 			"DELETE FROM actor_state WHERE actor_type = $1 AND actor_id = $2",
-			key.actorType, key.actorID)
+			key.ActorType, key.ActorID,
+		)
 		if err != nil {
 			return fmt.Errorf("failed to delete actor state: %w", err)
 		}
@@ -546,13 +599,14 @@ func (s *StandalonePostgresBacked) persistActorStateChanges(ctx context.Context,
 	// Creates
 	for key, entry := range changes.ActorState.Create {
 		var expVal any
-		if entry.expiration != nil {
-			expVal = entry.expiration.UTC()
+		if entry.Expiration != nil {
+			expVal = entry.Expiration.UTC()
 		}
 
 		_, err := tx.Exec(ctx,
 			"INSERT INTO actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time) VALUES ($1, $2, $3, $4)",
-			key.actorType, key.actorID, entry.data, expVal)
+			key.ActorType, key.ActorID, entry.Data, expVal,
+		)
 		if err != nil {
 			return fmt.Errorf("failed to insert actor state: %w", err)
 		}
@@ -561,13 +615,14 @@ func (s *StandalonePostgresBacked) persistActorStateChanges(ctx context.Context,
 	// Updates
 	for key, entry := range changes.ActorState.Update {
 		var expVal any
-		if entry.expiration != nil {
-			expVal = entry.expiration.UTC()
+		if entry.Expiration != nil {
+			expVal = entry.Expiration.UTC()
 		}
 
 		_, err := tx.Exec(ctx,
 			"UPDATE actor_state SET actor_state_data = $1, actor_state_expiration_time = $2 WHERE actor_type = $3 AND actor_id = $4",
-			entry.data, expVal, key.actorType, key.actorID)
+			entry.Data, expVal, key.ActorType, key.ActorID,
+		)
 		if err != nil {
 			return fmt.Errorf("failed to update actor state: %w", err)
 		}
