@@ -1,4 +1,4 @@
-package memory
+package standalone
 
 import (
 	"context"
@@ -14,13 +14,13 @@ import (
 	"github.com/italypaleale/francis/internal/ref"
 )
 
-func (m *MemoryProvider) GetAlarm(ctx context.Context, aRef ref.AlarmRef) (components.GetAlarmRes, error) {
+func (p *provider) GetAlarm(ctx context.Context, aRef ref.AlarmRef) (components.GetAlarmRes, error) {
 	key := newAlarmKey(aRef.ActorType, aRef.ActorID, aRef.Name)
 
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 
-	a, ok := m.alarms[key]
+	a, ok := p.alarms[key]
 	if !ok {
 		return components.GetAlarmRes{}, components.ErrNoAlarm
 	}
@@ -37,14 +37,16 @@ func (m *MemoryProvider) GetAlarm(ctx context.Context, aRef ref.AlarmRef) (compo
 	return res, nil
 }
 
-func (m *MemoryProvider) SetAlarm(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) error {
+func (p *provider) SetAlarm(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) error {
 	key := newAlarmKey(aRef.ActorType, aRef.ActorID, aRef.Name)
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	changes := newChanges()
 
 	// Check if alarm already exists with same properties (to avoid resetting leases unnecessarily)
-	existing, ok := m.alarms[key]
+	existing, ok := p.alarms[key]
 	if ok {
 		// Check if properties are the same
 		ok = existing.EqualProperties(alarmProperties{
@@ -59,7 +61,8 @@ func (m *MemoryProvider) SetAlarm(ctx context.Context, aRef ref.AlarmRef, req co
 		}
 
 		// Remove old alarm from alarmsByID
-		delete(m.alarmsByID, existing.id)
+		delete(p.alarmsByID, existing.id)
+		changes.Alarms.Delete = append(changes.Alarms.Delete, existing.id)
 	}
 
 	// Normalize empty data to nil
@@ -89,39 +92,58 @@ func (m *MemoryProvider) SetAlarm(ctx context.Context, aRef ref.AlarmRef, req co
 		leaseExpiration: nil,
 	}
 
-	m.alarms[key] = a
-	m.alarmsByID[alarmID] = a
+	p.alarms[key] = a
+	p.alarmsByID[alarmID] = a
+	changes.Alarms.Create = append(changes.Alarms.Create, a)
+
+	// Persist changes
+	if err := p.persistHook.PersistChanges(ctx, changes); err != nil {
+		// Rollback
+		delete(p.alarms, key)
+		delete(p.alarmsByID, alarmID)
+		return err
+	}
 
 	return nil
 }
 
-func (m *MemoryProvider) DeleteAlarm(ctx context.Context, aRef ref.AlarmRef) error {
+func (p *provider) DeleteAlarm(ctx context.Context, aRef ref.AlarmRef) error {
 	key := newAlarmKey(aRef.ActorType, aRef.ActorID, aRef.Name)
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	a, ok := m.alarms[key]
+	a, ok := p.alarms[key]
 	if !ok {
 		return components.ErrNoAlarm
 	}
 
-	delete(m.alarmsByID, a.id)
-	delete(m.alarms, key)
+	changes := newChanges()
+	changes.Alarms.Delete = append(changes.Alarms.Delete, a.id)
+
+	delete(p.alarmsByID, a.id)
+	delete(p.alarms, key)
+
+	// Persist changes
+	if err := p.persistHook.PersistChanges(ctx, changes); err != nil {
+		return err
+	}
 
 	return nil
 }
 
-func (m *MemoryProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req components.FetchAndLeaseUpcomingAlarmsReq) ([]*ref.AlarmLease, error) {
+func (p *provider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req components.FetchAndLeaseUpcomingAlarmsReq) ([]*ref.AlarmLease, error) {
 	if len(req.Hosts) == 0 {
 		return nil, nil
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	now := m.clock.Now()
-	horizon := now.Add(m.cfg.AlarmsFetchAheadInterval)
+	now := p.clock.Now()
+	horizon := now.Add(p.cfg.AlarmsFetchAheadInterval)
+
+	changes := newChanges()
 
 	// Get healthy hosts from the request list and build capacity info
 	type hostCapacity struct {
@@ -136,16 +158,16 @@ func (m *MemoryProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req co
 	healthyHostsSet := make(map[string]struct{})
 
 	for _, hostID := range req.Hosts {
-		h, ok := m.hosts[hostID]
-		if !ok || !m.isHostHealthy(h) {
+		h, ok := p.hosts[hostID]
+		if !ok || !p.isHostHealthy(h) {
 			continue
 		}
 		healthyHostsSet[hostID] = struct{}{}
 
-		for _, hat := range m.hostActorTypes[hostID] {
+		for _, hat := range p.hostActorTypes[hostID] {
 			capacity := math.MaxInt32
 			if hat.concurrencyLimit > 0 {
-				currentCount := m.countActiveActorsOnHost(hostID, hat.actorType)
+				currentCount := p.countActiveActorsOnHost(hostID, hat.actorType)
 				capacity = max(int(hat.concurrencyLimit)-currentCount, 0)
 			}
 
@@ -169,14 +191,14 @@ func (m *MemoryProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req co
 		hostID *string // nil if actor needs to be created
 	}
 
-	candidates := make([]alarmCandidate, 0, m.cfg.AlarmsFetchAheadBatchSize)
+	candidates := make([]alarmCandidate, 0, p.cfg.AlarmsFetchAheadBatchSize)
 
 	// First pass: collect all potentially upcoming alarms
 	type alarmWithTime struct {
 		alarm *alarm
 	}
 	allAlarms := make([]alarmWithTime, 0)
-	for _, a := range m.alarms {
+	for _, a := range p.alarms {
 		if a.dueTime.After(horizon) {
 			continue
 		}
@@ -198,12 +220,8 @@ func (m *MemoryProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req co
 	})
 
 	// Process alarms and check placement
-	// - Include alarms for actors that are NOT active
-	// - Include alarms for actors active on hosts in the request list (healthyHostsSet)
-	// - Include alarms for actors active on UNHEALTHY hosts (can be re-placed)
-	// - EXCLUDE alarms for actors active on healthy hosts NOT in the request list
 	for _, awt := range allAlarms {
-		if len(candidates) >= m.cfg.AlarmsFetchAheadBatchSize {
+		if len(candidates) >= p.cfg.AlarmsFetchAheadBatchSize {
 			break
 		}
 
@@ -214,7 +232,7 @@ func (m *MemoryProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req co
 		var hostID *string
 		var needsPlacement bool
 
-		actor, ok := m.activeActors[actKey]
+		actor, ok := p.activeActors[actKey]
 		if ok {
 			// Actor is active - check where
 			_, isInRequestList := healthyHostsSet[actor.hostID]
@@ -224,8 +242,8 @@ func (m *MemoryProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req co
 			} else {
 				// Actor is active on a host NOT in the request list
 				// Check if that host is healthy
-				h, ok := m.hosts[actor.hostID]
-				if ok && m.isHostHealthy(h) {
+				h, ok := p.hosts[actor.hostID]
+				if ok && p.isHostHealthy(h) {
 					// Actor is on a healthy host not in our list - SKIP this alarm
 					continue
 				}
@@ -283,7 +301,7 @@ func (m *MemoryProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req co
 	}
 	leaseIDPrefix := leaseIDPrefixObj.String()
 
-	leaseExpiration := now.Add(m.cfg.AlarmsLeaseDuration)
+	leaseExpiration := now.Add(p.cfg.AlarmsLeaseDuration)
 	result := make([]*ref.AlarmLease, 0, len(candidates))
 
 	for _, c := range candidates {
@@ -292,14 +310,13 @@ func (m *MemoryProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req co
 		// Activate or update actor if needed
 		if c.hostID != nil {
 			actKey := a.actorKey()
-			existingActor, exists := m.activeActors[actKey]
+			existingActor, exists := p.activeActors[actKey]
 
 			// Check if actor needs to be created or updated
-			// Update is needed when the actor is on an unhealthy host
 			needsUpdate := !exists
 			if exists {
-				h, ok := m.hosts[existingActor.hostID]
-				if !ok || !m.isHostHealthy(h) {
+				h, ok := p.hosts[existingActor.hostID]
+				if !ok || !p.isHostHealthy(h) {
 					needsUpdate = true
 				}
 			}
@@ -307,7 +324,7 @@ func (m *MemoryProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req co
 			if needsUpdate {
 				// Find idle timeout for this host/actor type
 				var idleTimeout time.Duration
-				for _, hat := range m.hostActorTypes[*c.hostID] {
+				for _, hat := range p.hostActorTypes[*c.hostID] {
 					if hat.actorType == a.actorType {
 						idleTimeout = hat.idleTimeout
 						break
@@ -319,12 +336,19 @@ func (m *MemoryProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req co
 					activationTime = now
 				}
 
-				m.activeActors[actKey] = &activeActor{
+				newActor := &activeActor{
 					actorType:   a.actorType,
 					actorID:     a.actorID,
 					hostID:      *c.hostID,
 					idleTimeout: idleTimeout,
 					activation:  activationTime,
+				}
+				p.activeActors[actKey] = newActor
+
+				if exists {
+					changes.ActiveActors.Update[actKey] = newActor
+				} else {
+					changes.ActiveActors.Create = append(changes.ActiveActors.Create, newActor)
 				}
 			}
 		}
@@ -333,6 +357,7 @@ func (m *MemoryProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req co
 		leaseID := leaseIDPrefix + "_" + a.id
 		a.leaseID = &leaseID
 		a.leaseExpiration = &leaseExpiration
+		changes.Alarms.Update[a.id] = a
 
 		result = append(result, ref.NewAlarmLease(
 			ref.AlarmRef{
@@ -346,20 +371,25 @@ func (m *MemoryProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req co
 		))
 	}
 
+	// Persist changes
+	if err := p.persistHook.PersistChanges(ctx, changes); err != nil {
+		return nil, err
+	}
+
 	return result, nil
 }
 
-func (m *MemoryProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmLease) (components.GetLeasedAlarmRes, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+func (p *provider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmLease) (components.GetLeasedAlarmRes, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 
-	a, ok := m.alarmsByID[lease.Key()]
+	a, ok := p.alarmsByID[lease.Key()]
 	if !ok {
 		return components.GetLeasedAlarmRes{}, components.ErrNoAlarm
 	}
 
 	// Check lease validity
-	if !a.hasValidLease(lease.LeaseID(), m.clock.Now()) {
+	if !a.hasValidLease(lease.LeaseID(), p.clock.Now()) {
 		return components.GetLeasedAlarmRes{}, components.ErrNoAlarm
 	}
 
@@ -378,14 +408,15 @@ func (m *MemoryProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmLea
 	}, nil
 }
 
-func (m *MemoryProvider) RenewAlarmLeases(ctx context.Context, req components.RenewAlarmLeasesReq) (components.RenewAlarmLeasesRes, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func (p *provider) RenewAlarmLeases(ctx context.Context, req components.RenewAlarmLeasesReq) (components.RenewAlarmLeasesRes, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	now := m.clock.Now()
-	expTime := now.Add(m.cfg.AlarmsLeaseDuration)
+	now := p.clock.Now()
+	expTime := now.Add(p.cfg.AlarmsLeaseDuration)
 
-	renewedLeases := make([]*ref.AlarmLease, 0, len(m.alarms))
+	changes := newChanges()
+	renewedLeases := make([]*ref.AlarmLease, 0, len(p.alarms))
 
 	// Build set of lease IDs to renew if specified
 	var leaseIDSet map[string]struct{}
@@ -407,7 +438,7 @@ func (m *MemoryProvider) RenewAlarmLeases(ctx context.Context, req components.Re
 		hostIDSet[h] = struct{}{}
 	}
 
-	for _, a := range m.alarms {
+	for _, a := range p.alarms {
 		// Check if alarm has a valid lease
 		if a.leaseID == nil || a.leaseExpiration == nil || a.leaseExpiration.Before(now) {
 			continue
@@ -423,7 +454,7 @@ func (m *MemoryProvider) RenewAlarmLeases(ctx context.Context, req components.Re
 
 		// Check if the actor is on one of the specified hosts
 		actKey := a.actorKey()
-		actor, ok := m.activeActors[actKey]
+		actor, ok := p.activeActors[actKey]
 		if !ok {
 			continue
 		}
@@ -435,6 +466,7 @@ func (m *MemoryProvider) RenewAlarmLeases(ctx context.Context, req components.Re
 
 		// Renew the lease
 		a.leaseExpiration = &expTime
+		changes.Alarms.Update[a.id] = a
 
 		renewedLeases = append(renewedLeases, ref.NewAlarmLease(
 			ref.AlarmRef{
@@ -448,20 +480,27 @@ func (m *MemoryProvider) RenewAlarmLeases(ctx context.Context, req components.Re
 		))
 	}
 
+	// Persist changes
+	if !changes.isEmpty() {
+		if err := p.persistHook.PersistChanges(ctx, changes); err != nil {
+			return components.RenewAlarmLeasesRes{}, err
+		}
+	}
+
 	return components.RenewAlarmLeasesRes{Leases: renewedLeases}, nil
 }
 
-func (m *MemoryProvider) ReleaseAlarmLease(ctx context.Context, lease *ref.AlarmLease) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func (p *provider) ReleaseAlarmLease(ctx context.Context, lease *ref.AlarmLease) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	a, ok := m.alarmsByID[lease.Key()]
+	a, ok := p.alarmsByID[lease.Key()]
 	if !ok {
 		return components.ErrNoAlarm
 	}
 
 	// Check lease validity
-	if !a.hasValidLease(lease.LeaseID(), m.clock.Now()) {
+	if !a.hasValidLease(lease.LeaseID(), p.clock.Now()) {
 		return components.ErrNoAlarm
 	}
 
@@ -469,20 +508,27 @@ func (m *MemoryProvider) ReleaseAlarmLease(ctx context.Context, lease *ref.Alarm
 	a.leaseID = nil
 	a.leaseExpiration = nil
 
+	// Persist changes
+	changes := newChanges()
+	changes.Alarms.Update[a.id] = a
+	if err := p.persistHook.PersistChanges(ctx, changes); err != nil {
+		return err
+	}
+
 	return nil
 }
 
-func (m *MemoryProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.AlarmLease, req components.UpdateLeasedAlarmReq) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func (p *provider) UpdateLeasedAlarm(ctx context.Context, lease *ref.AlarmLease, req components.UpdateLeasedAlarmReq) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	a, ok := m.alarmsByID[lease.Key()]
+	a, ok := p.alarmsByID[lease.Key()]
 	if !ok {
 		return components.ErrNoAlarm
 	}
 
 	// Check lease validity
-	now := m.clock.Now()
+	now := p.clock.Now()
 	if !a.hasValidLease(lease.LeaseID(), now) {
 		return components.ErrNoAlarm
 	}
@@ -493,33 +539,47 @@ func (m *MemoryProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Alarm
 	// Handle lease
 	if req.RefreshLease {
 		// Refresh the lease
-		a.leaseExpiration = ptr.Of(now.Add(m.cfg.AlarmsLeaseDuration))
+		a.leaseExpiration = ptr.Of(now.Add(p.cfg.AlarmsLeaseDuration))
 	} else {
 		// Release the lease
 		a.leaseID = nil
 		a.leaseExpiration = nil
 	}
 
+	// Persist changes
+	changes := newChanges()
+	changes.Alarms.Update[a.id] = a
+	if err := p.persistHook.PersistChanges(ctx, changes); err != nil {
+		return err
+	}
+
 	return nil
 }
 
-func (m *MemoryProvider) DeleteLeasedAlarm(ctx context.Context, lease *ref.AlarmLease) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func (p *provider) DeleteLeasedAlarm(ctx context.Context, lease *ref.AlarmLease) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
-	a, ok := m.alarmsByID[lease.Key()]
+	a, ok := p.alarmsByID[lease.Key()]
 	if !ok {
 		return components.ErrNoAlarm
 	}
 
 	// Check lease validity
-	if !a.hasValidLease(lease.LeaseID(), m.clock.Now()) {
+	if !a.hasValidLease(lease.LeaseID(), p.clock.Now()) {
 		return components.ErrNoAlarm
 	}
 
 	// Delete the alarm
-	delete(m.alarms, a.alarmKey())
-	delete(m.alarmsByID, a.id)
+	delete(p.alarms, a.alarmKey())
+	delete(p.alarmsByID, a.id)
+
+	// Persist changes
+	changes := newChanges()
+	changes.Alarms.Delete = append(changes.Alarms.Delete, a.id)
+	if err := p.persistHook.PersistChanges(ctx, changes); err != nil {
+		return err
+	}
 
 	return nil
 }

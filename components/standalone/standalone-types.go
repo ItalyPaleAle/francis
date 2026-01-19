@@ -1,4 +1,4 @@
-package memory
+package standalone
 
 import (
 	"slices"
@@ -102,4 +102,10 @@ type alarmProperties struct {
 type stateEntry struct {
 	data       []byte
 	expiration *time.Time
+}
+
+// hostActorTypeKey uniquely identifies a host actor type.
+type hostActorTypeKey struct {
+	hostID    string
+	actorType string
 }
