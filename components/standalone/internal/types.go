@@ -3,6 +3,8 @@ package internal
 import (
 	"slices"
 	"time"
+
+	"github.com/italypaleale/francis/internal/ptr"
 )
 
 type Host struct {
@@ -11,11 +13,30 @@ type Host struct {
 	LastHealthCheck time.Time
 }
 
+// Clone creates a deep copy of the Host.
+func (h *Host) Clone() *Host {
+	return &Host{
+		ID:              h.ID,
+		Address:         h.Address,
+		LastHealthCheck: h.LastHealthCheck,
+	}
+}
+
 type HostActorType struct {
 	HostID           string
 	ActorType        string
 	IdleTimeout      time.Duration
 	ConcurrencyLimit int32
+}
+
+// Clone creates a deep copy of the HostActorType.
+func (h *HostActorType) Clone() *HostActorType {
+	return &HostActorType{
+		HostID:           h.HostID,
+		ActorType:        h.ActorType,
+		IdleTimeout:      h.IdleTimeout,
+		ConcurrencyLimit: h.ConcurrencyLimit,
+	}
 }
 
 type ActorKey struct {
@@ -36,6 +57,17 @@ type ActiveActor struct {
 	HostID      string
 	IdleTimeout time.Duration
 	Activation  time.Time
+}
+
+// Clone creates a deep copy of the ActiveActor.
+func (a *ActiveActor) Clone() *ActiveActor {
+	return &ActiveActor{
+		ActorType:   a.ActorType,
+		ActorID:     a.ActorID,
+		HostID:      a.HostID,
+		IdleTimeout: a.IdleTimeout,
+		Activation:  a.Activation,
+	}
 }
 
 type AlarmKey struct {
@@ -92,6 +124,32 @@ func (a *Alarm) HasValidLease(leaseID any, now time.Time) bool {
 	return a.LeaseID != nil && *a.LeaseID == leaseID && a.LeaseExpiration != nil && !a.LeaseExpiration.Before(now)
 }
 
+// Clone creates a deep copy of the Alarm.
+func (a *Alarm) Clone() *Alarm {
+	clone := &Alarm{
+		ID:        a.ID,
+		ActorType: a.ActorType,
+		ActorID:   a.ActorID,
+		Name:      a.Name,
+		DueTime:   a.DueTime,
+		Interval:  a.Interval,
+	}
+	if a.TTL != nil {
+		clone.TTL = ptr.Of(*a.TTL)
+	}
+	if a.Data != nil {
+		clone.Data = make([]byte, len(a.Data))
+		copy(clone.Data, a.Data)
+	}
+	if a.LeaseID != nil {
+		clone.LeaseID = ptr.Of(*a.LeaseID)
+	}
+	if a.LeaseExpiration != nil {
+		clone.LeaseExpiration = ptr.Of(*a.LeaseExpiration)
+	}
+	return clone
+}
+
 type AlarmProperties struct {
 	DueTime  time.Time
 	Interval string
@@ -107,6 +165,19 @@ type StateEntry struct {
 // IsExpired returns true if the state has an expiration and it's in the past
 func (s *StateEntry) IsExpired(now time.Time) bool {
 	return s.Expiration != nil && now.After(*s.Expiration)
+}
+
+// Clone creates a deep copy of the StateEntry.
+func (s *StateEntry) Clone() *StateEntry {
+	clone := &StateEntry{}
+	if s.Data != nil {
+		clone.Data = make([]byte, len(s.Data))
+		copy(clone.Data, s.Data)
+	}
+	if s.Expiration != nil {
+		clone.Expiration = ptr.Of(*s.Expiration)
+	}
+	return clone
 }
 
 // HostActorTypeKey uniquely identifies a host actor type.

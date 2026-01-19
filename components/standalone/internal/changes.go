@@ -101,6 +101,73 @@ func (c *Changes) IsEmpty() bool {
 		len(c.ActorState.Delete) == 0
 }
 
+// Clone creates a deep clone of the Changes struct.
+func (c *Changes) Clone() *Changes {
+	clone := &Changes{}
+
+	// Clone Hosts
+	if len(c.Hosts.Set) > 0 {
+		clone.Hosts.Set = make([]HostChange, len(c.Hosts.Set))
+		for i, hc := range c.Hosts.Set {
+			clone.Hosts.Set[i] = HostChange{Key: hc.Key, Value: hc.Value.Clone()}
+		}
+	}
+	if len(c.Hosts.Delete) > 0 {
+		clone.Hosts.Delete = make([]string, len(c.Hosts.Delete))
+		copy(clone.Hosts.Delete, c.Hosts.Delete)
+	}
+
+	// Clone HostActorTypes
+	if len(c.HostActorTypes.Set) > 0 {
+		clone.HostActorTypes.Set = make([]*HostActorType, len(c.HostActorTypes.Set))
+		for i, hat := range c.HostActorTypes.Set {
+			clone.HostActorTypes.Set[i] = hat.Clone()
+		}
+	}
+	if len(c.HostActorTypes.Delete) > 0 {
+		clone.HostActorTypes.Delete = make([]HostActorTypeKey, len(c.HostActorTypes.Delete))
+		copy(clone.HostActorTypes.Delete, c.HostActorTypes.Delete)
+	}
+
+	// Clone ActiveActors
+	if len(c.ActiveActors.Set) > 0 {
+		clone.ActiveActors.Set = make([]ActiveActorChange, len(c.ActiveActors.Set))
+		for i, aac := range c.ActiveActors.Set {
+			clone.ActiveActors.Set[i] = ActiveActorChange{Key: aac.Key, Value: aac.Value.Clone()}
+		}
+	}
+	if len(c.ActiveActors.Delete) > 0 {
+		clone.ActiveActors.Delete = make([]ActorKey, len(c.ActiveActors.Delete))
+		copy(clone.ActiveActors.Delete, c.ActiveActors.Delete)
+	}
+
+	// Clone Alarms
+	if len(c.Alarms.Set) > 0 {
+		clone.Alarms.Set = make([]AlarmChange, len(c.Alarms.Set))
+		for i, ac := range c.Alarms.Set {
+			clone.Alarms.Set[i] = AlarmChange{Key: ac.Key, Value: ac.Value.Clone()}
+		}
+	}
+	if len(c.Alarms.Delete) > 0 {
+		clone.Alarms.Delete = make([]string, len(c.Alarms.Delete))
+		copy(clone.Alarms.Delete, c.Alarms.Delete)
+	}
+
+	// Clone ActorState
+	if len(c.ActorState.Set) > 0 {
+		clone.ActorState.Set = make([]ActorStateChange, len(c.ActorState.Set))
+		for i, asc := range c.ActorState.Set {
+			clone.ActorState.Set[i] = ActorStateChange{Key: asc.Key, Value: asc.Value.Clone()}
+		}
+	}
+	if len(c.ActorState.Delete) > 0 {
+		clone.ActorState.Delete = make([]ActorKey, len(c.ActorState.Delete))
+		copy(clone.ActorState.Delete, c.ActorState.Delete)
+	}
+
+	return clone
+}
+
 // PersistHook is called after each operation to persist changes to the backing store.
 type PersistHook interface {
 	// PersistChanges persists the given changes to the backing store.
