@@ -50,11 +50,8 @@ func (p *Provider) SetState(ctx context.Context, r ref.ActorRef, data []byte, op
 
 	// Persist changes
 	changes := NewChanges()
-	if exists {
-		changes.ActorState.Update[key] = entry
-	} else {
-		changes.ActorState.Create[key] = entry
-	}
+	defer changes.Release()
+	changes.ActorState.Set = append(changes.ActorState.Set, ActorStateChange{Key: key, Value: entry})
 	err := p.PersistHook.PersistChanges(ctx, changes)
 	if err != nil {
 		// Rollback
@@ -89,6 +86,7 @@ func (p *Provider) DeleteState(ctx context.Context, r ref.ActorRef) error {
 		changes := NewChanges()
 		changes.ActorState.Delete = append(changes.ActorState.Delete, key)
 		err := p.PersistHook.PersistChanges(ctx, changes)
+		changes.Release()
 		if err != nil {
 			// Only log the error here, the expired state isn't returned anyways
 			p.Log.WarnContext(ctx, "Error while persisting removal of expired state in DeleteState", slog.Any("error", err))
@@ -101,6 +99,7 @@ func (p *Provider) DeleteState(ctx context.Context, r ref.ActorRef) error {
 
 	// Persist changes
 	changes := NewChanges()
+	defer changes.Release()
 	changes.ActorState.Delete = append(changes.ActorState.Delete, key)
 	err := p.PersistHook.PersistChanges(ctx, changes)
 	if err != nil {

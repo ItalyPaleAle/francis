@@ -18,9 +18,10 @@ func (p *Provider) RegisterHost(ctx context.Context, req components.RegisterHost
 	defer p.Mu.Unlock()
 
 	changes := NewChanges()
+	defer changes.Release()
 
 	// Clean up unhealthy hosts first
-	p.CleanupUnhealthyHosts(changes)
+	cleanupRollback := p.CleanupUnhealthyHosts(changes)
 
 	// Check if there's already a healthy host at this address
 	existingHostID, ok := p.HostsByAddress[req.Address]
@@ -48,7 +49,7 @@ func (p *Provider) RegisterHost(ctx context.Context, req components.RegisterHost
 
 	p.Hosts[hostID] = h
 	p.HostsByAddress[req.Address] = hostID
-	changes.Hosts.Create = append(changes.Hosts.Create, h)
+	changes.Hosts.Set = append(changes.Hosts.Set, HostChange{Key: hostID, Value: h})
 
 	// Add actor types
 	if len(req.ActorTypes) > 0 {
@@ -61,17 +62,20 @@ func (p *Provider) RegisterHost(ctx context.Context, req components.RegisterHost
 				ConcurrencyLimit: at.ConcurrencyLimit,
 			}
 			p.HostActorTypes[hostID][i] = hat
-			changes.HostActorTypes.Create = append(changes.HostActorTypes.Create, hat)
+			changes.HostActorTypes.Set = append(changes.HostActorTypes.Set, hat)
 		}
 	}
 
 	// Persist changes
 	err = p.PersistHook.PersistChanges(ctx, changes)
 	if err != nil {
-		// Rollback in-memory changes
+		// Rollback in-memory changes for the new host
 		delete(p.Hosts, hostID)
 		delete(p.HostsByAddress, req.Address)
 		delete(p.HostActorTypes, hostID)
+
+		// Rollback cleanup changes
+		cleanupRollback()
 
 		return components.RegisterHostRes{}, fmt.Errorf("error persisting changes: %w", err)
 	}
@@ -94,13 +98,14 @@ func (p *Provider) UpdateActorHost(ctx context.Context, hostID string, req compo
 	}
 
 	changes := NewChanges()
+	defer changes.Release()
 
 	// Update last health check if requested
 	var rollbackHealthCheck time.Time
 	if req.UpdateLastHealthCheck {
 		rollbackHealthCheck = h.LastHealthCheck
 		h.LastHealthCheck = p.Clock.Now()
-		changes.Hosts.Update[hostID] = h
+		changes.Hosts.Set = append(changes.Hosts.Set, HostChange{Key: hostID, Value: h})
 	}
 
 	// Update actor types if provided (non-nil)
@@ -125,7 +130,7 @@ func (p *Provider) UpdateActorHost(ctx context.Context, hostID string, req compo
 				ConcurrencyLimit: at.ConcurrencyLimit,
 			}
 			p.HostActorTypes[hostID][i] = hat
-			changes.HostActorTypes.Create = append(changes.HostActorTypes.Create, hat)
+			changes.HostActorTypes.Set = append(changes.HostActorTypes.Set, hat)
 		}
 	}
 
@@ -155,6 +160,11 @@ func (p *Provider) UnregisterHost(ctx context.Context, hostID string) error {
 	wasHealthy := p.IsHostHealthy(h)
 
 	changes := NewChanges()
+	defer changes.Release()
+
+	// Track deleted data for rollback
+	deletedHostActorTypes := p.HostActorTypes[hostID]
+	deletedActiveActors := make(map[ActorKey]*ActiveActor)
 
 	// Remove the host and all associated data
 	delete(p.HostsByAddress, h.Address)
@@ -176,6 +186,7 @@ func (p *Provider) UnregisterHost(ctx context.Context, hostID string) error {
 			continue
 		}
 
+		deletedActiveActors[key] = actor
 		delete(p.ActiveActors, key)
 		changes.ActiveActors.Delete = append(changes.ActiveActors.Delete, key)
 	}
@@ -183,7 +194,13 @@ func (p *Provider) UnregisterHost(ctx context.Context, hostID string) error {
 	// Persist changes
 	err := p.PersistHook.PersistChanges(ctx, changes)
 	if err != nil {
-		// TODO: Implement rollback
+		// Rollback
+		p.Hosts[hostID] = h
+		p.HostsByAddress[h.Address] = hostID
+		p.HostActorTypes[hostID] = deletedHostActorTypes
+		for key, actor := range deletedActiveActors {
+			p.ActiveActors[key] = actor
+		}
 
 		return fmt.Errorf("error persisting changes: %w", err)
 	}
@@ -243,7 +260,8 @@ func (p *Provider) LookupActor(ctx context.Context, r ref.ActorRef, opts compone
 
 	// Persist changes
 	changes := NewChanges()
-	changes.ActiveActors.Create = append(changes.ActiveActors.Create, newActor)
+	defer changes.Release()
+	changes.ActiveActors.Set = append(changes.ActiveActors.Set, ActiveActorChange{Key: key, Value: newActor})
 	err := p.PersistHook.PersistChanges(ctx, changes)
 	if err != nil {
 		// Rollback
@@ -354,6 +372,7 @@ func (p *Provider) RemoveActor(ctx context.Context, r ref.ActorRef) error {
 	}
 
 	changes := NewChanges()
+	defer changes.Release()
 
 	delete(p.ActiveActors, key)
 	changes.ActiveActors.Delete = append(changes.ActiveActors.Delete, key)
@@ -375,7 +394,7 @@ func (p *Provider) RemoveActor(ctx context.Context, r ref.ActorRef) error {
 			rollbackLeases[k] = rollbackLease{LeaseID: a.LeaseID, LeaseExpiration: a.LeaseExpiration}
 			a.LeaseID = nil
 			a.LeaseExpiration = nil
-			changes.Alarms.Update[a.ID] = a
+			changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: a.ID, Value: a})
 		}
 	}
 

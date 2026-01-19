@@ -17,6 +17,7 @@ import (
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/standalone/internal"
+	"github.com/italypaleale/francis/internal/ptr"
 )
 
 //go:embed migrations/sqlite/*.sql
@@ -268,9 +269,10 @@ func (s *StandaloneSQLiteBacked) loadActiveActors(ctx context.Context) error {
 
 func (s *StandaloneSQLiteBacked) loadAlarms(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
-		       alarm_interval, alarm_ttl_time, alarm_data,
-		       alarm_lease_id, alarm_lease_expiration_time
+		SELECT
+			alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
+			alarm_interval, alarm_ttl_time, alarm_data,
+			alarm_lease_id, alarm_lease_expiration_time
 		FROM alarms
 	`)
 	if err != nil {
@@ -302,8 +304,7 @@ func (s *StandaloneSQLiteBacked) loadAlarms(ctx context.Context) error {
 			a.Interval = interval.String
 		}
 		if ttlMs.Valid {
-			t := time.UnixMilli(ttlMs.Int64)
-			a.TTL = &t
+			a.TTL = ptr.Of(time.UnixMilli(ttlMs.Int64))
 		}
 		if len(data) > 0 {
 			a.Data = data
@@ -312,8 +313,7 @@ func (s *StandaloneSQLiteBacked) loadAlarms(ctx context.Context) error {
 			a.LeaseID = &leaseID.String
 		}
 		if leaseExpMs.Valid {
-			t := time.UnixMilli(leaseExpMs.Int64)
-			a.LeaseExpiration = &t
+			a.LeaseExpiration = ptr.Of(time.UnixMilli(leaseExpMs.Int64))
 		}
 
 		key := internal.NewAlarmKey(a.ActorType, a.ActorID, a.Name)
@@ -371,7 +371,11 @@ func (s *StandaloneSQLiteBacked) PersistChanges(ctx context.Context, changes *in
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
+	var committed bool
 	defer func() {
+		if committed {
+			return
+		}
 		rollbackErr := tx.Rollback()
 		if rollbackErr != nil {
 			s.log.WarnContext(ctx, "Error while rolling back transaction", slog.Any("error", rollbackErr))
@@ -412,6 +416,7 @@ func (s *StandaloneSQLiteBacked) PersistChanges(ctx context.Context, changes *in
 	if err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
+	committed = true
 
 	return nil
 }
@@ -425,25 +430,15 @@ func (s *StandaloneSQLiteBacked) persistHostChanges(ctx context.Context, tx *sql
 		}
 	}
 
-	// Creates
-	for _, h := range changes.Hosts.Create {
+	// Upserts
+	for _, hc := range changes.Hosts.Set {
+		h := hc.Value
 		_, err := tx.ExecContext(ctx,
-			"INSERT INTO hosts (host_id, host_address, host_last_health_check) VALUES (?, ?, ?)",
+			`REPLACE INTO hosts (host_id, host_address, host_last_health_check) VALUES (?, ?, ?)`,
 			h.ID, h.Address, h.LastHealthCheck.UnixMilli(),
 		)
 		if err != nil {
-			return fmt.Errorf("failed to insert host %s: %w", h.ID, err)
-		}
-	}
-
-	// Updates
-	for _, h := range changes.Hosts.Update {
-		_, err := tx.ExecContext(ctx,
-			"UPDATE hosts SET host_address = ?, host_last_health_check = ? WHERE host_id = ?",
-			h.Address, h.LastHealthCheck.UnixMilli(), h.ID,
-		)
-		if err != nil {
-			return fmt.Errorf("failed to update host %s: %w", h.ID, err)
+			return fmt.Errorf("failed to upsert host %s: %w", h.ID, err)
 		}
 	}
 
@@ -462,14 +457,14 @@ func (s *StandaloneSQLiteBacked) persistHostActorTypeChanges(ctx context.Context
 		}
 	}
 
-	// Creates
-	for _, hat := range changes.HostActorTypes.Create {
+	// Upserts
+	for _, hat := range changes.HostActorTypes.Set {
 		_, err := tx.ExecContext(ctx,
-			"INSERT INTO host_actor_types (host_id, actor_type, actor_idle_timeout, actor_concurrency_limit) VALUES (?, ?, ?, ?)",
+			`REPLACE INTO host_actor_types (host_id, actor_type, actor_idle_timeout, actor_concurrency_limit) VALUES (?, ?, ?, ?)`,
 			hat.HostID, hat.ActorType, hat.IdleTimeout.Milliseconds(), hat.ConcurrencyLimit,
 		)
 		if err != nil {
-			return fmt.Errorf("failed to insert host actor type: %w", err)
+			return fmt.Errorf("failed to upsert host actor type: %w", err)
 		}
 	}
 
@@ -488,25 +483,15 @@ func (s *StandaloneSQLiteBacked) persistActiveActorChanges(ctx context.Context, 
 		}
 	}
 
-	// Creates
-	for _, aa := range changes.ActiveActors.Create {
+	// Upserts
+	for _, aac := range changes.ActiveActors.Set {
+		aa := aac.Value
 		_, err := tx.ExecContext(ctx,
-			"INSERT INTO active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation) VALUES (?, ?, ?, ?, ?)",
+			`REPLACE INTO active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation) VALUES (?, ?, ?, ?, ?)`,
 			aa.ActorType, aa.ActorID, aa.HostID, aa.IdleTimeout.Milliseconds(), aa.Activation.UnixMilli(),
 		)
 		if err != nil {
-			return fmt.Errorf("failed to insert active actor: %w", err)
-		}
-	}
-
-	// Updates
-	for _, aa := range changes.ActiveActors.Update {
-		_, err := tx.ExecContext(ctx,
-			"UPDATE active_actors SET host_id = ?, actor_idle_timeout = ?, actor_activation = ? WHERE actor_type = ? AND actor_id = ?",
-			aa.HostID, aa.IdleTimeout.Milliseconds(), aa.Activation.UnixMilli(), aa.ActorType, aa.ActorID,
-		)
-		if err != nil {
-			return fmt.Errorf("failed to update active actor: %w", err)
+			return fmt.Errorf("failed to upsert active actor: %w", err)
 		}
 	}
 
@@ -522,8 +507,9 @@ func (s *StandaloneSQLiteBacked) persistAlarmChanges(ctx context.Context, tx *sq
 		}
 	}
 
-	// Creates
-	for _, a := range changes.Alarms.Create {
+	// Upserts
+	for _, ac := range changes.Alarms.Set {
+		a := ac.Value
 		var (
 			intervalVal, leaseIDVal any
 			ttlVal, leaseExpVal     any
@@ -543,50 +529,16 @@ func (s *StandaloneSQLiteBacked) persistAlarmChanges(ctx context.Context, tx *sq
 		}
 
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO alarms (
+			`REPLACE INTO alarms (
 				alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
 			    alarm_interval, alarm_ttl_time, alarm_data,
 			    alarm_lease_id, alarm_lease_expiration_time
-			)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			a.ID, a.ActorType, a.ActorID, a.Name, a.DueTime.UnixMilli(),
 			intervalVal, ttlVal, a.Data, leaseIDVal, leaseExpVal,
 		)
 		if err != nil {
-			return fmt.Errorf("failed to insert alarm %s: %w", a.ID, err)
-		}
-	}
-
-	// Updates
-	for _, a := range changes.Alarms.Update {
-		var (
-			intervalVal, leaseIDVal any
-			ttlVal, leaseExpVal     any
-		)
-
-		if a.Interval != "" {
-			intervalVal = a.Interval
-		}
-		if a.TTL != nil {
-			ttlVal = a.TTL.UnixMilli()
-		}
-		if a.LeaseID != nil {
-			leaseIDVal = *a.LeaseID
-		}
-		if a.LeaseExpiration != nil {
-			leaseExpVal = a.LeaseExpiration.UnixMilli()
-		}
-
-		_, err := tx.ExecContext(ctx,
-			`UPDATE alarms SET
-				actor_type = ?, actor_id = ?, alarm_name = ?, alarm_due_time = ?,
-			    alarm_interval = ?, alarm_ttl_time = ?, alarm_data = ?,
-			    alarm_lease_id = ?, alarm_lease_expiration_time = ?
-			WHERE alarm_id = ?`,
-			a.ActorType, a.ActorID, a.Name, a.DueTime.UnixMilli(),
-			intervalVal, ttlVal, a.Data, leaseIDVal, leaseExpVal, a.ID)
-		if err != nil {
-			return fmt.Errorf("failed to update alarm %s: %w", a.ID, err)
+			return fmt.Errorf("failed to upsert alarm %s: %w", a.ID, err)
 		}
 	}
 
@@ -605,35 +557,21 @@ func (s *StandaloneSQLiteBacked) persistActorStateChanges(ctx context.Context, t
 		}
 	}
 
-	// Creates
-	for key, entry := range changes.ActorState.Create {
+	// Upserts
+	for _, asc := range changes.ActorState.Set {
+		key := asc.Key
+		entry := asc.Value
 		var expVal any
 		if entry.Expiration != nil {
 			expVal = entry.Expiration.UnixMilli()
 		}
 
 		_, err := tx.ExecContext(ctx,
-			"INSERT INTO actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time) VALUES (?, ?, ?, ?)",
+			`REPLACE INTO actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time) VALUES (?, ?, ?, ?)`,
 			key.ActorType, key.ActorID, entry.Data, expVal,
 		)
 		if err != nil {
-			return fmt.Errorf("failed to insert actor state: %w", err)
-		}
-	}
-
-	// Updates
-	for key, entry := range changes.ActorState.Update {
-		var expVal any
-		if entry.Expiration != nil {
-			expVal = entry.Expiration.UnixMilli()
-		}
-
-		_, err := tx.ExecContext(ctx,
-			"UPDATE actor_state SET actor_state_data = ?, actor_state_expiration_time = ? WHERE actor_type = ? AND actor_id = ?",
-			entry.Data, expVal, key.ActorType, key.ActorID,
-		)
-		if err != nil {
-			return fmt.Errorf("failed to update actor state: %w", err)
+			return fmt.Errorf("failed to upsert actor state: %w", err)
 		}
 	}
 

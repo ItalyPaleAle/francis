@@ -45,6 +45,7 @@ func (p *Provider) SetAlarm(ctx context.Context, aRef ref.AlarmRef, req componen
 	defer p.Mu.Unlock()
 
 	changes := NewChanges()
+	defer changes.Release()
 
 	// Check if alarm already exists with same properties (to avoid resetting leases unnecessarily)
 	existing, ok := p.Alarms[key]
@@ -94,14 +95,19 @@ func (p *Provider) SetAlarm(ctx context.Context, aRef ref.AlarmRef, req componen
 
 	p.Alarms[key] = a
 	p.AlarmsByID[alarmID] = a
-	changes.Alarms.Create = append(changes.Alarms.Create, a)
+	changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: alarmID, Value: a})
 
 	// Persist changes
 	err = p.PersistHook.PersistChanges(ctx, changes)
 	if err != nil {
 		// Rollback
-		p.Alarms[key] = existing
-		p.AlarmsByID[alarmID] = existing
+		if existing != nil {
+			p.Alarms[key] = existing
+			p.AlarmsByID[existing.ID] = existing
+		} else {
+			delete(p.Alarms, key)
+		}
+		delete(p.AlarmsByID, alarmID)
 
 		return fmt.Errorf("error persisting changes: %w", err)
 	}
@@ -121,6 +127,7 @@ func (p *Provider) DeleteAlarm(ctx context.Context, aRef ref.AlarmRef) error {
 	}
 
 	changes := NewChanges()
+	defer changes.Release()
 	changes.Alarms.Delete = append(changes.Alarms.Delete, a.ID)
 
 	delete(p.AlarmsByID, a.ID)
@@ -151,6 +158,7 @@ func (p *Provider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req componen
 	horizon := now.Add(p.Cfg.AlarmsFetchAheadInterval)
 
 	changes := NewChanges()
+	defer changes.Release()
 
 	// Get healthy hosts from the request list and build capacity info
 	type hostCapacity struct {
@@ -311,6 +319,19 @@ func (p *Provider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req componen
 	leaseExpiration := now.Add(p.Cfg.AlarmsLeaseDuration)
 	result := make([]*ref.AlarmLease, 0, len(candidates))
 
+	// Track changes for rollback
+	type actorRollback struct {
+		key           ActorKey
+		previousActor *ActiveActor // nil if actor was created
+	}
+	type alarmRollback struct {
+		alarm                   *Alarm
+		previousLeaseID         *string
+		previousLeaseExpiration *time.Time
+	}
+	actorRollbacks := make([]actorRollback, 0)
+	alarmRollbacks := make([]alarmRollback, 0)
+
 	for _, c := range candidates {
 		a := c.alarm
 
@@ -350,21 +371,30 @@ func (p *Provider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req componen
 					IdleTimeout: idleTimeout,
 					Activation:  activationTime,
 				}
-				p.ActiveActors[actKey] = newActor
 
+				// Track for rollback
 				if exists {
-					changes.ActiveActors.Update[actKey] = newActor
+					actorRollbacks = append(actorRollbacks, actorRollback{key: actKey, previousActor: existingActor})
 				} else {
-					changes.ActiveActors.Create = append(changes.ActiveActors.Create, newActor)
+					actorRollbacks = append(actorRollbacks, actorRollback{key: actKey, previousActor: nil})
 				}
+
+				p.ActiveActors[actKey] = newActor
+				changes.ActiveActors.Set = append(changes.ActiveActors.Set, ActiveActorChange{Key: actKey, Value: newActor})
 			}
 		}
 
 		// Acquire lease
+		alarmRollbacks = append(alarmRollbacks, alarmRollback{
+			alarm:                   a,
+			previousLeaseID:         a.LeaseID,
+			previousLeaseExpiration: a.LeaseExpiration,
+		})
+
 		leaseID := leaseIDPrefix + "_" + a.ID
 		a.LeaseID = &leaseID
 		a.LeaseExpiration = &leaseExpiration
-		changes.Alarms.Update[a.ID] = a
+		changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: a.ID, Value: a})
 
 		result = append(result, ref.NewAlarmLease(
 			ref.AlarmRef{
@@ -381,7 +411,19 @@ func (p *Provider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req componen
 	// Persist changes
 	err = p.PersistHook.PersistChanges(ctx, changes)
 	if err != nil {
-		// TODO: Implement rollback
+		// Rollback actors
+		for _, rb := range actorRollbacks {
+			if rb.previousActor != nil {
+				p.ActiveActors[rb.key] = rb.previousActor
+			} else {
+				delete(p.ActiveActors, rb.key)
+			}
+		}
+		// Rollback alarm leases
+		for _, rb := range alarmRollbacks {
+			rb.alarm.LeaseID = rb.previousLeaseID
+			rb.alarm.LeaseExpiration = rb.previousLeaseExpiration
+		}
 
 		return nil, fmt.Errorf("error persisting changes: %w", err)
 	}
@@ -426,6 +468,7 @@ func (p *Provider) RenewAlarmLeases(ctx context.Context, req components.RenewAla
 	expTime := now.Add(p.Cfg.AlarmsLeaseDuration)
 
 	changes := NewChanges()
+	defer changes.Release()
 	renewedLeases := make([]*ref.AlarmLease, 0, len(p.Alarms))
 
 	// Build set of lease IDs to renew if specified
@@ -447,6 +490,13 @@ func (p *Provider) RenewAlarmLeases(ctx context.Context, req components.RenewAla
 	for _, h := range req.Hosts {
 		hostIDSet[h] = struct{}{}
 	}
+
+	// Track changes for rollback
+	type leaseRollback struct {
+		alarm              *Alarm
+		previousExpiration *time.Time
+	}
+	rollbacks := make([]leaseRollback, 0)
 
 	for _, a := range p.Alarms {
 		// Check if alarm has a valid lease
@@ -474,9 +524,12 @@ func (p *Provider) RenewAlarmLeases(ctx context.Context, req components.RenewAla
 			continue
 		}
 
+		// Track for rollback
+		rollbacks = append(rollbacks, leaseRollback{alarm: a, previousExpiration: a.LeaseExpiration})
+
 		// Renew the lease
 		a.LeaseExpiration = &expTime
-		changes.Alarms.Update[a.ID] = a
+		changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: a.ID, Value: a})
 
 		renewedLeases = append(renewedLeases, ref.NewAlarmLease(
 			ref.AlarmRef{
@@ -494,7 +547,10 @@ func (p *Provider) RenewAlarmLeases(ctx context.Context, req components.RenewAla
 	if !changes.IsEmpty() {
 		err := p.PersistHook.PersistChanges(ctx, changes)
 		if err != nil {
-			// TODO: Implement rollback
+			// Rollback
+			for _, rb := range rollbacks {
+				rb.alarm.LeaseExpiration = rb.previousExpiration
+			}
 
 			return components.RenewAlarmLeasesRes{}, fmt.Errorf("error persisting changes: %w", err)
 		}
@@ -525,7 +581,8 @@ func (p *Provider) ReleaseAlarmLease(ctx context.Context, lease *ref.AlarmLease)
 
 	// Persist changes
 	changes := NewChanges()
-	changes.Alarms.Update[a.ID] = a
+	defer changes.Release()
+	changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: a.ID, Value: a})
 	err := p.PersistHook.PersistChanges(ctx, changes)
 	if err != nil {
 		// Rollback
@@ -571,7 +628,8 @@ func (p *Provider) UpdateLeasedAlarm(ctx context.Context, lease *ref.AlarmLease,
 
 	// Persist changes
 	changes := NewChanges()
-	changes.Alarms.Update[a.ID] = a
+	defer changes.Release()
+	changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: a.ID, Value: a})
 	err := p.PersistHook.PersistChanges(ctx, changes)
 	if err != nil {
 		// Rollback
@@ -605,6 +663,7 @@ func (p *Provider) DeleteLeasedAlarm(ctx context.Context, lease *ref.AlarmLease)
 
 	// Persist changes
 	changes := NewChanges()
+	defer changes.Release()
 	changes.Alarms.Delete = append(changes.Alarms.Delete, a.ID)
 	err := p.PersistHook.PersistChanges(ctx, changes)
 	if err != nil {

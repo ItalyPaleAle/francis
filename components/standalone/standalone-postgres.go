@@ -264,9 +264,10 @@ func (s *StandalonePostgresBacked) loadActiveActors(ctx context.Context) error {
 
 func (s *StandalonePostgresBacked) loadAlarms(ctx context.Context) error {
 	rows, err := s.db.Query(ctx, `
-		SELECT alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
-		       alarm_interval, alarm_ttl_time, alarm_data,
-		       alarm_lease_id, alarm_lease_expiration_time
+		SELECT
+			alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
+			alarm_interval, alarm_ttl_time, alarm_data,
+			alarm_lease_id, alarm_lease_expiration_time
 		FROM alarms
 	`)
 	if err != nil {
@@ -360,7 +361,11 @@ func (s *StandalonePostgresBacked) PersistChanges(ctx context.Context, changes *
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
+	var committed bool
 	defer func() {
+		if committed {
+			return
+		}
 		rollbackCtx, rollbackCancel := context.WithTimeout(ctx, s.timeout)
 		rollbackErr := tx.Rollback(rollbackCtx)
 		rollbackCancel()
@@ -403,6 +408,7 @@ func (s *StandalonePostgresBacked) PersistChanges(ctx context.Context, changes *
 	if err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
+	committed = true
 
 	return nil
 }
@@ -416,25 +422,19 @@ func (s *StandalonePostgresBacked) persistHostChanges(ctx context.Context, tx pg
 		}
 	}
 
-	// Creates
-	for _, h := range changes.Hosts.Create {
+	// Upserts
+	for _, hc := range changes.Hosts.Set {
+		h := hc.Value
 		_, err := tx.Exec(ctx,
-			"INSERT INTO hosts (host_id, host_address, host_last_health_check) VALUES ($1, $2, $3)",
+			`INSERT INTO hosts (host_id, host_address, host_last_health_check)
+			VALUES ($1, $2, $3)
+			ON CONFLICT(host_id) DO UPDATE SET
+				host_address = EXCLUDED.host_address,
+				host_last_health_check = EXCLUDED.host_last_health_check`,
 			h.ID, h.Address, h.LastHealthCheck.UTC(),
 		)
 		if err != nil {
-			return fmt.Errorf("failed to insert host %s: %w", h.ID, err)
-		}
-	}
-
-	// Updates
-	for _, h := range changes.Hosts.Update {
-		_, err := tx.Exec(ctx,
-			"UPDATE hosts SET host_address = $1, host_last_health_check = $2 WHERE host_id = $3",
-			h.Address, h.LastHealthCheck.UTC(), h.ID,
-		)
-		if err != nil {
-			return fmt.Errorf("failed to update host %s: %w", h.ID, err)
+			return fmt.Errorf("failed to upsert host %s: %w", h.ID, err)
 		}
 	}
 
@@ -453,14 +453,18 @@ func (s *StandalonePostgresBacked) persistHostActorTypeChanges(ctx context.Conte
 		}
 	}
 
-	// Creates
-	for _, hat := range changes.HostActorTypes.Create {
+	// Upserts
+	for _, hat := range changes.HostActorTypes.Set {
 		_, err := tx.Exec(ctx,
-			"INSERT INTO host_actor_types (host_id, actor_type, actor_idle_timeout, actor_concurrency_limit) VALUES ($1, $2, $3, $4)",
+			`INSERT INTO host_actor_types (host_id, actor_type, actor_idle_timeout, actor_concurrency_limit)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT(host_id, actor_type) DO UPDATE SET
+				actor_idle_timeout = EXCLUDED.actor_idle_timeout,
+				actor_concurrency_limit = EXCLUDED.actor_concurrency_limit`,
 			hat.HostID, hat.ActorType, hat.IdleTimeout.Milliseconds(), hat.ConcurrencyLimit,
 		)
 		if err != nil {
-			return fmt.Errorf("failed to insert host actor type: %w", err)
+			return fmt.Errorf("failed to upsert host actor type: %w", err)
 		}
 	}
 
@@ -479,25 +483,20 @@ func (s *StandalonePostgresBacked) persistActiveActorChanges(ctx context.Context
 		}
 	}
 
-	// Creates
-	for _, aa := range changes.ActiveActors.Create {
+	// Upserts
+	for _, aac := range changes.ActiveActors.Set {
+		aa := aac.Value
 		_, err := tx.Exec(ctx,
-			"INSERT INTO active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation) VALUES ($1, $2, $3, $4, $5)",
+			`INSERT INTO active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT(actor_type, actor_id) DO UPDATE SET
+				host_id = EXCLUDED.host_id,
+				actor_idle_timeout = EXCLUDED.actor_idle_timeout,
+				actor_activation = EXCLUDED.actor_activation`,
 			aa.ActorType, aa.ActorID, aa.HostID, aa.IdleTimeout.Milliseconds(), aa.Activation.UTC(),
 		)
 		if err != nil {
-			return fmt.Errorf("failed to insert active actor: %w", err)
-		}
-	}
-
-	// Updates
-	for _, aa := range changes.ActiveActors.Update {
-		_, err := tx.Exec(ctx,
-			"UPDATE active_actors SET host_id = $1, actor_idle_timeout = $2, actor_activation = $3 WHERE actor_type = $4 AND actor_id = $5",
-			aa.HostID, aa.IdleTimeout.Milliseconds(), aa.Activation.UTC(), aa.ActorType, aa.ActorID,
-		)
-		if err != nil {
-			return fmt.Errorf("failed to update active actor: %w", err)
+			return fmt.Errorf("failed to upsert active actor: %w", err)
 		}
 	}
 
@@ -513,8 +512,9 @@ func (s *StandalonePostgresBacked) persistAlarmChanges(ctx context.Context, tx p
 		}
 	}
 
-	// Creates
-	for _, a := range changes.Alarms.Create {
+	// Upserts
+	for _, ac := range changes.Alarms.Set {
+		a := ac.Value
 		var (
 			intervalVal, leaseIDVal any
 			ttlVal, leaseExpVal     any
@@ -538,46 +538,22 @@ func (s *StandalonePostgresBacked) persistAlarmChanges(ctx context.Context, tx p
 				alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
 			    alarm_interval, alarm_ttl_time, alarm_data,
 			    alarm_lease_id, alarm_lease_expiration_time)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			ON CONFLICT(alarm_id) DO UPDATE SET
+				actor_type = EXCLUDED.actor_type,
+				actor_id = EXCLUDED.actor_id,
+				alarm_name = EXCLUDED.alarm_name,
+				alarm_due_time = EXCLUDED.alarm_due_time,
+			    alarm_interval = EXCLUDED.alarm_interval,
+				alarm_ttl_time = EXCLUDED.alarm_ttl_time,
+				alarm_data = EXCLUDED.alarm_data,
+			    alarm_lease_id = EXCLUDED.alarm_lease_id,
+				alarm_lease_expiration_time = EXCLUDED.alarm_lease_expiration_time`,
 			a.ID, a.ActorType, a.ActorID, a.Name, a.DueTime.UTC(),
 			intervalVal, ttlVal, a.Data, leaseIDVal, leaseExpVal,
 		)
 		if err != nil {
-			return fmt.Errorf("failed to insert alarm %s: %w", a.ID, err)
-		}
-	}
-
-	// Updates
-	for _, a := range changes.Alarms.Update {
-		var (
-			intervalVal, leaseIDVal any
-			ttlVal, leaseExpVal     any
-		)
-
-		if a.Interval != "" {
-			intervalVal = a.Interval
-		}
-		if a.TTL != nil {
-			ttlVal = a.TTL.UTC()
-		}
-		if a.LeaseID != nil {
-			leaseIDVal = *a.LeaseID
-		}
-		if a.LeaseExpiration != nil {
-			leaseExpVal = a.LeaseExpiration.UTC()
-		}
-
-		_, err := tx.Exec(ctx,
-			`UPDATE alarms SET
-				actor_type = $1, actor_id = $2, alarm_name = $3, alarm_due_time = $4,
-			    alarm_interval = $5, alarm_ttl_time = $6, alarm_data = $7,
-			    alarm_lease_id = $8, alarm_lease_expiration_time = $9
-			WHERE alarm_id = $10`,
-			a.ActorType, a.ActorID, a.Name, a.DueTime.UTC(),
-			intervalVal, ttlVal, a.Data, leaseIDVal, leaseExpVal, a.ID,
-		)
-		if err != nil {
-			return fmt.Errorf("failed to update alarm %s: %w", a.ID, err)
+			return fmt.Errorf("failed to upsert alarm %s: %w", a.ID, err)
 		}
 	}
 
@@ -596,35 +572,25 @@ func (s *StandalonePostgresBacked) persistActorStateChanges(ctx context.Context,
 		}
 	}
 
-	// Creates
-	for key, entry := range changes.ActorState.Create {
+	// Upserts
+	for _, asc := range changes.ActorState.Set {
+		key := asc.Key
+		entry := asc.Value
 		var expVal any
 		if entry.Expiration != nil {
 			expVal = entry.Expiration.UTC()
 		}
 
 		_, err := tx.Exec(ctx,
-			"INSERT INTO actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time) VALUES ($1, $2, $3, $4)",
+			`INSERT INTO actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT(actor_type, actor_id) DO UPDATE SET
+				actor_state_data = EXCLUDED.actor_state_data,
+				actor_state_expiration_time = EXCLUDED.actor_state_expiration_time`,
 			key.ActorType, key.ActorID, entry.Data, expVal,
 		)
 		if err != nil {
-			return fmt.Errorf("failed to insert actor state: %w", err)
-		}
-	}
-
-	// Updates
-	for key, entry := range changes.ActorState.Update {
-		var expVal any
-		if entry.Expiration != nil {
-			expVal = entry.Expiration.UTC()
-		}
-
-		_, err := tx.Exec(ctx,
-			"UPDATE actor_state SET actor_state_data = $1, actor_state_expiration_time = $2 WHERE actor_type = $3 AND actor_id = $4",
-			entry.Data, expVal, key.ActorType, key.ActorID,
-		)
-		if err != nil {
-			return fmt.Errorf("failed to update actor state: %w", err)
+			return fmt.Errorf("failed to upsert actor state: %w", err)
 		}
 	}
 

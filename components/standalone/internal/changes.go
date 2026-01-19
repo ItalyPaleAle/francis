@@ -2,91 +2,102 @@ package internal
 
 import (
 	"context"
+	"sync"
 )
+
+// changesPool is a pool of *Changes objects to reduce allocations.
+var changesPool = sync.Pool{
+	New: func() any {
+		return &Changes{}
+	},
+}
+
+// HostChange represents a host to be set (upserted).
+type HostChange struct {
+	Key   string // host_id
+	Value *Host
+}
+
+// ActiveActorChange represents an active actor to be set (upserted).
+type ActiveActorChange struct {
+	Key   ActorKey
+	Value *ActiveActor
+}
+
+// AlarmChange represents an alarm to be set (upserted).
+type AlarmChange struct {
+	Key   string // alarm_id
+	Value *Alarm
+}
+
+// ActorStateChange represents actor state to be set (upserted).
+type ActorStateChange struct {
+	Key   ActorKey
+	Value *StateEntry
+}
 
 // Changes represents all changes made during a single operation.
 // This is passed to the PersistHook to persist changes to the backing store.
+// Set operations perform upserts (insert or update).
 type Changes struct {
 	Hosts struct {
-		Create []*Host
-		Update map[string]*Host // host_id -> host
-		Delete []string         // host_ids to delete
+		Set    []HostChange // Upsert hosts
+		Delete []string     // host_ids to delete
 	}
 	HostActorTypes struct {
-		Create []*HostActorType
+		Set    []*HostActorType   // Upsert host actor types
 		Delete []HostActorTypeKey // Delete by host_id + actor_type
 	}
 	ActiveActors struct {
-		Create []*ActiveActor
-		Update map[ActorKey]*ActiveActor
+		Set    []ActiveActorChange // Upsert active actors
 		Delete []ActorKey
 	}
 	Alarms struct {
-		Create []*Alarm
-		Update map[string]*Alarm // alarm_id -> alarm
-		Delete []string          // alarm_ids to delete
+		Set    []AlarmChange // Upsert alarms
+		Delete []string      // alarm_ids to delete
 	}
 	ActorState struct {
-		Create map[ActorKey]*StateEntry
-		Update map[ActorKey]*StateEntry
+		Set    []ActorStateChange // Upsert actor state
 		Delete []ActorKey
 	}
 }
 
-// NewChanges creates a new empty Changes instance.
+// NewChanges returns a Changes instance from the pool.
+// Call Release() when done to return it to the pool.
 func NewChanges() *Changes {
-	return &Changes{
-		Hosts: struct {
-			Create []*Host
-			Update map[string]*Host
-			Delete []string
-		}{
-			Update: make(map[string]*Host),
-		},
-		HostActorTypes: struct {
-			Create []*HostActorType
-			Delete []HostActorTypeKey
-		}{},
-		ActiveActors: struct {
-			Create []*ActiveActor
-			Update map[ActorKey]*ActiveActor
-			Delete []ActorKey
-		}{
-			Update: make(map[ActorKey]*ActiveActor),
-		},
-		Alarms: struct {
-			Create []*Alarm
-			Update map[string]*Alarm
-			Delete []string
-		}{
-			Update: make(map[string]*Alarm),
-		},
-		ActorState: struct {
-			Create map[ActorKey]*StateEntry
-			Update map[ActorKey]*StateEntry
-			Delete []ActorKey
-		}{
-			Create: make(map[ActorKey]*StateEntry),
-			Update: make(map[ActorKey]*StateEntry),
-		},
-	}
+	//nolint:forcetypeassert
+	return changesPool.Get().(*Changes)
+}
+
+// Release returns the Changes to the pool after resetting all slices.
+// The Changes object should not be used after calling Release.
+func (c *Changes) Release() {
+	// Reset all slices to zero length but keep capacity
+	c.Hosts.Set = c.Hosts.Set[:0]
+	c.Hosts.Delete = c.Hosts.Delete[:0]
+	c.HostActorTypes.Set = c.HostActorTypes.Set[:0]
+	c.HostActorTypes.Delete = c.HostActorTypes.Delete[:0]
+	c.ActiveActors.Set = c.ActiveActors.Set[:0]
+	c.ActiveActors.Delete = c.ActiveActors.Delete[:0]
+	c.Alarms.Set = c.Alarms.Set[:0]
+	c.Alarms.Delete = c.Alarms.Delete[:0]
+	c.ActorState.Set = c.ActorState.Set[:0]
+	c.ActorState.Delete = c.ActorState.Delete[:0]
+
+	changesPool.Put(c)
 }
 
 // IsEmpty returns true if no changes have been recorded.
 func (c *Changes) IsEmpty() bool {
-	return len(c.Hosts.Create) == 0 &&
-		len(c.Hosts.Update) == 0 &&
+	return len(c.Hosts.Set) == 0 &&
 		len(c.Hosts.Delete) == 0 &&
-		len(c.HostActorTypes.Create) == 0 &&
+		len(c.HostActorTypes.Set) == 0 &&
 		len(c.HostActorTypes.Delete) == 0 &&
-		len(c.ActiveActors.Create) == 0 &&
-		len(c.ActiveActors.Update) == 0 &&
+		len(c.ActiveActors.Set) == 0 &&
 		len(c.ActiveActors.Delete) == 0 &&
-		len(c.Alarms.Create) == 0 &&
-		len(c.Alarms.Update) == 0 &&
+		len(c.Alarms.Set) == 0 &&
 		len(c.Alarms.Delete) == 0 &&
-		len(c.ActorState.Create) == 0 &&
-		len(c.ActorState.Update) == 0 &&
+		len(c.ActorState.Set) == 0 &&
 		len(c.ActorState.Delete) == 0
 }
 
