@@ -22,15 +22,15 @@ import (
 
 // Config represents the configuration file structure
 type Config struct {
-	Bind     string      `yaml:"bind"`
-	TLS      TLSConfig   `yaml:"tls"`
+	Bind     string         `yaml:"bind"`
+	TLS      TLSConfig      `yaml:"tls"`
 	Provider ProviderConfig `yaml:"provider"`
-	Log      LogConfig   `yaml:"log"`
+	Log      LogConfig      `yaml:"log"`
 
-	HealthCheckDeadline  string `yaml:"healthCheckDeadline"`
-	AlarmsPollInterval   string `yaml:"alarmsPollInterval"`
-	AlarmsLeaseDuration  string `yaml:"alarmsLeaseDuration"`
-	ShutdownGracePeriod  string `yaml:"shutdownGracePeriod"`
+	HealthCheckDeadline string `yaml:"healthCheckDeadline"`
+	AlarmsPollInterval  string `yaml:"alarmsPollInterval"`
+	AlarmsLeaseDuration string `yaml:"alarmsLeaseDuration"`
+	ShutdownGracePeriod string `yaml:"shutdownGracePeriod"`
 }
 
 // TLSConfig represents TLS configuration
@@ -139,11 +139,11 @@ func run(ctx context.Context, config *Config) error {
 	case "standalone-memory", "memory":
 		opts = append(opts, francis.WithStandaloneMemoryProvider())
 	case "standalone-sqlite":
-		opts = append(opts, francis.WithStandaloneSQLiteProvider(standalone.StandaloneSQLiteProviderOptions{
+		opts = append(opts, francis.WithStandaloneSQLiteProvider(standalone.StandaloneSQLiteOptions{
 			ConnectionString: config.Provider.ConnectionString,
 		}))
 	case "standalone-postgres":
-		opts = append(opts, francis.WithStandalonePostgresProvider(standalone.StandalonePostgresProviderOptions{
+		opts = append(opts, francis.WithStandalonePostgresProvider(standalone.StandalonePostgresOptions{
 			ConnectionString: config.Provider.ConnectionString,
 		}))
 	default:
