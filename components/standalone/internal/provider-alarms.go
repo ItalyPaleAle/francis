@@ -95,6 +95,12 @@ func (p *Provider) SetAlarm(ctx context.Context, aRef ref.AlarmRef, req componen
 
 	p.Alarms[key] = a
 	p.AlarmsByID[alarmID] = a
+	// When replacing an existing alarm, the new alarm gets a fresh ID, so we must
+	// drop the previous ID's mapping to avoid leaking it (and to invalidate any
+	// stale lease still referencing the old alarm ID)
+	if existing != nil && existing.ID != alarmID {
+		delete(p.AlarmsByID, existing.ID)
+	}
 	changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: alarmID, Value: a})
 
 	// Persist changes

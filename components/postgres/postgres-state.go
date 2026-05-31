@@ -73,7 +73,7 @@ func (p *PostgresProvider) DeleteState(ctx context.Context, ref ref.ActorRef) er
 		WHERE
 			actor_type = $1
 			AND actor_id = $2
-			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time < now())`,
+			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > now())`,
 		ref.ActorType, ref.ActorID,
 	)
 	if err != nil {

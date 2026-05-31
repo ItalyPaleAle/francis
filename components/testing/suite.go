@@ -2034,6 +2034,29 @@ func (s Suite) TestState(t *testing.T) {
 		require.NoError(t, err)
 		expectCollection(t, ActorStateSpecCollection{})
 	})
+
+	t.Run("delete removes state with a live ttl", func(t *testing.T) {
+		ctx := t.Context()
+		ref4 := ref.ActorRef{ActorType: "TestType", ActorID: "actor-ttl-delete"}
+		data := []byte("delete-me")
+
+		// State with a TTL well in the future (i.e. not expired)
+		err := s.p.SetState(ctx, ref4, data, components.SetStateOpts{TTL: time.Hour})
+		require.NoError(t, err)
+		expectCollection(t, ActorStateSpecCollection{{ActorType: ref4.ActorType, ActorID: ref4.ActorID, Data: data}})
+
+		// Deleting live (non-expired) state must succeed and actually remove the row
+		err = s.p.DeleteState(ctx, ref4)
+		require.NoError(t, err)
+
+		_, err = s.p.GetState(ctx, ref4)
+		require.ErrorIs(t, err, components.ErrNoState)
+		expectCollection(t, ActorStateSpecCollection{})
+
+		// A second delete reports ErrNoState
+		err = s.p.DeleteState(ctx, ref4)
+		require.ErrorIs(t, err, components.ErrNoState)
+	})
 }
 
 func (s Suite) TestGetAlarm(t *testing.T) {
@@ -2526,6 +2549,57 @@ func (s Suite) TestSetAlarm(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.WithinDuration(t, newDueTime, updatedAlarm.DueTime, time.Second/10)
+	})
+
+	t.Run("replacing an alarm invalidates a previously-issued lease", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Acquire a real lease on an upcoming alarm
+		leased, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{SpecHostH7, SpecHostH8},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, leased, "should have fetched and leased some alarms")
+
+		oldLease := leased[0]
+		aRef := oldLease.AlarmRef()
+
+		// Sanity check: the lease is currently valid
+		_, err = s.p.GetLeasedAlarm(ctx, oldLease)
+		require.NoError(t, err)
+
+		// Replace the alarm with different properties. This generates a new alarm ID
+		// and must invalidate the prior lease (which referenced the old alarm ID).
+		newDueTime := oldLease.DueTime().Add(1 * time.Hour)
+		err = s.p.SetAlarm(ctx, aRef, components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{
+				DueTime: newDueTime,
+				Data:    []byte("replaced"),
+			},
+		})
+		require.NoError(t, err)
+
+		// The previous lease must no longer resolve to anything, for any operation.
+		// (Regression: a stale lease that still resolved could read/update/delete a
+		// phantom alarm, and DeleteLeasedAlarm via the stale lease could even remove
+		// the legitimate replacement.)
+		_, err = s.p.GetLeasedAlarm(ctx, oldLease)
+		require.ErrorIs(t, err, components.ErrNoAlarm, "stale lease should not resolve after the alarm was replaced")
+
+		err = s.p.UpdateLeasedAlarm(ctx, oldLease, components.UpdateLeasedAlarmReq{DueTime: newDueTime})
+		require.ErrorIs(t, err, components.ErrNoAlarm, "stale lease should not be usable to update the replaced alarm")
+
+		err = s.p.DeleteLeasedAlarm(ctx, oldLease)
+		require.ErrorIs(t, err, components.ErrNoAlarm, "stale lease should not be usable to delete the replaced alarm")
+
+		// The replacement alarm still exists and reflects the new properties
+		res, err := s.p.GetAlarm(ctx, aRef)
+		require.NoError(t, err)
+		assert.WithinDuration(t, newDueTime, res.DueTime, time.Second)
+		assert.Equal(t, []byte("replaced"), res.Data)
 	})
 }
 
