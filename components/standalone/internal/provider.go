@@ -108,6 +108,8 @@ func (p *Provider) Run(ctx context.Context) error {
 	if !p.Running.CompareAndSwap(false, true) {
 		return components.ErrAlreadyRunning
 	}
+	// Reset the running flag on exit, so the provider can be run again
+	defer p.Running.Store(false)
 
 	// Start the cleanup loop if enabled
 	if p.CleanupInterval > 0 {

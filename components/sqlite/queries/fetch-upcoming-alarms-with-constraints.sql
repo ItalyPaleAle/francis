@@ -1,10 +1,10 @@
 -- Fetches the upcoming alarms with constraints on capacity
 
--- Parameters:
+-- Parameters (in the order they are bound; see fetchUpcoming in sqlite-alarms.go):
 -- 1. Host health check cutoff, as UNIX timestamp with ms (int)
--- 2. Lookahead time horizon, as UNIX timestamp with ms (int)
--- 3. Current timestamp, as UNIX timestamp with ms (int)
--- 4. Capacity cap per actor type (typically batch size) (int)
+-- 2. Capacity cap per actor type (typically batch size) (int)
+-- 3. Lookahead time horizon, as UNIX timestamp with ms (int)
+-- 4. Current timestamp, as UNIX timestamp with ms (int)
 -- 5. Batch size (int)
 
 -- How the query works:

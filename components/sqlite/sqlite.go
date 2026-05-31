@@ -150,6 +150,8 @@ func (s *SQLiteProvider) Run(ctx context.Context) error {
 	if !s.running.CompareAndSwap(false, true) {
 		return components.ErrAlreadyRunning
 	}
+	// Reset the running flag on exit, so the provider can be run again
+	defer s.running.Store(false)
 
 	// Start the background garbage collection
 	err := s.initGC()
