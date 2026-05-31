@@ -173,7 +173,7 @@ func (p *PostgresProvider) performMigrations(ctx context.Context) error {
 	}
 	slices.Sort(names)
 
-	migrationFns := make([]migrations.MigrationFn, len(entries))
+	migrationFns := make([]migrations.MigrationFn, len(names))
 	for i, e := range names {
 		data, err := migrationScripts.ReadFile(filepath.Join("migrations", e))
 		if err != nil {

@@ -2,12 +2,12 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/italypaleale/francis/components"
@@ -33,7 +33,7 @@ func (p *PostgresProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res 
 		).
 		Scan(&res.DueTime, &interval, &res.Data, &res.TTL)
 
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return res, components.ErrNoAlarm
 	} else if err != nil {
 		return res, fmt.Errorf("error executing query: %w", err)
@@ -210,7 +210,7 @@ func (p *PostgresProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmL
 			&res.DueTime, &interval, &res.TTL,
 		)
 
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return res, components.ErrNoAlarm
 	} else if err != nil {
 		return res, fmt.Errorf("error executing query: %w", err)

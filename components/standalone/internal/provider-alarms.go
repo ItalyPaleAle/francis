@@ -484,8 +484,7 @@ func (p *Provider) RenewAlarmLeases(ctx context.Context, req components.RenewAla
 		for _, l := range req.Leases {
 			leaseID, ok := l.LeaseID().(string)
 			if !ok {
-				// Indicates a development-time error
-				panic("leaseID was expected to be a string")
+				return components.RenewAlarmLeasesRes{}, fmt.Errorf("invalid lease ID %v: expected a string but got %T", l.LeaseID(), l.LeaseID())
 			}
 			leaseIDSet[leaseID] = struct{}{}
 		}

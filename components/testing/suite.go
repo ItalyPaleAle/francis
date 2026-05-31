@@ -3660,6 +3660,33 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 			require.NoError(t, err, "all renewed leases should be valid")
 		}
 	})
+
+	t.Run("empty host list renews nothing", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Seed with the test data
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		// Create some valid leases
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{SpecHostH7, SpecHostH8},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, res, "should have fetched and leased some alarms")
+
+		// Renewal with no hosts must not error and must renew nothing
+		// (Regression: the SQLite provider previously built an invalid "host_id IN ()" clause)
+		renewRes, err := s.p.RenewAlarmLeases(ctx, components.RenewAlarmLeasesReq{})
+		require.NoError(t, err)
+		assert.Empty(t, renewRes.Leases, "no leases should be renewed without a host list")
+
+		// Even when specific leases are provided, an empty host list renews nothing
+		renewRes, err = s.p.RenewAlarmLeases(ctx, components.RenewAlarmLeasesReq{
+			Leases: []*ref.AlarmLease{res[0]},
+		})
+		require.NoError(t, err)
+		assert.Empty(t, renewRes.Leases, "no leases should be renewed without a host list, even when leases are specified")
+	})
 }
 
 func (s Suite) TestReleaseAlarmLease(t *testing.T) {

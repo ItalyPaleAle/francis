@@ -321,17 +321,18 @@ BEGIN
         -- Create deterministic lock key from actor type and ID to prevent double activation
         v_actor_lock_key := abs(h_bigint(rec.actor_type || '::' || rec.actor_id));
 
-        -- Try to acquire advisory lock for this specific actor
-        -- This may fail if someone else is already holding a lock for the actor
-        -- It means that the actor is being activated somewhere else, likely because it's going to be invoked (which will keep it busy for a bit)
-        -- To keep things simple, we can just skip this alarm and we will re-fetch it on the next iteration
-        -- The alternative would be to block while waiting for the lock, but that would slow everything down
-        IF pg_try_advisory_lock(v_actor_lock_key) THEN
-            BEGIN
-                --RAISE NOTICE 'Acquired lock for actor % / %', rec.actor_type, rec.actor_id;
-
-                -- Check if actor already exists (another process might have created it)
-                IF NOT actor_active_v1(rec.actor_type, rec.actor_id, v_health_cutoff) THEN
+        -- Try to acquire a transaction-level advisory lock for this specific actor.
+        -- This may fail if someone else is already holding a lock for the actor: it means the actor is being
+        -- activated somewhere else, likely because it's going to be invoked (which will keep it busy for a bit).
+        -- To keep things simple, we just skip this alarm and we will re-fetch it on the next iteration.
+        -- The alternative would be to block while waiting for the lock, but that would slow everything down.
+        -- We use the transaction-level variant (pg_try_advisory_xact_lock) so the lock is released automatically
+        -- when the function's transaction ends, including on error or query cancellation. This avoids leaking
+        -- session-level advisory locks onto pooled connections (which could otherwise make an actor permanently
+        -- un-allocatable on that connection).
+        IF pg_try_advisory_xact_lock(v_actor_lock_key) THEN
+            -- Check if actor already exists (another process might have created it)
+            IF NOT actor_active_v1(rec.actor_type, rec.actor_id, v_health_cutoff) THEN
                     -- Find a random host with capacity for this actor type
                     -- Note: There's a chance that multiple queries may allocate actors on the same hosts and we may go over capacity
                     -- We consider this an acceptable risk, as the complexity of handling that case is too significant otherwise (it would require locking the row with a FOR UPDATE in active_actor_hosts, which can lead to deadlocks and other issues)
@@ -384,21 +385,8 @@ BEGIN
                         -- Clear the variable for next iteration
                         v_allocated_host_id := NULL;
                     END IF; -- End of v_allocated_host_id not null
-                END IF;  -- End of actor existence check
-            EXCEPTION
-                WHEN OTHERS THEN
-                    -- Release lock on any error and re-raise
-                    -- RAISE NOTICE 'Released lock for actor % / % after exception', rec.actor_type, rec.actor_id;
-                    PERFORM pg_advisory_unlock(v_actor_lock_key);
-                    RAISE;
-            END;
-
-            -- Release the advisory lock
-            --RAISE NOTICE 'Released lock for actor % / %', rec.actor_type, rec.actor_id;
-            PERFORM pg_advisory_unlock(v_actor_lock_key);
-        -- ELSE
-        --     RAISE NOTICE 'Could not acquire lock for actor % / %', rec.actor_type, rec.actor_id;
-        END IF;
+            END IF;  -- End of actor existence check
+        END IF;  -- End of advisory lock acquisition
     END LOOP;
 
     -- Finally, acquire leases on all alarms that have actors (existing or allocated)
