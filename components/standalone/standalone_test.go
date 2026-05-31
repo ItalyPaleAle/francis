@@ -235,11 +235,6 @@ func initTestProvider(t *testing.T) *StandaloneMemory {
 	return p
 }
 
-// CleanupExpired performs garbage collection of expired records.
-func (p *StandaloneMemory) CleanupExpired(ctx context.Context) error {
-	return p.Cleanup(ctx)
-}
-
 func (p *StandaloneMemory) clearData() {
 	p.Hosts = make(map[string]*internal.Host)
 	p.HostsByAddress = make(map[string]string)
@@ -433,11 +428,6 @@ func (p *StandaloneMemory) GetAllHosts(ctx context.Context) (comptesting.Spec, e
 }
 
 // Test helper methods for StandaloneSQLiteBacked
-
-// CleanupExpired performs garbage collection of expired records.
-func (p *StandaloneSQLiteBacked) CleanupExpired(ctx context.Context) error {
-	return p.Cleanup(ctx)
-}
 
 func (p *StandaloneSQLiteBacked) clearData() {
 	p.Hosts = make(map[string]*internal.Host)
@@ -650,11 +640,6 @@ func (p *StandaloneSQLiteBacked) GetAllHosts(ctx context.Context) (comptesting.S
 }
 
 // Test helper methods for StandalonePostgresBacked
-
-// CleanupExpired performs garbage collection of expired records.
-func (p *StandalonePostgresBacked) CleanupExpired(ctx context.Context) error {
-	return p.Cleanup(ctx)
-}
 
 func (p *StandalonePostgresBacked) clearData() {
 	p.Hosts = make(map[string]*internal.Host)

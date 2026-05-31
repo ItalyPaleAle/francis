@@ -146,19 +146,19 @@ func (p *Provider) stateCleanupLoop(ctx context.Context) {
 
 // runCleanup runs the cleanup for unhealthy hosts and expired state
 func (p *Provider) runCleanup(ctx context.Context) {
-	err := p.Cleanup(ctx)
+	err := p.CleanupExpired(ctx)
 	if err != nil {
 		// Errors are logged
 		p.Log.Error("Failed to perform cleanup", "error", err)
 	}
 }
 
-// Cleanup performs garbage collection of unhealthy hosts and expired state, persisting the changes before applying them in memory
+// CleanupExpired performs garbage collection of unhealthy hosts and expired state, persisting the changes before applying them in memory
 //
-// Unlike the per-request operations, Cleanup holds the map lock across the whole compute+persist+apply sequence (rather than releasing it during persistence)
+// Unlike the per-request operations, CleanupExpired holds the map lock across the whole compute+persist+apply sequence (rather than releasing it during persistence)
 // This keeps the snapshot it computed valid through apply, so it cannot act on stale data
 // The latency-sensitive per-request operations still keep persistence off the lock
-func (p *Provider) Cleanup(ctx context.Context) error {
+func (p *Provider) CleanupExpired(ctx context.Context) error {
 	// Clean up unhealthy hosts (Mu domain)
 	err := p.cleanupDomain(ctx, &p.writeMu, &p.Mu, p.CleanupUnhealthyHosts)
 	if err != nil {
