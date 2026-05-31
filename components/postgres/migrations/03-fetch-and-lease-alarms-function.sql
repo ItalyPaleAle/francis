@@ -322,14 +322,11 @@ BEGIN
         v_actor_lock_key := abs(h_bigint(rec.actor_type || '::' || rec.actor_id));
 
         -- Try to acquire a transaction-level advisory lock for this specific actor.
-        -- This may fail if someone else is already holding a lock for the actor: it means the actor is being
-        -- activated somewhere else, likely because it's going to be invoked (which will keep it busy for a bit).
+        -- This may fail if someone else is already holding a lock for the actor: it means the actor is being activated somewhere else, likely because it's going to be invoked (which will keep it busy for a bit).
         -- To keep things simple, we just skip this alarm and we will re-fetch it on the next iteration.
         -- The alternative would be to block while waiting for the lock, but that would slow everything down.
-        -- We use the transaction-level variant (pg_try_advisory_xact_lock) so the lock is released automatically
-        -- when the function's transaction ends, including on error or query cancellation. This avoids leaking
-        -- session-level advisory locks onto pooled connections (which could otherwise make an actor permanently
-        -- un-allocatable on that connection).
+        -- We use the transaction-level variant (pg_try_advisory_xact_lock) so the lock is released automatically when the function's transaction ends, including on error or query cancellation.
+        -- This avoids leaking session-level advisory locks onto pooled connections (which could otherwise make an actor permanently un-allocatable on that connection).
         IF pg_try_advisory_xact_lock(v_actor_lock_key) THEN
             -- Check if actor already exists (another process might have created it)
             IF NOT actor_active_v1(rec.actor_type, rec.actor_id, v_health_cutoff) THEN

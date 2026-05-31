@@ -201,9 +201,8 @@ func (s *SQLiteProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmLea
 }
 
 func (s *SQLiteProvider) RenewAlarmLeases(ctx context.Context, req components.RenewAlarmLeasesReq) (res components.RenewAlarmLeasesRes, err error) {
-	// Renewal is always scoped to a set of hosts; with no host there's nothing to renew.
-	// We must return early here, as otherwise the query would contain an invalid "host_id IN ()" clause.
-	// This matches the Postgres provider, where "host_id = ANY('{}')" matches no rows.
+	// Renewal is always scoped to a set of hosts
+	// With no host there's nothing to renew, so we e must return early here, as otherwise the query would contain an invalid "host_id IN ()" clause
 	if len(req.Hosts) == 0 {
 		return res, nil
 	}

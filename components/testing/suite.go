@@ -3675,7 +3675,6 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 		require.NotEmpty(t, res, "should have fetched and leased some alarms")
 
 		// Renewal with no hosts must not error and must renew nothing
-		// (Regression: the SQLite provider previously built an invalid "host_id IN ()" clause)
 		renewRes, err := s.p.RenewAlarmLeases(ctx, components.RenewAlarmLeasesReq{})
 		require.NoError(t, err)
 		assert.Empty(t, renewRes.Leases, "no leases should be renewed without a host list")

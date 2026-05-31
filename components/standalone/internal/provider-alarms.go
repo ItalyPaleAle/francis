@@ -95,9 +95,7 @@ func (p *Provider) SetAlarm(ctx context.Context, aRef ref.AlarmRef, req componen
 
 	p.Alarms[key] = a
 	p.AlarmsByID[alarmID] = a
-	// When replacing an existing alarm, the new alarm gets a fresh ID, so we must
-	// drop the previous ID's mapping to avoid leaking it (and to invalidate any
-	// stale lease still referencing the old alarm ID)
+	// When replacing an existing alarm, the new alarm gets a fresh ID, so we must drop the previous ID's mapping to avoid leaking it (and to invalidate any stale lease still referencing the old alarm ID)
 	if existing != nil && existing.ID != alarmID {
 		delete(p.AlarmsByID, existing.ID)
 	}
@@ -484,6 +482,7 @@ func (p *Provider) RenewAlarmLeases(ctx context.Context, req components.RenewAla
 		for _, l := range req.Leases {
 			leaseID, ok := l.LeaseID().(string)
 			if !ok {
+				// Most certainly a development-time error
 				return components.RenewAlarmLeasesRes{}, fmt.Errorf("invalid lease ID %v: expected a string but got %T", l.LeaseID(), l.LeaseID())
 			}
 			leaseIDSet[leaseID] = struct{}{}
