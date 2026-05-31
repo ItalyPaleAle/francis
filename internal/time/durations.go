@@ -101,7 +101,7 @@ func (d Duration) String() string {
 			if milliseconds > 0 {
 				b.WriteString(strconv.Itoa(seconds))
 				b.WriteRune('.')
-				b.WriteString(fmt.Sprintf("%03d", milliseconds))
+				fmt.Fprintf(&b, "%03d", milliseconds)
 			} else {
 				b.WriteString(strconv.Itoa(seconds))
 			}

@@ -235,22 +235,6 @@ func initTestProvider(t *testing.T) *StandaloneMemory {
 	return p
 }
 
-// CleanupExpired performs garbage collection of expired records.
-func (p *StandaloneMemory) CleanupExpired() error {
-	p.Mu.Lock()
-	defer p.Mu.Unlock()
-
-	changes := internal.NewChanges()
-
-	// Clean up unhealthy hosts
-	p.CleanupUnhealthyHosts(changes)
-
-	// Clean up expired state
-	p.CleanupExpiredState(changes)
-
-	return nil
-}
-
 func (p *StandaloneMemory) clearData() {
 	p.Hosts = make(map[string]*internal.Host)
 	p.HostsByAddress = make(map[string]string)
@@ -265,6 +249,10 @@ func (p *StandaloneMemory) clearData() {
 func (p *StandaloneMemory) Seed(ctx context.Context, spec comptesting.Spec) error {
 	p.Mu.Lock()
 	defer p.Mu.Unlock()
+	// Seed also mutates the state map (via clearData), so it must hold StateMu too, to
+	// serialize against the background cleanup loop
+	p.StateMu.Lock()
+	defer p.StateMu.Unlock()
 
 	now := p.Clock.Now()
 
@@ -441,22 +429,6 @@ func (p *StandaloneMemory) GetAllHosts(ctx context.Context) (comptesting.Spec, e
 
 // Test helper methods for StandaloneSQLiteBacked
 
-// CleanupExpired performs garbage collection of expired records.
-func (p *StandaloneSQLiteBacked) CleanupExpired() error {
-	p.Mu.Lock()
-	defer p.Mu.Unlock()
-
-	changes := internal.NewChanges()
-
-	// Clean up unhealthy hosts
-	p.CleanupUnhealthyHosts(changes)
-
-	// Clean up expired state
-	p.CleanupExpiredState(changes)
-
-	return nil
-}
-
 func (p *StandaloneSQLiteBacked) clearData() {
 	p.Hosts = make(map[string]*internal.Host)
 	p.HostsByAddress = make(map[string]string)
@@ -483,6 +455,10 @@ func (p *StandaloneSQLiteBacked) clearDatabase(ctx context.Context) error {
 func (p *StandaloneSQLiteBacked) Seed(ctx context.Context, spec comptesting.Spec) error {
 	p.Mu.Lock()
 	defer p.Mu.Unlock()
+	// Seed also mutates the state map (via clearData), so it must hold StateMu too, to
+	// serialize against the background cleanup loop
+	p.StateMu.Lock()
+	defer p.StateMu.Unlock()
 
 	now := p.Clock.Now()
 
@@ -665,22 +641,6 @@ func (p *StandaloneSQLiteBacked) GetAllHosts(ctx context.Context) (comptesting.S
 
 // Test helper methods for StandalonePostgresBacked
 
-// CleanupExpired performs garbage collection of expired records.
-func (p *StandalonePostgresBacked) CleanupExpired() error {
-	p.Mu.Lock()
-	defer p.Mu.Unlock()
-
-	changes := internal.NewChanges()
-
-	// Clean up unhealthy hosts
-	p.CleanupUnhealthyHosts(changes)
-
-	// Clean up expired state
-	p.CleanupExpiredState(changes)
-
-	return nil
-}
-
 func (p *StandalonePostgresBacked) clearData() {
 	p.Hosts = make(map[string]*internal.Host)
 	p.HostsByAddress = make(map[string]string)
@@ -706,6 +666,9 @@ func (p *StandalonePostgresBacked) clearDatabase(ctx context.Context) error {
 func (p *StandalonePostgresBacked) Seed(ctx context.Context, spec comptesting.Spec) error {
 	p.Mu.Lock()
 	defer p.Mu.Unlock()
+	// Seed also mutates the state map (via clearData), so it must hold StateMu too, to serialize against the background cleanup loop
+	p.StateMu.Lock()
+	defer p.StateMu.Unlock()
 
 	now := p.Clock.Now()
 

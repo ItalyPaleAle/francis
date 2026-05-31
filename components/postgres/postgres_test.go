@@ -125,7 +125,7 @@ func initTestProvider(t *testing.T) (p *PostgresProvider, testSchema string, cle
 	return p, testSchema, cleanupFn
 }
 
-func (p *PostgresProvider) CleanupExpired() error {
+func (p *PostgresProvider) CleanupExpired(_ context.Context) error {
 	return p.gc.CleanupExpired()
 }
 
@@ -441,7 +441,7 @@ func TestHostGarbageCollection(t *testing.T) {
 		_ = p.AdvanceClock(15 * time.Second) //nolint:errcheck
 
 		// Run garbage collection
-		err = p.CleanupExpired()
+		err = p.CleanupExpired(t.Context())
 		require.NoError(t, err)
 
 		// Verify only host1 and its actor types are removed
@@ -474,7 +474,7 @@ func TestHostGarbageCollection(t *testing.T) {
 		_ = p.AdvanceClock(30 * time.Second) //nolint:errcheck
 
 		// Run garbage collection again
-		err = p.CleanupExpired()
+		err = p.CleanupExpired(t.Context())
 		require.NoError(t, err)
 
 		// Verify only host3 remains
@@ -493,7 +493,7 @@ func TestHostGarbageCollection(t *testing.T) {
 		_ = p.AdvanceClock(20 * time.Second) //nolint:errcheck
 
 		// Run garbage collection one more time
-		err = p.CleanupExpired()
+		err = p.CleanupExpired(t.Context())
 		require.NoError(t, err)
 
 		// Verify all hosts are removed

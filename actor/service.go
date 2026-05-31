@@ -17,7 +17,7 @@ var (
 	// ErrActorHalted is returned by methods that perform invocation when the actor is halted on the host where it was previously active.
 	// Callers should retry after a delay.
 	ErrActorHalted = errors.New("actor is halted")
-	// ErrActorHalted is returned by methods that perform invocation when the actor type is not supported for this cluster.
+	// ErrActorTypeUnsupported is returned by methods that perform invocation when the actor type is not supported for this cluster.
 	ErrActorTypeUnsupported = errors.New("actor type is not supported in the cluster")
 )
 

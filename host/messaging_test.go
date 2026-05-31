@@ -477,7 +477,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 		}
 
 		// Verify all actors were created
-		assert.Equal(t, numActors, int(host.actors.Len()))
+		assert.Equal(t, uintptr(numActors), host.actors.Len())
 	})
 
 	t.Run("concurrent invocations with same actor are serialized", func(t *testing.T) {
@@ -528,7 +528,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 		assert.Len(t, executionOrder, numInvocations)
 
 		// Only one actor should exist
-		assert.Equal(t, 1, int(host.actors.Len()))
+		assert.Equal(t, uintptr(1), host.actors.Len())
 	})
 
 	t.Run("parent context cancellation", func(t *testing.T) {

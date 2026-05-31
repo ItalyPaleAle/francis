@@ -54,8 +54,9 @@ func (m *MyActor) Invoke(ctx context.Context, method string, data actor.Envelope
 		return nil, fmt.Errorf("error retrieving state: %w", err)
 	}
 
-	if strings.HasSuffix(method, "-wait") {
-		method = strings.TrimSuffix(method, "-wait")
+	before, ok := strings.CutSuffix(method, "-wait")
+	if ok {
+		method = before
 
 		const waitTime = 25000 * time.Millisecond
 		select {

@@ -201,6 +201,12 @@ func (s *SQLiteProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmLea
 }
 
 func (s *SQLiteProvider) RenewAlarmLeases(ctx context.Context, req components.RenewAlarmLeasesReq) (res components.RenewAlarmLeasesRes, err error) {
+	// Renewal is always scoped to a set of hosts
+	// With no host there's nothing to renew, so we e must return early here, as otherwise the query would contain an invalid "host_id IN ()" clause
+	if len(req.Hosts) == 0 {
+		return res, nil
+	}
+
 	now := s.clock.Now()
 	expTime := now.Add(s.cfg.AlarmsLeaseDuration).UnixMilli()
 
@@ -624,10 +630,7 @@ func (u *upcomingAlarmFetcher) allocateActors(ctx context.Context, activeHosts *
 		}
 
 		// We set the alarm's due time as actor activation time, or the current time if that's later
-		activationTime := alarm.AlarmDueTime
-		if u.nowMs > activationTime {
-			activationTime = u.nowMs
-		}
+		activationTime := max(u.nowMs, alarm.AlarmDueTime)
 
 		// Execute the query
 		queryCtx, cancel := context.WithTimeout(ctx, u.timeout)

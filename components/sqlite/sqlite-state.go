@@ -69,7 +69,7 @@ func (s *SQLiteProvider) DeleteState(ctx context.Context, ref ref.ActorRef) erro
 		WHERE
 			actor_type = ?
 			AND actor_id = ?
-			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time < ?)`,
+			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > ?)`,
 		ref.ActorType, ref.ActorID, s.clock.Now().UnixMilli(),
 	)
 	if err != nil {

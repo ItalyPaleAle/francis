@@ -6,7 +6,7 @@ import (
 	timeutils "github.com/italypaleale/francis/internal/time"
 )
 
-// Properties for an alarm
+// AlarmProperties contains properties for an alarm
 type AlarmProperties struct {
 	// Due time.
 	DueTime time.Time

@@ -2,8 +2,8 @@ package internal
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
-	"maps"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,6 +23,14 @@ type Provider struct {
 	CleanupInterval time.Duration
 	Mu              sync.RWMutex // Lock for Hosts, HostsByAddress, HostActorTypes, ActiveActors, Alarms, AlarmsByID
 	StateMu         sync.RWMutex // Lock for ActorState
+
+	// writeMu and stateWriteMu serialize writers (mutations):
+	// - writeMu for the Mu domain (hosts/actors/alarms)
+	// - stateWriteMu for the StateMu domain (state)
+	// Writers hold these for the whole "compute change set -> persist -> apply" sequence
+	// This keeps the RWMutex (Mu/StateMu) off the persistence I/O path so readers can proceed while a write is being persisted, while still guaranteeing that no other writer can alter the state being persisted
+	writeMu      sync.Mutex
+	stateWriteMu sync.Mutex
 
 	// Persistence hook
 	PersistHook PersistHook
@@ -108,6 +116,7 @@ func (p *Provider) Run(ctx context.Context) error {
 	if !p.Running.CompareAndSwap(false, true) {
 		return components.ErrAlreadyRunning
 	}
+	defer p.Running.Store(false)
 
 	// Start the cleanup loop if enabled
 	if p.CleanupInterval > 0 {
@@ -135,37 +144,91 @@ func (p *Provider) stateCleanupLoop(ctx context.Context) {
 	}
 }
 
-// runCleanup runs the cleanup for unhealthy hosts and expired state.
+// runCleanup runs the cleanup for unhealthy hosts and expired state
 func (p *Provider) runCleanup(ctx context.Context) {
-	// Clean up unhealthy hosts
-	p.Mu.Lock()
+	err := p.CleanupExpired(ctx)
+	if err != nil {
+		// Errors are logged
+		p.Log.Error("Failed to perform cleanup", "error", err)
+	}
+}
+
+// CleanupExpired performs garbage collection of unhealthy hosts and expired state, persisting the changes before applying them in memory
+//
+// Unlike the per-request operations, CleanupExpired holds the map lock across the whole compute+persist+apply sequence (rather than releasing it during persistence)
+// This keeps the snapshot it computed valid through apply, so it cannot act on stale data
+// The latency-sensitive per-request operations still keep persistence off the lock
+func (p *Provider) CleanupExpired(ctx context.Context) error {
+	// Clean up unhealthy hosts (Mu domain)
+	err := p.cleanupDomain(ctx, &p.writeMu, &p.Mu, p.CleanupUnhealthyHosts)
+	if err != nil {
+		return fmt.Errorf("failed to clean up unhealthy hosts: %w", err)
+	}
+
+	// Clean up expired state (StateMu domain)
+	err = p.cleanupDomain(ctx, &p.stateWriteMu, &p.StateMu, p.CleanupExpiredState)
+	if err != nil {
+		return fmt.Errorf("failed to clean up expired state: %w", err)
+	}
+
+	return nil
+}
+
+// cleanupDomain computes, persists, and applies a cleanup change set atomically while holding the domain's write mutex and map lock
+func (p *Provider) cleanupDomain(ctx context.Context, writeMu *sync.Mutex, lock *sync.RWMutex, compute func(changes *Changes) func()) error {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+	lock.Lock()
+	defer lock.Unlock()
+
 	changes := NewChanges()
 	defer changes.Release()
-	rollback := p.CleanupUnhealthyHosts(changes)
-	if !changes.IsEmpty() {
-		err := p.PersistHook.PersistChanges(ctx, changes)
-		if err != nil {
-			p.Log.Error("Failed to persist cleanup changes", "error", err)
-			// Rollback in-memory changes to stay consistent with database
-			rollback()
-		}
-	}
-	p.Mu.Unlock()
 
-	// Clean up expired state
-	p.StateMu.Lock()
-	stateChanges := NewChanges()
-	defer stateChanges.Release()
-	stateRollback := p.CleanupExpiredState(stateChanges)
-	if !stateChanges.IsEmpty() {
-		err := p.PersistHook.PersistChanges(ctx, stateChanges)
-		if err != nil {
-			p.Log.Error("Failed to persist state cleanup changes", "error", err)
-			// Rollback in-memory changes to stay consistent with database
-			stateRollback()
-		}
+	// Compute the changes to apply
+	// This is an in-memory operation
+	apply := compute(changes)
+	if changes.IsEmpty() {
+		return nil
 	}
-	p.StateMu.Unlock()
+
+	// Persist the changes to the DB
+	err := p.PersistHook.PersistChanges(ctx, changes)
+	if err != nil {
+		return fmt.Errorf("error persisting changes: %w", err)
+	}
+
+	// Apply the changes in-memory
+	// This can't fail
+	apply()
+
+	return nil
+}
+
+// persistThenApply persists the change set and, only if persistence succeeds, applies the in-memory mutation under the given lock
+//
+// This implements the "persist before apply" strategy: the backing store is updated first, and memory is touched only after a successful commit
+// As a result the in-memory state and the backing store cannot diverge, and there is nothing to roll back on failure
+//
+// The caller must hold the domain write mutex (writeMu or stateWriteMu) for the whole compute+persist+apply sequence, and must not be holding lock when calling this
+// apply must not fail and is a no-op when there are no changes
+func (p *Provider) persistThenApply(ctx context.Context, lock *sync.RWMutex, changes *Changes, apply func()) error {
+	if changes.IsEmpty() {
+		return nil
+	}
+
+	// Persist changes in the DB
+	err := p.PersistHook.PersistChanges(ctx, changes)
+	if err != nil {
+		return fmt.Errorf("error persisting changes: %w", err)
+	}
+
+	// Apply the changes in-memory
+	lock.Lock()
+	// This can't fail
+	apply()
+	lock.Unlock()
+
+	return nil
 }
 
 func (p *Provider) HealthCheckInterval() time.Duration {
@@ -188,38 +251,34 @@ func (p *Provider) IsHostHealthy(h *Host) bool {
 	return p.Clock.Since(h.LastHealthCheck) < p.Cfg.HostHealthCheckDeadline
 }
 
-// CleanupUnhealthyHosts removes unhealthy hosts and their associated data, recording the changes for persistence.
-// Returns a rollback function that restores the in-memory state if persistence fails.
-// Must be called while holding a write lock.
-func (p *Provider) CleanupUnhealthyHosts(changes *Changes) (rollback func()) {
-	// Track deleted data for rollback
-	rollbackHosts := make(map[string]*Host)
-	rollbackHostAddresses := make(map[string]string) // address -> host_id
-	rollbackHostActorTypes := make(map[string][]*HostActorType)
-	rollbackActiveActors := make(map[ActorKey]*ActiveActor)
+// CleanupUnhealthyHosts computes the changes needed to remove unhealthy hosts and their
+// associated data, recording them in changes
+// It returns an apply function that performs the in-memory deletions
+// Must be called while holding at least a read lock on Mu
+// apply must be called while holding the Mu write lock (after the changes have been persisted)
+func (p *Provider) CleanupUnhealthyHosts(changes *Changes) (apply func()) {
+	var (
+		deleteHostIDs   []string
+		deleteAddresses []string
+		deleteActors    []ActorKey
+	)
 
 	for id, h := range p.Hosts {
 		if p.IsHostHealthy(h) {
 			continue
 		}
 
-		// Track for rollback
-		rollbackHosts[id] = h
-		rollbackHostAddresses[h.Address] = id
-
-		delete(p.HostsByAddress, h.Address)
-		delete(p.Hosts, id)
+		deleteHostIDs = append(deleteHostIDs, id)
+		deleteAddresses = append(deleteAddresses, h.Address)
 		changes.Hosts.Delete = append(changes.Hosts.Delete, id)
 
 		// Delete host actor types
-		rollbackHostActorTypes[id] = p.HostActorTypes[id]
 		for _, hat := range p.HostActorTypes[id] {
 			changes.HostActorTypes.Delete = append(changes.HostActorTypes.Delete, HostActorTypeKey{
 				HostID:    hat.HostID,
 				ActorType: hat.ActorType,
 			})
 		}
-		delete(p.HostActorTypes, id)
 
 		// Remove active actors on this host
 		for key, actor := range p.ActiveActors {
@@ -227,42 +286,44 @@ func (p *Provider) CleanupUnhealthyHosts(changes *Changes) (rollback func()) {
 				continue
 			}
 
-			rollbackActiveActors[key] = actor
-			delete(p.ActiveActors, key)
+			deleteActors = append(deleteActors, key)
 			changes.ActiveActors.Delete = append(changes.ActiveActors.Delete, key)
 		}
 	}
 
+	// Return the function that applies the changes in-memory
 	return func() {
-		// Restore hosts
-		maps.Copy(p.Hosts, rollbackHosts)
-		maps.Copy(p.HostsByAddress, rollbackHostAddresses)
-		// Restore host actor types
-		maps.Copy(p.HostActorTypes, rollbackHostActorTypes)
-		// Restore active actors
-		maps.Copy(p.ActiveActors, rollbackActiveActors)
+		for i, id := range deleteHostIDs {
+			delete(p.Hosts, id)
+			delete(p.HostsByAddress, deleteAddresses[i])
+			delete(p.HostActorTypes, id)
+		}
+		for _, key := range deleteActors {
+			delete(p.ActiveActors, key)
+		}
 	}
 }
 
-// CleanupExpiredState removes state that has expired, recording the changes.
-// Returns a rollback function that restores the in-memory state if persistence fails.
-// Must be called while holding a write lock on StateMu.
-func (p *Provider) CleanupExpiredState(changes *Changes) (rollback func()) {
+// CleanupExpiredState computes the changes needed to remove expired state, recording them in changes
+// It returns an apply function that performs the in-memory deletions
+// Must be called while holding at least a read lock on StateMu
+// apply must be called while holding the StateMu write lock (after the changes have been persisted)
+func (p *Provider) CleanupExpiredState(changes *Changes) (apply func()) {
 	now := p.Clock.Now()
 
-	// Track deleted state for rollback
-	rollbackState := make(map[ActorKey]*StateEntry)
-
+	var deleteKeys []ActorKey
 	for key, state := range p.ActorState {
 		if state.IsExpired(now) {
-			rollbackState[key] = state
-			delete(p.ActorState, key)
+			deleteKeys = append(deleteKeys, key)
 			changes.ActorState.Delete = append(changes.ActorState.Delete, key)
 		}
 	}
 
+	// Return the function that applies the changes in-memory
 	return func() {
-		maps.Copy(p.ActorState, rollbackState)
+		for _, key := range deleteKeys {
+			delete(p.ActorState, key)
+		}
 	}
 }
 

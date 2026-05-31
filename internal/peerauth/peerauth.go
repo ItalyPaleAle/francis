@@ -4,7 +4,7 @@ import (
 	"net/http"
 )
 
-// Interface implemented by all peer authentication methods
+// PeerAuthenticationMethod is the interface implemented by all peer authentication methods
 type PeerAuthenticationMethod interface {
 	// Validate the peer authentication method
 	Validate() error

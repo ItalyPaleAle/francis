@@ -2,10 +2,11 @@ package postgres
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
@@ -26,7 +27,7 @@ func (p *PostgresProvider) GetState(ctx context.Context, ref ref.ActorRef) (data
 			ref.ActorType, ref.ActorID,
 		).
 		Scan(&data)
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, components.ErrNoState
 	} else if err != nil {
 		return nil, fmt.Errorf("error executing query: %w", err)
@@ -73,7 +74,7 @@ func (p *PostgresProvider) DeleteState(ctx context.Context, ref ref.ActorRef) er
 		WHERE
 			actor_type = $1
 			AND actor_id = $2
-			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time < now())`,
+			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > now())`,
 		ref.ActorType, ref.ActorID,
 	)
 	if err != nil {

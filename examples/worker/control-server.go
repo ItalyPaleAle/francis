@@ -34,6 +34,7 @@ func runControlServer(actorService *actor.Service) func(ctx context.Context) err
 			if err != nil {
 				log.ErrorContext(r.Context(), "Error invoking actor", slog.Any("error", err))
 				w.WriteHeader(http.StatusInternalServerError)
+				// #nosec G705 -- API response
 				fmt.Fprint(w, err.Error())
 				return
 			}
@@ -46,6 +47,7 @@ func runControlServer(actorService *actor.Service) func(ctx context.Context) err
 				if err != nil {
 					log.ErrorContext(r.Context(), "Error decoding response envelope", slog.Any("error", err))
 					w.WriteHeader(http.StatusInternalServerError)
+					// #nosec G705 -- API response
 					fmt.Fprint(w, err.Error())
 					return
 				}
@@ -64,6 +66,7 @@ func runControlServer(actorService *actor.Service) func(ctx context.Context) err
 			if err != nil {
 				log.ErrorContext(r.Context(), "Error halting actor", slog.Any("error", err))
 				w.WriteHeader(http.StatusInternalServerError)
+				// #nosec G705 -- API response
 				fmt.Fprint(w, err.Error())
 				return
 			}
@@ -74,6 +77,7 @@ func runControlServer(actorService *actor.Service) func(ctx context.Context) err
 			if err != nil {
 				log.ErrorContext(r.Context(), "Error halting all actors", slog.Any("error", err))
 				w.WriteHeader(http.StatusInternalServerError)
+				// #nosec G705 -- API response
 				fmt.Fprint(w, err.Error())
 				return
 			}
@@ -94,6 +98,7 @@ func runControlServer(actorService *actor.Service) func(ctx context.Context) err
 			if err != nil {
 				log.ErrorContext(r.Context(), "Error invoking actor", slog.Any("error", err))
 				w.WriteHeader(http.StatusInternalServerError)
+				// #nosec G705 -- API response
 				fmt.Fprint(w, err.Error())
 				return
 			}
