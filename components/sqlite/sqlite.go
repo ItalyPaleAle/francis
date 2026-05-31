@@ -297,20 +297,20 @@ func (s *SQLiteProvider) initGC() (err error) {
 
 // Checks if an error returned by the database is a unique constraint violation error, such as a duplicate unique index or primary key.
 func isConstraintError(err error) bool {
-	// These bits are set on all constraint-related errors
-	// https://www.sqlite.org/rescode.html#constraint
+	// Primary result code for all constraint-related errors
+	// Extended result codes shift this into the low 8 bits, see https://www.sqlite.org/rescode.html#constraint
 	const sqliteConstraintCode = 19
 
 	if err == nil {
 		return false
 	}
 
-	var sqliteErr *sqlite.Error
-	if !errors.As(err, &sqliteErr) {
+	sqliteErr, ok := errors.AsType[*sqlite.Error](err)
+	if !ok {
 		return false
 	}
 
-	return sqliteErr.Code()&sqliteConstraintCode != 0
+	return sqliteErr.Code()&0xFF == sqliteConstraintCode
 }
 
 // Returns the placeholder string for an IN clause, and also appends all arguments to appendArgs, starting at position startAppend
