@@ -39,7 +39,7 @@ func IsInMemoryDB(connString string) bool {
 	return len(qs["mode"]) > 0 && qs["mode"][0] == "memory"
 }
 
-// Parse and validate the connection string.
+// ParseConnectionString parses and validates the connection string.
 func ParseConnectionString(connString string, log *slog.Logger) (string, error) {
 	// Check if we're using the in-memory database
 	isMemoryDB := IsInMemoryDB(connString)

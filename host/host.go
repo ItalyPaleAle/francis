@@ -47,7 +47,7 @@ const (
 	actorBusyReEnqueueInterval = 10 * time.Second
 )
 
-// Re-export provider options
+// SQLiteProviderOptions re-exports provider options
 type SQLiteProviderOptions = sqlite.SQLiteProviderOptions
 
 // Host is an actor host.

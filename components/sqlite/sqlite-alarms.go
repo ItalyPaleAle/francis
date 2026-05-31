@@ -630,10 +630,7 @@ func (u *upcomingAlarmFetcher) allocateActors(ctx context.Context, activeHosts *
 		}
 
 		// We set the alarm's due time as actor activation time, or the current time if that's later
-		activationTime := alarm.AlarmDueTime
-		if u.nowMs > activationTime {
-			activationTime = u.nowMs
-		}
+		activationTime := max(u.nowMs, alarm.AlarmDueTime)
 
 		// Execute the query
 		queryCtx, cancel := context.WithTimeout(ctx, u.timeout)

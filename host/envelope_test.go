@@ -124,12 +124,12 @@ func TestObjectEnvelope(t *testing.T) {
 	})
 
 	t.Run("msgpack serialization path for map", func(t *testing.T) {
-		original := map[string]interface{}{
+		original := map[string]any{
 			"key1": "value1",
 			"key2": 42,
 		}
 		envelope := newObjectEnvelope(original)
-		var target map[string]interface{}
+		var target map[string]any
 
 		err := envelope.Decode(&target)
 
