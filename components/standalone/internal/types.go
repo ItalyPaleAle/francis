@@ -3,8 +3,6 @@ package internal
 import (
 	"slices"
 	"time"
-
-	"github.com/italypaleale/francis/internal/ptr"
 )
 
 type Host struct {
@@ -135,17 +133,17 @@ func (a *Alarm) Clone() *Alarm {
 		Interval:  a.Interval,
 	}
 	if a.TTL != nil {
-		clone.TTL = ptr.Of(*a.TTL)
+		clone.TTL = a.TTL
 	}
 	if a.Data != nil {
 		clone.Data = make([]byte, len(a.Data))
 		copy(clone.Data, a.Data)
 	}
 	if a.LeaseID != nil {
-		clone.LeaseID = ptr.Of(*a.LeaseID)
+		clone.LeaseID = a.LeaseID
 	}
 	if a.LeaseExpiration != nil {
-		clone.LeaseExpiration = ptr.Of(*a.LeaseExpiration)
+		clone.LeaseExpiration = a.LeaseExpiration
 	}
 	return clone
 }
@@ -175,7 +173,7 @@ func (s *StateEntry) Clone() *StateEntry {
 		copy(clone.Data, s.Data)
 	}
 	if s.Expiration != nil {
-		clone.Expiration = ptr.Of(*s.Expiration)
+		clone.Expiration = s.Expiration
 	}
 	return clone
 }

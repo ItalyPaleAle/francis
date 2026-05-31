@@ -23,7 +23,6 @@ import (
 
 	"github.com/italypaleale/francis/components"
 	comptesting "github.com/italypaleale/francis/components/testing"
-	"github.com/italypaleale/francis/internal/ptr"
 	"github.com/italypaleale/francis/internal/testutil"
 )
 
@@ -241,10 +240,10 @@ func (p *PostgresProvider) Seed(ctx context.Context, spec comptesting.Spec) erro
 					interval *string
 				)
 				if a.Interval != "" {
-					interval = ptr.Of(a.Interval)
+					interval = &a.Interval
 				}
 				if a.TTL > 0 {
-					ttl = ptr.Of(now.Add(a.TTL))
+					ttl = new(now.Add(a.TTL))
 				}
 
 				var (
@@ -252,8 +251,8 @@ func (p *PostgresProvider) Seed(ctx context.Context, spec comptesting.Spec) erro
 					leaseExp *time.Time
 				)
 				if a.LeaseTTL != nil {
-					leaseExp = ptr.Of(now.Add(*a.LeaseTTL))
-					leaseID = ptr.Of(uuid.New().String())
+					leaseExp = new(now.Add(*a.LeaseTTL))
+					leaseID = new(uuid.New().String())
 				}
 
 				rows[i] = []any{

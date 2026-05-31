@@ -5,8 +5,6 @@ package testutil
 import (
 	"context"
 	"sync/atomic"
-
-	"github.com/italypaleale/francis/internal/ptr"
 )
 
 //nolint:containedctx
@@ -18,7 +16,7 @@ type contextDoneNotifier struct {
 
 func NewContextDoneNotifier(parentCtx context.Context) *contextDoneNotifier {
 	doneCalled := &atomic.Pointer[chan struct{}]{}
-	doneCalled.Store(ptr.Of(make(chan struct{})))
+	doneCalled.Store(new(make(chan struct{})))
 	return &contextDoneNotifier{
 		Context:    parentCtx,
 		doneCalled: doneCalled,

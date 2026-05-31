@@ -14,7 +14,6 @@ import (
 	sqltransactions "github.com/italypaleale/go-sql-utils/transactions/sql"
 
 	"github.com/italypaleale/francis/components"
-	"github.com/italypaleale/francis/internal/ptr"
 	"github.com/italypaleale/francis/internal/ref"
 )
 
@@ -51,7 +50,7 @@ func (s *SQLiteProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res co
 		res.Interval = *interval
 	}
 	if ttlTime != nil {
-		res.TTL = ptr.Of(time.UnixMilli(*ttlTime))
+		res.TTL = new(time.UnixMilli(*ttlTime))
 	}
 
 	return res, nil
@@ -63,10 +62,10 @@ func (s *SQLiteProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req com
 		ttlTime  *int64
 	)
 	if req.Interval != "" {
-		interval = ptr.Of(req.Interval)
+		interval = &req.Interval
 	}
 	if req.TTL != nil {
-		ttlTime = ptr.Of(req.TTL.UnixMilli())
+		ttlTime = new(req.TTL.UnixMilli())
 	}
 
 	if req.Data != nil && len(req.Data) == 0 {
@@ -194,7 +193,7 @@ func (s *SQLiteProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmLea
 		res.Interval = *interval
 	}
 	if ttlTime != nil {
-		res.TTL = ptr.Of(time.UnixMilli(*ttlTime))
+		res.TTL = new(time.UnixMilli(*ttlTime))
 	}
 
 	return res, nil

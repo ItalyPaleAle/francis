@@ -11,7 +11,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/italypaleale/francis/components"
-	"github.com/italypaleale/francis/internal/ptr"
 	"github.com/italypaleale/francis/internal/ref"
 )
 
@@ -585,7 +584,7 @@ func (p *Provider) UpdateLeasedAlarm(ctx context.Context, lease *ref.AlarmLease,
 		updated.DueTime = req.DueTime
 		if req.RefreshLease {
 			// Refresh the lease
-			updated.LeaseExpiration = ptr.Of(now.Add(p.Cfg.AlarmsLeaseDuration))
+			updated.LeaseExpiration = new(now.Add(p.Cfg.AlarmsLeaseDuration))
 		} else {
 			// Release the lease
 			updated.LeaseID = nil

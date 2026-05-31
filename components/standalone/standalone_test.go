@@ -24,7 +24,6 @@ import (
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/standalone/internal"
 	comptesting "github.com/italypaleale/francis/components/testing"
-	"github.com/italypaleale/francis/internal/ptr"
 	"github.com/italypaleale/francis/internal/ref"
 )
 
@@ -309,13 +308,13 @@ func (p *StandaloneMemory) Seed(ctx context.Context, spec comptesting.Spec) erro
 		}
 
 		if a.TTL > 0 {
-			alm.TTL = ptr.Of(now.Add(a.TTL))
+			alm.TTL = new(now.Add(a.TTL))
 		}
 
 		if a.LeaseTTL != nil {
 			leaseExp := now.Add(*a.LeaseTTL)
 			alm.LeaseExpiration = &leaseExp
-			alm.LeaseID = ptr.Of(uuid.New().String())
+			alm.LeaseID = new(uuid.New().String())
 		}
 
 		p.Alarms[key] = alm
@@ -418,7 +417,7 @@ func (p *StandaloneMemory) GetAllHosts(ctx context.Context) (comptesting.Spec, e
 		}
 
 		if a.LeaseExpiration != nil {
-			as.LeaseExp = ptr.Of(*a.LeaseExpiration)
+			as.LeaseExp = a.LeaseExpiration
 		}
 
 		spec.Alarms = append(spec.Alarms, as)
@@ -521,13 +520,13 @@ func (p *StandaloneSQLiteBacked) Seed(ctx context.Context, spec comptesting.Spec
 		}
 
 		if a.TTL > 0 {
-			alm.TTL = ptr.Of(now.Add(a.TTL))
+			alm.TTL = new(now.Add(a.TTL))
 		}
 
 		if a.LeaseTTL != nil {
 			leaseExp := now.Add(*a.LeaseTTL)
 			alm.LeaseExpiration = &leaseExp
-			alm.LeaseID = ptr.Of(uuid.New().String())
+			alm.LeaseID = new(uuid.New().String())
 		}
 
 		p.Alarms[key] = alm
@@ -630,7 +629,7 @@ func (p *StandaloneSQLiteBacked) GetAllHosts(ctx context.Context) (comptesting.S
 		}
 
 		if a.LeaseExpiration != nil {
-			as.LeaseExp = ptr.Of(*a.LeaseExpiration)
+			as.LeaseExp = a.LeaseExpiration
 		}
 
 		spec.Alarms = append(spec.Alarms, as)
@@ -731,13 +730,13 @@ func (p *StandalonePostgresBacked) Seed(ctx context.Context, spec comptesting.Sp
 		}
 
 		if a.TTL > 0 {
-			alm.TTL = ptr.Of(now.Add(a.TTL))
+			alm.TTL = new(now.Add(a.TTL))
 		}
 
 		if a.LeaseTTL != nil {
 			leaseExp := now.Add(*a.LeaseTTL)
 			alm.LeaseExpiration = &leaseExp
-			alm.LeaseID = ptr.Of(uuid.New().String())
+			alm.LeaseID = new(uuid.New().String())
 		}
 
 		p.Alarms[key] = alm
@@ -840,7 +839,7 @@ func (p *StandalonePostgresBacked) GetAllHosts(ctx context.Context) (comptesting
 		}
 
 		if a.LeaseExpiration != nil {
-			as.LeaseExp = ptr.Of(*a.LeaseExpiration)
+			as.LeaseExp = a.LeaseExpiration
 		}
 
 		spec.Alarms = append(spec.Alarms, as)

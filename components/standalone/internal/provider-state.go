@@ -5,7 +5,6 @@ import (
 	"log/slog"
 
 	"github.com/italypaleale/francis/components"
-	"github.com/italypaleale/francis/internal/ptr"
 	"github.com/italypaleale/francis/internal/ref"
 )
 
@@ -38,7 +37,7 @@ func (p *Provider) SetState(ctx context.Context, r ref.ActorRef, data []byte, op
 		Data: data,
 	}
 	if opts.TTL > 0 {
-		entry.Expiration = ptr.Of(p.Clock.Now().Add(opts.TTL))
+		entry.Expiration = new(p.Clock.Now().Add(opts.TTL))
 	}
 
 	// Persist first, then apply in memory

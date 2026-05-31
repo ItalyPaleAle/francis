@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/italypaleale/francis/components"
-	"github.com/italypaleale/francis/internal/ptr"
 )
 
 // Test host UUIDs - human readable patterns for easier debugging
@@ -427,11 +426,11 @@ func GetSpec() Spec {
 		// The first 5 are leased with a valid lease
 		var leaseTTL *time.Duration
 		if i <= 5 {
-			leaseTTL = ptr.Of(time.Minute)
+			leaseTTL = new(time.Minute)
 		}
 		// The 6th is leased but its lease has expired
 		if i == 6 {
-			leaseTTL = ptr.Of(-10 * time.Minute)
+			leaseTTL = new(-10 * time.Minute)
 		}
 		spec.addAlarm(AlarmSpec{
 			AlarmID:   fmt.Sprintf("AA000000-000C-4000-000C-000000000%03d", i),

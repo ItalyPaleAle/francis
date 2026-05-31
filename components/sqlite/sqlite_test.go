@@ -18,7 +18,6 @@ import (
 
 	"github.com/italypaleale/francis/components"
 	comptesting "github.com/italypaleale/francis/components/testing"
-	"github.com/italypaleale/francis/internal/ptr"
 	"github.com/italypaleale/francis/internal/testutil"
 )
 
@@ -199,10 +198,10 @@ func (s *SQLiteProvider) Seed(ctx context.Context, spec comptesting.Spec) error 
 				interval *string
 			)
 			if a.Interval != "" {
-				interval = ptr.Of(a.Interval)
+				interval = &a.Interval
 			}
 			if a.TTL > 0 {
-				ttl = ptr.Of(now.UnixMilli() + a.TTL.Milliseconds())
+				ttl = new(now.UnixMilli() + a.TTL.Milliseconds())
 			}
 
 			var (
@@ -210,8 +209,8 @@ func (s *SQLiteProvider) Seed(ctx context.Context, spec comptesting.Spec) error 
 				leaseExp *int64
 			)
 			if a.LeaseTTL != nil {
-				leaseExp = ptr.Of(now.UnixMilli() + a.LeaseTTL.Milliseconds())
-				leaseID = ptr.Of(uuid.New().String())
+				leaseExp = new(now.UnixMilli() + a.LeaseTTL.Milliseconds())
+				leaseID = new(uuid.New().String())
 			}
 
 			_, err = insAlarm.ExecContext(ctx,
@@ -342,7 +341,7 @@ func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, err
 				r.TTL = time.Duration(*ttl) * time.Millisecond
 			}
 			if leaseExp != nil {
-				r.LeaseExp = ptr.Of(time.UnixMilli(*leaseExp))
+				r.LeaseExp = new(time.UnixMilli(*leaseExp))
 			}
 			res.Alarms = append(res.Alarms, r)
 		}

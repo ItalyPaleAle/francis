@@ -7,7 +7,6 @@ import (
 	"fmt"
 
 	"github.com/italypaleale/francis/components"
-	"github.com/italypaleale/francis/internal/ptr"
 	"github.com/italypaleale/francis/internal/ref"
 )
 
@@ -38,7 +37,7 @@ func (s *SQLiteProvider) GetState(ctx context.Context, ref ref.ActorRef) (data [
 func (s *SQLiteProvider) SetState(ctx context.Context, ref ref.ActorRef, data []byte, opts components.SetStateOpts) error {
 	var exp *int64
 	if opts.TTL > 0 {
-		exp = ptr.Of(s.clock.Now().Add(opts.TTL).UnixMilli())
+		exp = new(s.clock.Now().Add(opts.TTL).UnixMilli())
 	}
 
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)

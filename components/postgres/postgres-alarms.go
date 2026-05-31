@@ -11,7 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/italypaleale/francis/components"
-	"github.com/italypaleale/francis/internal/ptr"
 	"github.com/italypaleale/francis/internal/ref"
 )
 
@@ -48,7 +47,7 @@ func (p *PostgresProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res 
 func (p *PostgresProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req components.SetAlarmReq) error {
 	var interval *string
 	if req.Interval != "" {
-		interval = ptr.Of(req.Interval)
+		interval = &req.Interval
 	}
 
 	if req.Data != nil && len(req.Data) == 0 {

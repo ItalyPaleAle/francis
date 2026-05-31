@@ -17,7 +17,6 @@ import (
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/standalone/internal"
-	"github.com/italypaleale/francis/internal/ptr"
 )
 
 //go:embed migrations/sqlite/*.sql
@@ -304,7 +303,7 @@ func (s *StandaloneSQLiteBacked) loadAlarms(ctx context.Context) error {
 			a.Interval = interval.String
 		}
 		if ttlMs.Valid {
-			a.TTL = ptr.Of(time.UnixMilli(ttlMs.Int64))
+			a.TTL = new(time.UnixMilli(ttlMs.Int64))
 		}
 		if len(data) > 0 {
 			a.Data = data
@@ -313,7 +312,7 @@ func (s *StandaloneSQLiteBacked) loadAlarms(ctx context.Context) error {
 			a.LeaseID = &leaseID.String
 		}
 		if leaseExpMs.Valid {
-			a.LeaseExpiration = ptr.Of(time.UnixMilli(leaseExpMs.Int64))
+			a.LeaseExpiration = new(time.UnixMilli(leaseExpMs.Int64))
 		}
 
 		key := internal.NewAlarmKey(a.ActorType, a.ActorID, a.Name)
