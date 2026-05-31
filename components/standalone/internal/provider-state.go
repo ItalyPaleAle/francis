@@ -74,13 +74,12 @@ func (p *Provider) DeleteState(ctx context.Context, r ref.ActorRef) error {
 		delete(p.ActorState, key)
 	}
 
-	// Expired state is treated as absent: we still remove it (best-effort), but always
-	// return ErrNoState
+	// Expired state is treated as absent
+	// We still remove it (best-effort), but always return ErrNoState
 	if expired {
 		err := p.persistThenApply(ctx, &p.StateMu, changes, apply)
 		if err != nil {
-			// Only log the error here: the expired state isn't returned anyway, and the
-			// background cleanup will retry the removal later
+			// Only log the error here: the expired state isn't returned anyway, and the background cleanup will retry the removal later
 			p.Log.WarnContext(ctx, "Error while persisting removal of expired state in DeleteState", slog.Any("error", err))
 		}
 		return components.ErrNoState

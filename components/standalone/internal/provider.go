@@ -24,13 +24,11 @@ type Provider struct {
 	Mu              sync.RWMutex // Lock for Hosts, HostsByAddress, HostActorTypes, ActiveActors, Alarms, AlarmsByID
 	StateMu         sync.RWMutex // Lock for ActorState
 
-	// writeMu and stateWriteMu serialize writers (mutations) in their respective
-	// domains: writeMu for the Mu domain (hosts/actors/alarms) and stateWriteMu for
-	// the StateMu domain (state).
-	// Writers hold these for the whole "compute change set -> persist -> apply"
-	// sequence. This keeps the RWMutex (Mu/StateMu) off the persistence I/O path so
-	// readers can proceed while a write is being persisted, while still guaranteeing
-	// that no other writer can alter the state being persisted.
+	// writeMu and stateWriteMu serialize writers (mutations):
+	// - writeMu for the Mu domain (hosts/actors/alarms)
+	// - stateWriteMu for the StateMu domain (state)
+	// Writers hold these for the whole "compute change set -> persist -> apply" sequence
+	// This keeps the RWMutex (Mu/StateMu) off the persistence I/O path so readers can proceed while a write is being persisted, while still guaranteeing that no other writer can alter the state being persisted
 	writeMu      sync.Mutex
 	stateWriteMu sync.Mutex
 
@@ -118,7 +116,6 @@ func (p *Provider) Run(ctx context.Context) error {
 	if !p.Running.CompareAndSwap(false, true) {
 		return components.ErrAlreadyRunning
 	}
-	// Reset the running flag on exit, so the provider can be run again
 	defer p.Running.Store(false)
 
 	// Start the cleanup loop if enabled
@@ -147,36 +144,29 @@ func (p *Provider) stateCleanupLoop(ctx context.Context) {
 	}
 }
 
-// runCleanup runs the cleanup for unhealthy hosts and expired state, logging any error.
+// runCleanup runs the cleanup for unhealthy hosts and expired state
 func (p *Provider) runCleanup(ctx context.Context) {
 	err := p.Cleanup(ctx)
 	if err != nil {
+		// Errors are logged
 		p.Log.Error("Failed to perform cleanup", "error", err)
 	}
 }
 
-// Cleanup performs garbage collection of unhealthy hosts and expired state, persisting
-// the changes before applying them in memory.
+// Cleanup performs garbage collection of unhealthy hosts and expired state, persisting the changes before applying them in memory
 //
-// Unlike the per-request operations, Cleanup holds the map lock across the whole
-// compute+persist+apply sequence (rather than releasing it during persistence). This keeps
-// the snapshot it computed valid through apply, so it cannot act on stale data (e.g. delete a
-// host that was concurrently re-registered). Cleanup is an infrequent background task, so
-// briefly blocking readers while it persists is an acceptable trade-off; the latency-sensitive
-// per-request operations still keep persistence off the lock.
+// Unlike the per-request operations, Cleanup holds the map lock across the whole compute+persist+apply sequence (rather than releasing it during persistence)
+// This keeps the snapshot it computed valid through apply, so it cannot act on stale data
+// The latency-sensitive per-request operations still keep persistence off the lock
 func (p *Provider) Cleanup(ctx context.Context) error {
 	// Clean up unhealthy hosts (Mu domain)
-	err := p.cleanupDomain(ctx, &p.writeMu, &p.Mu, func(changes *Changes) func() {
-		return p.CleanupUnhealthyHosts(changes)
-	})
+	err := p.cleanupDomain(ctx, &p.writeMu, &p.Mu, p.CleanupUnhealthyHosts)
 	if err != nil {
 		return fmt.Errorf("failed to clean up unhealthy hosts: %w", err)
 	}
 
 	// Clean up expired state (StateMu domain)
-	err = p.cleanupDomain(ctx, &p.stateWriteMu, &p.StateMu, func(changes *Changes) func() {
-		return p.CleanupExpiredState(changes)
-	})
+	err = p.cleanupDomain(ctx, &p.stateWriteMu, &p.StateMu, p.CleanupExpiredState)
 	if err != nil {
 		return fmt.Errorf("failed to clean up expired state: %w", err)
 	}
@@ -184,8 +174,7 @@ func (p *Provider) Cleanup(ctx context.Context) error {
 	return nil
 }
 
-// cleanupDomain computes, persists, and applies a cleanup change set atomically while holding
-// the domain's write mutex and map lock.
+// cleanupDomain computes, persists, and applies a cleanup change set atomically while holding the domain's write mutex and map lock
 func (p *Provider) cleanupDomain(ctx context.Context, writeMu *sync.Mutex, lock *sync.RWMutex, compute func(changes *Changes) func()) error {
 	writeMu.Lock()
 	defer writeMu.Unlock()
@@ -195,41 +184,47 @@ func (p *Provider) cleanupDomain(ctx context.Context, writeMu *sync.Mutex, lock 
 	changes := NewChanges()
 	defer changes.Release()
 
+	// Compute the changes to apply
+	// This is an in-memory operation
 	apply := compute(changes)
 	if changes.IsEmpty() {
 		return nil
 	}
 
+	// Persist the changes to the DB
 	err := p.PersistHook.PersistChanges(ctx, changes)
 	if err != nil {
 		return fmt.Errorf("error persisting changes: %w", err)
 	}
 
+	// Apply the changes in-memory
+	// This can't fail
 	apply()
+
 	return nil
 }
 
-// persistThenApply persists the change set and, only if persistence succeeds, applies the
-// in-memory mutation under the given lock.
+// persistThenApply persists the change set and, only if persistence succeeds, applies the in-memory mutation under the given lock
 //
-// This implements the "persist before apply" strategy: the backing store is updated first,
-// and memory is touched only after a successful commit. As a result the in-memory state and
-// the backing store cannot diverge, and there is nothing to roll back on failure.
+// This implements the "persist before apply" strategy: the backing store is updated first, and memory is touched only after a successful commit
+// As a result the in-memory state and the backing store cannot diverge, and there is nothing to roll back on failure
 //
-// The caller must hold the domain write mutex (writeMu or stateWriteMu) for the whole
-// compute+persist+apply sequence, and must not be holding lock when calling this.
-// apply must not fail; it is a no-op when there are no changes.
+// The caller must hold the domain write mutex (writeMu or stateWriteMu) for the whole compute+persist+apply sequence, and must not be holding lock when calling this
+// apply must not fail and is a no-op when there are no changes
 func (p *Provider) persistThenApply(ctx context.Context, lock *sync.RWMutex, changes *Changes, apply func()) error {
 	if changes.IsEmpty() {
 		return nil
 	}
 
+	// Persist changes in the DB
 	err := p.PersistHook.PersistChanges(ctx, changes)
 	if err != nil {
 		return fmt.Errorf("error persisting changes: %w", err)
 	}
 
+	// Apply the changes in-memory
 	lock.Lock()
+	// This can't fail
 	apply()
 	lock.Unlock()
 
@@ -257,10 +252,10 @@ func (p *Provider) IsHostHealthy(h *Host) bool {
 }
 
 // CleanupUnhealthyHosts computes the changes needed to remove unhealthy hosts and their
-// associated data, recording them in changes. It does NOT mutate in-memory state; instead it
-// returns an apply function that performs the in-memory deletions.
-// Must be called while holding at least a read lock on Mu; apply must be called while holding
-// the Mu write lock (after the changes have been persisted).
+// associated data, recording them in changes
+// It returns an apply function that performs the in-memory deletions
+// Must be called while holding at least a read lock on Mu
+// apply must be called while holding the Mu write lock (after the changes have been persisted)
 func (p *Provider) CleanupUnhealthyHosts(changes *Changes) (apply func()) {
 	var (
 		deleteHostIDs   []string
@@ -296,6 +291,7 @@ func (p *Provider) CleanupUnhealthyHosts(changes *Changes) (apply func()) {
 		}
 	}
 
+	// Return the function that applies the changes in-memory
 	return func() {
 		for i, id := range deleteHostIDs {
 			delete(p.Hosts, id)
@@ -308,11 +304,10 @@ func (p *Provider) CleanupUnhealthyHosts(changes *Changes) (apply func()) {
 	}
 }
 
-// CleanupExpiredState computes the changes needed to remove expired state, recording them in
-// changes. It does NOT mutate in-memory state; instead it returns an apply function that
-// performs the in-memory deletions.
-// Must be called while holding at least a read lock on StateMu; apply must be called while
-// holding the StateMu write lock (after the changes have been persisted).
+// CleanupExpiredState computes the changes needed to remove expired state, recording them in changes
+// It returns an apply function that performs the in-memory deletions
+// Must be called while holding at least a read lock on StateMu
+// apply must be called while holding the StateMu write lock (after the changes have been persisted)
 func (p *Provider) CleanupExpiredState(changes *Changes) (apply func()) {
 	now := p.Clock.Now()
 
@@ -324,6 +319,7 @@ func (p *Provider) CleanupExpiredState(changes *Changes) (apply func()) {
 		}
 	}
 
+	// Return the function that applies the changes in-memory
 	return func() {
 		for _, key := range deleteKeys {
 			delete(p.ActorState, key)

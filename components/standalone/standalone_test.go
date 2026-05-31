@@ -236,8 +236,8 @@ func initTestProvider(t *testing.T) *StandaloneMemory {
 }
 
 // CleanupExpired performs garbage collection of expired records.
-func (p *StandaloneMemory) CleanupExpired() error {
-	return p.Cleanup(context.Background())
+func (p *StandaloneMemory) CleanupExpired(ctx context.Context) error {
+	return p.Cleanup(ctx)
 }
 
 func (p *StandaloneMemory) clearData() {
@@ -435,8 +435,8 @@ func (p *StandaloneMemory) GetAllHosts(ctx context.Context) (comptesting.Spec, e
 // Test helper methods for StandaloneSQLiteBacked
 
 // CleanupExpired performs garbage collection of expired records.
-func (p *StandaloneSQLiteBacked) CleanupExpired() error {
-	return p.Cleanup(context.Background())
+func (p *StandaloneSQLiteBacked) CleanupExpired(ctx context.Context) error {
+	return p.Cleanup(ctx)
 }
 
 func (p *StandaloneSQLiteBacked) clearData() {
@@ -652,8 +652,8 @@ func (p *StandaloneSQLiteBacked) GetAllHosts(ctx context.Context) (comptesting.S
 // Test helper methods for StandalonePostgresBacked
 
 // CleanupExpired performs garbage collection of expired records.
-func (p *StandalonePostgresBacked) CleanupExpired() error {
-	return p.Cleanup(context.Background())
+func (p *StandalonePostgresBacked) CleanupExpired(ctx context.Context) error {
+	return p.Cleanup(ctx)
 }
 
 func (p *StandalonePostgresBacked) clearData() {
@@ -681,8 +681,7 @@ func (p *StandalonePostgresBacked) clearDatabase(ctx context.Context) error {
 func (p *StandalonePostgresBacked) Seed(ctx context.Context, spec comptesting.Spec) error {
 	p.Mu.Lock()
 	defer p.Mu.Unlock()
-	// Seed also mutates the state map (via clearData), so it must hold StateMu too, to
-	// serialize against the background cleanup loop
+	// Seed also mutates the state map (via clearData), so it must hold StateMu too, to serialize against the background cleanup loop
 	p.StateMu.Lock()
 	defer p.StateMu.Unlock()
 

@@ -1995,7 +1995,7 @@ func (s Suite) TestState(t *testing.T) {
 		expectCollection(t, ActorStateSpecCollection{{ActorType: ref2.ActorType, ActorID: ref2.ActorID, Data: data}})
 
 		_ = s.p.AdvanceClock(1200 * time.Millisecond) //nolint:errcheck
-		err = s.p.CleanupExpired()
+		err = s.p.CleanupExpired(t.Context())
 		require.NoError(t, err)
 
 		_, err = s.p.GetState(ctx, ref2)
@@ -2030,7 +2030,7 @@ func (s Suite) TestState(t *testing.T) {
 		// GC hasn't run yet
 		expectCollection(t, ActorStateSpecCollection{{ActorType: ref3.ActorType, ActorID: ref3.ActorID, Data: data2}})
 
-		err = s.p.CleanupExpired()
+		err = s.p.CleanupExpired(t.Context())
 		require.NoError(t, err)
 		expectCollection(t, ActorStateSpecCollection{})
 	})

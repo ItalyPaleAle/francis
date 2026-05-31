@@ -153,19 +153,20 @@ func (p *Provider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req componen
 	changes := NewChanges()
 	defer changes.Release()
 
-	// hostCapacity tracks the remaining capacity for a (host, actor type) pair.
+	// hostCapacity tracks the remaining capacity for a (host, actor type) pair
 	type hostCapacity struct {
 		hostID      string
 		idleTimeout time.Duration
 		capacity    int // remaining capacity (MaxInt32 for unlimited)
 	}
 
-	// actorPlacement is a staged actor activation (applied only after persistence).
+	// actorPlacement is a staged actor activation (applied only after persistence)
 	type actorPlacement struct {
 		key   ActorKey
 		actor *ActiveActor
 	}
-	// leaseUpdate is a staged alarm lease assignment (applied only after persistence).
+
+	// leaseUpdate is a staged alarm lease assignment (applied only after persistence)
 	type leaseUpdate struct {
 		key     AlarmKey
 		updated *Alarm
@@ -178,13 +179,14 @@ func (p *Provider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req componen
 		stagedActors = make(map[ActorKey]struct{})
 	)
 
-	// Everything below only reads the in-memory maps; mutations are staged and applied after the
-	// change set has been persisted. writeMu ensures no other writer alters the maps meanwhile.
+	// Everything below only reads the in-memory maps
+	// Mutations are staged and applied after the change set has been persisted. writeMu ensures no other writer alters the maps meanwhile
 	p.Mu.RLock()
 
 	// Build a map of actor type -> list of hosts with capacity, and the set of healthy hosts
 	capacitiesByType := make(map[string][]*hostCapacity)
 	healthyHostsSet := make(map[string]struct{})
+
 	for _, hostID := range req.Hosts {
 		h, ok := p.Hosts[hostID]
 		if !ok || !p.IsHostHealthy(h) {
@@ -234,7 +236,7 @@ func (p *Provider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req componen
 		return upcoming[i].DueTime.Before(upcoming[j].DueTime)
 	})
 
-	// alarmCandidate pairs an alarm with the host its actor will run on (nil host = skip).
+	// alarmCandidate pairs an alarm with the host its actor will run on (nil host = skip)
 	type alarmCandidate struct {
 		alarm  *Alarm
 		hostID *string
@@ -253,24 +255,30 @@ func (p *Provider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req componen
 		)
 
 		actor, ok := p.ActiveActors[actKey]
-		switch {
-		case ok:
-			if _, isInRequestList := healthyHostsSet[actor.HostID]; isInRequestList {
+		if ok {
+			// Actor is active - check where
+			_, isInRequestList := healthyHostsSet[actor.HostID]
+			if isInRequestList {
 				// Actor is active on a host in the request list - include the alarm
 				hostID = &actor.HostID
-			} else if h, ok := p.Hosts[actor.HostID]; ok && p.IsHostHealthy(h) {
-				// Actor is active on a healthy host not in our list - SKIP this alarm
-				continue
 			} else {
+				// Actor is active on a host NOT in the request list
+				// Check if that host is healthy
+				h, ok := p.Hosts[actor.HostID]
+				if ok && p.IsHostHealthy(h) {
+					// Actor is active on a healthy host not in our list - SKIP this alarm
+					continue
+				}
 				// Actor is on an unhealthy host - it can be re-placed
 				needsPlacement = true
 			}
-		default:
+		} else {
 			// Actor is not active - needs placement
 			needsPlacement = true
 		}
 
 		if needsPlacement {
+			// Need to find a host with capacity
 			caps := capacitiesByType[a.ActorType]
 			if len(caps) == 0 {
 				// No host can handle this actor type
@@ -284,13 +292,14 @@ func (p *Provider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req componen
 					hostsWithCap = append(hostsWithCap, hc)
 				}
 			}
+
 			if len(hostsWithCap) == 0 {
 				// No capacity available
 				continue
 			}
 
 			// Pick a random host and consume one unit of its capacity
-			// #nosec G404
+			// #nosec G404 -- rand is only used to pick a random entry, no need for crypto-safe randomness
 			selected := hostsWithCap[rand.IntN(len(hostsWithCap))]
 			selected.capacity--
 			hostID = &selected.hostID
@@ -319,7 +328,8 @@ func (p *Provider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req componen
 		// Stage actor activation if needed (only once per actor in this batch)
 		if c.hostID != nil {
 			actKey := a.GetActorKey()
-			if _, staged := stagedActors[actKey]; !staged {
+			_, staged := stagedActors[actKey]
+			if !staged {
 				existingActor, activeExists := p.ActiveActors[actKey]
 				needsUpdate := !activeExists
 				if activeExists {
@@ -454,7 +464,7 @@ func (p *Provider) RenewAlarmLeases(ctx context.Context, req components.RenewAla
 		hostIDSet[h] = struct{}{}
 	}
 
-	// leaseRenewal is a staged lease renewal (applied only after persistence).
+	// leaseRenewal is a staged lease renewal (applied only after persistence)
 	type leaseRenewal struct {
 		key     AlarmKey
 		updated *Alarm
@@ -474,7 +484,8 @@ func (p *Provider) RenewAlarmLeases(ctx context.Context, req components.RenewAla
 
 		// Check lease ID filter
 		if leaseIDSet != nil {
-			if _, ok := leaseIDSet[*a.LeaseID]; !ok {
+			_, ok := leaseIDSet[*a.LeaseID]
+			if !ok {
 				continue
 			}
 		}
@@ -484,7 +495,9 @@ func (p *Provider) RenewAlarmLeases(ctx context.Context, req components.RenewAla
 		if !ok {
 			continue
 		}
-		if _, ok := hostIDSet[actor.HostID]; !ok {
+
+		_, ok = hostIDSet[actor.HostID]
+		if !ok {
 			continue
 		}
 

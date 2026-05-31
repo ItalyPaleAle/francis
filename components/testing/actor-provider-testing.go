@@ -12,7 +12,7 @@ type ActorProviderTesting interface {
 	components.ActorProvider
 
 	// CleanupExpired performs garbage collection of expired records
-	CleanupExpired() error
+	CleanupExpired(ctx context.Context) error
 
 	// Seed seeds the data into the database
 	Seed(ctx context.Context, spec Spec) error

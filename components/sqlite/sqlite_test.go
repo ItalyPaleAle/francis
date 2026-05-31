@@ -90,7 +90,7 @@ func initTestProvider(t *testing.T, connString string) (p *SQLiteProvider) {
 	return s
 }
 
-func (s *SQLiteProvider) CleanupExpired() error {
+func (s *SQLiteProvider) CleanupExpired(_ context.Context) error {
 	return s.gc.CleanupExpired()
 }
 
@@ -403,7 +403,7 @@ func TestHostGarbageCollection(t *testing.T) {
 		_ = s.AdvanceClock(15 * time.Second) //nolint:errcheck
 
 		// Run garbage collection
-		err = s.CleanupExpired()
+		err = s.CleanupExpired(t.Context())
 		require.NoError(t, err)
 
 		// Verify only host1 and its actor types are removed
@@ -436,7 +436,7 @@ func TestHostGarbageCollection(t *testing.T) {
 		_ = s.AdvanceClock(30 * time.Second) //nolint:errcheck
 
 		// Run garbage collection again
-		err = s.CleanupExpired()
+		err = s.CleanupExpired(t.Context())
 		require.NoError(t, err)
 
 		// Verify only host3 remains
@@ -455,7 +455,7 @@ func TestHostGarbageCollection(t *testing.T) {
 		_ = s.AdvanceClock(20 * time.Second) //nolint:errcheck
 
 		// Run garbage collection one more time
-		err = s.CleanupExpired()
+		err = s.CleanupExpired(t.Context())
 		require.NoError(t, err)
 
 		// Verify all hosts are removed

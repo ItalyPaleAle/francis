@@ -20,11 +20,12 @@ func (p *Provider) RegisterHost(ctx context.Context, req components.RegisterHost
 	defer changes.Release()
 
 	p.Mu.RLock()
-	// Clean up unhealthy hosts first; the deletions are applied together with the new host
+	// Clean up unhealthy hosts first
+	// The deletions are applied together with the new host
 	cleanupApply := p.CleanupUnhealthyHosts(changes)
 
-	// Check if there's already a healthy host at this address.
-	// Unhealthy hosts at the same address are cleaned up above, so they don't block registration.
+	// Check if there's already a healthy host at this address
+	// Unhealthy hosts at the same address are cleaned up above, so they don't block registration
 	alreadyRegistered := false
 	if existingHostID, ok := p.HostsByAddress[req.Address]; ok {
 		existingHost, ok := p.Hosts[existingHostID]
@@ -105,17 +106,16 @@ func (p *Provider) UpdateActorHost(ctx context.Context, hostID string, req compo
 		newHats     []*HostActorType
 	)
 	if healthy {
-		// Update last health check if requested.
-		// We clone the host instead of mutating it in place, so nothing changes in memory
-		// until the change has been persisted.
+		// Update last health check if requested
+		// We clone the host instead of mutating it in place, so nothing changes in memory until the change has been persisted
 		if req.UpdateLastHealthCheck {
 			updatedHost = h.Clone()
 			updatedHost.LastHealthCheck = p.Clock.Now()
 			changes.Hosts.Set = append(changes.Hosts.Set, HostChange{Key: hostID, Value: updatedHost})
 		}
 
-		// Update actor types if provided (non-nil).
-		// A nil list means "do not update"; an empty, non-nil list removes all actor types.
+		// Update actor types if provided (non-nil)
+		// A nil list means "do not update", while an empty, non-nil list removes all actor types
 		if req.ActorTypes != nil {
 			for _, hat := range p.HostActorTypes[hostID] {
 				changes.HostActorTypes.Delete = append(changes.HostActorTypes.Delete, HostActorTypeKey{
@@ -236,8 +236,10 @@ func (p *Provider) LookupActor(ctx context.Context, r ref.ActorRef, opts compone
 	)
 
 	// Check if the actor is already active on a healthy host
-	if actor, ok := p.ActiveActors[key]; ok {
-		if h, ok := p.Hosts[actor.HostID]; ok && p.IsHostHealthy(h) {
+	actor, ok := p.ActiveActors[key]
+	if ok {
+		h, ok := p.Hosts[actor.HostID]
+		if ok && p.IsHostHealthy(h) {
 			if len(opts.Hosts) > 0 && !slices.Contains(opts.Hosts, actor.HostID) {
 				restricted = true
 			} else {
@@ -321,8 +323,8 @@ func (p *Provider) lookupActiveActor(r ref.ActorRef, hosts []string) (components
 	}, nil
 }
 
-// findHostWithCapacity finds a healthy host that can host an actor of the given type.
-// Must be called while holding at least a read lock on Mu.
+// findHostWithCapacity finds a healthy host that can host an actor of the given type
+// Must be called while holding at least a read lock on Mu
 func (p *Provider) findHostWithCapacity(actorType string, allowedHosts []string) (*Host, time.Duration) {
 	type candidate struct {
 		host        *Host
@@ -397,9 +399,8 @@ func (p *Provider) RemoveActor(ctx context.Context, r ref.ActorRef) error {
 	if ok {
 		changes.ActiveActors.Delete = append(changes.ActiveActors.Delete, key)
 
-		// Release any alarm leases for this actor.
-		// We clone the affected alarms (rather than mutate them in place) so nothing changes
-		// in memory until the change has been persisted.
+		// Release any alarm leases for this actor
+		// We clone the affected alarms (rather than mutate them in place) so nothing changes in memory until the change has been persisted
 		for k, a := range p.Alarms {
 			if a.ActorType != r.ActorType || a.ActorID != r.ActorID {
 				continue

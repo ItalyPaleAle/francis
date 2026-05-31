@@ -114,7 +114,6 @@ func (p *PostgresProvider) Run(ctx context.Context) error {
 	if !p.running.CompareAndSwap(false, true) {
 		return components.ErrAlreadyRunning
 	}
-	// Reset the running flag on exit, so the provider can be run again
 	defer p.running.Store(false)
 
 	// Start the background garbage collection
