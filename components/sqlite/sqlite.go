@@ -17,6 +17,7 @@ import (
 	"github.com/italypaleale/go-sql-utils/cleanup"
 	"github.com/italypaleale/go-sql-utils/migrations"
 	sqlitemigrations "github.com/italypaleale/go-sql-utils/migrations/sqlite"
+	gosqlsqlite "github.com/italypaleale/go-sql-utils/sqlite"
 	"k8s.io/utils/clock"
 	"modernc.org/sqlite"
 
@@ -32,6 +33,13 @@ var (
 
 	//go:embed queries/fetch-upcoming-alarms-with-constraints.sql
 	queryFetchUpcomingAlarmsWithConstraints string
+)
+
+const (
+	DefaultBusyTimeout      = 2500 * time.Millisecond
+	DefaultConnectionString = "data.db"
+	DefaultTimeout          = 5 * time.Second
+	DefaultCleanupInterval  = 10 * time.Minute
 )
 
 type SQLiteProvider struct {
@@ -89,7 +97,8 @@ func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, provi
 		if sqliteOpts.ConnectionString == "" {
 			sqliteOpts.ConnectionString = DefaultConnectionString
 		}
-		sqliteOpts.ConnectionString, err = ParseConnectionString(sqliteOpts.ConnectionString, s.log)
+		var isMemoryDB bool
+		sqliteOpts.ConnectionString, _, isMemoryDB, err = gosqlsqlite.ParseConnectionString(sqliteOpts.ConnectionString, s.log)
 		if err != nil {
 			return nil, fmt.Errorf("connection string for SQLite is not valid: %w", err)
 		}
@@ -102,7 +111,7 @@ func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, provi
 
 		// For in-memory databases, we must limit to 1 open connection at the same time, or they won't see the whole data
 		// The other workaround, of using shared caches, doesn't work well with multiple write transactions trying to happen at once
-		if IsInMemoryDB(sqliteOpts.ConnectionString) {
+		if isMemoryDB {
 			s.db.SetMaxOpenConns(1)
 		}
 	}
