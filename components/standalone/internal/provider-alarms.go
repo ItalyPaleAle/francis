@@ -41,29 +41,30 @@ func (p *Provider) GetAlarm(ctx context.Context, aRef ref.AlarmRef) (components.
 func (p *Provider) SetAlarm(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) error {
 	key := NewAlarmKey(aRef.ActorType, aRef.ActorID, aRef.Name)
 
-	p.Mu.Lock()
-	defer p.Mu.Unlock()
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
 
 	changes := NewChanges()
 	defer changes.Release()
 
-	// Check if alarm already exists with same properties (to avoid resetting leases unnecessarily)
-	existing, ok := p.Alarms[key]
-	if ok {
-		// Check if properties are the same
-		ok = existing.EqualProperties(AlarmProperties{
-			DueTime:  req.DueTime,
-			Interval: req.Interval,
-			TTL:      req.TTL,
-			Data:     req.Data,
-		})
-		if ok {
-			// Properties are the same, keep the existing alarm with its lease
-			return nil
-		}
+	// Check if the alarm already exists with the same properties (to avoid resetting leases unnecessarily)
+	p.Mu.RLock()
+	existing, exists := p.Alarms[key]
+	sameProps := exists && existing.EqualProperties(AlarmProperties{
+		DueTime:  req.DueTime,
+		Interval: req.Interval,
+		TTL:      req.TTL,
+		Data:     req.Data,
+	})
+	var existingID string
+	if exists {
+		existingID = existing.ID
+	}
+	p.Mu.RUnlock()
 
-		// Remove old alarm
-		changes.Alarms.Delete = append(changes.Alarms.Delete, existing.ID)
+	if sameProps {
+		// Properties are the same: keep the existing alarm with its lease
+		return nil
 	}
 
 	// Normalize empty data to nil
@@ -93,61 +94,48 @@ func (p *Provider) SetAlarm(ctx context.Context, aRef ref.AlarmRef, req componen
 		LeaseExpiration: nil,
 	}
 
-	p.Alarms[key] = a
-	p.AlarmsByID[alarmID] = a
-	// When replacing an existing alarm, the new alarm gets a fresh ID, so we must drop the previous ID's mapping to avoid leaking it (and to invalidate any stale lease still referencing the old alarm ID)
-	if existing != nil && existing.ID != alarmID {
-		delete(p.AlarmsByID, existing.ID)
+	if exists {
+		// Remove the old alarm (it gets a fresh ID)
+		changes.Alarms.Delete = append(changes.Alarms.Delete, existingID)
 	}
 	changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: alarmID, Value: a})
 
-	// Persist changes
-	err = p.PersistHook.PersistChanges(ctx, changes)
-	if err != nil {
-		// Rollback
-		if existing != nil {
-			p.Alarms[key] = existing
-			p.AlarmsByID[existing.ID] = existing
-		} else {
-			delete(p.Alarms, key)
+	return p.persistThenApply(ctx, &p.Mu, changes, func() {
+		p.Alarms[key] = a
+		p.AlarmsByID[alarmID] = a
+		// When replacing an existing alarm, the new alarm gets a fresh ID, so we drop the previous ID's mapping to avoid leaking it (and to invalidate any stale lease still referencing the old alarm ID)
+		if exists && existingID != alarmID {
+			delete(p.AlarmsByID, existingID)
 		}
-		delete(p.AlarmsByID, alarmID)
-
-		return fmt.Errorf("error persisting changes: %w", err)
-	}
-
-	return nil
+	})
 }
 
 func (p *Provider) DeleteAlarm(ctx context.Context, aRef ref.AlarmRef) error {
 	key := NewAlarmKey(aRef.ActorType, aRef.ActorID, aRef.Name)
 
-	p.Mu.Lock()
-	defer p.Mu.Unlock()
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
 
+	p.Mu.RLock()
 	a, ok := p.Alarms[key]
+	var id string
+	if ok {
+		id = a.ID
+	}
+	p.Mu.RUnlock()
+
 	if !ok {
 		return components.ErrNoAlarm
 	}
 
 	changes := NewChanges()
 	defer changes.Release()
-	changes.Alarms.Delete = append(changes.Alarms.Delete, a.ID)
+	changes.Alarms.Delete = append(changes.Alarms.Delete, id)
 
-	delete(p.AlarmsByID, a.ID)
-	delete(p.Alarms, key)
-
-	// Persist changes
-	err := p.PersistHook.PersistChanges(ctx, changes)
-	if err != nil {
-		// Rollback
-		p.Alarms[key] = a
-		p.AlarmsByID[a.ID] = a
-
-		return fmt.Errorf("error persisting changes: %w", err)
-	}
-
-	return nil
+	return p.persistThenApply(ctx, &p.Mu, changes, func() {
+		delete(p.Alarms, key)
+		delete(p.AlarmsByID, id)
+	})
 }
 
 func (p *Provider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req components.FetchAndLeaseUpcomingAlarmsReq) ([]*ref.AlarmLease, error) {
@@ -155,27 +143,48 @@ func (p *Provider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req componen
 		return nil, nil
 	}
 
-	p.Mu.Lock()
-	defer p.Mu.Unlock()
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
 
 	now := p.Clock.Now()
 	horizon := now.Add(p.Cfg.AlarmsFetchAheadInterval)
+	leaseExpiration := now.Add(p.Cfg.AlarmsLeaseDuration)
 
 	changes := NewChanges()
 	defer changes.Release()
 
-	// Get healthy hosts from the request list and build capacity info
+	// hostCapacity tracks the remaining capacity for a (host, actor type) pair.
 	type hostCapacity struct {
 		hostID      string
-		actorType   string
 		idleTimeout time.Duration
 		capacity    int // remaining capacity (MaxInt32 for unlimited)
 	}
 
-	// Build a map of actor type -> list of hosts with capacity
+	// actorPlacement is a staged actor activation (applied only after persistence).
+	type actorPlacement struct {
+		key   ActorKey
+		actor *ActiveActor
+	}
+	// leaseUpdate is a staged alarm lease assignment (applied only after persistence).
+	type leaseUpdate struct {
+		key     AlarmKey
+		updated *Alarm
+	}
+
+	var (
+		result       []*ref.AlarmLease
+		placements   []actorPlacement
+		leaseUpdates []leaseUpdate
+		stagedActors = make(map[ActorKey]struct{})
+	)
+
+	// Everything below only reads the in-memory maps; mutations are staged and applied after the
+	// change set has been persisted. writeMu ensures no other writer alters the maps meanwhile.
+	p.Mu.RLock()
+
+	// Build a map of actor type -> list of hosts with capacity, and the set of healthy hosts
 	capacitiesByType := make(map[string][]*hostCapacity)
 	healthyHostsSet := make(map[string]struct{})
-
 	for _, hostID := range req.Hosts {
 		h, ok := p.Hosts[hostID]
 		if !ok || !p.IsHostHealthy(h) {
@@ -192,7 +201,6 @@ func (p *Provider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req componen
 
 			hc := &hostCapacity{
 				hostID:      hostID,
-				actorType:   hat.ActorType,
 				idleTimeout: hat.IdleTimeout,
 				capacity:    capacity,
 			}
@@ -201,108 +209,90 @@ func (p *Provider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req componen
 	}
 
 	if len(healthyHostsSet) == 0 {
+		p.Mu.RUnlock()
 		return nil, nil
 	}
 
-	// Collect upcoming alarms sorted by due time
-	type alarmCandidate struct {
-		alarm  *Alarm
-		hostID *string // nil if actor needs to be created
-	}
-
-	candidates := make([]alarmCandidate, 0, p.Cfg.AlarmsFetchAheadBatchSize)
-
-	// First pass: collect all potentially upcoming alarms
-	type alarmWithTime struct {
-		alarm *Alarm
-	}
-	allAlarms := make([]alarmWithTime, 0)
+	// Collect all potentially upcoming alarms (within the horizon and not validly leased)
+	upcoming := make([]*Alarm, 0)
 	for _, a := range p.Alarms {
 		if a.DueTime.After(horizon) {
 			continue
 		}
-
 		// Skip alarms with valid leases
 		if a.LeaseID != nil && a.LeaseExpiration != nil && a.LeaseExpiration.After(now) {
 			continue
 		}
-
-		allAlarms = append(allAlarms, alarmWithTime{alarm: a})
+		upcoming = append(upcoming, a)
 	}
 
 	// Sort by due time, then by alarm ID for consistent ordering
-	sort.Slice(allAlarms, func(i, j int) bool {
-		if allAlarms[i].alarm.DueTime.Equal(allAlarms[j].alarm.DueTime) {
-			return allAlarms[i].alarm.ID < allAlarms[j].alarm.ID
+	sort.Slice(upcoming, func(i, j int) bool {
+		if upcoming[i].DueTime.Equal(upcoming[j].DueTime) {
+			return upcoming[i].ID < upcoming[j].ID
 		}
-		return allAlarms[i].alarm.DueTime.Before(allAlarms[j].alarm.DueTime)
+		return upcoming[i].DueTime.Before(upcoming[j].DueTime)
 	})
 
-	// Process alarms and check placement
-	for _, awt := range allAlarms {
+	// alarmCandidate pairs an alarm with the host its actor will run on (nil host = skip).
+	type alarmCandidate struct {
+		alarm  *Alarm
+		hostID *string
+	}
+	candidates := make([]alarmCandidate, 0, p.Cfg.AlarmsFetchAheadBatchSize)
+
+	for _, a := range upcoming {
 		if len(candidates) >= p.Cfg.AlarmsFetchAheadBatchSize {
 			break
 		}
 
-		a := awt.alarm
-
-		// Check if actor is already active
 		actKey := a.GetActorKey()
-		var hostID *string
-		var needsPlacement bool
+		var (
+			hostID         *string
+			needsPlacement bool
+		)
 
 		actor, ok := p.ActiveActors[actKey]
-		if ok {
-			// Actor is active - check where
-			_, isInRequestList := healthyHostsSet[actor.HostID]
-			if isInRequestList {
+		switch {
+		case ok:
+			if _, isInRequestList := healthyHostsSet[actor.HostID]; isInRequestList {
 				// Actor is active on a host in the request list - include the alarm
 				hostID = &actor.HostID
+			} else if h, ok := p.Hosts[actor.HostID]; ok && p.IsHostHealthy(h) {
+				// Actor is active on a healthy host not in our list - SKIP this alarm
+				continue
 			} else {
-				// Actor is active on a host NOT in the request list
-				// Check if that host is healthy
-				h, ok := p.Hosts[actor.HostID]
-				if ok && p.IsHostHealthy(h) {
-					// Actor is on a healthy host not in our list - SKIP this alarm
-					continue
-				}
-				// Actor is on an unhealthy host - can be re-placed
+				// Actor is on an unhealthy host - it can be re-placed
 				needsPlacement = true
 			}
-		} else {
+		default:
 			// Actor is not active - needs placement
 			needsPlacement = true
 		}
 
 		if needsPlacement {
-			// Need to find a host with capacity
 			caps := capacitiesByType[a.ActorType]
 			if len(caps) == 0 {
 				// No host can handle this actor type
 				continue
 			}
 
-			// Find hosts with capacity
-			hostsWithCap := make([]*hostCapacity, 0)
+			// Find hosts with remaining capacity
+			hostsWithCap := make([]*hostCapacity, 0, len(caps))
 			for _, hc := range caps {
 				if hc.capacity > 0 {
 					hostsWithCap = append(hostsWithCap, hc)
 				}
 			}
-
 			if len(hostsWithCap) == 0 {
 				// No capacity available
 				continue
 			}
 
-			// Pick random host
+			// Pick a random host and consume one unit of its capacity
 			// #nosec G404
-			idx := rand.IntN(len(hostsWithCap))
-			selected := hostsWithCap[idx]
-
-			// Decrement capacity
+			selected := hostsWithCap[rand.IntN(len(hostsWithCap))]
 			selected.capacity--
-
 			hostID = &selected.hostID
 		}
 
@@ -310,95 +300,71 @@ func (p *Provider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req componen
 	}
 
 	if len(candidates) == 0 {
+		p.Mu.RUnlock()
 		return nil, nil
 	}
 
-	// Generate a single lease ID prefix
+	// Generate a single lease ID prefix shared by this batch
 	leaseIDPrefixObj, err := uuid.NewV7()
 	if err != nil {
+		p.Mu.RUnlock()
 		return nil, err
 	}
 	leaseIDPrefix := leaseIDPrefixObj.String()
 
-	leaseExpiration := now.Add(p.Cfg.AlarmsLeaseDuration)
-	result := make([]*ref.AlarmLease, 0, len(candidates))
-
-	// Track changes for rollback
-	type actorRollback struct {
-		key           ActorKey
-		previousActor *ActiveActor // nil if actor was created
-	}
-	type alarmRollback struct {
-		alarm                   *Alarm
-		previousLeaseID         *string
-		previousLeaseExpiration *time.Time
-	}
-	actorRollbacks := make([]actorRollback, 0)
-	alarmRollbacks := make([]alarmRollback, 0)
-
+	result = make([]*ref.AlarmLease, 0, len(candidates))
 	for _, c := range candidates {
 		a := c.alarm
 
-		// Activate or update actor if needed
+		// Stage actor activation if needed (only once per actor in this batch)
 		if c.hostID != nil {
 			actKey := a.GetActorKey()
-			existingActor, exists := p.ActiveActors[actKey]
-
-			// Check if actor needs to be created or updated
-			needsUpdate := !exists
-			if exists {
-				h, ok := p.Hosts[existingActor.HostID]
-				if !ok || !p.IsHostHealthy(h) {
-					needsUpdate = true
-				}
-			}
-
-			if needsUpdate {
-				// Find idle timeout for this host/actor type
-				var idleTimeout time.Duration
-				for _, hat := range p.HostActorTypes[*c.hostID] {
-					if hat.ActorType == a.ActorType {
-						idleTimeout = hat.IdleTimeout
-						break
+			if _, staged := stagedActors[actKey]; !staged {
+				existingActor, activeExists := p.ActiveActors[actKey]
+				needsUpdate := !activeExists
+				if activeExists {
+					h, ok := p.Hosts[existingActor.HostID]
+					if !ok || !p.IsHostHealthy(h) {
+						needsUpdate = true
 					}
 				}
 
-				activationTime := a.DueTime
-				if now.After(activationTime) {
-					activationTime = now
-				}
+				if needsUpdate {
+					// Find the idle timeout for this host/actor type
+					var idleTimeout time.Duration
+					for _, hat := range p.HostActorTypes[*c.hostID] {
+						if hat.ActorType == a.ActorType {
+							idleTimeout = hat.IdleTimeout
+							break
+						}
+					}
 
-				newActor := &ActiveActor{
-					ActorType:   a.ActorType,
-					ActorID:     a.ActorID,
-					HostID:      *c.hostID,
-					IdleTimeout: idleTimeout,
-					Activation:  activationTime,
-				}
+					activationTime := a.DueTime
+					if now.After(activationTime) {
+						activationTime = now
+					}
 
-				// Track for rollback
-				if exists {
-					actorRollbacks = append(actorRollbacks, actorRollback{key: actKey, previousActor: existingActor})
-				} else {
-					actorRollbacks = append(actorRollbacks, actorRollback{key: actKey, previousActor: nil})
+					newActor := &ActiveActor{
+						ActorType:   a.ActorType,
+						ActorID:     a.ActorID,
+						HostID:      *c.hostID,
+						IdleTimeout: idleTimeout,
+						Activation:  activationTime,
+					}
+					stagedActors[actKey] = struct{}{}
+					placements = append(placements, actorPlacement{key: actKey, actor: newActor})
+					changes.ActiveActors.Set = append(changes.ActiveActors.Set, ActiveActorChange{Key: actKey, Value: newActor})
 				}
-
-				p.ActiveActors[actKey] = newActor
-				changes.ActiveActors.Set = append(changes.ActiveActors.Set, ActiveActorChange{Key: actKey, Value: newActor})
 			}
 		}
 
-		// Acquire lease
-		alarmRollbacks = append(alarmRollbacks, alarmRollback{
-			alarm:                   a,
-			previousLeaseID:         a.LeaseID,
-			previousLeaseExpiration: a.LeaseExpiration,
-		})
-
+		// Stage the lease assignment on a clone of the alarm
 		leaseID := leaseIDPrefix + "_" + a.ID
-		a.LeaseID = &leaseID
-		a.LeaseExpiration = &leaseExpiration
-		changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: a.ID, Value: a})
+		updated := a.Clone()
+		updated.LeaseID = &leaseID
+		updated.LeaseExpiration = &leaseExpiration
+		leaseUpdates = append(leaseUpdates, leaseUpdate{key: a.GetAlarmKey(), updated: updated})
+		changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: updated.ID, Value: updated})
 
 		result = append(result, ref.NewAlarmLease(
 			ref.AlarmRef{
@@ -411,25 +377,19 @@ func (p *Provider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req componen
 			leaseID,
 		))
 	}
+	p.Mu.RUnlock()
 
-	// Persist changes
-	err = p.PersistHook.PersistChanges(ctx, changes)
+	err = p.persistThenApply(ctx, &p.Mu, changes, func() {
+		for _, pl := range placements {
+			p.ActiveActors[pl.key] = pl.actor
+		}
+		for _, lu := range leaseUpdates {
+			p.Alarms[lu.key] = lu.updated
+			p.AlarmsByID[lu.updated.ID] = lu.updated
+		}
+	})
 	if err != nil {
-		// Rollback actors
-		for _, rb := range actorRollbacks {
-			if rb.previousActor != nil {
-				p.ActiveActors[rb.key] = rb.previousActor
-			} else {
-				delete(p.ActiveActors, rb.key)
-			}
-		}
-		// Rollback alarm leases
-		for _, rb := range alarmRollbacks {
-			rb.alarm.LeaseID = rb.previousLeaseID
-			rb.alarm.LeaseExpiration = rb.previousLeaseExpiration
-		}
-
-		return nil, fmt.Errorf("error persisting changes: %w", err)
+		return nil, err
 	}
 
 	return result, nil
@@ -465,15 +425,14 @@ func (p *Provider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmLease) (c
 }
 
 func (p *Provider) RenewAlarmLeases(ctx context.Context, req components.RenewAlarmLeasesReq) (components.RenewAlarmLeasesRes, error) {
-	p.Mu.Lock()
-	defer p.Mu.Unlock()
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
 
 	now := p.Clock.Now()
 	expTime := now.Add(p.Cfg.AlarmsLeaseDuration)
 
 	changes := NewChanges()
 	defer changes.Release()
-	renewedLeases := make([]*ref.AlarmLease, 0, len(p.Alarms))
 
 	// Build set of lease IDs to renew if specified
 	var leaseIDSet map[string]struct{}
@@ -495,13 +454,18 @@ func (p *Provider) RenewAlarmLeases(ctx context.Context, req components.RenewAla
 		hostIDSet[h] = struct{}{}
 	}
 
-	// Track changes for rollback
-	type leaseRollback struct {
-		alarm              *Alarm
-		previousExpiration *time.Time
+	// leaseRenewal is a staged lease renewal (applied only after persistence).
+	type leaseRenewal struct {
+		key     AlarmKey
+		updated *Alarm
 	}
-	rollbacks := make([]leaseRollback, 0)
 
+	var (
+		renewals      []leaseRenewal
+		renewedLeases = make([]*ref.AlarmLease, 0, len(req.Leases))
+	)
+
+	p.Mu.RLock()
 	for _, a := range p.Alarms {
 		// Check if alarm has a valid lease
 		if a.LeaseID == nil || a.LeaseExpiration == nil || a.LeaseExpiration.Before(now) {
@@ -510,30 +474,25 @@ func (p *Provider) RenewAlarmLeases(ctx context.Context, req components.RenewAla
 
 		// Check lease ID filter
 		if leaseIDSet != nil {
-			_, ok := leaseIDSet[*a.LeaseID]
-			if !ok {
+			if _, ok := leaseIDSet[*a.LeaseID]; !ok {
 				continue
 			}
 		}
 
-		// Check if the actor is on one of the specified hosts
-		actKey := a.GetActorKey()
-		actor, ok := p.ActiveActors[actKey]
+		// Check that the actor is active on one of the specified hosts
+		actor, ok := p.ActiveActors[a.GetActorKey()]
 		if !ok {
 			continue
 		}
-
-		_, ok = hostIDSet[actor.HostID]
-		if !ok {
+		if _, ok := hostIDSet[actor.HostID]; !ok {
 			continue
 		}
 
-		// Track for rollback
-		rollbacks = append(rollbacks, leaseRollback{alarm: a, previousExpiration: a.LeaseExpiration})
-
-		// Renew the lease
-		a.LeaseExpiration = &expTime
-		changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: a.ID, Value: a})
+		// Renew the lease on a clone of the alarm
+		updated := a.Clone()
+		updated.LeaseExpiration = &expTime
+		renewals = append(renewals, leaseRenewal{key: a.GetAlarmKey(), updated: updated})
+		changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: updated.ID, Value: updated})
 
 		renewedLeases = append(renewedLeases, ref.NewAlarmLease(
 			ref.AlarmRef{
@@ -541,142 +500,128 @@ func (p *Provider) RenewAlarmLeases(ctx context.Context, req components.RenewAla
 				ActorID:   a.ActorID,
 				Name:      a.Name,
 			},
-			a.ID,
-			a.DueTime,
-			*a.LeaseID,
+			updated.ID,
+			updated.DueTime,
+			*updated.LeaseID,
 		))
 	}
+	p.Mu.RUnlock()
 
-	// Persist changes
-	if !changes.IsEmpty() {
-		err := p.PersistHook.PersistChanges(ctx, changes)
-		if err != nil {
-			// Rollback
-			for _, rb := range rollbacks {
-				rb.alarm.LeaseExpiration = rb.previousExpiration
-			}
-
-			return components.RenewAlarmLeasesRes{}, fmt.Errorf("error persisting changes: %w", err)
+	err := p.persistThenApply(ctx, &p.Mu, changes, func() {
+		for _, r := range renewals {
+			p.Alarms[r.key] = r.updated
+			p.AlarmsByID[r.updated.ID] = r.updated
 		}
+	})
+	if err != nil {
+		return components.RenewAlarmLeasesRes{}, err
 	}
 
 	return components.RenewAlarmLeasesRes{Leases: renewedLeases}, nil
 }
 
 func (p *Provider) ReleaseAlarmLease(ctx context.Context, lease *ref.AlarmLease) error {
-	p.Mu.Lock()
-	defer p.Mu.Unlock()
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
 
+	p.Mu.RLock()
 	a, ok := p.AlarmsByID[lease.Key()]
-	if !ok {
+	valid := ok && a.HasValidLease(lease.LeaseID(), p.Clock.Now())
+	var (
+		key     AlarmKey
+		updated *Alarm
+	)
+	if valid {
+		key = a.GetAlarmKey()
+		updated = a.Clone()
+		updated.LeaseID = nil
+		updated.LeaseExpiration = nil
+	}
+	p.Mu.RUnlock()
+
+	if !valid {
 		return components.ErrNoAlarm
 	}
 
-	// Check lease validity
-	if !a.HasValidLease(lease.LeaseID(), p.Clock.Now()) {
-		return components.ErrNoAlarm
-	}
-
-	// Release the lease
-	rollbackLeaseID := a.LeaseID
-	rollbackLeaseExpiration := a.LeaseExpiration
-	a.LeaseID = nil
-	a.LeaseExpiration = nil
-
-	// Persist changes
 	changes := NewChanges()
 	defer changes.Release()
-	changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: a.ID, Value: a})
-	err := p.PersistHook.PersistChanges(ctx, changes)
-	if err != nil {
-		// Rollback
-		a.LeaseID = rollbackLeaseID
-		a.LeaseExpiration = rollbackLeaseExpiration
+	changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: updated.ID, Value: updated})
 
-		return fmt.Errorf("error persisting changes: %w", err)
-	}
-
-	return nil
+	return p.persistThenApply(ctx, &p.Mu, changes, func() {
+		p.Alarms[key] = updated
+		p.AlarmsByID[updated.ID] = updated
+	})
 }
 
 func (p *Provider) UpdateLeasedAlarm(ctx context.Context, lease *ref.AlarmLease, req components.UpdateLeasedAlarmReq) error {
-	p.Mu.Lock()
-	defer p.Mu.Unlock()
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
 
-	a, ok := p.AlarmsByID[lease.Key()]
-	if !ok {
-		return components.ErrNoAlarm
-	}
-
-	// Check lease validity
 	now := p.Clock.Now()
-	if !a.HasValidLease(lease.LeaseID(), now) {
+
+	p.Mu.RLock()
+	a, ok := p.AlarmsByID[lease.Key()]
+	valid := ok && a.HasValidLease(lease.LeaseID(), now)
+	var (
+		key     AlarmKey
+		updated *Alarm
+	)
+	if valid {
+		key = a.GetAlarmKey()
+		updated = a.Clone()
+		updated.DueTime = req.DueTime
+		if req.RefreshLease {
+			// Refresh the lease
+			updated.LeaseExpiration = ptr.Of(now.Add(p.Cfg.AlarmsLeaseDuration))
+		} else {
+			// Release the lease
+			updated.LeaseID = nil
+			updated.LeaseExpiration = nil
+		}
+	}
+	p.Mu.RUnlock()
+
+	if !valid {
 		return components.ErrNoAlarm
 	}
 
-	// Update due time
-	rollbackDueTime := a.DueTime
-	a.DueTime = req.DueTime
-
-	// Handle lease
-	rollBackLeaseID := a.LeaseID
-	rollbackLeaseExpiration := a.LeaseExpiration
-	if req.RefreshLease {
-		// Refresh the lease
-		a.LeaseExpiration = ptr.Of(now.Add(p.Cfg.AlarmsLeaseDuration))
-	} else {
-		// Release the lease
-		a.LeaseID = nil
-		a.LeaseExpiration = nil
-	}
-
-	// Persist changes
 	changes := NewChanges()
 	defer changes.Release()
-	changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: a.ID, Value: a})
-	err := p.PersistHook.PersistChanges(ctx, changes)
-	if err != nil {
-		// Rollback
-		a.DueTime = rollbackDueTime
-		a.LeaseID = rollBackLeaseID
-		a.LeaseExpiration = rollbackLeaseExpiration
+	changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: updated.ID, Value: updated})
 
-		return fmt.Errorf("error persisting changes: %w", err)
-	}
-
-	return nil
+	return p.persistThenApply(ctx, &p.Mu, changes, func() {
+		p.Alarms[key] = updated
+		p.AlarmsByID[updated.ID] = updated
+	})
 }
 
 func (p *Provider) DeleteLeasedAlarm(ctx context.Context, lease *ref.AlarmLease) error {
-	p.Mu.Lock()
-	defer p.Mu.Unlock()
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
 
+	p.Mu.RLock()
 	a, ok := p.AlarmsByID[lease.Key()]
-	if !ok {
+	valid := ok && a.HasValidLease(lease.LeaseID(), p.Clock.Now())
+	var (
+		key AlarmKey
+		id  string
+	)
+	if valid {
+		key = a.GetAlarmKey()
+		id = a.ID
+	}
+	p.Mu.RUnlock()
+
+	if !valid {
 		return components.ErrNoAlarm
 	}
 
-	// Check lease validity
-	if !a.HasValidLease(lease.LeaseID(), p.Clock.Now()) {
-		return components.ErrNoAlarm
-	}
-
-	// Delete the alarm
-	delete(p.Alarms, a.GetAlarmKey())
-	delete(p.AlarmsByID, a.ID)
-
-	// Persist changes
 	changes := NewChanges()
 	defer changes.Release()
-	changes.Alarms.Delete = append(changes.Alarms.Delete, a.ID)
-	err := p.PersistHook.PersistChanges(ctx, changes)
-	if err != nil {
-		// Rollback
-		p.Alarms[a.GetAlarmKey()] = a
-		p.AlarmsByID[a.ID] = a
+	changes.Alarms.Delete = append(changes.Alarms.Delete, id)
 
-		return fmt.Errorf("error persisting changes: %w", err)
-	}
-
-	return nil
+	return p.persistThenApply(ctx, &p.Mu, changes, func() {
+		delete(p.Alarms, key)
+		delete(p.AlarmsByID, id)
+	})
 }

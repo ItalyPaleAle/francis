@@ -2,7 +2,6 @@ package internal
 
 import (
 	"context"
-	"fmt"
 	"math/rand/v2"
 	"slices"
 	"time"
@@ -14,22 +13,29 @@ import (
 )
 
 func (p *Provider) RegisterHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {
-	p.Mu.Lock()
-	defer p.Mu.Unlock()
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
 
 	changes := NewChanges()
 	defer changes.Release()
 
-	// Clean up unhealthy hosts first
-	cleanupRollback := p.CleanupUnhealthyHosts(changes)
+	p.Mu.RLock()
+	// Clean up unhealthy hosts first; the deletions are applied together with the new host
+	cleanupApply := p.CleanupUnhealthyHosts(changes)
 
-	// Check if there's already a healthy host at this address
-	existingHostID, ok := p.HostsByAddress[req.Address]
-	if ok {
+	// Check if there's already a healthy host at this address.
+	// Unhealthy hosts at the same address are cleaned up above, so they don't block registration.
+	alreadyRegistered := false
+	if existingHostID, ok := p.HostsByAddress[req.Address]; ok {
 		existingHost, ok := p.Hosts[existingHostID]
 		if ok && p.IsHostHealthy(existingHost) {
-			return components.RegisterHostRes{}, components.ErrHostAlreadyRegistered
+			alreadyRegistered = true
 		}
+	}
+	p.Mu.RUnlock()
+
+	if alreadyRegistered {
+		return components.RegisterHostRes{}, components.ErrHostAlreadyRegistered
 	}
 
 	// Generate a new host ID
@@ -40,20 +46,17 @@ func (p *Provider) RegisterHost(ctx context.Context, req components.RegisterHost
 	hostID := hostIDObj.String()
 
 	// Create the host
-	now := p.Clock.Now()
 	h := &Host{
 		ID:              hostID,
 		Address:         req.Address,
-		LastHealthCheck: now,
+		LastHealthCheck: p.Clock.Now(),
 	}
-
-	p.Hosts[hostID] = h
-	p.HostsByAddress[req.Address] = hostID
 	changes.Hosts.Set = append(changes.Hosts.Set, HostChange{Key: hostID, Value: h})
 
-	// Add actor types
+	// Build actor types
+	var hats []*HostActorType
 	if len(req.ActorTypes) > 0 {
-		p.HostActorTypes[hostID] = make([]*HostActorType, len(req.ActorTypes))
+		hats = make([]*HostActorType, len(req.ActorTypes))
 		for i, at := range req.ActorTypes {
 			hat := &HostActorType{
 				HostID:           hostID,
@@ -61,23 +64,21 @@ func (p *Provider) RegisterHost(ctx context.Context, req components.RegisterHost
 				IdleTimeout:      at.IdleTimeout,
 				ConcurrencyLimit: at.ConcurrencyLimit,
 			}
-			p.HostActorTypes[hostID][i] = hat
+			hats[i] = hat
 			changes.HostActorTypes.Set = append(changes.HostActorTypes.Set, hat)
 		}
 	}
 
-	// Persist changes
-	err = p.PersistHook.PersistChanges(ctx, changes)
+	err = p.persistThenApply(ctx, &p.Mu, changes, func() {
+		cleanupApply()
+		p.Hosts[hostID] = h
+		p.HostsByAddress[req.Address] = hostID
+		if hats != nil {
+			p.HostActorTypes[hostID] = hats
+		}
+	})
 	if err != nil {
-		// Rollback in-memory changes for the new host
-		delete(p.Hosts, hostID)
-		delete(p.HostsByAddress, req.Address)
-		delete(p.HostActorTypes, hostID)
-
-		// Rollback cleanup changes
-		cleanupRollback()
-
-		return components.RegisterHostRes{}, fmt.Errorf("error persisting changes: %w", err)
+		return components.RegisterHostRes{}, err
 	}
 
 	return components.RegisterHostRes{HostID: hostID}, nil
@@ -89,29 +90,90 @@ func (p *Provider) UpdateActorHost(ctx context.Context, hostID string, req compo
 		return nil
 	}
 
-	p.Mu.Lock()
-	defer p.Mu.Unlock()
-
-	h, ok := p.Hosts[hostID]
-	if !ok || !p.IsHostHealthy(h) {
-		return components.ErrHostUnregistered
-	}
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
 
 	changes := NewChanges()
 	defer changes.Release()
 
-	// Update last health check if requested
-	var rollbackHealthCheck time.Time
-	if req.UpdateLastHealthCheck {
-		rollbackHealthCheck = h.LastHealthCheck
-		h.LastHealthCheck = p.Clock.Now()
-		changes.Hosts.Set = append(changes.Hosts.Set, HostChange{Key: hostID, Value: h})
+	p.Mu.RLock()
+	h, ok := p.Hosts[hostID]
+	healthy := ok && p.IsHostHealthy(h)
+
+	var (
+		updatedHost *Host
+		newHats     []*HostActorType
+	)
+	if healthy {
+		// Update last health check if requested.
+		// We clone the host instead of mutating it in place, so nothing changes in memory
+		// until the change has been persisted.
+		if req.UpdateLastHealthCheck {
+			updatedHost = h.Clone()
+			updatedHost.LastHealthCheck = p.Clock.Now()
+			changes.Hosts.Set = append(changes.Hosts.Set, HostChange{Key: hostID, Value: updatedHost})
+		}
+
+		// Update actor types if provided (non-nil).
+		// A nil list means "do not update"; an empty, non-nil list removes all actor types.
+		if req.ActorTypes != nil {
+			for _, hat := range p.HostActorTypes[hostID] {
+				changes.HostActorTypes.Delete = append(changes.HostActorTypes.Delete, HostActorTypeKey{
+					HostID:    hat.HostID,
+					ActorType: hat.ActorType,
+				})
+			}
+
+			newHats = make([]*HostActorType, len(req.ActorTypes))
+			for i, at := range req.ActorTypes {
+				hat := &HostActorType{
+					HostID:           hostID,
+					ActorType:        at.ActorType,
+					IdleTimeout:      at.IdleTimeout,
+					ConcurrencyLimit: at.ConcurrencyLimit,
+				}
+				newHats[i] = hat
+				changes.HostActorTypes.Set = append(changes.HostActorTypes.Set, hat)
+			}
+		}
+	}
+	p.Mu.RUnlock()
+
+	if !healthy {
+		// Host doesn't exist, or exists but is un-healthy
+		return components.ErrHostUnregistered
 	}
 
-	// Update actor types if provided (non-nil)
-	var rollbackHat []*HostActorType
-	if req.ActorTypes != nil {
-		// Record deletions for existing actor types
+	return p.persistThenApply(ctx, &p.Mu, changes, func() {
+		if updatedHost != nil {
+			p.Hosts[hostID] = updatedHost
+		}
+		if req.ActorTypes != nil {
+			p.HostActorTypes[hostID] = newHats
+		}
+	})
+}
+
+func (p *Provider) UnregisterHost(ctx context.Context, hostID string) error {
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+
+	changes := NewChanges()
+	defer changes.Release()
+
+	p.Mu.RLock()
+	h, ok := p.Hosts[hostID]
+	var (
+		address      string
+		wasHealthy   bool
+		deleteActors []ActorKey
+	)
+	if ok {
+		address = h.Address
+		wasHealthy = p.IsHostHealthy(h)
+
+		changes.Hosts.Delete = append(changes.Hosts.Delete, hostID)
+
 		for _, hat := range p.HostActorTypes[hostID] {
 			changes.HostActorTypes.Delete = append(changes.HostActorTypes.Delete, HostActorTypeKey{
 				HostID:    hat.HostID,
@@ -119,93 +181,33 @@ func (p *Provider) UpdateActorHost(ctx context.Context, hostID string, req compo
 			})
 		}
 
-		// Add new actor types
-		rollbackHat = p.HostActorTypes[hostID]
-		p.HostActorTypes[hostID] = make([]*HostActorType, len(req.ActorTypes))
-		for i, at := range req.ActorTypes {
-			hat := &HostActorType{
-				HostID:           hostID,
-				ActorType:        at.ActorType,
-				IdleTimeout:      at.IdleTimeout,
-				ConcurrencyLimit: at.ConcurrencyLimit,
+		for key, actor := range p.ActiveActors {
+			if actor.HostID != hostID {
+				continue
 			}
-			p.HostActorTypes[hostID][i] = hat
-			changes.HostActorTypes.Set = append(changes.HostActorTypes.Set, hat)
+			deleteActors = append(deleteActors, key)
+			changes.ActiveActors.Delete = append(changes.ActiveActors.Delete, key)
 		}
 	}
+	p.Mu.RUnlock()
 
-	// Persist changes
-	err := p.PersistHook.PersistChanges(ctx, changes)
-	if err != nil {
-		// Rollback
-		h.LastHealthCheck = rollbackHealthCheck
-		p.HostActorTypes[hostID] = rollbackHat
-
-		return fmt.Errorf("error persisting changes: %w", err)
-	}
-
-	return nil
-}
-
-func (p *Provider) UnregisterHost(ctx context.Context, hostID string) error {
-	p.Mu.Lock()
-	defer p.Mu.Unlock()
-
-	h, ok := p.Hosts[hostID]
 	if !ok {
 		return components.ErrHostUnregistered
 	}
 
-	// Check if host was healthy
-	wasHealthy := p.IsHostHealthy(h)
-
-	changes := NewChanges()
-	defer changes.Release()
-
-	// Track deleted data for rollback
-	deletedHostActorTypes := p.HostActorTypes[hostID]
-	deletedActiveActors := make(map[ActorKey]*ActiveActor)
-
-	// Remove the host and all associated data
-	delete(p.HostsByAddress, h.Address)
-	delete(p.Hosts, hostID)
-	changes.Hosts.Delete = append(changes.Hosts.Delete, hostID)
-
-	// Remove host actor types
-	for _, hat := range p.HostActorTypes[hostID] {
-		changes.HostActorTypes.Delete = append(changes.HostActorTypes.Delete, HostActorTypeKey{
-			HostID:    hat.HostID,
-			ActorType: hat.ActorType,
-		})
-	}
-	delete(p.HostActorTypes, hostID)
-
-	// Remove active actors on this host
-	for key, actor := range p.ActiveActors {
-		if actor.HostID != hostID {
-			continue
+	err := p.persistThenApply(ctx, &p.Mu, changes, func() {
+		delete(p.Hosts, hostID)
+		delete(p.HostsByAddress, address)
+		delete(p.HostActorTypes, hostID)
+		for _, key := range deleteActors {
+			delete(p.ActiveActors, key)
 		}
-
-		deletedActiveActors[key] = actor
-		delete(p.ActiveActors, key)
-		changes.ActiveActors.Delete = append(changes.ActiveActors.Delete, key)
-	}
-
-	// Persist changes
-	err := p.PersistHook.PersistChanges(ctx, changes)
+	})
 	if err != nil {
-		// Rollback
-		p.Hosts[hostID] = h
-		p.HostsByAddress[h.Address] = hostID
-		p.HostActorTypes[hostID] = deletedHostActorTypes
-		for key, actor := range deletedActiveActors {
-			p.ActiveActors[key] = actor
-		}
-
-		return fmt.Errorf("error persisting changes: %w", err)
+		return err
 	}
 
-	// If host was unhealthy, return error (we still cleaned it up)
+	// If the host was unhealthy, we still cleaned it up, but we report it as unregistered
 	if !wasHealthy {
 		return components.ErrHostUnregistered
 	}
@@ -221,30 +223,46 @@ func (p *Provider) LookupActor(ctx context.Context, r ref.ActorRef, opts compone
 		return p.lookupActiveActor(r, opts.Hosts)
 	}
 
-	p.Mu.Lock()
-	defer p.Mu.Unlock()
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
 
-	// Check if actor is already active on a healthy host
-	actor, ok := p.ActiveActors[key]
-	if ok {
-		h, ok := p.Hosts[actor.HostID]
-		if ok && p.IsHostHealthy(h) {
-			// If host restrictions are set, check if the current host is allowed
+	p.Mu.RLock()
+	var (
+		existingRes  components.LookupActorRes
+		haveExisting bool
+		restricted   bool // actor is active on a healthy host that's not allowed
+		host         *Host
+		idleTimeout  time.Duration
+	)
+
+	// Check if the actor is already active on a healthy host
+	if actor, ok := p.ActiveActors[key]; ok {
+		if h, ok := p.Hosts[actor.HostID]; ok && p.IsHostHealthy(h) {
 			if len(opts.Hosts) > 0 && !slices.Contains(opts.Hosts, actor.HostID) {
-				return components.LookupActorRes{}, components.ErrNoHost
+				restricted = true
+			} else {
+				existingRes = components.LookupActorRes{
+					HostID:      actor.HostID,
+					Address:     h.Address,
+					IdleTimeout: actor.IdleTimeout,
+				}
+				haveExisting = true
 			}
-
-			return components.LookupActorRes{
-				HostID:      actor.HostID,
-				Address:     h.Address,
-				IdleTimeout: actor.IdleTimeout,
-			}, nil
 		}
 	}
 
-	// Actor is not active on a healthy host; find a host with capacity
-	host, idleTimeout := p.findHostWithCapacity(r.ActorType, opts.Hosts)
-	if host == nil {
+	// If not active on a healthy host, find a host with capacity to activate it on
+	if !haveExisting && !restricted {
+		host, idleTimeout = p.findHostWithCapacity(r.ActorType, opts.Hosts)
+	}
+	p.Mu.RUnlock()
+
+	switch {
+	case restricted:
+		return components.LookupActorRes{}, components.ErrNoHost
+	case haveExisting:
+		return existingRes, nil
+	case host == nil:
 		return components.LookupActorRes{}, components.ErrNoHost
 	}
 
@@ -256,18 +274,16 @@ func (p *Provider) LookupActor(ctx context.Context, r ref.ActorRef, opts compone
 		IdleTimeout: idleTimeout,
 		Activation:  p.Clock.Now(),
 	}
-	p.ActiveActors[key] = newActor
 
-	// Persist changes
 	changes := NewChanges()
 	defer changes.Release()
 	changes.ActiveActors.Set = append(changes.ActiveActors.Set, ActiveActorChange{Key: key, Value: newActor})
-	err := p.PersistHook.PersistChanges(ctx, changes)
-	if err != nil {
-		// Rollback
-		delete(p.ActiveActors, key)
 
-		return components.LookupActorRes{}, fmt.Errorf("error persisting changes: %w", err)
+	err := p.persistThenApply(ctx, &p.Mu, changes, func() {
+		p.ActiveActors[key] = newActor
+	})
+	if err != nil {
+		return components.LookupActorRes{}, err
 	}
 
 	return components.LookupActorRes{
@@ -306,7 +322,7 @@ func (p *Provider) lookupActiveActor(r ref.ActorRef, hosts []string) (components
 }
 
 // findHostWithCapacity finds a healthy host that can host an actor of the given type.
-// Must be called while holding the write lock.
+// Must be called while holding at least a read lock on Mu.
 func (p *Provider) findHostWithCapacity(actorType string, allowedHosts []string) (*Host, time.Duration) {
 	type candidate struct {
 		host        *Host
@@ -363,53 +379,51 @@ func (p *Provider) findHostWithCapacity(actorType string, allowedHosts []string)
 func (p *Provider) RemoveActor(ctx context.Context, r ref.ActorRef) error {
 	key := NewActorKey(r.ActorType, r.ActorID)
 
-	p.Mu.Lock()
-	defer p.Mu.Unlock()
-
-	activeActor, ok := p.ActiveActors[key]
-	if !ok {
-		return components.ErrNoActor
-	}
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
 
 	changes := NewChanges()
 	defer changes.Release()
 
-	delete(p.ActiveActors, key)
-	changes.ActiveActors.Delete = append(changes.ActiveActors.Delete, key)
-
-	// Prepare for rollbacks
-	type rollbackLease struct {
-		LeaseID         *string
-		LeaseExpiration *time.Time
-	}
-	rollbackLeases := make(map[AlarmKey]rollbackLease, 0)
-
-	// Release any alarm leases for this actor
-	for k, a := range p.Alarms {
-		if a.ActorType != r.ActorType || a.ActorID != r.ActorID {
-			continue
-		}
-
-		if a.LeaseID != nil {
-			rollbackLeases[k] = rollbackLease{LeaseID: a.LeaseID, LeaseExpiration: a.LeaseExpiration}
-			a.LeaseID = nil
-			a.LeaseExpiration = nil
-			changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: a.ID, Value: a})
-		}
+	// alarmUpdate carries the cloned alarm (with its lease cleared) that replaces the live one
+	type alarmUpdate struct {
+		key     AlarmKey
+		updated *Alarm
 	}
 
-	// Persist changes
-	err := p.PersistHook.PersistChanges(ctx, changes)
-	if err != nil {
-		// Rollback
-		p.ActiveActors[key] = activeActor
-		for k, a := range rollbackLeases {
-			p.Alarms[k].LeaseID = a.LeaseID
-			p.Alarms[k].LeaseExpiration = a.LeaseExpiration
-		}
+	p.Mu.RLock()
+	_, ok := p.ActiveActors[key]
+	var alarmUpdates []alarmUpdate
+	if ok {
+		changes.ActiveActors.Delete = append(changes.ActiveActors.Delete, key)
 
-		return fmt.Errorf("error persisting changes: %w", err)
+		// Release any alarm leases for this actor.
+		// We clone the affected alarms (rather than mutate them in place) so nothing changes
+		// in memory until the change has been persisted.
+		for k, a := range p.Alarms {
+			if a.ActorType != r.ActorType || a.ActorID != r.ActorID {
+				continue
+			}
+			if a.LeaseID != nil {
+				updated := a.Clone()
+				updated.LeaseID = nil
+				updated.LeaseExpiration = nil
+				alarmUpdates = append(alarmUpdates, alarmUpdate{key: k, updated: updated})
+				changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: updated.ID, Value: updated})
+			}
+		}
+	}
+	p.Mu.RUnlock()
+
+	if !ok {
+		return components.ErrNoActor
 	}
 
-	return nil
+	return p.persistThenApply(ctx, &p.Mu, changes, func() {
+		delete(p.ActiveActors, key)
+		for _, au := range alarmUpdates {
+			p.Alarms[au.key] = au.updated
+			p.AlarmsByID[au.updated.ID] = au.updated
+		}
+	})
 }
