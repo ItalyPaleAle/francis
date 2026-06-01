@@ -24,8 +24,8 @@ const (
 	ErrCodeDeadlineExceeded ErrorCode = "deadline_exceeded"
 	// ErrCodeCanceled indicates the operation was canceled
 	ErrCodeCanceled ErrorCode = "canceled"
-	// ErrCodeSessionFenced indicates the session was superseded by a newer one for the same host
-	ErrCodeSessionFenced ErrorCode = "session_fenced"
+	// ErrCodeSessionSuperseded indicates the session was superseded by a newer one for the same host
+	ErrCodeSessionSuperseded ErrorCode = "session_superseded"
 	// ErrCodeHostUnregistered indicates the host registration is no longer valid
 	ErrCodeHostUnregistered ErrorCode = "host_unregistered"
 	// ErrCodeHostDraining indicates the target host is draining and cannot accept new work; retry after a delay

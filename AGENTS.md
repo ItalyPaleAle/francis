@@ -24,14 +24,16 @@ If you modify `pkg/config.Config` or any struct referenced from it, always run `
 
 ## Comments
 
-- One sentence per line; do not wrap to a max line length
+- Exactly one sentence per line
+- There is NO maximum line width: never wrap a single sentence across multiple comment lines, no matter how long that sentence is
+- A new line in a comment means a new sentence; a wrapped line does not exist
 - No trailing period on single-line comments
 - Prefer comments that explain intent, invariants, or why a branch exists
 - Avoid comments that simply restate the next line of code
 - For multi-step logic, use short section comments to separate the steps and explain why each step exists
 
 ```go
-// Wrong — wrapped mid-sentence
+// Wrong — one sentence wrapped across multiple lines
 // This function performs the main validation logic. It checks
 // the input against the schema and returns an error if the
 // input is invalid.
@@ -39,7 +41,7 @@ If you modify `pkg/config.Config` or any struct referenced from it, always run `
 // Wrong — trailing period on single-line comment
 // Validate the input.
 
-// Right
+// Right — one sentence per line, each line as long as it needs to be
 // This function performs the main validation logic
 // It checks the input against the schema and returns an error if the input is invalid
 

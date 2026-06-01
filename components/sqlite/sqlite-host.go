@@ -17,6 +17,11 @@ import (
 )
 
 func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {
+	// If the host wants to reattach to an existing registration, take the dedicated path
+	if req.ExistingHostID != "" {
+		return s.reattachHost(ctx, req)
+	}
+
 	hostIDObj, oErr := uuid.NewV7()
 	if oErr != nil {
 		return components.RegisterHostRes{}, fmt.Errorf("failed to generate host ID: %w", oErr)
@@ -59,7 +64,7 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 		}
 
 		// Insert all supported host types
-		err = s.insertHostActorTypes(ctx, tx, hostID, req.ActorTypes)
+		err = s.insertHostActorTypes(ctx, tx, hostID, req.ActorTypes, false)
 		if err != nil {
 			return zero, fmt.Errorf("error inserting supported actor types: %w", err)
 		}
@@ -72,6 +77,105 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 
 	return components.RegisterHostRes{
 		HostID: hostID,
+	}, nil
+}
+
+// reattachHost reattaches a reconnecting host to its existing registration, identified by req.ExistingHostID
+// It refreshes the registration in place even if its health record is stale, so a host can reclaim it after a runtime failover without waiting for the previous health record to expire
+// If the registration no longer exists, a brand-new one is created instead
+func (s *SQLiteProvider) reattachHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {
+	// Generate a fresh ID up front, used only if we have to fall back to a new registration
+	newHostIDObj, oErr := uuid.NewV7()
+	if oErr != nil {
+		return components.RegisterHostRes{}, fmt.Errorf("failed to generate host ID: %w", oErr)
+	}
+	newHostID := newHostIDObj.String()
+
+	var (
+		hostID     string
+		reattached bool
+	)
+	_, oErr = sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
+		now := s.clock.Now().UnixMilli()
+		cutoff := now - s.cfg.HostHealthCheckDeadline.Milliseconds()
+
+		// Clean up unhealthy hosts, but never the registration we are reattaching to
+		// This lets a host reclaim its registration even if its health record is stale, while still clearing other dead hosts that might otherwise block the address
+		queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+		defer cancel()
+		_, err = tx.ExecContext(queryCtx,
+			`DELETE FROM hosts
+			WHERE host_last_health_check < ? AND host_id != ?`,
+			cutoff, req.ExistingHostID,
+		)
+		if err != nil {
+			return zero, fmt.Errorf("error removing failed hosts: %w", err)
+		}
+
+		// Try to refresh the existing registration in place
+		// A unique constraint violation here means a different, healthy host already holds the address
+		queryCtx, cancel = context.WithTimeout(ctx, s.timeout)
+		defer cancel()
+		var res sql.Result
+		res, err = tx.ExecContext(queryCtx,
+			`UPDATE hosts
+			SET host_address = ?, host_last_health_check = ?
+			WHERE host_id = ?`,
+			req.Address, now, req.ExistingHostID,
+		)
+		if isConstraintError(err) {
+			return zero, components.ErrHostAlreadyRegistered
+		} else if err != nil {
+			return zero, fmt.Errorf("error updating host: %w", err)
+		}
+		var affected int64
+		affected, err = res.RowsAffected()
+		if err != nil {
+			return zero, fmt.Errorf("error counting affected rows: %w", err)
+		}
+
+		if affected == 1 {
+			// Reattached: replace the supported actor types to match the new registration
+			err = s.insertHostActorTypes(ctx, tx, req.ExistingHostID, req.ActorTypes, true)
+			if err != nil {
+				return zero, fmt.Errorf("error inserting supported actor types: %w", err)
+			}
+
+			hostID = req.ExistingHostID
+			reattached = true
+			return zero, nil
+		}
+
+		// The existing registration was not found (already garbage-collected): create a new one
+		queryCtx, cancel = context.WithTimeout(ctx, s.timeout)
+		defer cancel()
+		_, err = tx.ExecContext(queryCtx,
+			`INSERT INTO hosts (host_id, host_address, host_last_health_check)
+			VALUES (?, ?, ?)`,
+			newHostID, req.Address, now,
+		)
+		if isConstraintError(err) {
+			return zero, components.ErrHostAlreadyRegistered
+		} else if err != nil {
+			return zero, fmt.Errorf("error inserting host: %w", err)
+		}
+
+		err = s.insertHostActorTypes(ctx, tx, newHostID, req.ActorTypes, false)
+		if err != nil {
+			return zero, fmt.Errorf("error inserting supported actor types: %w", err)
+		}
+
+		hostID = newHostID
+		reattached = false
+		return zero, nil
+	})
+	if oErr != nil {
+		return components.RegisterHostRes{}, fmt.Errorf("failed to register host: %w", oErr)
+	}
+
+	return components.RegisterHostRes{
+		HostID:     hostID,
+		Reattached: reattached,
 	}, nil
 }
 
@@ -121,20 +225,8 @@ func (s *SQLiteProvider) UpdateActorHost(ctx context.Context, hostID string, req
 				}
 			}
 
-			// First, delete all supported actor types for the host
-			queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
-			defer cancel()
-			_, err = tx.
-				ExecContext(queryCtx,
-					`DELETE FROM host_actor_types WHERE host_id = ?`,
-					hostID,
-				)
-			if err != nil {
-				return zero, fmt.Errorf("error executing query: %w", err)
-			}
-
-			// Insert the new supported actor types
-			err = s.insertHostActorTypes(ctx, tx, hostID, req.ActorTypes)
+			// Replace all supported actor types for the host
+			err = s.insertHostActorTypes(ctx, tx, hostID, req.ActorTypes, true)
 			if err != nil {
 				return zero, fmt.Errorf("error inserting supported actor types: %w", err)
 			}
@@ -475,7 +567,21 @@ func buildLookupActorHostClause(hosts []string, params []any) (string, []any) {
 	return hostClause.String(), params
 }
 
-func (s *SQLiteProvider) insertHostActorTypes(ctx context.Context, tx *sql.Tx, hostID string, actorTypes []components.ActorHostType) error {
+// insertHostActorTypes inserts the supported actor types for a host
+// When deleteExisting is true, all existing actor types for the host are removed first, so the host's supported types are replaced rather than appended
+func (s *SQLiteProvider) insertHostActorTypes(ctx context.Context, tx *sql.Tx, hostID string, actorTypes []components.ActorHostType, deleteExisting bool) error {
+	if deleteExisting {
+		queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+		defer cancel()
+		_, err := tx.ExecContext(queryCtx,
+			`DELETE FROM host_actor_types WHERE host_id = ?`,
+			hostID,
+		)
+		if err != nil {
+			return fmt.Errorf("error removing existing actor types: %w", err)
+		}
+	}
+
 	if len(actorTypes) == 0 {
 		return nil
 	}

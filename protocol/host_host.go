@@ -14,12 +14,8 @@ const (
 )
 
 // InvokeActorRequest is the metadata frame for a host-to-host actor invocation
-//
-// For object invocation the request body travels in the envelope payload as a MessagePack object,
-// and the response travels in the response envelope payload likewise
-//
-// For stream invocation this frame is sent first, then the request body streams as raw bytes;
-// the response sends an InvokeActorResponse frame followed by the streamed response body
+// For object invocation the request body travels in the envelope payload as a MessagePack object, and the response travels in the response envelope payload likewise
+// For stream invocation this frame is sent first, then the request body streams as raw bytes; the response sends an InvokeActorResponse frame followed by the streamed response body
 type InvokeActorRequest struct {
 	// TargetHostID is the host the caller believes owns the actor, used to detect stale placement
 	TargetHostID string `msgpack:"hostId"`

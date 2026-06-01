@@ -4,8 +4,7 @@ package protocol
 // Each host-initiated operation is paired with its response in this file
 // Responses flow Runtime -> Host but belong to the host-initiated conversation
 //
-// All durations are expressed in milliseconds and all timestamps in Unix milliseconds
-// so the wire format is unambiguous and language-neutral
+// All durations are expressed in milliseconds and all timestamps in Unix milliseconds so the wire format is unambiguous and language-neutral
 // DTOs intentionally use explicit exported fields and never embed internal/ref types
 
 // ActorRef references an actor by type and ID
@@ -68,7 +67,7 @@ type RegisterHostRequest struct {
 type RegisterHostResponse struct {
 	// HostID is the provider-backed stable host identity
 	HostID string `msgpack:"hostId"`
-	// SessionID identifies this runtime session and is echoed on subsequent messages for fencing
+	// SessionID identifies this runtime session and is echoed on subsequent messages so the runtime can detect a superseded session
 	SessionID string `msgpack:"sessionId"`
 	// ProtocolVersion is the negotiated protocol version both ends will use
 	ProtocolVersion uint16 `msgpack:"v"`

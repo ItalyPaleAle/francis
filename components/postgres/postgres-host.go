@@ -15,6 +15,11 @@ import (
 )
 
 func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {
+	// If the host wants to reattach to an existing registration, take the dedicated path
+	if req.ExistingHostID != "" {
+		return p.reattachHost(ctx, req)
+	}
+
 	hostIDObj, oErr := uuid.NewV7()
 	if oErr != nil {
 		return components.RegisterHostRes{}, fmt.Errorf("failed to generate host ID: %w", oErr)
@@ -54,7 +59,7 @@ func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.Regi
 		}
 
 		// Insert all supported host types
-		err = p.insertHostActorTypes(ctx, tx, hostID, req.ActorTypes)
+		err = p.insertHostActorTypes(ctx, tx, hostID, req.ActorTypes, false)
 		if err != nil {
 			return zero, fmt.Errorf("error inserting supported actor types: %w", err)
 		}
@@ -67,6 +72,95 @@ func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.Regi
 
 	return components.RegisterHostRes{
 		HostID: hostID,
+	}, nil
+}
+
+// reattachHost reattaches a reconnecting host to its existing registration, identified by req.ExistingHostID
+// It refreshes the registration in place even if its health record is stale, so a host can reclaim it after a runtime failover without waiting for the previous health record to expire
+// If the registration no longer exists, a brand-new one is created instead
+func (p *PostgresProvider) reattachHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {
+	newHostIDObj, oErr := uuid.NewV7()
+	if oErr != nil {
+		return components.RegisterHostRes{}, fmt.Errorf("failed to generate host ID: %w", oErr)
+	}
+	newHostID := newHostIDObj.String()
+
+	var (
+		hostID     string
+		reattached bool
+	)
+	_, oErr = postgrestransactions.ExecuteInTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (zero struct{}, err error) {
+		// Clean up unhealthy hosts, but never the registration we are reattaching to
+		queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
+		defer cancel()
+		_, err = tx.Exec(queryCtx,
+			`DELETE FROM hosts
+			WHERE host_last_health_check < (now() - $1::interval) AND host_id != $2`,
+			p.cfg.HostHealthCheckDeadline, req.ExistingHostID,
+		)
+		if err != nil {
+			return zero, fmt.Errorf("error removing failed hosts: %w", err)
+		}
+
+		// Try to refresh the existing registration in place
+		// A unique constraint violation here means a different, healthy host already holds the address
+		queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
+		defer cancel()
+		var tag pgconn.CommandTag
+		tag, err = tx.Exec(queryCtx,
+			`UPDATE hosts
+			SET host_address = $1, host_last_health_check = now()
+			WHERE host_id = $2`,
+			req.Address, req.ExistingHostID,
+		)
+		if isConstraintError(err) {
+			return zero, components.ErrHostAlreadyRegistered
+		} else if err != nil {
+			return zero, fmt.Errorf("error updating host: %w", err)
+		}
+
+		if tag.RowsAffected() == 1 {
+			// Reattached: replace the supported actor types to match the new registration
+			err = p.insertHostActorTypes(ctx, tx, req.ExistingHostID, req.ActorTypes, true)
+			if err != nil {
+				return zero, fmt.Errorf("error inserting supported actor types: %w", err)
+			}
+
+			hostID = req.ExistingHostID
+			reattached = true
+			return zero, nil
+		}
+
+		// The existing registration was not found (already garbage-collected): create a new one
+		queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
+		defer cancel()
+		_, err = tx.Exec(queryCtx,
+			`INSERT INTO hosts (host_id, host_address, host_last_health_check)
+			VALUES ($1, $2, now())`,
+			newHostID, req.Address,
+		)
+		if isConstraintError(err) {
+			return zero, components.ErrHostAlreadyRegistered
+		} else if err != nil {
+			return zero, fmt.Errorf("error inserting host: %w", err)
+		}
+
+		err = p.insertHostActorTypes(ctx, tx, newHostID, req.ActorTypes, false)
+		if err != nil {
+			return zero, fmt.Errorf("error inserting supported actor types: %w", err)
+		}
+
+		hostID = newHostID
+		reattached = false
+		return zero, nil
+	})
+	if oErr != nil {
+		return components.RegisterHostRes{}, fmt.Errorf("failed to register host: %w", oErr)
+	}
+
+	return components.RegisterHostRes{
+		HostID:     hostID,
+		Reattached: reattached,
 	}, nil
 }
 
@@ -115,20 +209,8 @@ func (p *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, r
 				}
 			}
 
-			// First, delete all supported actor types for the host
-			queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
-			defer cancel()
-			_, err = tx.
-				Exec(queryCtx,
-					`DELETE FROM host_actor_types WHERE host_id = $1`,
-					hostID,
-				)
-			if err != nil {
-				return zero, fmt.Errorf("error executing query: %w", err)
-			}
-
-			// Insert the new supported actor types
-			err = p.insertHostActorTypes(ctx, tx, hostID, req.ActorTypes)
+			// Replace all supported actor types for the host
+			err = p.insertHostActorTypes(ctx, tx, hostID, req.ActorTypes, true)
 			if err != nil {
 				return zero, fmt.Errorf("error inserting supported actor types: %w", err)
 			}
@@ -266,7 +348,21 @@ func (p *PostgresProvider) RemoveActor(ctx context.Context, ref ref.ActorRef) er
 	return nil
 }
 
-func (p *PostgresProvider) insertHostActorTypes(ctx context.Context, tx pgx.Tx, hostID string, actorTypes []components.ActorHostType) error {
+// insertHostActorTypes inserts the supported actor types for a host
+// When deleteExisting is true, all existing actor types for the host are removed first, so the host's supported types are replaced rather than appended
+func (p *PostgresProvider) insertHostActorTypes(ctx context.Context, tx pgx.Tx, hostID string, actorTypes []components.ActorHostType, deleteExisting bool) error {
+	if deleteExisting {
+		queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
+		defer cancel()
+		_, err := tx.Exec(queryCtx,
+			`DELETE FROM host_actor_types WHERE host_id = $1`,
+			hostID,
+		)
+		if err != nil {
+			return fmt.Errorf("error removing existing actor types: %w", err)
+		}
+	}
+
 	if len(actorTypes) == 0 {
 		return nil
 	}

@@ -27,8 +27,7 @@ const (
 
 // Message kinds, grouped by traffic path so the allowed direction is obvious at a glance
 // Every request has a matching response kind; a response is correlated to its request via CorrelationID
-// Errors are reported with KindError regardless of the request, so a receiver can classify a reply
-// as success-vs-error from the Kind alone and only then decode the operation-specific payload
+// Errors are reported with KindError regardless of the request, so a receiver can classify a reply as success-vs-error from the Kind alone and only then decode the operation-specific payload
 const (
 	// Host -> Runtime requests
 
@@ -93,7 +92,7 @@ type Envelope struct {
 	DeadlineUnixMs int64 `msgpack:"dl,omitempty"`
 	// HostID is the stable identity of the host sending or targeted by the message
 	HostID string `msgpack:"h,omitempty"`
-	// SessionID identifies the runtime session, used to fence stale sessions
+	// SessionID identifies the runtime session, used to detect superseded sessions
 	SessionID string `msgpack:"s,omitempty"`
 	// Payload is the MessagePack-encoded, kind-specific body
 	Payload []byte `msgpack:"p,omitempty"`
@@ -126,8 +125,7 @@ func (e *Envelope) Reply(kind string, payload []byte) *Envelope {
 	return r
 }
 
-// ReplyWith returns a response envelope of the given kind correlated to this request,
-// encoding payload as MessagePack
+// ReplyWith returns a response envelope of the given kind correlated to this request, encoding payload as MessagePack
 // A nil payload produces an empty-bodied acknowledgement, which is how ack-only operations respond
 func (e *Envelope) ReplyWith(kind string, payload any) (*Envelope, error) {
 	r := e.Reply(kind, nil)

@@ -5,8 +5,7 @@ package protocol
 // Each runtime-initiated operation is paired with its response in this file
 //
 // Alarm messages use explicit exported fields rather than internal/ref types
-// The lease itself stays runtime-side: the runtime correlates the host's response to
-// the in-flight ExecuteAlarmRequest by CorrelationID and keeps renewing the lease meanwhile
+// The lease itself stays runtime-side: the runtime correlates the host's response to the in-flight ExecuteAlarmRequest by CorrelationID and keeps renewing the lease meanwhile
 
 // ExecuteAlarmRequest asks a host to execute an alarm for an actor it owns and waits for the response
 type ExecuteAlarmRequest struct {

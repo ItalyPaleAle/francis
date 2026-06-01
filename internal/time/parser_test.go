@@ -61,6 +61,29 @@ func TestParseTime(t *testing.T) {
 	})
 }
 
+func TestParseDurationDefault(t *testing.T) {
+	const def = 30 * time.Second
+
+	t.Run("empty string returns default", func(t *testing.T) {
+		assert.Equal(t, def, ParseDurationDefault("", def))
+	})
+
+	t.Run("valid Go duration string", func(t *testing.T) {
+		assert.Equal(t, 1500*time.Millisecond, ParseDurationDefault("1500ms", def))
+		assert.Equal(t, 2*time.Minute+5*time.Second, ParseDurationDefault("2m5s", def))
+	})
+
+	t.Run("invalid string returns default", func(t *testing.T) {
+		assert.Equal(t, def, ParseDurationDefault("not-a-duration", def))
+		assert.Equal(t, def, ParseDurationDefault("10", def)) // missing unit
+	})
+
+	t.Run("non-positive duration returns default", func(t *testing.T) {
+		assert.Equal(t, def, ParseDurationDefault("0s", def))
+		assert.Equal(t, def, ParseDurationDefault("-5s", def))
+	})
+}
+
 func TestParseDuration_Parser(t *testing.T) {
 	t.Run("ISO8601 string", func(t *testing.T) {
 		out, err := ParseDuration("PT1H2M3.004S")
