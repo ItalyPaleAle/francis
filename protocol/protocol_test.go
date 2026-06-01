@@ -55,23 +55,6 @@ func TestEnvelopeReplyCorrelation(t *testing.T) {
 	assert.Equal(t, "h1", out.HostID)
 }
 
-func TestEnvelopeDeadline(t *testing.T) {
-	e := NewEnvelope(KindInvokeActor, nil)
-
-	_, ok := e.Deadline()
-	assert.False(t, ok)
-
-	want := time.UnixMilli(1_700_000_000_123)
-	e.SetDeadline(want)
-	got, ok := e.Deadline()
-	require.True(t, ok)
-	assert.True(t, want.Equal(got))
-
-	e.SetDeadline(time.Time{})
-	_, ok = e.Deadline()
-	assert.False(t, ok)
-}
-
 func TestWriteReadMessageRoundTrip(t *testing.T) {
 	e := NewEnvelope(KindSetState, nil)
 	e.HostID = "host-abc"

@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
+	"github.com/italypaleale/go-kit/eventqueue"
 	"github.com/italypaleale/go-kit/servicerunner"
 	"github.com/italypaleale/go-kit/ttlcache"
 	"github.com/quic-go/quic-go"
@@ -17,6 +19,7 @@ import (
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/protocol"
 )
 
@@ -39,6 +42,21 @@ type Runtime struct {
 	// placementCache holds short-lived actor placement lookups to reduce provider load
 	// A nil cache disables runtime-side caching
 	placementCache *ttlcache.Cache[string, *cachedPlacement]
+
+	// alarmProcessor schedules leased alarms for dispatch at their due time
+	alarmProcessor *eventqueue.Processor[string, *ref.AlarmLease]
+	// activeAlarms and retryingAlarms track in-flight and retrying alarms by key, guarded by activeAlarmsLock
+	activeAlarmsLock sync.Mutex
+	activeAlarms     map[string]struct{}
+	retryingAlarms   map[string]struct{}
+	// alarmsDraining is set during shutdown to stop new executions from starting, also guarded by activeAlarmsLock
+	alarmsDraining bool
+	// alarmWg counts in-flight alarm executions so shutdown can wait for them to finish
+	alarmWg sync.WaitGroup
+
+	// sendToHost dispatches a request to a connected host and returns its response
+	// Tests can substitute a fake host transport
+	sendToHost func(ctx context.Context, c *hostConn, env *protocol.Envelope) (*protocol.Envelope, error)
 
 	log   *slog.Logger
 	clock clock.WithTicker
@@ -74,8 +92,15 @@ func NewRuntime(provider components.ActorProvider, opts ...RuntimeOption) (*Runt
 		alarmsPollInterval:      options.alarmsPollInterval,
 		providerRequestTimeout:  options.providerRequestTimeout,
 		shutdownGracePeriod:     options.shutdownGracePeriod,
+		activeAlarms:            make(map[string]struct{}),
+		retryingAlarms:          make(map[string]struct{}),
 		log:                     options.logger,
 		clock:                   options.clock,
+	}
+
+	// By default, alarms are dispatched to hosts over their WebTransport session
+	rt.sendToHost = func(ctx context.Context, c *hostConn, env *protocol.Envelope) (*protocol.Envelope, error) {
+		return c.sendRequest(ctx, env)
 	}
 	return rt, nil
 }
@@ -108,6 +133,12 @@ func (rt *Runtime) Run(parentCtx context.Context) error {
 		NewServiceRunner(
 			// Run the WebTransport server that accepts host sessions
 			rt.runServer,
+
+			// Fetch and dispatch alarms for the hosts connected to this runtime
+			rt.runAlarmFetcher,
+
+			// Renew leases for the alarms owned by connected hosts
+			rt.runLeaseRenewal,
 
 			// Run the actor provider
 			rt.provider.Run,
@@ -240,18 +271,10 @@ func (rt *Runtime) handleStream(ctx context.Context, c *hostConn, stream *webtra
 	}
 
 	// Base the handler context on the stream's context rather than the session's
-	// The stream context is canceled when this stream's write side closes, which covers both a per-request cancellation (the peer sends STOP_SENDING for our response) and session or connection teardown
-	// This gives finer-grained cancellation than the session context without firing during normal dispatch
-	reqCtx := stream.Context()
-	deadline, hasDeadline := req.Deadline()
-	if hasDeadline {
-		_ = stream.SetDeadline(deadline)
-		var cancel context.CancelFunc
-		reqCtx, cancel = context.WithDeadline(reqCtx, deadline)
-		defer cancel()
-	}
+	// The stream context is canceled when this stream's write side closes, which covers both a per-request cancellation (the caller abandons the request and resets the stream) and session or connection teardown
+	// The caller bounds the operation with its own context timeout, so no deadline travels on the wire
 
-	resp := rt.dispatch(reqCtx, c, req)
+	resp := rt.dispatch(stream.Context(), c, req)
 	err = protocol.WriteMessage(stream, resp)
 	if err != nil {
 		rt.log.WarnContext(ctx, "Failed to write response to host",

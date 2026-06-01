@@ -15,7 +15,7 @@ import (
 )
 
 // newTestRuntime returns a Runtime backed by an in-memory provider, ready for dispatch-level tests
-func newTestRuntime(t *testing.T) (*Runtime, *standalone.StandaloneMemory) {
+func newTestRuntime(t *testing.T, opts ...RuntimeOption) (*Runtime, *standalone.StandaloneMemory) {
 	t.Helper()
 
 	prov, err := standalone.NewStandaloneMemory(slog.New(slog.DiscardHandler), standalone.StandaloneMemoryOptions{}, components.ProviderConfig{
@@ -26,7 +26,7 @@ func newTestRuntime(t *testing.T) (*Runtime, *standalone.StandaloneMemory) {
 	})
 	require.NoError(t, err)
 
-	rt, err := NewRuntime(prov, WithBind("127.0.0.1:0"))
+	rt, err := NewRuntime(prov, append([]RuntimeOption{WithBind("127.0.0.1:0")}, opts...)...)
 	require.NoError(t, err)
 	require.NoError(t, prov.Init(t.Context()))
 

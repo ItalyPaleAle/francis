@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/google/uuid"
 	msgpack "github.com/vmihailenco/msgpack/v5"
@@ -88,8 +87,6 @@ type Envelope struct {
 	CorrelationID string `msgpack:"cid,omitempty"`
 	// Kind identifies the message type
 	Kind string `msgpack:"k"`
-	// DeadlineUnixMs is the absolute deadline for the operation, in Unix milliseconds; zero means no deadline
-	DeadlineUnixMs int64 `msgpack:"dl,omitempty"`
 	// HostID is the stable identity of the host sending or targeted by the message
 	HostID string `msgpack:"h,omitempty"`
 	// SessionID identifies the runtime session, used to detect superseded sessions
@@ -188,24 +185,6 @@ func (e *Envelope) AsError() (*Error, bool) {
 		return NewError(ErrCodeInternal, "failed to decode error payload"), true
 	}
 	return perr, true
-}
-
-// Deadline returns the absolute deadline for the operation, if one is set
-func (e *Envelope) Deadline() (time.Time, bool) {
-	if e.DeadlineUnixMs <= 0 {
-		return time.Time{}, false
-	}
-	return time.UnixMilli(e.DeadlineUnixMs), true
-}
-
-// SetDeadline sets the absolute deadline for the operation
-// A zero time clears the deadline
-func (e *Envelope) SetDeadline(t time.Time) {
-	if t.IsZero() {
-		e.DeadlineUnixMs = 0
-		return
-	}
-	e.DeadlineUnixMs = t.UnixMilli()
 }
 
 // CheckProtocolVersion validates the protocol version advertised by a peer

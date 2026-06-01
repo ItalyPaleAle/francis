@@ -1,69 +1,8 @@
 package runtime
 
 import (
-	"log/slog"
 	"sync"
-	"sync/atomic"
-
-	"github.com/quic-go/webtransport-go"
-
-	"github.com/italypaleale/francis/protocol"
 )
-
-// Session error codes used when the runtime closes a host's WebTransport session
-const (
-	// sessionErrorSuperseded is sent when a session is superseded by a newer one for the same host
-	sessionErrorSuperseded webtransport.SessionErrorCode = 1
-	// sessionErrorShutdown is sent when the runtime is shutting down
-	sessionErrorShutdown webtransport.SessionErrorCode = 2
-)
-
-// hostConn represents a single connected host and its active WebTransport session
-// One hostConn corresponds to one QUIC connection
-// In case of reconnection, we create a new hostConn superseding the previous one for the same ID
-type hostConn struct {
-	session   *webtransport.Session
-	hostID    string
-	sessionID string
-	address   string
-
-	protocolVersion uint16
-	actorTypes      []protocol.ActorHostType
-
-	// draining is set when a graceful UnregisterHost is in progress
-	// While draining the host must not be selected for new placement or alarm work
-	draining atomic.Bool
-
-	log *slog.Logger
-}
-
-// ID returns the stable host ID
-func (c *hostConn) ID() string {
-	return c.hostID
-}
-
-// SessionID returns the runtime-generated session ID used to detect superseded sessions
-func (c *hostConn) SessionID() string {
-	return c.sessionID
-}
-
-// IsDraining reports whether the host is gracefully draining
-func (c *hostConn) IsDraining() bool {
-	return c.draining.Load()
-}
-
-// setDraining marks the host as draining
-func (c *hostConn) setDraining() {
-	c.draining.Store(true)
-}
-
-// close terminates the host's WebTransport session with the given error code
-func (c *hostConn) close(code webtransport.SessionErrorCode, msg string) {
-	if c.session == nil {
-		return
-	}
-	_ = c.session.CloseWithError(code, msg)
-}
 
 // HostManager tracks the hosts currently connected to this runtime replica, keyed by host ID
 // It is the in-memory source of truth for which hosts this runtime owns sessions for
