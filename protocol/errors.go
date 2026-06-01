@@ -38,6 +38,8 @@ const (
 	ErrCodeNoHost ErrorCode = "no_host"
 	// ErrCodeActorNotHosted indicates the actor is not active on the target host
 	ErrCodeActorNotHosted ErrorCode = "actor_not_hosted"
+	// ErrCodeActorNotActive indicates an active-only lookup found no active actor, and is not retryable
+	ErrCodeActorNotActive ErrorCode = "actor_not_active"
 	// ErrCodeActorHalted indicates the actor is being halted; retry after a delay
 	ErrCodeActorHalted ErrorCode = "actor_halted"
 	// ErrCodeActorTypeUnsupported indicates the actor type is not supported in the cluster

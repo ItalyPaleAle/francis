@@ -102,6 +102,9 @@ type LookupActorRequest struct {
 	ActorID   string `msgpack:"id"`
 	// ActiveOnly looks up only actors that are already active and does not allocate a new placement
 	ActiveOnly bool `msgpack:"activeOnly,omitempty"`
+	// SkipCache bypasses any runtime-side placement cache and forces a fresh provider lookup
+	// Hosts set this when retrying after a stale-placement failure
+	SkipCache bool `msgpack:"skipCache,omitempty"`
 }
 
 // LookupActorResponse carries the resolved placement for an actor

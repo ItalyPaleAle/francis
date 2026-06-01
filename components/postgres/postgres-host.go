@@ -315,8 +315,8 @@ func (p *PostgresProvider) LookupActor(ctx context.Context, ref ref.ActorRef, op
 		}
 
 		// Check for our custom error code indicating no host available
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "P0001" && pgErr.Message == "NO_HOST_AVAILABLE" {
+		pgErr, ok := errors.AsType[*pgconn.PgError](err)
+		if ok && pgErr.Code == "P0001" && pgErr.Message == "NO_HOST_AVAILABLE" {
 			if opts.ActiveOnly {
 				return components.LookupActorRes{}, components.ErrNoActor
 			}

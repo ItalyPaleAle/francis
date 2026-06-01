@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/italypaleale/go-kit/servicerunner"
+	"github.com/italypaleale/go-kit/ttlcache"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/webtransport-go"
@@ -34,6 +35,10 @@ type Runtime struct {
 	alarmsPollInterval      time.Duration
 	providerRequestTimeout  time.Duration
 	shutdownGracePeriod     time.Duration
+
+	// placementCache holds short-lived actor placement lookups to reduce provider load
+	// A nil cache disables runtime-side caching
+	placementCache *ttlcache.Cache[string, *cachedPlacement]
 
 	log   *slog.Logger
 	clock clock.WithTicker
@@ -87,6 +92,13 @@ func (rt *Runtime) Run(parentCtx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to init provider: %w", err)
 	}
+
+	// Create the short-lived placement cache
+	// The max TTL is bounded by the host health check deadline so a dead host is never served past it
+	rt.placementCache = ttlcache.NewCache[string, *cachedPlacement](&ttlcache.CacheOptions{
+		MaxTTL: rt.placementCacheTTL(),
+	})
+	defer rt.placementCache.Stop()
 
 	rt.log.InfoContext(ctx, "Starting Francis runtime", slog.String("bind", rt.bind))
 

@@ -2,13 +2,26 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/protocol"
 )
+
+// lookupCacheMaxTTL caps how long a placement lookup is cached at the runtime
+const lookupCacheMaxTTL = 5 * time.Second
+
+// cachedPlacement is a placement lookup result held in the runtime placement cache
+type cachedPlacement struct {
+	HostID        string
+	Address       string
+	IdleTimeoutMs int64
+}
 
 // handleRegistration performs the registration handshake on the first stream of a session
 // It returns true if the host was successfully registered
@@ -156,41 +169,252 @@ func (rt *Runtime) handleUnregister(ctx context.Context, c *hostConn, req *proto
 	return resp
 }
 
-// notImplemented is a placeholder for handlers implemented in later phases
-func notImplemented(req *protocol.Envelope, what string) *protocol.Envelope {
-	return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, what+" is not implemented yet"))
+// handleHealthCheck persists a periodic host health report, optionally updating the supported actor types
+func (rt *Runtime) handleHealthCheck(parentCtx context.Context, c *hostConn, req *protocol.Envelope) *protocol.Envelope {
+	var payload protocol.HealthCheckRequest
+	err := req.DecodePayload(&payload)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode health check request"))
+	}
+
+	updateReq := components.UpdateActorHostReq{
+		UpdateLastHealthCheck: true,
+	}
+
+	// A non-nil actor type list replaces the host's supported types; a nil list leaves them unchanged
+	if payload.ActorTypes != nil {
+		updateReq.ActorTypes = protocolActorTypesToComponents(payload.ActorTypes)
+		c.actorTypes = payload.ActorTypes
+	}
+
+	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+	defer cancel()
+	err = rt.provider.UpdateActorHost(ctx, c.hostID, updateReq)
+	if errors.Is(err, components.ErrHostUnregistered) {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeHostUnregistered, "host registration is no longer valid"))
+	} else if err != nil {
+		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeInternal, "failed to persist health check: %v", err))
+	}
+
+	return req.Reply(protocol.KindHealthCheckResponse, nil)
 }
 
-// The following handlers are implemented in Phase 4 (handlers) and Phase 5 (alarm dispatch)
+// handleLookupActor resolves the placement of an actor, consulting the runtime placement cache when allowed
+func (rt *Runtime) handleLookupActor(parentCtx context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
+	var payload protocol.LookupActorRequest
+	err := req.DecodePayload(&payload)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode lookup request"))
+	}
+	if payload.ActorType == "" || payload.ActorID == "" {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "lookup is missing the actor type or ID"))
+	}
 
-func (rt *Runtime) handleHealthCheck(_ context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
-	return notImplemented(req, "health check")
+	aRef := ref.NewActorRef(payload.ActorType, payload.ActorID)
+	key := aRef.String()
+
+	// The cache only serves allocating lookups
+	// Active-only lookups always consult the provider
+	useCache := rt.placementCache != nil && !payload.ActiveOnly
+	if useCache && !payload.SkipCache {
+		cached, ok := rt.placementCache.Get(key)
+		// A cached host that has since started draining must not be served
+		if ok && !rt.hostDraining(cached.HostID) {
+			return rt.reply(req, protocol.KindLookupActorResponse, protocol.LookupActorResponse{
+				HostID:        cached.HostID,
+				Address:       cached.Address,
+				IdleTimeoutMs: cached.IdleTimeoutMs,
+			})
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+	defer cancel()
+	res, err := rt.provider.LookupActor(ctx, aRef, components.LookupActorOpts{
+		ActiveOnly: payload.ActiveOnly,
+	})
+	switch {
+	case errors.Is(err, components.ErrNoHost):
+		rt.deletePlacement(key)
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeNoHost, "no host is available to place the actor"))
+	case errors.Is(err, components.ErrNoActor):
+		// Only reachable for active-only lookups, and not retryable
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeActorNotActive, "actor is not currently active"))
+	case err != nil:
+		rt.deletePlacement(key)
+		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeInternal, "failed to look up actor: %v", err))
+	}
+
+	// Never hand out a placement on a host that is draining on this runtime
+	if rt.hostDraining(res.HostID) {
+		rt.deletePlacement(key)
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeRetryLater, "actor is moving off a draining host").WithRetryAfter(rt.alarmsPollInterval))
+	}
+
+	// Always refresh the cache with the fresh placement
+	if useCache {
+		rt.placementCache.Set(key, &cachedPlacement{
+			HostID:        res.HostID,
+			Address:       res.Address,
+			IdleTimeoutMs: res.IdleTimeout.Milliseconds(),
+		}, rt.placementCacheTTL())
+	}
+
+	return rt.reply(req, protocol.KindLookupActorResponse, protocol.LookupActorResponse{
+		HostID:        res.HostID,
+		Address:       res.Address,
+		IdleTimeoutMs: res.IdleTimeout.Milliseconds(),
+	})
 }
 
-func (rt *Runtime) handleLookupActor(_ context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
-	return notImplemented(req, "actor lookup")
+// handleGetAlarm retrieves an alarm's properties
+func (rt *Runtime) handleGetAlarm(parentCtx context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
+	var payload protocol.GetAlarmRequest
+	err := req.DecodePayload(&payload)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode get alarm request"))
+	}
+
+	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+	defer cancel()
+	res, err := rt.provider.GetAlarm(ctx, ref.NewAlarmRef(payload.ActorType, payload.ActorID, payload.Name))
+	if errors.Is(err, components.ErrNoAlarm) {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeAlarmNotFound, "alarm does not exist"))
+	} else if err != nil {
+		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeInternal, "failed to get alarm: %v", err))
+	}
+
+	return rt.reply(req, protocol.KindGetAlarmResponse, protocol.GetAlarmResponse{
+		AlarmProperties: refAlarmPropsToProtocol(res.AlarmProperties),
+	})
 }
 
-func (rt *Runtime) handleGetAlarm(_ context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
-	return notImplemented(req, "get alarm")
+// handleSetAlarm creates or replaces an alarm
+func (rt *Runtime) handleSetAlarm(parentCtx context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
+	var payload protocol.SetAlarmRequest
+	err := req.DecodePayload(&payload)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode set alarm request"))
+	}
+
+	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+	defer cancel()
+	err = rt.provider.SetAlarm(ctx, ref.NewAlarmRef(payload.ActorType, payload.ActorID, payload.Name), components.SetAlarmReq{
+		AlarmProperties: protocolAlarmPropsToRef(payload.AlarmProperties),
+	})
+	if err != nil {
+		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeInternal, "failed to set alarm: %v", err))
+	}
+
+	return req.Reply(protocol.KindSetAlarmResponse, nil)
 }
 
-func (rt *Runtime) handleSetAlarm(_ context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
-	return notImplemented(req, "set alarm")
+// handleDeleteAlarm removes an alarm
+func (rt *Runtime) handleDeleteAlarm(parentCtx context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
+	var payload protocol.DeleteAlarmRequest
+	err := req.DecodePayload(&payload)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode delete alarm request"))
+	}
+
+	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+	defer cancel()
+	err = rt.provider.DeleteAlarm(ctx, ref.NewAlarmRef(payload.ActorType, payload.ActorID, payload.Name))
+	if errors.Is(err, components.ErrNoAlarm) {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeAlarmNotFound, "alarm does not exist"))
+	} else if err != nil {
+		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeInternal, "failed to delete alarm: %v", err))
+	}
+
+	return req.Reply(protocol.KindDeleteAlarmResponse, nil)
 }
 
-func (rt *Runtime) handleDeleteAlarm(_ context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
-	return notImplemented(req, "delete alarm")
+// handleGetState retrieves an actor's persistent state
+func (rt *Runtime) handleGetState(parentCtx context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
+	var payload protocol.GetStateRequest
+	err := req.DecodePayload(&payload)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode get state request"))
+	}
+
+	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+	defer cancel()
+	data, err := rt.provider.GetState(ctx, ref.NewActorRef(payload.ActorType, payload.ActorID))
+	if errors.Is(err, components.ErrNoState) {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeStateNotFound, "no state found for the actor"))
+	} else if err != nil {
+		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeInternal, "failed to get state: %v", err))
+	}
+
+	return rt.reply(req, protocol.KindGetStateResponse, protocol.GetStateResponse{Data: data})
 }
 
-func (rt *Runtime) handleGetState(_ context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
-	return notImplemented(req, "get state")
+// handleSetState stores an actor's persistent state
+func (rt *Runtime) handleSetState(parentCtx context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
+	var payload protocol.SetStateRequest
+	err := req.DecodePayload(&payload)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode set state request"))
+	}
+
+	opts := components.SetStateOpts{}
+	if payload.TTLMs > 0 {
+		opts.TTL = time.Duration(payload.TTLMs) * time.Millisecond
+	}
+
+	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+	defer cancel()
+	err = rt.provider.SetState(ctx, ref.NewActorRef(payload.ActorType, payload.ActorID), payload.Data, opts)
+	if err != nil {
+		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeInternal, "failed to set state: %v", err))
+	}
+
+	return req.Reply(protocol.KindSetStateResponse, nil)
 }
 
-func (rt *Runtime) handleSetState(_ context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
-	return notImplemented(req, "set state")
+// handleDeleteState removes an actor's persistent state
+func (rt *Runtime) handleDeleteState(parentCtx context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
+	var payload protocol.DeleteStateRequest
+	err := req.DecodePayload(&payload)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode delete state request"))
+	}
+
+	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+	defer cancel()
+	err = rt.provider.DeleteState(ctx, ref.NewActorRef(payload.ActorType, payload.ActorID))
+	if errors.Is(err, components.ErrNoState) {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeStateNotFound, "no state found for the actor"))
+	} else if err != nil {
+		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeInternal, "failed to delete state: %v", err))
+	}
+
+	return req.Reply(protocol.KindDeleteStateResponse, nil)
 }
 
-func (rt *Runtime) handleDeleteState(_ context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
-	return notImplemented(req, "delete state")
+// reply builds a response envelope of the given kind, falling back to an internal error if encoding fails
+func (rt *Runtime) reply(req *protocol.Envelope, kind string, payload any) *protocol.Envelope {
+	resp, err := req.ReplyWith(kind, payload)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to encode response"))
+	}
+	return resp
+}
+
+// hostDraining reports whether the given host is connected to this runtime and currently draining
+func (rt *Runtime) hostDraining(hostID string) bool {
+	c, ok := rt.hosts.Get(hostID)
+	return ok && c.IsDraining()
+}
+
+// deletePlacement removes a cache entry when the cache is enabled
+func (rt *Runtime) deletePlacement(key string) {
+	if rt.placementCache != nil {
+		rt.placementCache.Delete(key)
+	}
+}
+
+// placementCacheTTL returns the TTL used for placement cache entries, bounded by the health check deadline
+func (rt *Runtime) placementCacheTTL() time.Duration {
+	return min(lookupCacheMaxTTL, rt.hostHealthCheckDeadline)
 }
