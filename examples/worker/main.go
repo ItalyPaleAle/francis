@@ -17,7 +17,7 @@ import (
 	"github.com/lmittmann/tint"
 	"github.com/mattn/go-isatty"
 
-	"github.com/italypaleale/francis/host"
+	"github.com/italypaleale/francis/host/local"
 )
 
 var (
@@ -48,13 +48,13 @@ func main() {
 
 func runWorker(ctx context.Context) error {
 	// Options for the host
-	opts := []host.HostOption{
-		host.WithAddress(actorHostAddress),
-		host.WithLogger(log.With("scope", "actor-host")),
-		host.WithSQLiteProvider(host.SQLiteProviderOptions{
+	opts := []local.HostOption{
+		local.WithAddress(actorHostAddress),
+		local.WithLogger(log.With("scope", "actor-host")),
+		local.WithSQLiteProvider(local.SQLiteProviderOptions{
 			ConnectionString: "data.db",
 		}),
-		host.WithShutdownGracePeriod(10 * time.Second),
+		local.WithShutdownGracePeriod(10 * time.Second),
 	}
 
 	// Check if we're using mTLS
@@ -67,20 +67,20 @@ func runWorker(ctx context.Context) error {
 	} else {
 		opts = append(opts,
 			// Use shared key for auth
-			host.WithPeerAuthenticationSharedKey(peerAuthKey),
+			local.WithPeerAuthenticationSharedKey(peerAuthKey),
 			// Use self-signed certs
-			host.WithServerTLSInsecureSkipTLSValidation(),
+			local.WithServerTLSInsecureSkipTLSValidation(),
 		)
 	}
 
 	// Create a new actor host
-	h, err := host.NewHost(opts...)
+	h, err := local.NewHost(opts...)
 	if err != nil {
 		return fmt.Errorf("failed to create actor host: %w", err)
 	}
 
 	// Register all supported actors
-	err = h.RegisterActor("myactor", NewMyActor, host.RegisterActorOptions{
+	err = h.RegisterActor("myactor", NewMyActor, local.RegisterActorOptions{
 		IdleTimeout: 10 * time.Second,
 	})
 	if err != nil {
@@ -120,7 +120,7 @@ func initLogger(level slog.Level) *slog.Logger {
 	return slog.New(handler)
 }
 
-func getMTLSHostOption() (host.HostOption, error) {
+func getMTLSHostOption() (local.HostOption, error) {
 	// Load the certificate and key
 	cert, err := tls.LoadX509KeyPair("certs/"+certName+".crt", "certs/"+certName+".key")
 	if err != nil {
@@ -144,5 +144,5 @@ func getMTLSHostOption() (host.HostOption, error) {
 		return nil, fmt.Errorf("failed to parse CA certificate: %w", err)
 	}
 
-	return host.WithPeerAuthenticationMTLS(&cert, caCert), nil
+	return local.WithPeerAuthenticationMTLS(&cert, caCert), nil
 }
