@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync/atomic"
 	"time"
@@ -94,6 +95,112 @@ func (pc *peerClient) InvokeObject(ctx context.Context, address string, req prot
 	}
 
 	return out, nil
+}
+
+// InvokeStream performs a stream invocation against the actor on the peer at address
+// The request body is streamed from body
+// On success the returned reader carries the streamed response body and must be closed by the caller
+// A returned protocol error that is Retryable signals the caller to invalidate its cached placement and retry a fresh lookup
+func (pc *peerClient) InvokeStream(ctx context.Context, address string, req protocol.InvokeActorRequest, body io.Reader) (string, io.ReadCloser, *protocol.Error) {
+	req.Mode = protocol.InvocationModeStream
+
+	// Reuse a live pooled session to the peer, dialing one if necessary
+	session, err := pc.session(ctx, address)
+	if err != nil {
+		return "", nil, protocol.NewErrorf(protocol.ErrCodeRetryLater, "failed to connect to peer %s: %v", address, err)
+	}
+
+	// Open a fresh stream for this invocation
+	// The read side stays open to carry the response body
+	stream, err := session.OpenStreamSync(ctx)
+	if err != nil {
+		return "", nil, protocol.NewErrorf(protocol.ErrCodeRetryLater, "failed to open stream to peer %s: %v", address, err)
+	}
+
+	// Bound the request send and response-metadata read by the caller's context
+	// quic streams are not context-aware, so a watcher forces the blocking calls to unblock until we hand the body reader to the caller
+	stopWatch := make(chan struct{})
+	watchStopped := false
+	stop := func() {
+		if !watchStopped {
+			watchStopped = true
+			close(stopWatch)
+		}
+	}
+	defer stop()
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = stream.SetDeadline(time.Now())
+		case <-stopWatch:
+			// Noop
+		}
+	}()
+
+	// Send the invocation metadata frame
+	env, err := protocol.NewRequest(protocol.KindInvokeActor, req)
+	if err != nil {
+		_ = stream.Close()
+		return "", nil, protocol.NewErrorf(protocol.ErrCodeInternal, "failed to encode invocation: %v", err)
+	}
+
+	err = protocol.WriteMessage(stream, env)
+	if err != nil {
+		_ = stream.Close()
+		return "", nil, protocol.NewErrorf(protocol.ErrCodeRetryLater, "failed to send invocation to peer %s: %v", address, err)
+	}
+
+	// Stream the request body, then close the write side to signal its end
+	if body != nil {
+		_, err = io.Copy(stream, body)
+		if err != nil {
+			_ = stream.Close()
+			return "", nil, protocol.NewErrorf(protocol.ErrCodeRetryLater, "failed to stream request body to peer %s: %v", address, err)
+		}
+	}
+	_ = stream.Close()
+
+	// Read the response metadata frame
+	respEnv, err := protocol.ReadMessage(stream)
+	if err != nil {
+		stream.CancelRead(0)
+		return "", nil, protocol.NewErrorf(protocol.ErrCodeRetryLater, "failed to read response from peer %s: %v", address, err)
+	}
+
+	// Surface a structured error from the peer (host mismatch, halted actor, invocation failure, and so on)
+	perr, isErr := respEnv.AsError()
+	if isErr {
+		stream.CancelRead(0)
+		return "", nil, perr
+	}
+
+	var meta protocol.InvokeActorResponse
+	err = respEnv.DecodePayload(&meta)
+	if err != nil {
+		stream.CancelRead(0)
+		return "", nil, protocol.NewErrorf(protocol.ErrCodeInternal, "failed to decode invocation response: %v", err)
+	}
+
+	// From here the caller owns the stream's read side, so stop the context watcher
+	stop()
+
+	// The remaining bytes on the stream are the response body, which the caller reads and then closes
+	return meta.ContentType, &streamBody{stream: stream}, nil
+}
+
+// streamBody adapts a WebTransport stream's read side to an io.ReadCloser for a streamed response body
+type streamBody struct {
+	stream *webtransport.Stream
+}
+
+func (s *streamBody) Read(p []byte) (int, error) {
+	return s.stream.Read(p)
+}
+
+func (s *streamBody) Close() error {
+	// Releasing the body cancels the read side, which is harmless once the body has been fully read
+	s.stream.CancelRead(0)
+	return nil
 }
 
 // session returns a live pooled session for the peer address, dialing and pooling a new one when there is none or the pooled one has died
