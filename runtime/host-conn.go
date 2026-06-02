@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"sync/atomic"
-	"time"
 
 	"github.com/quic-go/webtransport-go"
 
@@ -81,7 +80,7 @@ func (c *hostConn) actorTypeConfig(actorType string) (protocol.ActorHostType, bo
 
 // sendRequest opens a new bi-directional stream to the host, writes the request, and reads the response
 // It is used for runtime-initiated operations such as ExecuteAlarm
-// The caller's context bounds the round-trip, and when it is canceled or times out, the blocking stream read or write is unblocked and the call returns the context error
+// The caller's context bounds the round-trip
 func (c *hostConn) sendRequest(ctx context.Context, env *protocol.Envelope) (*protocol.Envelope, error) {
 	// Stamp the host identity and session so the host can reject a request meant for a superseded session
 	env.HostID = c.hostID
@@ -93,32 +92,5 @@ func (c *hostConn) sendRequest(ctx context.Context, env *protocol.Envelope) (*pr
 	}
 	defer stream.Close()
 
-	// quic streams are not context-aware, so a watcher forces the blocking read or write to unblock as soon as the caller's context is done, covering both timeouts and explicit cancellation
-	stop := make(chan struct{})
-	defer close(stop)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = stream.SetDeadline(time.Now())
-		case <-stop:
-		}
-	}()
-
-	err = protocol.WriteMessage(stream, env)
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, fmt.Errorf("failed to write request to host: %w", err)
-	}
-
-	resp, err := protocol.ReadMessage(stream)
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, fmt.Errorf("failed to read response from host: %w", err)
-	}
-
-	return resp, nil
+	return protocol.RoundTrip(ctx, stream, env)
 }

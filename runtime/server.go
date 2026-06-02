@@ -23,9 +23,6 @@ import (
 	"github.com/italypaleale/francis/protocol"
 )
 
-// runtimePath is the HTTP/3 path hosts use to establish a WebTransport session with the runtime
-const runtimePath = "/runtime/v1/connect"
-
 // Runtime is a standalone Francis runtime
 // It coordinates database access on behalf of the application hosts connected to it: host registration, placement lookup, state, alarms, health checks, and alarm dispatch
 type Runtime struct {
@@ -81,6 +78,11 @@ func NewRuntime(provider components.ActorProvider, opts ...RuntimeOption) (*Runt
 	serverTLSConfig, _, err := options.tlsOptions.GetTLSConfig()
 	if err != nil {
 		return nil, err
+	}
+
+	// Advertise the HTTP/3 ALPN so WebTransport clients can negotiate the connection
+	serverTLSConfig.NextProtos = []string{
+		http3.NextProtoH3,
 	}
 
 	rt := &Runtime{
@@ -153,13 +155,18 @@ func (rt *Runtime) runServer(ctx context.Context) error {
 	// Create the WebTransport server
 	wtServer := &webtransport.Server{
 		H3: &http3.Server{
-			Addr:            rt.bind,
-			TLSConfig:       rt.serverTLSConfig,
-			QUICConfig:      &quic.Config{},
-			EnableDatagrams: true,
-			Handler:         mux,
+			Addr:      rt.bind,
+			TLSConfig: rt.serverTLSConfig,
+			QUICConfig: &quic.Config{
+				EnableDatagrams:                  true,
+				EnableStreamResetPartialDelivery: true,
+			},
+			Handler: mux,
 		},
 	}
+
+	// Advertise WebTransport support in the HTTP/3 SETTINGS and make the QUIC connection available to Upgrade
+	webtransport.ConfigureHTTP3Server(wtServer.H3)
 
 	// Health endpoint for liveness probes over plain HTTP/3
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -167,7 +174,7 @@ func (rt *Runtime) runServer(ctx context.Context) error {
 	})
 
 	// WebTransport endpoint for host sessions
-	mux.HandleFunc(runtimePath, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(protocol.RuntimeConnectPath, func(w http.ResponseWriter, r *http.Request) {
 		session, rErr := wtServer.Upgrade(w, r)
 		if rErr != nil {
 			rt.log.WarnContext(r.Context(), "Failed to upgrade WebTransport session", slog.Any("error", rErr))
