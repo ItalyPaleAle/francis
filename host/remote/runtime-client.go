@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/quic-go/quic-go"
 	"github.com/quic-go/webtransport-go"
 	"k8s.io/utils/clock"
 
+	"github.com/italypaleale/francis/internal/wt"
 	"github.com/italypaleale/francis/protocol"
 )
 
@@ -79,15 +79,9 @@ func newRuntimeClient(cfg runtimeClientConfig) *runtimeClient {
 	}
 
 	return &runtimeClient{
-		cfg: cfg,
-		dialer: &webtransport.Dialer{
-			TLSClientConfig: cfg.tlsConfig,
-			QUICConfig: &quic.Config{
-				EnableDatagrams:                  true,
-				EnableStreamResetPartialDelivery: true,
-			},
-		},
-		ready: make(chan struct{}),
+		cfg:    cfg,
+		dialer: wt.NewDialer(cfg.tlsConfig),
+		ready:  make(chan struct{}),
 	}
 }
 

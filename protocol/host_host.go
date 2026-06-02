@@ -14,7 +14,7 @@ const (
 )
 
 // InvokeActorRequest is the metadata frame for a host-to-host actor invocation
-// For object invocation the request body travels in the envelope payload as a MessagePack object, and the response travels in the response envelope payload likewise
+// For object invocation the MessagePack-encoded argument travels in Data, and the result comes back in InvokeActorResponse.Data
 // For stream invocation this frame is sent first, then the request body streams as raw bytes; the response sends an InvokeActorResponse frame followed by the streamed response body
 type InvokeActorRequest struct {
 	// TargetHostID is the host the caller believes owns the actor, used to detect stale placement
@@ -24,6 +24,9 @@ type InvokeActorRequest struct {
 	Method       string `msgpack:"method"`
 	// Mode is the requested invocation mode
 	Mode InvocationMode `msgpack:"mode"`
+	// Data is the MessagePack-encoded argument for object invocation
+	// It is empty for stream invocation
+	Data []byte `msgpack:"data,omitempty"`
 	// ContentType is the content type of the streamed request and expected response bodies
 	// It is only meaningful for stream invocation
 	ContentType string `msgpack:"contentType,omitempty"`
@@ -31,6 +34,9 @@ type InvokeActorRequest struct {
 
 // InvokeActorResponse is the metadata frame for the response to an InvokeActorRequest
 type InvokeActorResponse struct {
+	// Data is the MessagePack-encoded result for object invocation
+	// It is empty for stream invocation
+	Data []byte `msgpack:"data,omitempty"`
 	// ContentType of a streamed response body, if any
 	ContentType string `msgpack:"contentType,omitempty"`
 	// NoContent indicates the response carries no body

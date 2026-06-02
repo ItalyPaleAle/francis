@@ -13,13 +13,12 @@ import (
 	"github.com/italypaleale/go-kit/eventqueue"
 	"github.com/italypaleale/go-kit/servicerunner"
 	"github.com/italypaleale/go-kit/ttlcache"
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/webtransport-go"
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/wt"
 	"github.com/italypaleale/francis/protocol"
 )
 
@@ -75,14 +74,10 @@ func NewRuntime(provider components.ActorProvider, opts ...RuntimeOption) (*Runt
 	}
 
 	// Build the server TLS configuration
+	// The WebTransport server sets the HTTP/3 ALPN on it
 	serverTLSConfig, _, err := options.tlsOptions.GetTLSConfig()
 	if err != nil {
 		return nil, err
-	}
-
-	// Advertise the HTTP/3 ALPN so WebTransport clients can negotiate the connection
-	serverTLSConfig.NextProtos = []string{
-		http3.NextProtoH3,
 	}
 
 	rt := &Runtime{
@@ -152,21 +147,8 @@ func (rt *Runtime) Run(parentCtx context.Context) error {
 func (rt *Runtime) runServer(ctx context.Context) error {
 	mux := http.NewServeMux()
 
-	// Create the WebTransport server
-	wtServer := &webtransport.Server{
-		H3: &http3.Server{
-			Addr:      rt.bind,
-			TLSConfig: rt.serverTLSConfig,
-			QUICConfig: &quic.Config{
-				EnableDatagrams:                  true,
-				EnableStreamResetPartialDelivery: true,
-			},
-			Handler: mux,
-		},
-	}
-
-	// Advertise WebTransport support in the HTTP/3 SETTINGS and make the QUIC connection available to Upgrade
-	webtransport.ConfigureHTTP3Server(wtServer.H3)
+	// Create the WebTransport server with the shared HTTP/3 and QUIC settings
+	wtServer := wt.NewServer(rt.bind, rt.serverTLSConfig, mux)
 
 	// Health endpoint for liveness probes over plain HTTP/3
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -191,9 +173,9 @@ func (rt *Runtime) runServer(ctx context.Context) error {
 	srvErr := make(chan error, 1)
 	go func() {
 		// Blocks until the server is closed
-		listenErr := wtServer.ListenAndServe()
-		if listenErr != nil && !errors.Is(listenErr, http.ErrServerClosed) && !errors.Is(listenErr, quic.ErrServerClosed) {
-			srvErr <- fmt.Errorf("error running WebTransport server: %w", listenErr)
+		rErr := wtServer.ListenAndServe()
+		if wt.IsServeError(rErr) {
+			srvErr <- fmt.Errorf("error running WebTransport server: %w", rErr)
 			return
 		}
 		srvErr <- nil

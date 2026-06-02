@@ -9,6 +9,9 @@ import (
 // RuntimeConnectPath is the HTTP/3 path a host uses to establish a WebTransport session with a runtime
 const RuntimeConnectPath = "/runtime/v1/connect"
 
+// PeerConnectPath is the HTTP/3 path a host uses to establish a WebTransport session with another host for actor invocation
+const PeerConnectPath = "/peer/v1/invoke"
+
 // Stream is a bidirectional, length-framed transport stream that supports deadlines
 // It is satisfied by a WebTransport stream
 type Stream interface {

@@ -116,7 +116,7 @@ func runControlServer(actorService *actor.Service) func(ctx context.Context) err
 		go func() {
 			log.Info("Control server listening", slog.String("addr", server.Addr))
 			rErr := server.ListenAndServe()
-			if rErr != nil && rErr != http.ErrServerClosed {
+			if rErr != nil && !errors.Is(rErr, http.ErrServerClosed) {
 				serveErrCh <- rErr
 			} else {
 				serveErrCh <- nil
