@@ -1,4 +1,4 @@
-package local
+package actorcore
 
 import (
 	"context"
@@ -19,17 +19,19 @@ import (
 // Copyright (C) 2024 The Dapr Authors
 // License: Apache2
 
-type idleActorProcessor = *eventqueue.Processor[string, *activeActor]
+type idleActorProcessor = *eventqueue.Processor[string, *ActiveActor]
 
-var errActiveActorAlreadyHalted = errors.New("actor is already halted")
+// ErrActorAlreadyHalted is returned by Halt when the actor is already halting
+var ErrActorAlreadyHalted = errors.New("actor is already halted")
 
-// activeActor references an actor that is currently active on this host
-type activeActor struct {
+// ActiveActor references an actor instance that is currently active on this host
+type ActiveActor struct {
+	// Instance is the actor object
+	// It is exported so callers can type-assert it to the actor's optional interfaces such as actor.ActorInvoke
+	Instance actor.Actor
+
 	// Actor reference
 	ref ref.ActorRef
-
-	// Actor object
-	instance actor.Actor
 
 	// Configured max idle time for actors of this type
 	idleTimeout time.Duration
@@ -50,28 +52,30 @@ type activeActor struct {
 	clock         clock.Clock
 }
 
-func newActiveActor(ref ref.ActorRef, instance actor.Actor, idleTimeout time.Duration, idleProcessor idleActorProcessor, cl clock.Clock) *activeActor {
+// NewActiveActor returns a new ActiveActor for the given instance
+func NewActiveActor(ref ref.ActorRef, instance actor.Actor, idleTimeout time.Duration, idleProcessor idleActorProcessor, cl clock.Clock) *ActiveActor {
 	if cl == nil {
 		cl = &clock.RealClock{}
 	}
 
-	a := &activeActor{
+	a := &ActiveActor{
+		Instance:      instance,
 		ref:           ref,
-		instance:      instance,
 		idleTimeout:   idleTimeout,
 		haltCh:        make(chan struct{}),
 		locker:        locker.TurnBasedLocker{},
 		idleProcessor: idleProcessor,
 		clock:         cl,
 	}
-	a.updateIdleAt(0)
+	a.UpdateIdleAt(0)
 
 	return a
 }
 
-// Updates the idle timeout property (i.e. time the actor becomes idle at)
-// d allows overriding the idle interval; if zero, uses the default for the actor type
-func (a *activeActor) updateIdleAt(d time.Duration) {
+// UpdateIdleAt updates the idle timeout property (i.e. the time the actor becomes idle at)
+// d allows overriding the idle interval
+// if zero, uses the default for the actor type
+func (a *ActiveActor) UpdateIdleAt(d time.Duration) {
 	if a.idleTimeout <= 0 {
 		// Actor doesn't have an idle timeout
 		return
@@ -90,7 +94,7 @@ func (a *activeActor) updateIdleAt(d time.Duration) {
 }
 
 // TryLock tries to lock the actor for turn-based concurrency, if the actor isn't already locked.
-func (a *activeActor) TryLock() (bool, chan struct{}, error) {
+func (a *ActiveActor) TryLock() (bool, chan struct{}, error) {
 	if a.halted.Load() {
 		return false, nil, actor.ErrActorHalted
 	}
@@ -110,14 +114,14 @@ func (a *activeActor) TryLock() (bool, chan struct{}, error) {
 	}
 
 	// Update the time the actor became idle at
-	a.updateIdleAt(0)
+	a.UpdateIdleAt(0)
 
 	return true, a.haltCh, nil
 }
 
 // Lock the actor for turn-based concurrency.
 // This function blocks until the lock is acquired
-func (a *activeActor) Lock(ctx context.Context) (chan struct{}, error) {
+func (a *ActiveActor) Lock(ctx context.Context) (chan struct{}, error) {
 	if a.halted.Load() {
 		return nil, actor.ErrActorHalted
 	}
@@ -134,20 +138,20 @@ func (a *activeActor) Lock(ctx context.Context) (chan struct{}, error) {
 	}
 
 	// Update the time the actor became idle at
-	a.updateIdleAt(0)
+	a.UpdateIdleAt(0)
 
 	return a.haltCh, nil
 }
 
 // Unlock releases the lock for turn-based concurrency
-func (a *activeActor) Unlock() {
+func (a *ActiveActor) Unlock() {
 	a.locker.Unlock()
 }
 
 // Halt the active actor
-func (a *activeActor) Halt(drain bool) error {
+func (a *ActiveActor) Halt(drain bool) error {
 	if !a.halted.CompareAndSwap(false, true) {
-		return errActiveActorAlreadyHalted
+		return ErrActorAlreadyHalted
 	}
 
 	// Stop the turn-based locker
@@ -172,18 +176,23 @@ func (a *activeActor) Halt(drain bool) error {
 }
 
 // ActorType returns the type of the actor.
-func (a *activeActor) ActorType() string {
+func (a *ActiveActor) ActorType() string {
 	return a.ref.ActorType
+}
+
+// Ref returns the actor reference.
+func (a *ActiveActor) Ref() ref.ActorRef {
+	return a.ref
 }
 
 // Key returns the key for the actor.
 // This is implemented to comply with the queueable interface.
-func (a *activeActor) Key() string {
+func (a *ActiveActor) Key() string {
 	return a.ref.String()
 }
 
 // DueTime returns the time the actor becomes idle at.
 // This is implemented to comply with the queueable interface.
-func (a *activeActor) DueTime() time.Time {
+func (a *ActiveActor) DueTime() time.Time {
 	return *a.idleAt.Load()
 }

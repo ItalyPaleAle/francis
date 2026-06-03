@@ -1,4 +1,4 @@
-package local
+package actorcore
 
 import (
 	"context"
@@ -28,27 +28,26 @@ func TestLockAndInvokeFn(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 	log := slog.New(slog.DiscardHandler)
 
-	newHost := func() *Host {
+	newHost := func() *Manager {
 		// Create a minimal host for testing
-		host := &Host{
-			actors:              haxmap.New[string, *activeActor](8),
+		host := &Manager{
+			Actors:              haxmap.New[string, *ActiveActor](8),
 			log:                 log,
 			clock:               clock,
 			shutdownGracePeriod: 5 * time.Second,
-			actorsConfig: map[string]components.ActorHostType{
+			ActorsConfig: map[string]components.ActorHostType{
 				"testactor": {
 					IdleTimeout: 5 * time.Minute,
 				},
 			},
-			actorFactories: map[string]actor.Factory{
+			ActorFactories: map[string]actor.Factory{
 				"testactor": func(actorID string, service *actor.Service) actor.Actor {
 					return &actor_mocks.MockActorDeactivate{}
 				},
 			},
 		}
-		host.service = actor.NewService(host)
-		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
-			ExecuteFn: host.handleIdleActor,
+		host.IdleProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ActiveActor]{
+			ExecuteFn: host.HandleIdleActor,
 			Clock:     clock,
 		})
 		return host
@@ -58,23 +57,23 @@ func TestLockAndInvokeFn(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.IdleProcessor.Close()
 
 		actorRef := ref.NewActorRef("testactor", "actor1")
 
 		// Create a mock function that returns a test value
 		testValue := "test-result"
-		mockFn := func(ctx context.Context, act *activeActor) (any, error) {
+		mockFn := func(ctx context.Context, act *ActiveActor) (any, error) {
 			return testValue, nil
 		}
 
 		// Test successful invocation
-		result, err := host.lockAndInvokeFn(t.Context(), actorRef, mockFn)
+		result, err := host.LockAndInvoke(t.Context(), actorRef, mockFn)
 		require.NoError(t, err)
 		assert.Equal(t, testValue, result)
 
 		// Verify the actor was created and is in the map
-		act, exists := host.actors.Get(actorRef.String())
+		act, exists := host.Actors.Get(actorRef.String())
 		assert.True(t, exists)
 		assert.NotNil(t, act)
 	})
@@ -83,18 +82,18 @@ func TestLockAndInvokeFn(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.IdleProcessor.Close()
 
 		actorRef := ref.NewActorRef("testactor", "actor2")
 
 		// Create a mock function that returns an error
 		testError := errors.New("test error")
-		mockFn := func(ctx context.Context, act *activeActor) (any, error) {
+		mockFn := func(ctx context.Context, act *ActiveActor) (any, error) {
 			return nil, testError
 		}
 
 		// Test invocation with error
-		result, err := host.lockAndInvokeFn(t.Context(), actorRef, mockFn)
+		result, err := host.LockAndInvoke(t.Context(), actorRef, mockFn)
 		require.ErrorIs(t, err, testError)
 		assert.Nil(t, result)
 	})
@@ -103,16 +102,16 @@ func TestLockAndInvokeFn(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.IdleProcessor.Close()
 
 		actorRef := ref.NewActorRef("unsupported", "actor1")
 
-		mockFn := func(ctx context.Context, act *activeActor) (any, error) {
+		mockFn := func(ctx context.Context, act *ActiveActor) (any, error) {
 			return "result", nil
 		}
 
 		// Test with unsupported actor type
-		result, err := host.lockAndInvokeFn(t.Context(), actorRef, mockFn)
+		result, err := host.LockAndInvoke(t.Context(), actorRef, mockFn)
 		require.Error(t, err)
 		require.ErrorContains(t, err, "unsupported actor type")
 		assert.Nil(t, result)
@@ -122,14 +121,14 @@ func TestLockAndInvokeFn(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.IdleProcessor.Close()
 
 		actorRef := ref.NewActorRef("testactor", "actor3")
 
 		// Create and register an active actor, then lock it
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
-		host.actors.Set(actorRef.String(), activeAct)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Acquire the lock first
 		haltCh, err := activeAct.Lock(t.Context())
@@ -141,12 +140,12 @@ func TestLockAndInvokeFn(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 		defer cancel()
 
-		mockFn := func(ctx context.Context, act *activeActor) (any, error) {
+		mockFn := func(ctx context.Context, act *ActiveActor) (any, error) {
 			return "result", nil
 		}
 
 		// Test with context that will timeout while waiting for lock
-		result, err := host.lockAndInvokeFn(ctx, actorRef, mockFn)
+		result, err := host.LockAndInvoke(ctx, actorRef, mockFn)
 		require.Error(t, err)
 		require.ErrorContains(t, err, "failed to acquire lock for actor")
 		require.ErrorIs(t, err, context.DeadlineExceeded)
@@ -160,25 +159,25 @@ func TestLockAndInvokeFn(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.IdleProcessor.Close()
 
 		actorRef := ref.NewActorRef("testactor", "actor4")
 
 		// Create and register an active actor
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
-		host.actors.Set(actorRef.String(), activeAct)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Halt the actor first
 		err := activeAct.Halt(false)
 		require.NoError(t, err)
 
-		mockFn := func(ctx context.Context, act *activeActor) (any, error) {
+		mockFn := func(ctx context.Context, act *ActiveActor) (any, error) {
 			return "result", nil
 		}
 
 		// Test invocation on halted actor
-		result, err := host.lockAndInvokeFn(t.Context(), actorRef, mockFn)
+		result, err := host.LockAndInvoke(t.Context(), actorRef, mockFn)
 		require.ErrorIs(t, err, actor.ErrActorHalted)
 		assert.Nil(t, result)
 	})
@@ -187,25 +186,25 @@ func TestLockAndInvokeFn(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.IdleProcessor.Close()
 
 		actorRef := ref.NewActorRef("testactor", "actor5")
 
 		// Create and register an active actor
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
-		host.actors.Set(actorRef.String(), activeAct)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Acquire the lock first
 		haltCh, err := activeAct.Lock(t.Context())
 		require.NoError(t, err)
 		assert.NotNil(t, haltCh)
 
-		mockFn := func(ctx context.Context, act *activeActor) (any, error) {
+		mockFn := func(ctx context.Context, act *ActiveActor) (any, error) {
 			return "result", nil
 		}
 
-		// Launch lockAndInvokeFn in a separate goroutine (it will wait for the lock)
+		// Launch LockAndInvoke in a separate goroutine (it will wait for the lock)
 		type resultData struct {
 			result any
 			err    error
@@ -214,7 +213,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 		startedCh := make(chan struct{})
 		go func() {
 			close(startedCh)
-			result, err := host.lockAndInvokeFn(t.Context(), actorRef, mockFn)
+			result, err := host.LockAndInvoke(t.Context(), actorRef, mockFn)
 			resultCh <- resultData{result: result, err: err}
 		}()
 
@@ -242,14 +241,14 @@ func TestLockAndInvokeFn(t *testing.T) {
 		err = activeAct.Halt(false)
 		require.NoError(t, err)
 
-		// The lockAndInvokeFn should return ErrActorHalted
+		// The LockAndInvoke should return ErrActorHalted
 		select {
 		case r := <-resultCh:
 			require.ErrorIs(t, r.err, actor.ErrActorHalted)
 			assert.Nil(t, r.result)
 			assert.Greater(t, time.Since(start), 50*time.Millisecond)
 		case <-time.After(1 * time.Second):
-			t.Fatal("lockAndInvokeFn did not return within timeout")
+			t.Fatal("LockAndInvoke did not return within timeout")
 		}
 	})
 
@@ -257,21 +256,21 @@ func TestLockAndInvokeFn(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.IdleProcessor.Close()
 
 		actorRef := ref.NewActorRef("testactor", "actor6")
 
 		// Create and register an active actor
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
-		host.actors.Set(actorRef.String(), activeAct)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		host.Actors.Set(actorRef.String(), activeAct)
 
-		// Launch lockAndInvokeFn in a separate goroutine
+		// Launch LockAndInvoke in a separate goroutine
 		var ctxCanceled atomic.Bool
 		errCh := make(chan error, 1)
 		startedCh := make(chan struct{})
 		go func() {
-			_, err := host.lockAndInvokeFn(t.Context(), actorRef, func(ctx context.Context, act *activeActor) (any, error) {
+			_, err := host.LockAndInvoke(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
 				close(startedCh)
 				// Wait for context cancellation
 				select {
@@ -314,7 +313,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 			require.ErrorIs(t, err, context.Canceled)
 			assert.True(t, ctxCanceled.Load(), "Context should have been canceled")
 		case <-time.After(500 * time.Millisecond):
-			t.Fatal("lockAndInvokeFn did not return within timeout")
+			t.Fatal("LockAndInvoke did not return within timeout")
 		}
 	})
 
@@ -325,20 +324,20 @@ func TestLockAndInvokeFn(t *testing.T) {
 		defer cancel()
 
 		host := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.IdleProcessor.Close()
 
 		actorRef := ref.NewActorRef("testactor", "actor6")
 
 		// Create and register an active actor
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
-		host.actors.Set(actorRef.String(), activeAct)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		host.Actors.Set(actorRef.String(), activeAct)
 
-		// Launch lockAndInvokeFn in a separate goroutine
+		// Launch LockAndInvoke in a separate goroutine
 		errCh := make(chan error, 1)
 		startedCh := make(chan struct{})
 		go func() {
-			_, err := host.lockAndInvokeFn(ctx, actorRef, func(ctx context.Context, act *activeActor) (any, error) {
+			_, err := host.LockAndInvoke(ctx, actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
 				close(startedCh)
 				// Wait for context cancellation
 				select {
@@ -379,7 +378,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 			require.Error(t, err)
 			require.ErrorIs(t, err, context.Canceled)
 		case <-time.After(500 * time.Millisecond):
-			t.Fatal("lockAndInvokeFn did not return within timeout")
+			t.Fatal("LockAndInvoke did not return within timeout")
 		}
 	})
 
@@ -387,31 +386,31 @@ func TestLockAndInvokeFn(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.IdleProcessor.Close()
 
 		actorRef := ref.NewActorRef("testactor", "actor7")
 
 		// Create and register an active actor
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
-		host.actors.Set(actorRef.String(), activeAct)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Create a function that completes quickly
 		const testValue = "quick-result"
 		startedCh := make(chan struct{})
-		mockFn := func(ctx context.Context, act *activeActor) (any, error) {
+		mockFn := func(ctx context.Context, act *ActiveActor) (any, error) {
 			close(startedCh)
 			return testValue, nil
 		}
 
-		// Launch lockAndInvokeFn in a separate goroutine
+		// Launch LockAndInvoke in a separate goroutine
 		type resultData struct {
 			result any
 			err    error
 		}
 		resultCh := make(chan resultData, 1)
 		go func() {
-			result, err := host.lockAndInvokeFn(t.Context(), actorRef, mockFn)
+			result, err := host.LockAndInvoke(t.Context(), actorRef, mockFn)
 			resultCh <- resultData{result: result, err: err}
 		}()
 
@@ -434,7 +433,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 			require.NoError(t, r.err)
 			assert.Equal(t, testValue, r.result)
 		case <-time.After(1 * time.Second):
-			t.Fatal("lockAndInvokeFn did not return within timeout")
+			t.Fatal("LockAndInvoke did not return within timeout")
 		}
 	})
 
@@ -442,7 +441,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.IdleProcessor.Close()
 
 		const numActors = 5
 		var wg sync.WaitGroup
@@ -456,13 +455,13 @@ func TestLockAndInvokeFn(t *testing.T) {
 				actorRef := ref.NewActorRef("testactor", fmt.Sprintf("actor%d", actorID))
 				expectedResult := fmt.Sprintf("result%d", actorID)
 
-				mockFn := func(ctx context.Context, act *activeActor) (any, error) {
+				mockFn := func(ctx context.Context, act *ActiveActor) (any, error) {
 					// Add small delay to simulate work
 					time.Sleep(10 * time.Millisecond)
 					return expectedResult, nil
 				}
 
-				result, err := host.lockAndInvokeFn(t.Context(), actorRef, mockFn)
+				result, err := host.LockAndInvoke(t.Context(), actorRef, mockFn)
 				results[actorID] = result
 				errors[actorID] = err
 			}(i)
@@ -477,14 +476,14 @@ func TestLockAndInvokeFn(t *testing.T) {
 		}
 
 		// Verify all actors were created
-		assert.Equal(t, uintptr(numActors), host.actors.Len())
+		assert.Equal(t, uintptr(numActors), host.Actors.Len())
 	})
 
 	t.Run("concurrent invocations with same actor are serialized", func(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.IdleProcessor.Close()
 
 		actorRef := ref.NewActorRef("testactor", "shared-actor")
 
@@ -500,7 +499,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 			go func(invocationID int) {
 				defer wg.Done()
 
-				mockFn := func(ctx context.Context, act *activeActor) (any, error) {
+				mockFn := func(ctx context.Context, act *ActiveActor) (any, error) {
 					orderMutex.Lock()
 					executionOrder = append(executionOrder, invocationID)
 					orderMutex.Unlock()
@@ -510,7 +509,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 					return fmt.Sprintf("result%d", invocationID), nil
 				}
 
-				result, err := host.lockAndInvokeFn(t.Context(), actorRef, mockFn)
+				result, err := host.LockAndInvoke(t.Context(), actorRef, mockFn)
 				results[invocationID] = result
 				errors[invocationID] = err
 			}(i)
@@ -528,14 +527,14 @@ func TestLockAndInvokeFn(t *testing.T) {
 		assert.Len(t, executionOrder, numInvocations)
 
 		// Only one actor should exist
-		assert.Equal(t, uintptr(1), host.actors.Len())
+		assert.Equal(t, uintptr(1), host.Actors.Len())
 	})
 
 	t.Run("parent context cancellation", func(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.IdleProcessor.Close()
 
 		actorRef := ref.NewActorRef("testactor", "actor8")
 
@@ -543,7 +542,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 		defer cancel()
 
-		mockFn := func(ctx context.Context, act *activeActor) (any, error) {
+		mockFn := func(ctx context.Context, act *ActiveActor) (any, error) {
 			// Wait longer than the context timeout
 			select {
 			case <-ctx.Done():
@@ -554,7 +553,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 		}
 
 		// Test invocation with context timeout
-		result, err := host.lockAndInvokeFn(ctx, actorRef, mockFn)
+		result, err := host.LockAndInvoke(ctx, actorRef, mockFn)
 		require.Error(t, err)
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 		assert.Nil(t, result)

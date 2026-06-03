@@ -13,7 +13,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/alphadose/haxmap"
 	backoff "github.com/cenkalti/backoff/v5"
 	"github.com/italypaleale/go-kit/eventqueue"
 	"github.com/italypaleale/go-kit/servicerunner"
@@ -25,6 +24,7 @@ import (
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/sqlite"
+	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/peerauth"
 	"github.com/italypaleale/francis/internal/ref"
 )
@@ -35,16 +35,12 @@ import (
 
 const (
 	defaultShutdownGracePeriod      = 30 * time.Second
-	defaultActorsMapSize            = 128 // Must be a power of 2
 	defaultProviderRequestTimeout   = 15 * time.Second
 	defaultHostHealthCheckDeadline  = 20 * time.Second
 	defaultAlarmsPollInterval       = 1500 * time.Millisecond
 	defaultAlarmsLeaseDuration      = 20 * time.Second
 	defaultAlarmsFetchAheadInterval = 2500 * time.Millisecond
 	defaultAlarmsFetchAheadBatch    = 25
-
-	// If an idle actor is getting deactivated, but it's still busy, will be re-enqueued with its idle timeout increased by this duration
-	actorBusyReEnqueueInterval = 10 * time.Second
 )
 
 // SQLiteProviderOptions re-exports provider options
@@ -62,20 +58,12 @@ type Host struct {
 	actorProvider components.ActorProvider
 	service       *actor.Service
 	client        *http.Client
+	core          *actorcore.Manager
 
-	// Actor factory methods; key is actor type
-	actorFactories map[string]actor.Factory
-
-	// Active actors; key is "actorType/actorID"
-	actors             *haxmap.Map[string, *activeActor]
-	idleActorProcessor *eventqueue.Processor[string, *activeActor]
-	alarmProcessor     *eventqueue.Processor[string, *ref.AlarmLease]
+	alarmProcessor *eventqueue.Processor[string, *ref.AlarmLease]
 
 	// Actor placement cache
 	placementCache *ttlcache.Cache[string, *actorPlacement]
-
-	// Map of actor configuration objects; key is actor type
-	actorsConfig map[string]components.ActorHostType
 
 	// List of currently-active alarms
 	activeAlarmsLock sync.Mutex
@@ -230,9 +218,6 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 	h = &Host{
 		address:                options.Address,
 		actorProvider:          actorProvider,
-		actorsConfig:           map[string]components.ActorHostType{},
-		actorFactories:         map[string]actor.Factory{},
-		actors:                 haxmap.New[string, *activeActor](defaultActorsMapSize),
 		activeAlarms:           map[string]struct{}{},
 		retryingAlarms:         map[string]struct{}{},
 		alarmsPollInterval:     options.AlarmsPollInterval,
@@ -245,6 +230,17 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 		clock:                  options.clock,
 	}
 	h.service = actor.NewService(h)
+
+	// The actor core owns activation, turn-based invocation, idle deactivation, and halting
+	// On deactivation it removes the actor from the provider
+	h.core = actorcore.NewManager(actorcore.Options{
+		Service:                h.service,
+		RemoveActor:            actorProvider.RemoveActor,
+		Logger:                 options.Logger,
+		Clock:                  options.clock,
+		ProviderRequestTimeout: options.ProviderRequestTimeout,
+		ShutdownGracePeriod:    options.ShutdownGracePeriod,
+	})
 
 	// Init the HTTP client for the host
 	// This is configured with HTTP3 support
@@ -275,12 +271,9 @@ func (h *Host) Run(parentCtx context.Context) error {
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
-	// Init idle processor and ttlcache
-	h.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
-		Clock:     h.clock,
-		ExecuteFn: h.handleIdleActor,
-	})
-	defer h.idleActorProcessor.Close()
+	// Start the actor core (idle processor) and the placement cache
+	h.core.Start()
+	defer h.core.Close()
 
 	h.placementCache = ttlcache.NewCache[string, *actorPlacement](&ttlcache.CacheOptions{
 		MaxTTL: placementCacheMaxTTL,
@@ -296,17 +289,10 @@ func (h *Host) Run(parentCtx context.Context) error {
 	}
 
 	// Register the host
-	actorsConfigList := make([]components.ActorHostType, len(h.actorsConfig))
-	var i int
-	for _, ac := range h.actorsConfig {
-		actorsConfigList[i] = ac
-		i++
-	}
-
 	registerCtx, registerCancel := context.WithTimeout(parentCtx, h.providerRequestTimeout)
 	res, err := h.actorProvider.RegisterHost(registerCtx, components.RegisterHostReq{
 		Address:    h.address,
-		ActorTypes: actorsConfigList,
+		ActorTypes: h.core.RegisteredActorTypes(),
 	})
 	registerCancel()
 	if err != nil {
@@ -315,6 +301,7 @@ func (h *Host) Run(parentCtx context.Context) error {
 
 	h.hostID = res.HostID
 	h.log = h.logSource.With(slog.String("hostId", h.hostID))
+	h.core.SetLogger(h.log)
 
 	h.log.InfoContext(ctx, "Registered actor host", slog.String("address", h.address))
 
@@ -365,36 +352,9 @@ func (h *Host) Run(parentCtx context.Context) error {
 		Run(ctx)
 }
 
-// HaltAll halts all actors, gracefully
+// HaltAll halts all actors active on the host, gracefully
 func (h *Host) HaltAll() error {
-	// Deactivate all actors, each in its own goroutine
-	errCh := make(chan error)
-	var count int
-	for _, act := range h.actors.Iterator() {
-		count++
-		go func(act *activeActor) {
-			err := h.haltActiveActor(act, true)
-			if err != nil {
-				err = fmt.Errorf("failed to halt actor '%s': %w", act.Key(), err)
-			}
-			errCh <- err
-		}(act)
-	}
-
-	// Collect all errors
-	errs := make([]error, 0)
-	for range count {
-		err := <-errCh
-		if err != nil {
-			errs = append(errs, err)
-		}
-	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("error halting actors: %w", errors.Join(errs...))
-	}
-
-	return nil
+	return h.core.HaltAll()
 }
 
 // HostID returns the ID of the host.
@@ -404,37 +364,13 @@ func (h *Host) HostID() string {
 
 // Halt gracefully halts an actor that is hosted on the current host
 func (h *Host) Halt(actorType string, actorID string) error {
-	// Get the active actor object
-	// Only actors that are active on the current host can be halted here
-	aRef := ref.NewActorRef(actorType, actorID)
-	act, ok := h.actors.Get(aRef.String())
-	if !ok || act == nil {
-		return actor.ErrActorNotHosted
-	}
-
-	// Gracefully halt the actor
-	err := h.haltActiveActor(act, true)
-	if err != nil {
-		return fmt.Errorf("failed to halt actor: %w", err)
-	}
-
-	return nil
+	return h.core.Halt(actorType, actorID)
 }
 
 // HaltDeferred gracefully halts an actor that is hosted on the current host
 // This is a non-blocking variant of the Halt method, which runs in background
 func (h *Host) HaltDeferred(actorType string, actorID string) {
-	go func() {
-		err := h.Halt(actorType, actorID)
-		if err != nil {
-			// Log the error, not much else we can do
-			h.log.Error(
-				"Failed to halt actor",
-				slog.String("actorRef", ref.NewActorRef(actorType, actorID).String()),
-				slog.Any("error", err),
-			)
-		}
-	}()
+	h.core.HaltDeferred(actorType, actorID)
 }
 
 func (h *Host) runHealthChecks(parentCtx context.Context) error {
@@ -481,115 +417,4 @@ func (h *Host) runHealthChecks(parentCtx context.Context) error {
 			return parentCtx.Err()
 		}
 	}
-}
-
-func (h *Host) handleIdleActor(act *activeActor) {
-	// Just because the actor is marked as idle, doesn't mean it's inactive
-	// For example, there could be a long-running operation still in progress
-	// We need to confirm the actor isn't busy, and we need to prevent others from starting new work on it
-	// To do that, we use TryLock, which will give us a lock only if the actor isn't busy
-	// If we get the lock, it means it's safe for us to dispose of it
-	// (Note that TryLock does also reset the idleAt time, but we will ignore that)
-	ok, _, err := act.TryLock()
-	if err != nil {
-		h.log.Error("Failed to try locking idle actor for deactivation", slog.String("actorRef", act.Key()), slog.Any("error", err))
-		return
-	}
-
-	// If we did not acquire the lock, the actor is still busy.
-	// We will increase its idle time and re-enqueue it
-	if !ok {
-		h.log.Debug("Actor is busy and will not be deactivated; re-enqueueing it", slog.String("actorRef", act.Key()))
-		act.updateIdleAt(actorBusyReEnqueueInterval)
-		return
-	}
-
-	// Proceed with halting in a background goroutine, so we don't block other idle actors from being deactivated
-	go func() {
-		// We don't need to drain the active calls because we just acquired the lock
-		err = h.haltActiveActor(act, false)
-		if err != nil {
-			h.log.Error("Failed to deactivate idle actor", slog.String("actorRef", act.Key()), slog.Any("error", err))
-			return
-		}
-	}()
-}
-
-// Gracefully halts an actor's instance
-func (h *Host) haltActiveActor(act *activeActor, drain bool) error {
-	key := act.Key()
-
-	h.log.Debug("Halting actor", slog.String("actorRef", key))
-
-	// First, signal the actor's instance to halt, so it drains the current call and prevents more calls
-	// Note that this call blocks until the current in-process request stops
-	err := act.Halt(drain)
-	if errors.Is(err, errActiveActorAlreadyHalted) {
-		// The actor is already halting, so nothing else to do here...
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("failed to halt actor: %w", err)
-	}
-
-	// Send the actor a message it has been deactivated
-	err = h.deactivateActor(act)
-	if err != nil {
-		// Even though the call to the actor's Deactivate method failed, we still need to continue with the deactivation process
-		// Otherwise, we are in a state where the object is still in-memory and that will cause many issues
-		h.log.Error("Actor returned an error during deactivation", slog.Any("error", err))
-	}
-
-	// Remove the actor from the table
-	// This will prevent more state changes
-	act, ok := h.actors.GetAndDel(key)
-	if !ok || act == nil {
-		// If nothing was loaded, the actor was already deactivated
-		return nil
-	}
-
-	// Report to the provider that the actor has been deactivated
-	// This uses a background context because at this point it needs to not be tied to the caller's context
-	// Once the decision to deactivate an actor has been made, we must go through with it or we could have an inconsistent state
-	// TODO: Handle this error - should retry, and then maybe gracefully exit?
-	ctx, cancel := context.WithTimeout(context.Background(), h.providerRequestTimeout)
-	defer cancel()
-	err = h.actorProvider.RemoveActor(ctx, act.ref)
-	if errors.Is(err, components.ErrNoActor) {
-		// If the error is ErrNoActor, it means that the actor was already deactivated on the provider, so we can just ignore the erro
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("failed to remove actor from the provider: %w", err)
-	}
-
-	return nil
-}
-
-func (h *Host) deactivateActor(act *activeActor) error {
-	h.log.Debug("Deactivated actor", slog.String("actorRef", act.Key()))
-
-	// Check if the actor implements the Deactivate method
-	obj, ok := act.instance.(actor.ActorDeactivate)
-	if !ok {
-		// Not an error - this is an optional interface
-		return nil
-	}
-
-	// If the timeout is empty, there's nothing to do
-	timeout := h.actorsConfig[act.ActorType()].DeactivationTimeout
-	if timeout <= 0 {
-		return nil
-	}
-
-	// This uses a background context because it should be unrelated from the caller's context
-	// Once the decision to deactivate an actor has been made, we must go through with it or we could have an inconsistent state
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	// Call the Deactivate method on the actor
-	err := obj.Deactivate(ctx)
-	if err != nil {
-		return fmt.Errorf("error from actor: %w", err)
-	}
-
-	return nil
 }

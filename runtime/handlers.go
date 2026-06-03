@@ -68,6 +68,8 @@ func (rt *Runtime) dispatch(ctx context.Context, c *hostConn, req *protocol.Enve
 		return rt.handleHealthCheck(ctx, c, req)
 	case protocol.KindLookupActor:
 		return rt.handleLookupActor(ctx, c, req)
+	case protocol.KindRemoveActor:
+		return rt.handleRemoveActor(ctx, c, req)
 	case protocol.KindGetAlarm:
 		return rt.handleGetAlarm(ctx, c, req)
 	case protocol.KindSetAlarm:
@@ -265,6 +267,37 @@ func (rt *Runtime) handleLookupActor(parentCtx context.Context, _ *hostConn, req
 		Address:       res.Address,
 		IdleTimeoutMs: res.IdleTimeout.Milliseconds(),
 	})
+}
+
+// handleRemoveActor clears the placement of an actor that the host has deactivated
+// The host owns the actor lifecycle and tells the runtime once an actor is gone so callers stop being routed to it
+func (rt *Runtime) handleRemoveActor(parentCtx context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
+	var payload protocol.RemoveActorRequest
+	err := req.DecodePayload(&payload)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode remove actor request"))
+	}
+	if payload.ActorType == "" || payload.ActorID == "" {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "remove actor is missing the actor type or ID"))
+	}
+
+	aRef := ref.NewActorRef(payload.ActorType, payload.ActorID)
+
+	// Drop any cached placement so callers are no longer routed to the deactivated actor
+	rt.deletePlacement(aRef.String())
+
+	// Remove the actor from the provider's set of active placements
+	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+	defer cancel()
+	err = rt.provider.RemoveActor(ctx, aRef)
+	if errors.Is(err, components.ErrNoActor) {
+		// The actor was already gone, which is the desired end state, so report it without treating it as a hard failure
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeActorNotActive, "actor is not currently active"))
+	} else if err != nil {
+		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeInternal, "failed to remove actor: %v", err))
+	}
+
+	return req.Reply(protocol.KindRemoveActorResponse, nil)
 }
 
 // handleGetAlarm retrieves an alarm's properties

@@ -11,6 +11,7 @@ import (
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/standalone"
+	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/protocol"
 )
 
@@ -193,6 +194,39 @@ func TestHandleLookupActorDrainingHost(t *testing.T) {
 	d, hasRetry := perr.RetryAfter()
 	require.True(t, hasRetry)
 	assert.Positive(t, d)
+}
+
+func TestHandleRemoveActor(t *testing.T) {
+	rt, prov := newTestRuntime(t)
+	rt.placementCache = ttlcache.NewCache[string, *cachedPlacement](&ttlcache.CacheOptions{MaxTTL: rt.placementCacheTTL()})
+	defer rt.placementCache.Stop()
+
+	hostID := registerTestHost(t, prov, "10.0.0.10:1", "T")
+	c := &hostConn{hostID: hostID, sessionID: "s1"}
+
+	t.Run("removes an active actor and clears its cached placement", func(t *testing.T) {
+		// A lookup activates the actor and caches its placement
+		resp := dispatchReq(t, rt, c, protocol.KindLookupActor, protocol.LookupActorRequest{ActorType: "T", ActorID: "a1"})
+		require.Equal(t, protocol.KindLookupActorResponse, resp.Kind)
+		_, cached := rt.placementCache.Get(ref.NewActorRef("T", "a1").String())
+		require.True(t, cached, "lookup should have cached the placement")
+
+		// Removing the actor acknowledges and drops the cache entry
+		removeResp := dispatchReq(t, rt, c, protocol.KindRemoveActor, protocol.RemoveActorRequest{ActorRef: protocol.ActorRef{ActorType: "T", ActorID: "a1"}})
+		assert.Equal(t, protocol.KindRemoveActorResponse, removeResp.Kind)
+		_, stillCached := rt.placementCache.Get(ref.NewActorRef("T", "a1").String())
+		assert.False(t, stillCached, "remove should have cleared the cached placement")
+	})
+
+	t.Run("reports not active for an actor that is not active", func(t *testing.T) {
+		resp := dispatchReq(t, rt, c, protocol.KindRemoveActor, protocol.RemoveActorRequest{ActorRef: protocol.ActorRef{ActorType: "T", ActorID: "never-activated"}})
+		requireError(t, resp, protocol.ErrCodeActorNotActive)
+	})
+
+	t.Run("missing actor identity is a bad request", func(t *testing.T) {
+		resp := dispatchReq(t, rt, c, protocol.KindRemoveActor, protocol.RemoveActorRequest{ActorRef: protocol.ActorRef{ActorType: "T"}})
+		requireError(t, resp, protocol.ErrCodeBadRequest)
+	})
 }
 
 func TestHandleState(t *testing.T) {

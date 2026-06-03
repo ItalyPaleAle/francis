@@ -1,4 +1,4 @@
-package local
+package actorcore
 
 import (
 	"bytes"
@@ -10,18 +10,20 @@ import (
 	msgpack "github.com/vmihailenco/msgpack/v5"
 )
 
-// objectEnvelope implements actor.Envelope to return an object that was not serialized
-type objectEnvelope struct {
+// ObjectEnvelope implements actor.Envelope to carry an object that was not serialized
+type ObjectEnvelope struct {
 	object any
 }
 
-func newObjectEnvelope(obj any) *objectEnvelope {
-	return &objectEnvelope{
+// NewObjectEnvelope returns an ObjectEnvelope wrapping obj
+func NewObjectEnvelope(obj any) *ObjectEnvelope {
+	return &ObjectEnvelope{
 		object: obj,
 	}
 }
 
-func (o *objectEnvelope) Decode(into any) error {
+// Decode decodes the wrapped object into into
+func (o *ObjectEnvelope) Decode(into any) error {
 	if o == nil || o.object == nil {
 		return nil
 	}
@@ -68,7 +70,8 @@ func (o *objectEnvelope) Decode(into any) error {
 	return nil
 }
 
-func (o *objectEnvelope) Encode(w io.Writer) error {
+// Encode writes the wrapped object to w as MessagePack
+func (o *ObjectEnvelope) Encode(w io.Writer) error {
 	if o == nil || o.object == nil {
 		return nil
 	}

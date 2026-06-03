@@ -466,6 +466,11 @@ func (rc *runtimeClient) LookupActor(ctx context.Context, req protocol.LookupAct
 	return out, err
 }
 
+// RemoveActor notifies the runtime that an actor has been deactivated on this host
+func (rc *runtimeClient) RemoveActor(ctx context.Context, req protocol.RemoveActorRequest) error {
+	return rc.doRequest(ctx, protocol.KindRemoveActor, req, nil)
+}
+
 // GetState retrieves an actor's persistent state through the runtime
 func (rc *runtimeClient) GetState(ctx context.Context, req protocol.GetStateRequest) (protocol.GetStateResponse, error) {
 	var out protocol.GetStateResponse

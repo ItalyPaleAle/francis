@@ -1,0 +1,169 @@
+package remote
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+
+	msgpack "github.com/vmihailenco/msgpack/v5"
+
+	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/internal/actorcore"
+	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/types"
+	"github.com/italypaleale/francis/protocol"
+)
+
+// Invoke performs the synchronous invocation of an actor running anywhere in the cluster.
+func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, method string, data any, optsFn ...actor.InvokeOption) (actor.Envelope, error) {
+	opts := &types.InvokeOpts{}
+	for _, fn := range optsFn {
+		fn(opts)
+	}
+
+	aRef := ref.NewActorRef(actorType, actorID)
+
+	// Resolve the placement and invoke, using the cache on the first attempt
+	ap, err := h.lookupActor(ctx, aRef, false, opts.ActiveOnly)
+	if err != nil {
+		return nil, fmt.Errorf("failed to look up actor: %w", err)
+	}
+
+	env, retry, err := h.doInvoke(ctx, aRef, ap, method, data)
+	if !retry {
+		return env, err
+	}
+
+	// The placement was stale: drop it, re-resolve with a fresh lookup, and try once more
+	h.invalidatePlacement(aRef)
+	ap, err = h.lookupActor(ctx, aRef, true, opts.ActiveOnly)
+	if err != nil {
+		return nil, fmt.Errorf("failed to look up actor: %w", err)
+	}
+
+	env, _, err = h.doInvoke(ctx, aRef, ap, method, data)
+	return env, err
+}
+
+// doInvoke dispatches a single invocation attempt to the local actor or a peer, depending on the placement
+// The bool return is true when the attempt failed in a way that warrants re-resolving the placement and retrying
+func (h *Host) doInvoke(ctx context.Context, aRef ref.ActorRef, ap *actorPlacement, method string, data any) (actor.Envelope, bool, error) {
+	if h.isLocal(ap) {
+		env, err := h.doInvokeLocal(ctx, aRef, method, data)
+		return env, false, err
+	}
+	return h.doInvokeRemote(ctx, aRef, ap, method, data)
+}
+
+// doInvokeLocal invokes an actor owned by this host
+func (h *Host) doInvokeLocal(ctx context.Context, aRef ref.ActorRef, method string, data any) (actor.Envelope, error) {
+	res, err := h.core.LockAndInvoke(ctx, aRef, func(invokeCtx context.Context, act *actorcore.ActiveActor) (any, error) {
+		// The actor must implement the Invoke method to be called this way
+		obj, ok := act.Instance.(actor.ActorInvoke)
+		if !ok {
+			return nil, errActorMethodUnsupported
+		}
+
+		// Invoke the actor
+		// We wrap the data in an envelope as the receiver expects
+		res, err := obj.Invoke(invokeCtx, method, actorcore.NewObjectEnvelope(data))
+		if err != nil {
+			return nil, fmt.Errorf("error from actor: %w", err)
+		}
+
+		return res, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// If there's a response, wrap it in an envelope
+	if res != nil {
+		return actorcore.NewObjectEnvelope(res), nil
+	}
+
+	return nil, nil
+}
+
+// doInvokeRemote invokes an actor owned by a peer host over the peer transport
+// The bool return is true when the placement looks stale and the caller should re-resolve and retry
+func (h *Host) doInvokeRemote(ctx context.Context, aRef ref.ActorRef, ap *actorPlacement, method string, data any) (actor.Envelope, bool, error) {
+	// Encode the argument as MessagePack for the request body
+	var argData []byte
+	if data != nil {
+		b, err := msgpack.Marshal(data)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to serialize data using msgpack: %w", err)
+		}
+		argData = b
+	}
+
+	// Invoke the actor on the peer that owns it
+	resp, perr := h.peerClient.InvokeObject(ctx, ap.Address, protocol.InvokeActorRequest{
+		TargetHostID: ap.HostID,
+		ActorType:    aRef.ActorType,
+		ActorID:      aRef.ActorID,
+		Method:       method,
+		Data:         argData,
+	})
+	if perr != nil {
+		// A retryable error (stale placement, halted actor, transport failure) tells the caller to re-resolve and retry
+		return nil, perr.Retryable(), protocolErrorToActor(perr)
+	}
+
+	// Decode the result into an envelope
+	if len(resp.Data) == 0 {
+		return nil, false, nil
+	}
+	var out any
+	err := msgpack.Unmarshal(resp.Data, &out)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to decode response body using msgpack: %w", err)
+	}
+
+	return actorcore.NewObjectEnvelope(out), false, nil
+}
+
+// peerInvokeObject executes an object invocation for an actor owned by this host, on behalf of a peer caller
+func (h *Host) peerInvokeObject(ctx context.Context, req protocol.InvokeActorRequest) (protocol.InvokeActorResponse, *protocol.Error) {
+	aRef := ref.NewActorRef(req.ActorType, req.ActorID)
+
+	res, err := h.core.LockAndInvoke(ctx, aRef, func(invokeCtx context.Context, act *actorcore.ActiveActor) (any, error) {
+		// The actor must implement the Invoke method to be called this way
+		obj, ok := act.Instance.(actor.ActorInvoke)
+		if !ok {
+			return nil, errActorMethodUnsupported
+		}
+
+		// Decode the argument straight off the wire: the MessagePack decoder satisfies the Envelope interface
+		var data actor.Envelope
+		if len(req.Data) > 0 {
+			dec := msgpack.GetDecoder()
+			dec.Reset(bytes.NewReader(req.Data))
+			defer msgpack.PutDecoder(dec)
+			data = dec
+		}
+
+		// Invoke the actor
+		r, invokeErr := obj.Invoke(invokeCtx, req.Method, data)
+		if invokeErr != nil {
+			return nil, fmt.Errorf("error from actor: %w", invokeErr)
+		}
+
+		return r, nil
+	})
+	if err != nil {
+		return protocol.InvokeActorResponse{}, invokeErrorToProtocol(err)
+	}
+
+	// Encode the result for the response body
+	if res == nil {
+		return protocol.InvokeActorResponse{NoContent: true}, nil
+	}
+	outData, err := msgpack.Marshal(res)
+	if err != nil {
+		return protocol.InvokeActorResponse{}, protocol.NewErrorf(protocol.ErrCodeInternal, "failed to serialize response using msgpack: %v", err)
+	}
+
+	return protocol.InvokeActorResponse{Data: outData}, nil
+}

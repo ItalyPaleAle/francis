@@ -6,8 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alphadose/haxmap"
-	"github.com/italypaleale/go-kit/eventqueue"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -33,21 +31,11 @@ func TestGetAlarm(t *testing.T) {
 
 		// Create a minimal host for testing
 		host := &Host{
-			actorProvider: provider,
-			actors:        haxmap.New[string, *activeActor](8),
-			log:           log,
-			clock:         clock,
-			actorsConfig: map[string]components.ActorHostType{
-				"testactor": {
-					IdleTimeout: 5 * time.Minute,
-				},
-			},
+			actorProvider:          provider,
+			log:                    log,
+			clock:                  clock,
 			providerRequestTimeout: 30 * time.Second,
 		}
-		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
-			ExecuteFn: host.handleIdleActor,
-			Clock:     clock,
-		})
 		return host, provider
 	}
 
@@ -174,21 +162,11 @@ func TestSetAlarm(t *testing.T) {
 
 		// Create a minimal host for testing
 		host := &Host{
-			actorProvider: provider,
-			actors:        haxmap.New[string, *activeActor](8),
-			log:           log,
-			clock:         clock,
-			actorsConfig: map[string]components.ActorHostType{
-				"testactor": {
-					IdleTimeout: 5 * time.Minute,
-				},
-			},
+			actorProvider:          provider,
+			log:                    log,
+			clock:                  clock,
 			providerRequestTimeout: 30 * time.Second,
 		}
-		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
-			ExecuteFn: host.handleIdleActor,
-			Clock:     clock,
-		})
 		return host, provider
 	}
 
@@ -347,21 +325,11 @@ func TestDeleteAlarm(t *testing.T) {
 
 		// Create a minimal host for testing
 		host := &Host{
-			actorProvider: provider,
-			actors:        haxmap.New[string, *activeActor](8),
-			log:           log,
-			clock:         clock,
-			actorsConfig: map[string]components.ActorHostType{
-				"testactor": {
-					IdleTimeout: 5 * time.Minute,
-				},
-			},
+			actorProvider:          provider,
+			log:                    log,
+			clock:                  clock,
 			providerRequestTimeout: 30 * time.Second,
 		}
-		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
-			ExecuteFn: host.handleIdleActor,
-			Clock:     clock,
-		})
 		return host, provider
 	}
 

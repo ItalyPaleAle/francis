@@ -7,8 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alphadose/haxmap"
-	"github.com/italypaleale/go-kit/eventqueue"
 	"github.com/italypaleale/go-kit/ttlcache"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -18,6 +16,7 @@ import (
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/actorcore"
 	actor_mocks "github.com/italypaleale/francis/internal/mocks/actor"
 	components_mocks "github.com/italypaleale/francis/internal/mocks/components"
 	"github.com/italypaleale/francis/internal/ref"
@@ -37,26 +36,30 @@ func TestLookupActor(t *testing.T) {
 			hostID:                 "test-host-123",
 			address:                "localhost:8080",
 			actorProvider:          provider,
-			actors:                 haxmap.New[string, *activeActor](8),
 			log:                    log,
 			clock:                  clock,
 			providerRequestTimeout: 30 * time.Second,
-			actorsConfig: map[string]components.ActorHostType{
-				"testactor": {
-					IdleTimeout: 5 * time.Minute,
-				},
-			},
-			actorFactories: map[string]actor.Factory{
-				"testactor": func(actorID string, service *actor.Service) actor.Actor {
-					return &actor_mocks.MockActorDeactivate{}
-				},
-			},
 		}
 		host.service = actor.NewService(host)
-		host.idleActorProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *activeActor]{
-			ExecuteFn: host.handleIdleActor,
-			Clock:     clock,
+
+		// The actor core owns the active actors map and idle processor
+		host.core = actorcore.NewManager(actorcore.Options{
+			Service:     host.service,
+			RemoveActor: provider.RemoveActor,
+			Logger:      log,
+			Clock:       clock,
 		})
+		host.core.ActorsConfig = map[string]components.ActorHostType{
+			"testactor": {
+				IdleTimeout: 5 * time.Minute,
+			},
+		}
+		host.core.ActorFactories = map[string]actor.Factory{
+			"testactor": func(actorID string, service *actor.Service) actor.Actor {
+				return &actor_mocks.MockActorDeactivate{}
+			},
+		}
+		host.core.Start()
 
 		// Initialize placement cache
 		host.placementCache = ttlcache.NewCache[string, *actorPlacement](&ttlcache.CacheOptions{
@@ -71,15 +74,15 @@ func TestLookupActor(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host, provider := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.core.Close()
 		defer host.placementCache.Stop()
 
 		actorRef := ref.NewActorRef("testactor", "actor1")
 
 		// Create and register an active actor locally
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
-		host.actors.Set(actorRef.String(), activeAct)
+		activeAct := actorcore.NewActiveActor(actorRef, instance, 5*time.Minute, host.core.IdleProcessor, clock)
+		host.core.Actors.Set(actorRef.String(), activeAct)
 
 		// No provider calls should be made when actor is local
 		provider.AssertNotCalled(t, "LookupActor")
@@ -103,7 +106,7 @@ func TestLookupActor(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host, provider := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.core.Close()
 		defer host.placementCache.Stop()
 
 		actorRef := ref.NewActorRef("testactor", "actor2")
@@ -130,7 +133,7 @@ func TestLookupActor(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host, provider := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.core.Close()
 		defer host.placementCache.Stop()
 
 		actorRef := ref.NewActorRef("testactor", "actor3")
@@ -174,7 +177,7 @@ func TestLookupActor(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host, provider := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.core.Close()
 		defer host.placementCache.Stop()
 
 		actorRef := ref.NewActorRef("testactor", "actor4")
@@ -211,7 +214,7 @@ func TestLookupActor(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host, provider := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.core.Close()
 		defer host.placementCache.Stop()
 
 		actorRef := ref.NewActorRef("testactor", "error-no-host-actor")
@@ -247,7 +250,7 @@ func TestLookupActor(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host, provider := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.core.Close()
 		defer host.placementCache.Stop()
 
 		actorRef := ref.NewActorRef("testactor", "error-other-actor")
@@ -285,7 +288,7 @@ func TestLookupActor(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host, provider := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.core.Close()
 		defer host.placementCache.Stop()
 
 		// Set a very short timeout
@@ -324,7 +327,7 @@ func TestLookupActor(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host, provider := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.core.Close()
 		defer host.placementCache.Stop()
 
 		actorRef := ref.NewActorRef("testactor", "actor8")
@@ -372,7 +375,7 @@ func TestLookupActor(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host, provider := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.core.Close()
 		defer host.placementCache.Stop()
 
 		actorRef := ref.NewActorRef("testactor", "actor9")
@@ -408,7 +411,7 @@ func TestLookupActor(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host, provider := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.core.Close()
 		defer host.placementCache.Stop()
 
 		actorRef := ref.NewActorRef("testactor", "actor10")
@@ -444,7 +447,7 @@ func TestLookupActor(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host, provider := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.core.Close()
 		defer host.placementCache.Stop()
 
 		actorRef := ref.NewActorRef("testactor", "concurrent-actor")
@@ -498,7 +501,7 @@ func TestLookupActor(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host, provider := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.core.Close()
 		defer host.placementCache.Stop()
 
 		const numActors = 5
@@ -561,15 +564,15 @@ func TestLookupActor(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host, provider := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.core.Close()
 		defer host.placementCache.Stop()
 
 		actorRef := ref.NewActorRef("testactor", "active-local-actor")
 
 		// Create and register an active actor locally
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := newActiveActor(actorRef, instance, 5*time.Minute, host.idleActorProcessor, clock)
-		host.actors.Set(actorRef.String(), activeAct)
+		activeAct := actorcore.NewActiveActor(actorRef, instance, 5*time.Minute, host.core.IdleProcessor, clock)
+		host.core.Actors.Set(actorRef.String(), activeAct)
 
 		// No provider calls should be made when actor is local
 		provider.AssertNotCalled(t, "LookupActor")
@@ -586,7 +589,7 @@ func TestLookupActor(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host, provider := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.core.Close()
 		defer host.placementCache.Stop()
 
 		actorRef := ref.NewActorRef("testactor", "active-remote-actor")
@@ -622,7 +625,7 @@ func TestLookupActor(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host, provider := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.core.Close()
 		defer host.placementCache.Stop()
 
 		actorRef := ref.NewActorRef("testactor", "inactive-actor")
@@ -647,7 +650,7 @@ func TestLookupActor(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 		host, provider := newHost()
-		defer host.idleActorProcessor.Close()
+		defer host.core.Close()
 		defer host.placementCache.Stop()
 
 		actorRef := ref.NewActorRef("testactor", "placement-actor")
@@ -721,43 +724,43 @@ func TestIsLocal(t *testing.T) {
 func TestDeactivationTimeoutForActorType(t *testing.T) {
 	log := slog.New(slog.DiscardHandler)
 
-	t.Run("actor type with deactivation timeout", func(t *testing.T) {
+	newHost := func(cfg map[string]components.ActorHostType) *Host {
 		host := &Host{
 			log: log,
-			actorsConfig: map[string]components.ActorHostType{
-				"testactor": {
-					DeactivationTimeout: 30 * time.Second,
-				},
-			},
 		}
+		host.core = actorcore.NewManager(actorcore.Options{Logger: log})
+		host.core.ActorsConfig = cfg
+		return host
+	}
+
+	t.Run("actor type with deactivation timeout", func(t *testing.T) {
+		host := newHost(map[string]components.ActorHostType{
+			"testactor": {
+				DeactivationTimeout: 30 * time.Second,
+			},
+		})
 
 		timeout := host.deactivationTimeoutForActorType("testactor")
 		assert.Equal(t, 30*time.Second, timeout)
 	})
 
 	t.Run("actor type with zero deactivation timeout", func(t *testing.T) {
-		host := &Host{
-			log: log,
-			actorsConfig: map[string]components.ActorHostType{
-				"testactor": {
-					DeactivationTimeout: 0,
-				},
+		host := newHost(map[string]components.ActorHostType{
+			"testactor": {
+				DeactivationTimeout: 0,
 			},
-		}
+		})
 
 		timeout := host.deactivationTimeoutForActorType("testactor")
 		assert.Equal(t, time.Duration(0), timeout)
 	})
 
 	t.Run("unknown actor type", func(t *testing.T) {
-		host := &Host{
-			log: log,
-			actorsConfig: map[string]components.ActorHostType{
-				"testactor": {
-					DeactivationTimeout: 30 * time.Second,
-				},
+		host := newHost(map[string]components.ActorHostType{
+			"testactor": {
+				DeactivationTimeout: 30 * time.Second,
 			},
-		}
+		})
 
 		timeout := host.deactivationTimeoutForActorType("unknown")
 		assert.Equal(t, time.Duration(0), timeout)

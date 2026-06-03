@@ -117,6 +117,12 @@ type LookupActorResponse struct {
 	IdleTimeoutMs int64 `msgpack:"idle,omitempty"`
 }
 
+// RemoveActorRequest notifies the runtime that an actor has been deactivated on the sending host
+// The host owns the actor lifecycle, so this clears the placement the runtime holds for the actor
+type RemoveActorRequest struct {
+	ActorRef
+}
+
 // GetAlarmRequest retrieves an alarm
 type GetAlarmRequest struct {
 	AlarmRef

@@ -18,7 +18,7 @@ func (h *Host) lookupActor(parentCtx context.Context, aRef ref.ActorRef, skipCac
 
 	// First, check if the actor is active locally
 	// This check can be performed in-memory
-	_, ok := h.actors.Get(key)
+	_, ok := h.core.Actors.Get(key)
 	if ok {
 		// Actor is running on the current host, so we can just return that
 		// Note that we don't need to do anything with activeOnly, since the actor is definitely active
@@ -81,7 +81,7 @@ func (h *Host) isLocal(ap *actorPlacement) bool {
 }
 
 func (h *Host) deactivationTimeoutForActorType(actorType string) time.Duration {
-	return h.actorsConfig[actorType].DeactivationTimeout
+	return h.core.ActorsConfig[actorType].DeactivationTimeout
 }
 
 type actorPlacement struct {

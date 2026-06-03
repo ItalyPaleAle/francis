@@ -15,6 +15,7 @@ import (
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/ref"
 )
 
@@ -152,7 +153,7 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 
 	// Get and lock the actor
 	ref := lease.ActorRef()
-	statusAny, err := h.lockAndInvokeFn(ctx, ref, func(parentCtx context.Context, act *activeActor) (any, error) {
+	statusAny, err := h.core.LockAndInvoke(ctx, ref, func(parentCtx context.Context, act *actorcore.ActiveActor) (any, error) {
 		// Before we execute an alarm we need to fetch it again using the lease
 		// This is because alarms we have in-memory could have been here for a few seconds, and they may not represent the accurate
 		// state of the data in the provider. For example, it could have been edited or deleted, or the lease could have been broken.
@@ -170,7 +171,7 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		}
 
 		// Ensure the actor implements the Alarm method
-		obj, ok := act.instance.(actor.ActorAlarm)
+		obj, ok := act.Instance.(actor.ActorAlarm)
 		if !ok {
 			// This is a fatal error, which causes us to drop the alarm since there's no way it can be completed
 			return executeAlarmStatusFatal, fmt.Errorf("actor of type '%s' does not implement the Alarm method", act.ActorType())
@@ -192,7 +193,7 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		if err != nil {
 			// Consider this as a retryable condition unless we've exceeded the max attempts
 			code := executeAlarmStatusRetryable
-			maxAttempts := h.actorsConfig[ref.ActorType].MaxAttempts
+			maxAttempts := h.core.ActorsConfig[ref.ActorType].MaxAttempts
 			if lease.Attempts() > maxAttempts {
 				code = executeAlarmStatusFatal
 			}
@@ -251,7 +252,7 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		// #nosec G404
 		jitter := rand.Float64()*0.2 + 0.9
 		multiplier := min(math.Pow(1.5, float64(lease.Attempts())), 10) * jitter
-		delay := h.actorsConfig[ref.ActorType].InitialRetryDelay * time.Duration(multiplier)
+		delay := h.core.ActorsConfig[ref.ActorType].InitialRetryDelay * time.Duration(multiplier)
 		lease.IncreaseAttempts(h.clock.Now().Add(delay))
 		err = h.alarmProcessor.Enqueue(lease)
 		if err != nil {

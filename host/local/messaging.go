@@ -2,7 +2,6 @@ package local
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	msgpack "github.com/vmihailenco/msgpack/v5"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/types"
 )
@@ -73,15 +73,15 @@ func (h *Host) InvokeLocal(ctx context.Context, actorType string, actorID string
 }
 
 func (h *Host) doInvokeLocal(ctx context.Context, ref ref.ActorRef, method string, data any) (actor.Envelope, error) {
-	res, err := h.lockAndInvokeFn(ctx, ref, func(ctx context.Context, act *activeActor) (any, error) {
-		obj, ok := act.instance.(actor.ActorInvoke)
+	res, err := h.core.LockAndInvoke(ctx, ref, func(ctx context.Context, act *actorcore.ActiveActor) (any, error) {
+		obj, ok := act.Instance.(actor.ActorInvoke)
 		if !ok {
 			return nil, fmt.Errorf("actor of type '%s' does not implement the Invoke method", act.ActorType())
 		}
 
 		// Invoke the actor
 		// We wrap the data in an envelope as the receiver expects
-		res, err := obj.Invoke(ctx, method, newObjectEnvelope(data))
+		res, err := obj.Invoke(ctx, method, actorcore.NewObjectEnvelope(data))
 		if err != nil {
 			return nil, fmt.Errorf("error from actor: %w", err)
 		}
@@ -94,7 +94,7 @@ func (h *Host) doInvokeLocal(ctx context.Context, ref ref.ActorRef, method strin
 
 	// If there's a response, wrap in an envelope
 	if res != nil {
-		return newObjectEnvelope(res), nil
+		return actorcore.NewObjectEnvelope(res), nil
 	}
 
 	return nil, nil
@@ -188,79 +188,8 @@ func (h *Host) doInvokeRemote(ctx context.Context, aRef ref.ActorRef, ap *actorP
 			return nil, fmt.Errorf("failed to decode response body using msgpack: %w", err)
 		}
 
-		return newObjectEnvelope(out), nil
+		return actorcore.NewObjectEnvelope(out), nil
 	}
 
 	return nil, nil
-}
-
-func (h *Host) lockAndInvokeFn(parentCtx context.Context, ref ref.ActorRef, fn func(context.Context, *activeActor) (any, error)) (any, error) {
-	// Get the actor, which may create it
-	act, err := h.getOrCreateActor(ref)
-	if err != nil {
-		return nil, err
-	}
-
-	// Create a context for this request, which allows us to stop it in-flight if needed
-	ctx, cancel := context.WithCancelCause(parentCtx)
-	defer cancel(nil)
-
-	// Acquire a lock for turn-based concurrency
-	haltCh, err := act.Lock(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to acquire lock for actor: %w", err)
-	}
-	defer act.Unlock()
-
-	go func() {
-		select {
-		case <-haltCh:
-			// The actor is being halted, so we need to cancel the context
-			t := h.clock.NewTimer(h.shutdownGracePeriod)
-			select {
-			case <-t.C():
-				// Graceful timeout has passed: forcefully cancel the context
-				cancel(actor.ErrActorHalted)
-				return
-			case <-ctx.Done():
-				// The method is returning (either fn() is done, or context was canceled)
-				if !t.Stop() {
-					<-t.C()
-				}
-				return
-			}
-		case <-ctx.Done():
-			// The method is returning (either fn() is done, or context was canceled)
-			return
-		}
-	}()
-
-	return fn(ctx, act)
-}
-
-func (h *Host) getOrCreateActor(ref ref.ActorRef) (*activeActor, error) {
-	// Get the factory function
-	fn, err := h.createActorFn(ref)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get (or create) the actor
-	actor, _ := h.actors.GetOrCompute(ref.String(), fn)
-
-	return actor, nil
-}
-
-func (h *Host) createActorFn(ref ref.ActorRef) (func() *activeActor, error) {
-	// We don't need a locking mechanism here as these maps are "locked" after the service has started
-	factoryFn := h.actorFactories[ref.ActorType]
-	if factoryFn == nil {
-		return nil, errors.New("unsupported actor type")
-	}
-
-	idleTimeout := h.actorsConfig[ref.ActorType].IdleTimeout
-	return func() *activeActor {
-		instance := factoryFn(ref.ActorID, h.service)
-		return newActiveActor(ref, instance, idleTimeout, h.idleActorProcessor, h.clock)
-	}, nil
 }
