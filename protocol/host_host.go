@@ -24,6 +24,8 @@ type InvokeActorRequest struct {
 	Method       string `msgpack:"method"`
 	// Mode is the requested invocation mode
 	Mode InvocationMode `msgpack:"mode"`
+	// ActiveOnly tells the owning host to invoke the actor only if it is already active, never activating it
+	ActiveOnly bool `msgpack:"activeOnly,omitempty"`
 	// Data is the MessagePack-encoded argument for object invocation
 	// It is empty for stream invocation
 	Data []byte `msgpack:"data,omitempty"`

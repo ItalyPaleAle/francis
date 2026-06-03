@@ -559,3 +559,75 @@ func TestLockAndInvokeFn(t *testing.T) {
 		assert.Nil(t, result)
 	})
 }
+
+func TestLockAndInvokeActive(t *testing.T) {
+	clock := clocktesting.NewFakeClock(time.Now())
+	log := slog.New(slog.DiscardHandler)
+
+	newHost := func() *Manager {
+		host := &Manager{
+			Actors:              haxmap.New[string, *ActiveActor](8),
+			log:                 log,
+			clock:               clock,
+			shutdownGracePeriod: 5 * time.Second,
+			ActorsConfig: map[string]components.ActorHostType{
+				"testactor": {IdleTimeout: 5 * time.Minute},
+			},
+			ActorFactories: map[string]actor.Factory{
+				"testactor": func(actorID string, service *actor.Service) actor.Actor {
+					return &actor_mocks.MockActorDeactivate{}
+				},
+			},
+		}
+		host.IdleProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ActiveActor]{
+			ExecuteFn: host.HandleIdleActor,
+			Clock:     clock,
+		})
+		return host
+	}
+
+	t.Run("invokes an already-active actor", func(t *testing.T) {
+		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+
+		host := newHost()
+		defer host.IdleProcessor.Close()
+
+		actorRef := ref.NewActorRef("testactor", "actor1")
+
+		// Pre-activate the actor
+		instance := &actor_mocks.MockActorDeactivate{}
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		host.Actors.Set(actorRef.String(), activeAct)
+
+		called := false
+		result, err := host.LockAndInvokeActive(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
+			called = true
+			return "ok", nil
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "ok", result)
+		assert.True(t, called)
+	})
+
+	t.Run("returns ErrActorNotActive and does not create the actor", func(t *testing.T) {
+		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+
+		host := newHost()
+		defer host.IdleProcessor.Close()
+
+		actorRef := ref.NewActorRef("testactor", "inactive")
+
+		called := false
+		result, err := host.LockAndInvokeActive(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
+			called = true
+			return "ok", nil
+		})
+		require.ErrorIs(t, err, actor.ErrActorNotActive)
+		assert.Nil(t, result)
+		assert.False(t, called, "the invocation function must not run for an inactive actor")
+
+		// The actor must not have been created
+		_, exists := host.Actors.Get(actorRef.String())
+		assert.False(t, exists, "an active-only invocation must never activate the actor")
+	})
+}

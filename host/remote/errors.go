@@ -59,6 +59,9 @@ func invokeErrorToProtocol(err error) *protocol.Error {
 	case errors.Is(err, errActorMethodUnsupported):
 		// The actor type cannot service this call, so retrying will never succeed
 		return protocol.NewError(protocol.ErrCodeInvokeModeUnsupported, err.Error())
+	case errors.Is(err, actor.ErrActorNotActive):
+		// An active-only invocation found the actor inactive on this host
+		return protocol.NewError(protocol.ErrCodeActorNotActive, "actor is not currently active")
 	case errors.Is(err, actor.ErrActorHalted):
 		// The actor is halting, so the caller should re-resolve placement and retry
 		return protocol.NewError(protocol.ErrCodeActorHalted, "actor is halted")

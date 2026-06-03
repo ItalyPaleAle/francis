@@ -3,6 +3,7 @@ package remote
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 
 	msgpack "github.com/vmihailenco/msgpack/v5"
@@ -29,7 +30,7 @@ func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, met
 		return nil, fmt.Errorf("failed to look up actor: %w", err)
 	}
 
-	env, retry, err := h.doInvoke(ctx, aRef, ap, method, data)
+	env, retry, err := h.doInvoke(ctx, aRef, ap, method, data, opts.ActiveOnly)
 	if !retry {
 		return env, err
 	}
@@ -41,23 +42,23 @@ func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, met
 		return nil, fmt.Errorf("failed to look up actor: %w", err)
 	}
 
-	env, _, err = h.doInvoke(ctx, aRef, ap, method, data)
+	env, _, err = h.doInvoke(ctx, aRef, ap, method, data, opts.ActiveOnly)
 	return env, err
 }
 
 // doInvoke dispatches a single invocation attempt to the local actor or a peer, depending on the placement
 // The bool return is true when the attempt failed in a way that warrants re-resolving the placement and retrying
-func (h *Host) doInvoke(ctx context.Context, aRef ref.ActorRef, ap *actorPlacement, method string, data any) (actor.Envelope, bool, error) {
+func (h *Host) doInvoke(ctx context.Context, aRef ref.ActorRef, ap *actorPlacement, method string, data any, activeOnly bool) (actor.Envelope, bool, error) {
 	if h.isLocal(ap) {
-		env, err := h.doInvokeLocal(ctx, aRef, method, data)
-		return env, false, err
+		return h.doInvokeLocal(ctx, aRef, method, data, activeOnly)
 	}
-	return h.doInvokeRemote(ctx, aRef, ap, method, data)
+	return h.doInvokeRemote(ctx, aRef, ap, method, data, activeOnly)
 }
 
 // doInvokeLocal invokes an actor owned by this host
-func (h *Host) doInvokeLocal(ctx context.Context, aRef ref.ActorRef, method string, data any) (actor.Envelope, error) {
-	res, err := h.core.LockAndInvoke(ctx, aRef, func(invokeCtx context.Context, act *actorcore.ActiveActor) (any, error) {
+// The bool return is true when an active-only invocation found the actor inactive, so the caller can re-resolve in case it is active elsewhere
+func (h *Host) doInvokeLocal(ctx context.Context, aRef ref.ActorRef, method string, data any, activeOnly bool) (actor.Envelope, bool, error) {
+	invoke := func(invokeCtx context.Context, act *actorcore.ActiveActor) (any, error) {
 		// The actor must implement the Invoke method to be called this way
 		obj, ok := act.Instance.(actor.ActorInvoke)
 		if !ok {
@@ -72,22 +73,37 @@ func (h *Host) doInvokeLocal(ctx context.Context, aRef ref.ActorRef, method stri
 		}
 
 		return res, nil
-	})
+	}
+
+	// An active-only invocation must not activate the actor
+	// If it is not active here, re-resolve in case it moved
+	var (
+		res any
+		err error
+	)
+	if activeOnly {
+		res, err = h.core.LockAndInvokeActive(ctx, aRef, invoke)
+		if errors.Is(err, actor.ErrActorNotActive) {
+			return nil, true, err
+		}
+	} else {
+		res, err = h.core.LockAndInvoke(ctx, aRef, invoke)
+	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	// If there's a response, wrap it in an envelope
 	if res != nil {
-		return actorcore.NewObjectEnvelope(res), nil
+		return actorcore.NewObjectEnvelope(res), false, nil
 	}
 
-	return nil, nil
+	return nil, false, nil
 }
 
 // doInvokeRemote invokes an actor owned by a peer host over the peer transport
 // The bool return is true when the placement looks stale and the caller should re-resolve and retry
-func (h *Host) doInvokeRemote(ctx context.Context, aRef ref.ActorRef, ap *actorPlacement, method string, data any) (actor.Envelope, bool, error) {
+func (h *Host) doInvokeRemote(ctx context.Context, aRef ref.ActorRef, ap *actorPlacement, method string, data any, activeOnly bool) (actor.Envelope, bool, error) {
 	// Encode the argument as MessagePack for the request body
 	var argData []byte
 	if data != nil {
@@ -105,10 +121,12 @@ func (h *Host) doInvokeRemote(ctx context.Context, aRef ref.ActorRef, ap *actorP
 		ActorID:      aRef.ActorID,
 		Method:       method,
 		Data:         argData,
+		ActiveOnly:   activeOnly,
 	})
 	if perr != nil {
-		// A retryable error (stale placement, halted actor, transport failure) tells the caller to re-resolve and retry
-		return nil, perr.Retryable(), protocolErrorToActor(perr)
+		// Re-resolve and retry on a stale placement, a halted actor, a transport failure, or an active-only miss that may be active elsewhere
+		retry := perr.Retryable() || perr.Code == protocol.ErrCodeActorNotActive
+		return nil, retry, protocolErrorToActor(perr)
 	}
 
 	// Decode the result into an envelope
@@ -128,7 +146,7 @@ func (h *Host) doInvokeRemote(ctx context.Context, aRef ref.ActorRef, ap *actorP
 func (h *Host) peerInvokeObject(ctx context.Context, req protocol.InvokeActorRequest) (protocol.InvokeActorResponse, *protocol.Error) {
 	aRef := ref.NewActorRef(req.ActorType, req.ActorID)
 
-	res, err := h.core.LockAndInvoke(ctx, aRef, func(invokeCtx context.Context, act *actorcore.ActiveActor) (any, error) {
+	invoke := func(invokeCtx context.Context, act *actorcore.ActiveActor) (any, error) {
 		// The actor must implement the Invoke method to be called this way
 		obj, ok := act.Instance.(actor.ActorInvoke)
 		if !ok {
@@ -151,7 +169,18 @@ func (h *Host) peerInvokeObject(ctx context.Context, req protocol.InvokeActorReq
 		}
 
 		return r, nil
-	})
+	}
+
+	// An active-only invocation must not activate the actor here; this host is authoritative about whether it is active
+	var (
+		res any
+		err error
+	)
+	if req.ActiveOnly {
+		res, err = h.core.LockAndInvokeActive(ctx, aRef, invoke)
+	} else {
+		res, err = h.core.LockAndInvoke(ctx, aRef, invoke)
+	}
 	if err != nil {
 		return protocol.InvokeActorResponse{}, invokeErrorToProtocol(err)
 	}

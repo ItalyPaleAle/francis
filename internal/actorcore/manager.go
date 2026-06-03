@@ -162,6 +162,23 @@ func (m *Manager) LockAndInvoke(parentCtx context.Context, r ref.ActorRef, fn fu
 		return nil, err
 	}
 
+	return m.lockAndInvokeActor(parentCtx, act, fn)
+}
+
+// LockAndInvokeActive runs fn against an actor only if it is already active on this host
+// It never activates the actor, returning actor.ErrActorNotActive when the actor is not active, so active-only invocations can be honored authoritatively here
+func (m *Manager) LockAndInvokeActive(parentCtx context.Context, r ref.ActorRef, fn func(ctx context.Context, act *ActiveActor) (any, error)) (any, error) {
+	// Only proceed if the actor is already active; do not create it
+	act, ok := m.Actors.Get(r.String())
+	if !ok || act == nil {
+		return nil, actor.ErrActorNotActive
+	}
+
+	return m.lockAndInvokeActor(parentCtx, act, fn)
+}
+
+// lockAndInvokeActor acquires the actor's turn-based lock and runs fn, canceling the call if the actor is halted mid-flight
+func (m *Manager) lockAndInvokeActor(parentCtx context.Context, act *ActiveActor, fn func(ctx context.Context, act *ActiveActor) (any, error)) (any, error) {
 	// Create a context for this request, which allows us to stop it in-flight if needed
 	ctx, cancel := context.WithCancelCause(parentCtx)
 	defer cancel(nil)

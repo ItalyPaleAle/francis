@@ -41,7 +41,7 @@ func (h *Host) lookupActor(parentCtx context.Context, aRef ref.ActorRef, skipCac
 		res, ok := h.placementCache.Get(key)
 		if ok {
 			// We have a cached value, so just use that
-			// If the actor is no longer there, the invocation will fail later on and the caller re-resolves
+			// The owning host enforces active-only on invocation, so a stale placement is rejected there and re-resolved
 			return res, nil
 		}
 	}
