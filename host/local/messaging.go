@@ -63,8 +63,11 @@ func (h *Host) doInvoke(ctx context.Context, aRef ref.ActorRef, ap *actorPlaceme
 	if !h.isLocal(ap) {
 		env, err := h.doInvokeRemote(ctx, aRef, ap, method, data, activeOnly)
 
-		// An active-only invocation that the owning host found inactive may be active elsewhere, so re-resolve
-		if activeOnly && errors.Is(err, actor.ErrActorNotActive) {
+		// Re-resolve and retry once when the placement looks stale or the actor was halting, or on an active-only miss that may be active elsewhere
+		switch {
+		case errors.Is(err, actor.ErrActorNotHosted), errors.Is(err, actor.ErrActorHalted):
+			return nil, true, err
+		case activeOnly && errors.Is(err, actor.ErrActorNotActive):
 			return nil, true, err
 		}
 
@@ -220,13 +223,21 @@ func (h *Host) doInvokeRemote(ctx context.Context, aRef ref.ActorRef, ap *actorP
 				return nil, fmt.Errorf("request failed with status code %d and failed to read msgpack response body with error: %w", res.StatusCode, err)
 			}
 
-			// An active-only invocation that the owning host found inactive surfaces as the public ErrActorNotActive so the caller can re-resolve
-			if apiErr.Code == errApiActorNotActive.Code {
+			// Map the well-known API errors to their public actor equivalents so the caller can react
+			// The stale-placement and halted cases surface as errors doInvoke re-resolves and retries once
+			switch apiErr.Code {
+			case errApiActorNotActive.Code:
+				// An active-only invocation found the actor inactive on the owning host, it may be active elsewhere
 				return nil, actor.ErrActorNotActive
+			case errApiActorNotHosted.Code, errApiReqInvokeHostIdMismatch.Code:
+				// The cached placement is stale: the actor is no longer on this host, or this address now serves a different host
+				return nil, actor.ErrActorNotHosted
+			case errApiActorHalted.Code:
+				// The actor is being halted on the owning host
+				// Re-resolving may find it active elsewhere
+				return nil, actor.ErrActorHalted
 			}
 
-			// TODO: Check other API errors
-			// Some errors to consider include "req_invoke_hostid_mismatch" (re-fetch cached address and retry)
 			return nil, fmt.Errorf("request failed with status code %d and API error: %w", res.StatusCode, apiErr)
 		}
 
