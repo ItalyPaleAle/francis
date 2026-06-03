@@ -26,8 +26,6 @@ type runtimeHandlers struct {
 	executeAlarm func(ctx context.Context, req protocol.ExecuteAlarmRequest) (protocol.ExecuteAlarmResponse, *protocol.Error)
 	// terminateActor halts an actor active on this host
 	terminateActor func(ctx context.Context, req protocol.TerminateActorRequest) *protocol.Error
-	// disconnect is invoked when the runtime asks the host to drain and reconnect elsewhere
-	disconnect func(req protocol.DisconnectRequest)
 }
 
 // runtimeClientConfig configures a runtimeClient
@@ -323,8 +321,6 @@ func (rc *runtimeClient) dispatchInbound(ctx context.Context, req *protocol.Enve
 		return rc.handleExecuteAlarm(ctx, req)
 	case protocol.KindTerminateActor:
 		return rc.handleTerminateActor(ctx, req)
-	case protocol.KindDisconnect:
-		return rc.handleDisconnect(req)
 	default:
 		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeBadRequest, "unknown message kind %q", req.Kind))
 	}
@@ -376,21 +372,6 @@ func (rc *runtimeClient) handleTerminateActor(ctx context.Context, req *protocol
 		return req.ErrorReply(perr)
 	}
 	return req.Reply(protocol.KindTerminateActorResponse, nil)
-}
-
-func (rc *runtimeClient) handleDisconnect(req *protocol.Envelope) *protocol.Envelope {
-	// Decode the drain request
-	var payload protocol.DisconnectRequest
-	err := req.DecodePayload(&payload)
-	if err != nil {
-		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode disconnect request"))
-	}
-
-	// Notify the host so it can drain and reconnect elsewhere, then acknowledge
-	if rc.cfg.handlers.disconnect != nil {
-		rc.cfg.handlers.disconnect(payload)
-	}
-	return req.Reply(protocol.KindDisconnectResponse, nil)
 }
 
 // doRequest sends a host-to-runtime request on a new stream and decodes the response into out

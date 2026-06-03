@@ -60,13 +60,11 @@ const (
 
 	KindExecuteAlarm   = "runtime.alarm.execute"
 	KindTerminateActor = "runtime.actor.terminate"
-	KindDisconnect     = "runtime.disconnect"
 
 	// Runtime -> Host responses
 
 	KindExecuteAlarmResponse   = "runtime.alarm.execute.response"
 	KindTerminateActorResponse = "runtime.actor.terminate.response"
-	KindDisconnectResponse     = "runtime.disconnect.response"
 
 	// Host -> Host
 

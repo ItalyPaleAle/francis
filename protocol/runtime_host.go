@@ -33,11 +33,3 @@ type TerminateActorRequest struct {
 	ActorType string `msgpack:"type"`
 	ActorID   string `msgpack:"id"`
 }
-
-// DisconnectRequest instructs a host to gracefully drain and reconnect to another runtime replica
-type DisconnectRequest struct {
-	// Reason is an optional human-readable reason for the disconnect
-	Reason string `msgpack:"reason,omitempty"`
-	// ReconnectAfterMs hints how long the host should wait before reconnecting, in milliseconds
-	ReconnectAfterMs int64 `msgpack:"reconnectAfter,omitempty"`
-}

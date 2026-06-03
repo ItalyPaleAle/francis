@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 
 	msgpack "github.com/vmihailenco/msgpack/v5"
 
@@ -122,10 +121,4 @@ func (h *Host) terminateActor(_ context.Context, req protocol.TerminateActorRequ
 	}
 
 	return nil
-}
-
-// handleDisconnect is invoked when the runtime asks this host to drain and reconnect to another replica
-// The runtime closes the session after this returns, which the connection loop detects and reconnects from
-func (h *Host) handleDisconnect(req protocol.DisconnectRequest) {
-	h.log.Info("Runtime requested disconnect; will reconnect to another replica", slog.String("reason", req.Reason))
 }
