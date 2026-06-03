@@ -2,6 +2,7 @@ package remote
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
@@ -12,41 +13,106 @@ import (
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/standalone"
+	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/runtime"
 )
 
-// testActor is a minimal actor used by the integration test
-// It echoes invocations, round-trips its state through the runtime, and signals when its alarm fires
+// testActor is a minimal actor used by the integration tests
+// It echoes invocations, round-trips its state through the runtime, and optionally signals invocation, alarm, and deactivation events
 type testActor struct {
-	svc     *actor.Service
-	id      string
-	alarmCh chan string
+	svc   *actor.Service
+	id    string
+	label string
+
+	// Optional observation channels; a nil channel means the event is not observed
+	alarmCh      chan string
+	invokeCh     chan string
+	deactivateCh chan string
 }
 
 func (a *testActor) Invoke(ctx context.Context, method string, data actor.Envelope) (any, error) {
+	signal(a.invokeCh, method)
+
 	switch method {
 	case "echo":
 		var in string
 		_ = data.Decode(&in)
-		return "echo:" + in, nil
+		return a.label + "echo:" + in, nil
 	case "setstate":
 		return nil, a.svc.SetState(ctx, "T", a.id, "saved-value", nil)
 	case "getstate":
 		var out string
 		err := a.svc.GetState(ctx, "T", a.id, &out)
 		return out, err
+	case "fail":
+		return nil, errors.New("boom")
 	default:
 		return nil, nil
 	}
 }
 
 func (a *testActor) Alarm(_ context.Context, name string, _ actor.Envelope) error {
-	a.alarmCh <- name
+	signal(a.alarmCh, name)
 	return nil
 }
 
-// startTestRuntime starts an in-memory runtime over WebTransport and returns its address
-func startTestRuntime(t *testing.T, ctx context.Context) string {
+func (a *testActor) Deactivate(_ context.Context) error {
+	signal(a.deactivateCh, a.id)
+	return nil
+}
+
+// signal performs a non-blocking send so an unobserved or already-signaled channel never blocks the actor
+func signal(ch chan string, v string) {
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- v:
+	default:
+	}
+}
+
+// newRemoteHost builds a remote host pointed at the runtime, without starting it
+func newRemoteHost(t *testing.T, runtimeAddr string) *Host {
+	t.Helper()
+
+	host, err := NewHost(
+		WithAddress(freeUDPAddr(t)),
+		WithRuntimeAddresses(runtimeAddr),
+		WithServerTLSInsecureSkipTLSValidation(),
+		WithLogger(slog.New(slog.DiscardHandler)),
+	)
+	require.NoError(t, err)
+	return host
+}
+
+// runRemoteHost starts the host and waits until it has registered with the runtime
+func runRemoteHost(t *testing.T, host *Host) {
+	t.Helper()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- host.Run(t.Context())
+	}()
+
+	select {
+	case <-host.Ready():
+	case <-time.After(15 * time.Second):
+		t.Fatal("host did not connect to the runtime")
+	}
+
+	// Wait for Run to return when the test's context is canceled
+	t.Cleanup(func() {
+		select {
+		case <-errCh:
+		case <-time.After(10 * time.Second):
+			t.Error("host did not shut down")
+		}
+	})
+}
+
+// startTestRuntime starts an in-memory runtime over WebTransport and returns its address and backing provider
+func startTestRuntime(t *testing.T, ctx context.Context) (string, *standalone.StandaloneMemory) {
 	t.Helper()
 
 	addr := freeUDPAddr(t)
@@ -69,15 +135,15 @@ func startTestRuntime(t *testing.T, ctx context.Context) string {
 		_ = rt.Run(ctx)
 	}()
 
-	return addr
+	return addr, prov
 }
 
 // TestHostRemoteIntegration exercises the remote host end-to-end against a real runtime over WebTransport
 func TestHostRemoteIntegration(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
+	hostCtx, hostCancel := context.WithCancel(t.Context())
+	t.Cleanup(hostCancel)
 
-	runtimeAddr := startTestRuntime(t, ctx)
+	runtimeAddr, _ := startTestRuntime(t, hostCtx)
 
 	alarmCh := make(chan string, 1)
 
@@ -96,7 +162,7 @@ func TestHostRemoteIntegration(t *testing.T) {
 
 	hostErr := make(chan error, 1)
 	go func() {
-		hostErr <- host.Run(ctx)
+		hostErr <- host.Run(hostCtx)
 	}()
 
 	// Wait until the host has registered with the runtime
@@ -110,10 +176,7 @@ func TestHostRemoteIntegration(t *testing.T) {
 	svc := host.Service()
 
 	t.Run("invoke activates and calls the actor", func(t *testing.T) {
-		reqCtx, reqCancel := context.WithTimeout(ctx, 5*time.Second)
-		defer reqCancel()
-
-		res, err := svc.Invoke(reqCtx, "T", "a1", "echo", "hi")
+		res, err := svc.Invoke(t.Context(), "T", "a1", "echo", "hi")
 		require.NoError(t, err)
 
 		var out string
@@ -122,13 +185,10 @@ func TestHostRemoteIntegration(t *testing.T) {
 	})
 
 	t.Run("state round-trips through the runtime", func(t *testing.T) {
-		reqCtx, reqCancel := context.WithTimeout(ctx, 5*time.Second)
-		defer reqCancel()
-
-		_, err := svc.Invoke(reqCtx, "T", "a1", "setstate", nil)
+		_, err := svc.Invoke(t.Context(), "T", "a1", "setstate", nil)
 		require.NoError(t, err)
 
-		res, err := svc.Invoke(reqCtx, "T", "a1", "getstate", nil)
+		res, err := svc.Invoke(t.Context(), "T", "a1", "getstate", nil)
 		require.NoError(t, err)
 
 		var out string
@@ -137,15 +197,12 @@ func TestHostRemoteIntegration(t *testing.T) {
 	})
 
 	t.Run("alarm round-trips and fires on the host", func(t *testing.T) {
-		reqCtx, reqCancel := context.WithTimeout(ctx, 5*time.Second)
-		defer reqCancel()
-
 		// The actor must be active so the runtime can resolve its placement when dispatching the alarm
-		_, err := svc.Invoke(reqCtx, "T", "a1", "echo", "warmup")
+		_, err := svc.Invoke(t.Context(), "T", "a1", "echo", "warmup")
 		require.NoError(t, err)
 
 		// An already-due alarm makes the runtime dispatch it back to this host
-		err = svc.SetAlarm(reqCtx, "T", "a1", "wake", actor.AlarmProperties{
+		err = svc.SetAlarm(t.Context(), "T", "a1", "wake", actor.AlarmProperties{
 			DueTime: time.Now().Add(-time.Second),
 		})
 		require.NoError(t, err)
@@ -159,18 +216,123 @@ func TestHostRemoteIntegration(t *testing.T) {
 	})
 
 	t.Run("deleting a missing alarm reports not found", func(t *testing.T) {
-		reqCtx, reqCancel := context.WithTimeout(ctx, 5*time.Second)
-		defer reqCancel()
-
-		err := svc.DeleteAlarm(reqCtx, "T", "a1", "does-not-exist")
+		err := svc.DeleteAlarm(t.Context(), "T", "a1", "does-not-exist")
 		require.ErrorIs(t, err, actor.ErrAlarmNotFound)
 	})
 
 	// Shut down the host and confirm Run returns
-	cancel()
+	hostCancel()
 	select {
 	case <-hostErr:
 	case <-time.After(10 * time.Second):
 		t.Fatal("host did not shut down")
 	}
+}
+
+// TestHostRemoteMultiHostPeerInvocation verifies a host invoking an actor the runtime places on a different host routes peer-to-peer
+func TestHostRemoteMultiHostPeerInvocation(t *testing.T) {
+	runtimeAddr, _ := startTestRuntime(t, t.Context())
+
+	// Host A registers no actor types, so it can only reach actors by routing to peers
+	hostA := newRemoteHost(t, runtimeAddr)
+
+	// Host B owns actor type "T", so the runtime can only place "T" actors there
+	hostB := newRemoteHost(t, runtimeAddr)
+	invokeCh := make(chan string, 4)
+	err := hostB.RegisterActor("T", func(actorID string, service *actor.Service) actor.Actor {
+		return &testActor{svc: service, id: actorID, label: "B:", invokeCh: invokeCh}
+	}, RegisterActorOptions{})
+	require.NoError(t, err)
+
+	runRemoteHost(t, hostB)
+	runRemoteHost(t, hostA)
+
+	// Host A invokes "T", which the runtime places on host B, so the call must traverse the peer transport
+	res, err := hostA.Service().Invoke(t.Context(), "T", "peer1", "echo", "hi")
+	require.NoError(t, err)
+
+	var out string
+	require.NoError(t, res.Decode(&out))
+	assert.Equal(t, "B:echo:hi", out, "the actor ran on host B and the result returned to host A")
+
+	// Confirm host B actually executed the invocation
+	select {
+	case method := <-invokeCh:
+		assert.Equal(t, "echo", method)
+	case <-time.After(5 * time.Second):
+		t.Fatal("host B did not execute the invocation")
+	}
+
+	// The placement host A cached must point at host B, not itself
+	ap, err := hostA.lookupActor(t.Context(), ref.NewActorRef("T", "peer1"), false, false)
+	require.NoError(t, err)
+	assert.Equal(t, hostB.HostID(), ap.HostID)
+	assert.False(t, hostA.isLocal(ap))
+}
+
+// TestHostRemoteIdleDeactivation verifies an idle actor is deactivated and its placement is cleared at the runtime
+func TestHostRemoteIdleDeactivation(t *testing.T) {
+	runtimeAddr, prov := startTestRuntime(t, t.Context())
+
+	host := newRemoteHost(t, runtimeAddr)
+	deactivateCh := make(chan string, 1)
+	err := host.RegisterActor("T", func(actorID string, service *actor.Service) actor.Actor {
+		return &testActor{svc: service, id: actorID, deactivateCh: deactivateCh}
+	}, RegisterActorOptions{
+		// A short idle timeout so the actor deactivates quickly
+		IdleTimeout: 250 * time.Millisecond,
+	})
+	require.NoError(t, err)
+
+	runRemoteHost(t, host)
+
+	// Activate the actor on the host
+	_, err = host.Service().Invoke(t.Context(), "T", "idle1", "echo", "hi")
+	require.NoError(t, err)
+
+	// The actor goes idle and is deactivated, which calls its Deactivate method
+	select {
+	case <-deactivateCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("idle actor was not deactivated")
+	}
+
+	// Deactivation notifies the runtime, which clears the placement in the provider
+	// We check the provider directly: the Deactivate signal fires before the RemoveActor round-trip completes, and an active-only Invoke would re-activate the actor through the still-warm placement cache
+	aRef := ref.NewActorRef("T", "idle1")
+	require.Eventually(t, func() bool {
+		_, lookupErr := prov.LookupActor(t.Context(), aRef, components.LookupActorOpts{ActiveOnly: true})
+		return errors.Is(lookupErr, components.ErrNoActor)
+	}, 5*time.Second, 20*time.Millisecond, "the actor's placement should be cleared at the runtime after deactivation")
+}
+
+// TestHostRemoteInvokeErrors covers invocation failure modes surfaced through the remote host
+func TestHostRemoteInvokeErrors(t *testing.T) {
+	runtimeAddr, _ := startTestRuntime(t, t.Context())
+
+	host := newRemoteHost(t, runtimeAddr)
+	err := host.RegisterActor("T", func(actorID string, service *actor.Service) actor.Actor {
+		return &testActor{svc: service, id: actorID}
+	}, RegisterActorOptions{})
+	require.NoError(t, err)
+
+	runRemoteHost(t, host)
+
+	svc := host.Service()
+
+	t.Run("unsupported actor type", func(t *testing.T) {
+		_, err := svc.Invoke(t.Context(), "Unsupported", "a1", "echo", "hi")
+		require.ErrorIs(t, err, actor.ErrActorTypeUnsupported)
+	})
+
+	t.Run("active-only invoke of an inactive actor", func(t *testing.T) {
+		_, err := host.Invoke(t.Context(), "T", "never-active", "echo", "hi", actor.WithInvokeActiveOnly())
+		require.ErrorIs(t, err, actor.ErrActorNotActive)
+	})
+
+	t.Run("error returned by the actor is propagated", func(t *testing.T) {
+		_, err := svc.Invoke(t.Context(), "T", "a1", "fail", nil)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "boom")
+	})
 }
