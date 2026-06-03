@@ -1190,14 +1190,12 @@ func TestIdleActorHandling(t *testing.T) {
 		// Update idle time to trigger processing
 		activeAct.UpdateIdleAt(0) // Use default idle timeout
 
-		// Advance time to when the actor should be processed
-		clock.Step(idleTimeout + 1*time.Second)
-
-		// Verify re-enqueue message was logged
+		// Advance time and wait for the busy actor to be re-enqueued rather than deactivated
+		// We step the clock inside the poll so a step can never race ahead of the processor registering the idle timer
 		assert.Eventually(t, func() bool {
-			logString := logBuf.String()
-			return strings.Contains(logString, "Actor is busy and will not be deactivated; re-enqueueing it")
-		}, 1*time.Second, 50*time.Millisecond, "Should log re-enqueue message")
+			clock.Step(idleTimeout + 1*time.Second)
+			return strings.Contains(logBuf.String(), "Actor is busy and will not be deactivated; re-enqueueing it")
+		}, 2*time.Second, 50*time.Millisecond, "Should log re-enqueue message")
 
 		// Verify the actor is still in the host (not halted because it's busy)
 		_, exists := host.Actors.Get(actorRef.String())
@@ -1219,11 +1217,10 @@ func TestIdleActorHandling(t *testing.T) {
 			Return(nil).
 			Once()
 
-		// Advance time by the re-enqueue interval to trigger processing again
-		clock.Step(10*time.Second + 1*time.Second) // actorBusyReEnqueueInterval + buffer
-
-		// Wait for the actor to be processed and removed
+		// Advance time past the re-enqueue interval and wait for the actor to be processed and removed
+		// The busy re-enqueue runs in the processor goroutine, so we step the clock inside the poll to avoid racing a single step ahead of the re-enqueue registering its timer
 		assert.Eventually(t, func() bool {
+			clock.Step(10*time.Second + 1*time.Second) // actorBusyReEnqueueInterval + buffer
 			_, exists := host.Actors.Get(actorRef.String())
 			return !exists // Wait until actor is removed
 		}, 2*time.Second, 50*time.Millisecond, "Actor should be removed from host after successful processing")
@@ -1419,10 +1416,10 @@ func TestIdleActorHandling(t *testing.T) {
 		assert.Equal(t, uintptr(numActors), host.Actors.Len(), "Should have all actors initially")
 
 		// Advance time to when actors should be processed
-		start := time.Now()
 		clock.Step(idleTimeout + 1*time.Second)
 
-		// Wait for all actors to start deactivation (proving they started in parallel)
+		// Wait for all actors to start deactivation
+		// Each deactivation blocks on deactivateCanContinue, which we only close once all have started, so reaching that point proves the deactivations ran in parallel rather than sequentially
 		var startedActors []int
 		timeout := time.After(2 * time.Second)
 
@@ -1435,11 +1432,6 @@ func TestIdleActorHandling(t *testing.T) {
 				t.Fatalf("Timeout waiting for all actors to start deactivation. Only %d/%d started", len(startedActors), numActors)
 			}
 		}
-
-		// Verify all actors started deactivation within a reasonable time window (proving parallelism)
-		parallelStartTime := time.Since(start)
-		assert.Less(t, parallelStartTime, 500*time.Millisecond, "All actors should start deactivation quickly if processed in parallel")
-		t.Logf("All %d actors started deactivation in %v", numActors, parallelStartTime)
 
 		// Now allow all deactivations to continue
 		close(deactivateCanContinue)
@@ -1457,15 +1449,6 @@ func TestIdleActorHandling(t *testing.T) {
 				t.Fatalf("Timeout waiting for all actors to complete deactivation. Only %d/%d completed", len(completedActors), numActors)
 			}
 		}
-
-		// Verify parallel completion time
-		// If processed in parallel, total time should be less than if processed sequentially
-		// Sequential would be roughly (numActors * 10ms) + overhead
-		// Parallel should be roughly 10ms + overhead regardless of numActors
-		totalTime := time.Since(start)
-		expectedSequentialTime := time.Duration(numActors) * 10 * time.Millisecond
-		assert.Less(t, totalTime, expectedSequentialTime, "Parallel processing should be faster than sequential")
-		t.Logf("All %d actors completed deactivation in %v (sequential would take ~%v)", numActors, totalTime, expectedSequentialTime)
 
 		// Wait for all actors to be processed and removed from the host map
 		assert.Eventually(t, func() bool {

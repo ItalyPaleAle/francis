@@ -2,6 +2,7 @@ package local
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +22,7 @@ const (
 	headerXHostID      = "X-Host-Id"
 	headerContentType  = "Content-Type"
 	headerUserAgent    = "User-Agent"
+	headerActiveOnly   = "X-Active-Only"
 )
 
 // Invoke performs the synchronous invocation of an actor running anywhere.
@@ -32,19 +34,48 @@ func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, met
 
 	aRef := ref.NewActorRef(actorType, actorID)
 
-	// Look up the actor
+	// Resolve the placement and invoke, using the cache on the first attempt
 	ap, err := h.lookupActor(ctx, aRef, false, opts.ActiveOnly)
 	if err != nil {
 		return nil, fmt.Errorf("failed to look up actor: %w", err)
 	}
 
-	// Check if we're invoking a remote host
-	if !h.isLocal(ap) {
-		return h.doInvokeRemote(ctx, aRef, ap, method, data)
+	env, retry, err := h.doInvoke(ctx, aRef, ap, method, data, opts.ActiveOnly)
+	if !retry {
+		return env, err
 	}
 
-	// TODO: Handle ErrActorHalted: retry (after new lookup without cache): actor could be on a separate host
-	return h.doInvokeLocal(ctx, ref.NewActorRef(actorType, actorID), method, data)
+	// An active-only invocation found the actor inactive on the cached placement
+	// Drop the stale placement and re-resolve through the provider, which is authoritative about active actors, in case it is active elsewhere
+	h.placementCache.Delete(aRef.String())
+	ap, err = h.lookupActor(ctx, aRef, true, opts.ActiveOnly)
+	if err != nil {
+		return nil, fmt.Errorf("failed to look up actor: %w", err)
+	}
+
+	env, _, err = h.doInvoke(ctx, aRef, ap, method, data, opts.ActiveOnly)
+	return env, err
+}
+
+// doInvoke dispatches a single invocation attempt to the local actor or a remote host, depending on the placement
+// The bool return is true when an active-only invocation found the actor inactive locally, so the caller can re-resolve in case it is active elsewhere
+func (h *Host) doInvoke(ctx context.Context, aRef ref.ActorRef, ap *actorPlacement, method string, data any, activeOnly bool) (actor.Envelope, bool, error) {
+	if !h.isLocal(ap) {
+		env, err := h.doInvokeRemote(ctx, aRef, ap, method, data, activeOnly)
+
+		// An active-only invocation that the owning host found inactive may be active elsewhere, so re-resolve
+		if activeOnly && errors.Is(err, actor.ErrActorNotActive) {
+			return nil, true, err
+		}
+
+		return env, false, err
+	}
+
+	env, err := h.doInvokeLocal(ctx, aRef, method, data, activeOnly)
+	if activeOnly && errors.Is(err, actor.ErrActorNotActive) {
+		return nil, true, err
+	}
+	return env, false, err
 }
 
 // InvokeLocal performs the synchronous invocation of an actor running on the current node.
@@ -58,8 +89,14 @@ func (h *Host) InvokeLocal(ctx context.Context, actorType string, actorID string
 
 	aRef := ref.NewActorRef(actorType, actorID)
 
+	// For an active-only invocation the local active-actor table is authoritative
+	// Skip the placement lookup so we never activate the actor or re-route, returning ErrActorNotActive if it is not active here
+	if opts.ActiveOnly {
+		return h.doInvokeLocal(ctx, aRef, method, data, true)
+	}
+
 	// Look up the actor
-	ap, err := h.lookupActor(ctx, aRef, false, opts.ActiveOnly)
+	ap, err := h.lookupActor(ctx, aRef, false, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to look up actor: %w", err)
 	}
@@ -69,11 +106,11 @@ func (h *Host) InvokeLocal(ctx context.Context, actorType string, actorID string
 		return nil, actor.ErrActorNotHosted
 	}
 
-	return h.doInvokeLocal(ctx, ref.NewActorRef(actorType, actorID), method, data)
+	return h.doInvokeLocal(ctx, aRef, method, data, false)
 }
 
-func (h *Host) doInvokeLocal(ctx context.Context, ref ref.ActorRef, method string, data any) (actor.Envelope, error) {
-	res, err := h.core.LockAndInvoke(ctx, ref, func(ctx context.Context, act *actorcore.ActiveActor) (any, error) {
+func (h *Host) doInvokeLocal(ctx context.Context, aRef ref.ActorRef, method string, data any, activeOnly bool) (actor.Envelope, error) {
+	invoke := func(ctx context.Context, act *actorcore.ActiveActor) (any, error) {
 		obj, ok := act.Instance.(actor.ActorInvoke)
 		if !ok {
 			return nil, fmt.Errorf("actor of type '%s' does not implement the Invoke method", act.ActorType())
@@ -87,7 +124,19 @@ func (h *Host) doInvokeLocal(ctx context.Context, ref ref.ActorRef, method strin
 		}
 
 		return res, nil
-	})
+	}
+
+	// An active-only invocation must not activate the actor
+	// This host owns the actor lifecycle, so it is authoritative about whether it is active
+	var (
+		res any
+		err error
+	)
+	if activeOnly {
+		res, err = h.core.LockAndInvokeActive(ctx, aRef, invoke)
+	} else {
+		res, err = h.core.LockAndInvoke(ctx, aRef, invoke)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +149,7 @@ func (h *Host) doInvokeLocal(ctx context.Context, ref ref.ActorRef, method strin
 	return nil, nil
 }
 
-func (h *Host) doInvokeRemote(ctx context.Context, aRef ref.ActorRef, ap *actorPlacement, method string, data any) (actor.Envelope, error) {
+func (h *Host) doInvokeRemote(ctx context.Context, aRef ref.ActorRef, ap *actorPlacement, method string, data any, activeOnly bool) (actor.Envelope, error) {
 	// Request URL
 	u := url.URL{}
 	u.Scheme = "https"
@@ -132,6 +181,11 @@ func (h *Host) doInvokeRemote(ctx context.Context, aRef ref.ActorRef, ap *actorP
 
 	req.Header.Set(headerUserAgent, userAgentValue)
 	req.Header.Set(headerXHostID, ap.HostID)
+
+	// An active-only invocation must be enforced by the owning host, which is authoritative about whether the actor is active
+	if activeOnly {
+		req.Header.Set(headerActiveOnly, "1")
+	}
 
 	if br != nil {
 		// Set the content type for msgpack if we have a body
@@ -165,7 +219,13 @@ func (h *Host) doInvokeRemote(ctx context.Context, aRef ref.ActorRef, ap *actorP
 			if err != nil {
 				return nil, fmt.Errorf("request failed with status code %d and failed to read msgpack response body with error: %w", res.StatusCode, err)
 			}
-			// TODO: Check API errors
+
+			// An active-only invocation that the owning host found inactive surfaces as the public ErrActorNotActive so the caller can re-resolve
+			if apiErr.Code == errApiActorNotActive.Code {
+				return nil, actor.ErrActorNotActive
+			}
+
+			// TODO: Check other API errors
 			// Some errors to consider include "req_invoke_hostid_mismatch" (re-fetch cached address and retry)
 			return nil, fmt.Errorf("request failed with status code %d and API error: %w", res.StatusCode, apiErr)
 		}

@@ -10,6 +10,7 @@ import (
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/actorcore"
+	"github.com/italypaleale/go-kit/utils"
 )
 
 // Handler for POST /v1/invoke/{actorType}/{actorID}/{method}
@@ -60,12 +61,21 @@ func (h *Host) handleMessageRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A caller may request active-only invocation, which must not activate the actor on this host
+	invokeOpts := make([]actor.InvokeOption, 0, 1)
+	if utils.IsTruthy(r.Header.Get(headerActiveOnly)) {
+		invokeOpts = append(invokeOpts, actor.WithInvokeActiveOnly())
+	}
+
 	// Invoke the actor
 	actorType := r.PathValue("actorType")
-	outData, err := h.InvokeLocal(r.Context(), actorType, r.PathValue("actorID"), r.PathValue("method"), reqData)
+	outData, err := h.InvokeLocal(r.Context(), actorType, r.PathValue("actorID"), r.PathValue("method"), reqData, invokeOpts...)
 	switch {
 	case errors.Is(err, actor.ErrActorNotHosted):
 		errApiActorNotHosted.WriteResponse(w)
+		return
+	case errors.Is(err, actor.ErrActorNotActive):
+		errApiActorNotActive.WriteResponse(w)
 		return
 	case errors.Is(err, actor.ErrActorHalted):
 		// Get the deactivation timeout for the actor type (in ms), and include the ActorDeactivationTimeout metadata key to aid the caller in deciding how long to wait

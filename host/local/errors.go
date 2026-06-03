@@ -18,6 +18,7 @@ var (
 	errApiReqInvokeBody           = newApiError("req_invoke_body", http.StatusBadRequest, "Failed to parse request body")
 	errApiReqInvokeContentType    = newApiError("req_invoke_content_type", http.StatusBadRequest, "Unsupported content type")
 	errApiActorNotHosted          = newApiError("actor_not_hosted", http.StatusNotFound, "Actor is not active on the current host")
+	errApiActorNotActive          = newApiError("actor_not_active", http.StatusConflict, "Actor is not currently active")
 	errApiActorHalted             = newApiError("actor_halted", http.StatusServiceUnavailable, "Actor is halted")
 	errApiInvokeFailed            = newApiError("invoke_failed", http.StatusInternalServerError, "Actor invocation failed")
 	errInternal                   = newApiError("internal", http.StatusInternalServerError, "Internal error")
