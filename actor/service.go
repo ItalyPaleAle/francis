@@ -3,6 +3,7 @@ package actor
 import (
 	"context"
 	"errors"
+	"io"
 )
 
 var (
@@ -36,6 +37,12 @@ func NewService(host Host) *Service {
 // Invoke an actor
 func (s Service) Invoke(ctx context.Context, actorType string, actorID string, method string, data any) (Envelope, error) {
 	return s.host.Invoke(ctx, actorType, actorID, method, data)
+}
+
+// InvokeStream performs a streamed invocation of an actor.
+// The request body is streamed from body, and the response body is returned as a reader that the caller must close.
+func (s Service) InvokeStream(ctx context.Context, actorType string, actorID string, method string, reqContentType string, body io.Reader) (respContentType string, resp io.ReadCloser, err error) {
+	return s.host.InvokeStream(ctx, actorType, actorID, method, reqContentType, body)
 }
 
 // SetState saves the state for an actor.

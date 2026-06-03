@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 
 	msgpack "github.com/vmihailenco/msgpack/v5"
 
@@ -140,6 +141,103 @@ func (h *Host) doInvokeRemote(ctx context.Context, aRef ref.ActorRef, ap *actorP
 	}
 
 	return actorcore.NewObjectEnvelope(out), false, nil
+}
+
+// InvokeStream performs a streamed invocation of an actor running anywhere in the cluster.
+// Stale-placement and not-active errors are returned to the caller rather than retried, because the request body is a one-shot reader that cannot be replayed.
+func (h *Host) InvokeStream(ctx context.Context, actorType string, actorID string, method string, reqContentType string, body io.Reader, optsFn ...actor.InvokeOption) (string, io.ReadCloser, error) {
+	opts := &types.InvokeOpts{}
+	for _, fn := range optsFn {
+		fn(opts)
+	}
+
+	aRef := ref.NewActorRef(actorType, actorID)
+
+	// Resolve the placement and invoke
+	ap, err := h.lookupActor(ctx, aRef, false, opts.ActiveOnly)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to look up actor: %w", err)
+	}
+
+	return h.doInvokeStream(ctx, aRef, ap, method, reqContentType, body, opts.ActiveOnly)
+}
+
+// doInvokeStream dispatches a streamed invocation to the local actor or a peer, depending on the placement
+func (h *Host) doInvokeStream(ctx context.Context, aRef ref.ActorRef, ap *actorPlacement, method string, reqContentType string, body io.Reader, activeOnly bool) (string, io.ReadCloser, error) {
+	if h.isLocal(ap) {
+		return h.doInvokeStreamLocal(ctx, aRef, method, reqContentType, body, activeOnly)
+	}
+
+	ct, resp, err := h.doInvokeStreamRemote(ctx, aRef, ap, method, reqContentType, body, activeOnly)
+
+	// On a stale-placement or not-active error, drop the cached placement so the next call re-resolves
+	// We do not retry the current call because the request body has already been consumed
+	switch {
+	case errors.Is(err, actor.ErrActorNotHosted), errors.Is(err, actor.ErrActorHalted), errors.Is(err, actor.ErrActorNotActive):
+		h.invalidatePlacement(aRef)
+	}
+
+	return ct, resp, err
+}
+
+// doInvokeStreamLocal streams an invocation to an actor owned by this host
+func (h *Host) doInvokeStreamLocal(ctx context.Context, aRef ref.ActorRef, method string, reqContentType string, body io.Reader, activeOnly bool) (string, io.ReadCloser, error) {
+	return h.core.LockAndStream(ctx, aRef, activeOnly, func(invokeCtx context.Context, act *actorcore.ActiveActor, w actor.StreamResponseWriter) error {
+		// The actor must implement the InvokeStream method to be called this way
+		obj, ok := act.Instance.(actor.ActorStream)
+		if !ok {
+			return errActorMethodUnsupported
+		}
+
+		// Stream the invocation; the actor reads body and writes the response to w
+		return obj.InvokeStream(invokeCtx, method, reqContentType, body, w)
+	})
+}
+
+// doInvokeStreamRemote streams an invocation to an actor owned by a peer host over the peer transport
+func (h *Host) doInvokeStreamRemote(ctx context.Context, aRef ref.ActorRef, ap *actorPlacement, method string, reqContentType string, body io.Reader, activeOnly bool) (string, io.ReadCloser, error) {
+	ct, resp, perr := h.peerClient.InvokeStream(ctx, ap.Address, protocol.InvokeActorRequest{
+		TargetHostID: ap.HostID,
+		ActorType:    aRef.ActorType,
+		ActorID:      aRef.ActorID,
+		Method:       method,
+		ContentType:  reqContentType,
+		ActiveOnly:   activeOnly,
+	}, body)
+	if perr != nil {
+		return "", nil, protocolErrorToActor(perr)
+	}
+
+	return ct, resp, nil
+}
+
+// peerInvokeStream executes a streamed invocation for an actor owned by this host, on behalf of a peer caller
+func (h *Host) peerInvokeStream(ctx context.Context, req protocol.InvokeActorRequest, body io.Reader, w actor.StreamResponseWriter) *protocol.Error {
+	aRef := ref.NewActorRef(req.ActorType, req.ActorID)
+
+	invoke := func(invokeCtx context.Context, act *actorcore.ActiveActor) (any, error) {
+		// The actor must implement the InvokeStream method to be called this way
+		obj, ok := act.Instance.(actor.ActorStream)
+		if !ok {
+			return nil, errActorMethodUnsupported
+		}
+
+		// Stream the invocation; the actor reads body and writes the response to w, which emits the response frame on its first write
+		return nil, obj.InvokeStream(invokeCtx, req.Method, req.ContentType, body, w)
+	}
+
+	// An active-only invocation must not activate the actor here; this host is authoritative about whether it is active
+	var err error
+	if req.ActiveOnly {
+		_, err = h.core.LockAndInvokeActive(ctx, aRef, invoke)
+	} else {
+		_, err = h.core.LockAndInvoke(ctx, aRef, invoke)
+	}
+	if err != nil {
+		return invokeErrorToProtocol(err)
+	}
+
+	return nil
 }
 
 // peerInvokeObject executes an object invocation for an actor owned by this host, on behalf of a peer caller

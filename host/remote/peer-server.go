@@ -10,6 +10,7 @@ import (
 
 	"github.com/quic-go/webtransport-go"
 
+	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/wt"
 	"github.com/italypaleale/francis/protocol"
 )
@@ -19,9 +20,8 @@ import (
 type peerInvokeHandler func(ctx context.Context, req protocol.InvokeActorRequest) (protocol.InvokeActorResponse, *protocol.Error)
 
 // peerStreamHandler executes a stream invocation for an actor owned by this host
-// It reads the request body from body and returns the response content type and body, or a structured error
-// The returned response reader is drained and closed by the caller
-type peerStreamHandler func(ctx context.Context, req protocol.InvokeActorRequest, body io.Reader) (contentType string, resp io.Reader, perr *protocol.Error)
+// It reads the request body from body and writes the response to w, returning a structured error if the invocation fails
+type peerStreamHandler func(ctx context.Context, req protocol.InvokeActorRequest, body io.Reader, w actor.StreamResponseWriter) *protocol.Error
 
 // peerServerConfig configures a peerServer
 type peerServerConfig struct {
@@ -194,34 +194,60 @@ func (ps *peerServer) handleStreamInvoke(ctx context.Context, stream *webtranspo
 		return
 	}
 
-	// The remaining bytes on the stream are the request body, which the handler reads until the caller's end-of-stream
-	contentType, respBody, perr := ps.cfg.streamHandler(ctx, payload, stream)
+	// The remaining bytes on the stream are the request body
+	// The handler writes the response through w
+	// w emits the response metadata frame on its first Write, so the content type can be set before any body bytes are produced
+	w := &peerStreamWriter{stream: stream, req: req}
+	perr := ps.cfg.streamHandler(ctx, payload, stream, w)
 	if perr != nil {
-		_ = protocol.WriteMessage(stream, req.ErrorReply(perr))
+		// We can only report a structured error if the response metadata frame has not been sent yet
+		// Once the body has started, a mid-stream failure surfaces as a truncated body when the stream closes
+		if !w.flushed {
+			_ = protocol.WriteMessage(stream, req.ErrorReply(perr))
+		}
 		return
 	}
 
-	// Send the response metadata frame, then stream the response body on the same stream
-	respEnv, err := req.ReplyWith(protocol.KindInvokeActorResponse, protocol.InvokeActorResponse{
-		ContentType: contentType,
-		NoContent:   respBody == nil,
-	})
-	if err != nil {
-		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to encode invocation response")))
-		return
+	// A handler that returned without writing anything produces an empty (no-content) response
+	if !w.flushed {
+		respEnv, err := req.ReplyWith(protocol.KindInvokeActorResponse, protocol.InvokeActorResponse{NoContent: true})
+		if err != nil {
+			_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to encode invocation response")))
+			return
+		}
+		_ = protocol.WriteMessage(stream, respEnv)
 	}
+}
 
-	err = protocol.WriteMessage(stream, respEnv)
-	if err != nil {
-		return
+// peerStreamWriter is a StreamResponseWriter that writes a peer stream response: a metadata frame followed by the raw response body
+type peerStreamWriter struct {
+	stream      *webtransport.Stream
+	req         *protocol.Envelope
+	contentType string
+	flushed     bool
+}
+
+// SetContentType records the content type, which is sent in the metadata frame on the first Write
+func (w *peerStreamWriter) SetContentType(contentType string) {
+	if !w.flushed {
+		w.contentType = contentType
 	}
+}
 
-	// Copy the response body after the metadata frame, then release the handler's reader
-	if respBody != nil {
-		_, _ = io.Copy(stream, respBody)
-		closer, ok := respBody.(io.Closer)
-		if ok {
-			_ = closer.Close()
+// Write sends the response metadata frame on the first call, then writes the raw body bytes to the stream
+func (w *peerStreamWriter) Write(p []byte) (int, error) {
+	if !w.flushed {
+		w.flushed = true
+		env, err := w.req.ReplyWith(protocol.KindInvokeActorResponse, protocol.InvokeActorResponse{ContentType: w.contentType})
+		if err != nil {
+			return 0, err
+		}
+
+		err = protocol.WriteMessage(w.stream, env)
+		if err != nil {
+			return 0, err
 		}
 	}
+
+	return w.stream.Write(p)
 }

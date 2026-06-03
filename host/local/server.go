@@ -65,6 +65,7 @@ func (h *Host) getServerHandler() http.Handler {
 	})
 
 	mux.HandleFunc("POST /v1/invoke/{actorType}/{actorID}/{method}", h.handleMessageRequest)
+	mux.HandleFunc("POST /v1/invoke-stream/{actorType}/{actorID}/{method}", h.handleStreamRequest)
 
 	// TODO: Enable the MaxBodySize middleware
 

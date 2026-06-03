@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/hosttls"
 	"github.com/italypaleale/francis/protocol"
 )
@@ -133,13 +134,20 @@ func TestPeerInvocationIntegration(t *testing.T) {
 	assert.True(t, perr.Retryable())
 }
 
-// echoStreamHandler reads the entire request body and returns it as the response body
-func echoStreamHandler(_ context.Context, _ protocol.InvokeActorRequest, body io.Reader) (string, io.Reader, *protocol.Error) {
+// echoStreamHandler reads the entire request body and writes it back as the response body
+func echoStreamHandler(_ context.Context, _ protocol.InvokeActorRequest, body io.Reader, w actor.StreamResponseWriter) *protocol.Error {
 	data, err := io.ReadAll(body)
 	if err != nil {
-		return "", nil, protocol.NewErrorf(protocol.ErrCodeInvokeFailed, "failed to read body: %v", err)
+		return protocol.NewErrorf(protocol.ErrCodeInvokeFailed, "failed to read body: %v", err)
 	}
-	return "application/test", bytes.NewReader(data), nil
+
+	w.SetContentType("application/test")
+	_, err = w.Write(data)
+	if err != nil {
+		return protocol.NewErrorf(protocol.ErrCodeInvokeFailed, "failed to write response: %v", err)
+	}
+
+	return nil
 }
 
 func TestPeerStreamInvocationIntegration(t *testing.T) {

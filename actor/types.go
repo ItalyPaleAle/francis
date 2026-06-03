@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"time"
 
 	timeutils "github.com/italypaleale/francis/internal/time"
@@ -12,6 +13,7 @@ import (
 
 type Host interface {
 	Invoke(ctx context.Context, actorType string, actorID string, method string, data any, opts ...InvokeOption) (Envelope, error)
+	InvokeStream(ctx context.Context, actorType string, actorID string, method string, reqContentType string, body io.Reader, opts ...InvokeOption) (respContentType string, resp io.ReadCloser, err error)
 
 	HaltAll() error
 	Halt(actorType string, actorID string) error

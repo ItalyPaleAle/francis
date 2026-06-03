@@ -163,11 +163,12 @@ func newHost(options *newHostOptions) (*Host, error) {
 	// The peer server serves invocations of actors owned by this host
 	// It reports our current runtime-assigned host ID so it can reject invocations aimed at a stale placement
 	h.peerServer = newPeerServer(peerServerConfig{
-		bind:      h.bind,
-		tlsConfig: serverTLSConfig,
-		handler:   h.peerInvokeObject,
-		log:       options.Logger,
-		hostID:    h.runtimeClient.HostID,
+		bind:          h.bind,
+		tlsConfig:     serverTLSConfig,
+		handler:       h.peerInvokeObject,
+		streamHandler: h.peerInvokeStream,
+		log:           options.Logger,
+		hostID:        h.runtimeClient.HostID,
 	})
 
 	return h, nil

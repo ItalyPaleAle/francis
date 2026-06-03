@@ -3,7 +3,9 @@ package remote
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,6 +56,20 @@ func (a *testActor) Invoke(ctx context.Context, method string, data actor.Envelo
 func (a *testActor) Alarm(_ context.Context, name string, _ actor.Envelope) error {
 	signal(a.alarmCh, name)
 	return nil
+}
+
+// InvokeStream echoes the request body back, prefixed with the actor's label, and echoes the request content type
+func (a *testActor) InvokeStream(_ context.Context, method string, reqContentType string, body io.Reader, w actor.StreamResponseWriter) error {
+	signal(a.invokeCh, method)
+
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return err
+	}
+
+	w.SetContentType(reqContentType)
+	_, err = w.Write([]byte(a.label + "stream:" + string(data)))
+	return err
 }
 
 func (a *testActor) Deactivate(_ context.Context) error {
@@ -334,5 +350,59 @@ func TestHostRemoteInvokeErrors(t *testing.T) {
 		_, err := svc.Invoke(t.Context(), "T", "a1", "fail", nil)
 		require.Error(t, err)
 		assert.ErrorContains(t, err, "boom")
+	})
+}
+
+// TestHostRemoteStreamInvocation exercises streamed invocation locally and across hosts
+func TestHostRemoteStreamInvocation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	runtimeAddr, _ := startTestRuntime(t, ctx)
+
+	t.Run("same-host stream", func(t *testing.T) {
+		host := newRemoteHost(t, runtimeAddr)
+		err := host.RegisterActor("T", func(actorID string, service *actor.Service) actor.Actor {
+			return &testActor{svc: service, id: actorID}
+		}, RegisterActorOptions{})
+		require.NoError(t, err)
+		runRemoteHost(t, host)
+
+		reqCtx, reqCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer reqCancel()
+
+		ct, resp, err := host.Service().InvokeStream(reqCtx, "T", "s1", "echo", "text/plain", strings.NewReader("hi"))
+		require.NoError(t, err)
+		defer resp.Close()
+
+		assert.Equal(t, "text/plain", ct)
+		got, err := io.ReadAll(resp)
+		require.NoError(t, err)
+		assert.Equal(t, "stream:hi", string(got))
+	})
+
+	t.Run("cross-host peer stream", func(t *testing.T) {
+		hostA := newRemoteHost(t, runtimeAddr)
+		hostB := newRemoteHost(t, runtimeAddr)
+		err := hostB.RegisterActor("S", func(actorID string, service *actor.Service) actor.Actor {
+			return &testActor{svc: service, id: actorID, label: "B:"}
+		}, RegisterActorOptions{})
+		require.NoError(t, err)
+
+		runRemoteHost(t, hostB)
+		runRemoteHost(t, hostA)
+
+		reqCtx, reqCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer reqCancel()
+
+		// Host A streams to "S", which the runtime places on host B, so it traverses the peer transport
+		ct, resp, err := hostA.Service().InvokeStream(reqCtx, "S", "s1", "echo", "application/test", strings.NewReader("ping"))
+		require.NoError(t, err)
+		defer resp.Close()
+
+		assert.Equal(t, "application/test", ct)
+		got, err := io.ReadAll(resp)
+		require.NoError(t, err)
+		assert.Equal(t, "B:stream:ping", string(got))
 	})
 }

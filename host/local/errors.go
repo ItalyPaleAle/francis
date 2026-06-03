@@ -20,6 +20,7 @@ var (
 	errApiActorNotHosted          = newApiError("actor_not_hosted", http.StatusNotFound, "Actor is not active on the current host")
 	errApiActorNotActive          = newApiError("actor_not_active", http.StatusConflict, "Actor is not currently active")
 	errApiActorHalted             = newApiError("actor_halted", http.StatusServiceUnavailable, "Actor is halted")
+	errApiInvokeModeUnsupported   = newApiError("invoke_mode_unsupported", http.StatusBadRequest, "Actor does not support the requested invocation mode")
 	errApiInvokeFailed            = newApiError("invoke_failed", http.StatusInternalServerError, "Actor invocation failed")
 	errInternal                   = newApiError("internal", http.StatusInternalServerError, "Internal error")
 )

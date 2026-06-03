@@ -2,6 +2,7 @@ package local
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -20,10 +21,27 @@ import (
 	"github.com/italypaleale/francis/internal/ref"
 )
 
-// echoActor is a minimal actor that implements Invoke for the handler tests
+// echoActor is a minimal actor that implements Invoke and InvokeStream for the handler tests
 type echoActor struct{}
 
 func (echoActor) Invoke(_ context.Context, _ string, _ actor.Envelope) (any, error) {
+	return "ok", nil
+}
+
+func (echoActor) InvokeStream(_ context.Context, _ string, reqContentType string, body io.Reader, w actor.StreamResponseWriter) error {
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return err
+	}
+	w.SetContentType(reqContentType)
+	_, err = w.Write([]byte("stream:" + string(data)))
+	return err
+}
+
+// objectOnlyActor implements Invoke but not InvokeStream, to exercise the unsupported-mode path
+type objectOnlyActor struct{}
+
+func (objectOnlyActor) Invoke(_ context.Context, _ string, _ actor.Envelope) (any, error) {
 	return "ok", nil
 }
 
