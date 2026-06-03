@@ -17,7 +17,7 @@ func TestEnvelopePayloadRoundTrip(t *testing.T) {
 		ProtocolVersion: ProtocolVersion,
 		Address:         "10.0.0.5:8443",
 		ActorTypes: []ActorHostType{
-			{ActorType: "myactor", IdleTimeoutMs: 10000, SupportsObjectInvocation: true},
+			{ActorType: "myactor", IdleTimeoutMs: 10000},
 		},
 	}
 

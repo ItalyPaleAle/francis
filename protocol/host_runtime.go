@@ -45,10 +45,6 @@ type ActorHostType struct {
 	MaxAttempts int `msgpack:"maxAttempts,omitempty"`
 	// InitialRetryDelayMs is the initial retry delay after a failed attempt, in milliseconds
 	InitialRetryDelayMs int64 `msgpack:"retryDelay,omitempty"`
-	// SupportsObjectInvocation indicates the actor type implements object invocation
-	SupportsObjectInvocation bool `msgpack:"obj,omitempty"`
-	// SupportsStreamInvocation indicates the actor type implements stream invocation
-	SupportsStreamInvocation bool `msgpack:"stream,omitempty"`
 }
 
 // RegisterHostRequest registers or reattaches a host with the runtime

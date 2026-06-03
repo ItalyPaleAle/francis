@@ -41,19 +41,19 @@ func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, met
 	}
 
 	env, retry, err := h.doInvoke(ctx, aRef, ap, method, data, opts.ActiveOnly)
-	if !retry {
-		return env, err
+	if retry {
+		// An active-only invocation found the actor inactive on the cached placement
+		// Drop the stale placement and re-resolve through the provider, which is authoritative about active actors, in case it is active elsewhere
+		h.placementCache.Delete(aRef.String())
+		ap, err = h.lookupActor(ctx, aRef, true, opts.ActiveOnly)
+		if err != nil {
+			return nil, fmt.Errorf("failed to look up actor: %w", err)
+		}
+
+		// Re-invoke
+		env, _, err = h.doInvoke(ctx, aRef, ap, method, data, opts.ActiveOnly)
 	}
 
-	// An active-only invocation found the actor inactive on the cached placement
-	// Drop the stale placement and re-resolve through the provider, which is authoritative about active actors, in case it is active elsewhere
-	h.placementCache.Delete(aRef.String())
-	ap, err = h.lookupActor(ctx, aRef, true, opts.ActiveOnly)
-	if err != nil {
-		return nil, fmt.Errorf("failed to look up actor: %w", err)
-	}
-
-	env, _, err = h.doInvoke(ctx, aRef, ap, method, data, opts.ActiveOnly)
 	return env, err
 }
 
@@ -61,6 +61,7 @@ func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, met
 // The bool return is true when an active-only invocation found the actor inactive locally, so the caller can re-resolve in case it is active elsewhere
 func (h *Host) doInvoke(ctx context.Context, aRef ref.ActorRef, ap *actorPlacement, method string, data any, activeOnly bool) (actor.Envelope, bool, error) {
 	if !h.isLocal(ap) {
+		// Actor is remote
 		env, err := h.doInvokeRemote(ctx, aRef, ap, method, data, activeOnly)
 
 		// Re-resolve and retry once when the placement looks stale or the actor was halting, or on an active-only miss that may be active elsewhere
@@ -74,10 +75,12 @@ func (h *Host) doInvoke(ctx context.Context, aRef ref.ActorRef, ap *actorPlaceme
 		return env, false, err
 	}
 
+	// Actor is local
 	env, err := h.doInvokeLocal(ctx, aRef, method, data, activeOnly)
 	if activeOnly && errors.Is(err, actor.ErrActorNotActive) {
 		return nil, true, err
 	}
+
 	return env, false, err
 }
 
@@ -114,6 +117,7 @@ func (h *Host) InvokeLocal(ctx context.Context, actorType string, actorID string
 
 func (h *Host) doInvokeLocal(ctx context.Context, aRef ref.ActorRef, method string, data any, activeOnly bool) (actor.Envelope, error) {
 	invoke := func(ctx context.Context, act *actorcore.ActiveActor) (any, error) {
+		// The actor must implement the Invoke method to be called this way
 		obj, ok := act.Instance.(actor.ActorInvoke)
 		if !ok {
 			return nil, fmt.Errorf("actor of type '%s' does not implement the Invoke method", act.ActorType())

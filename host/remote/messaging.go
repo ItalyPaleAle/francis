@@ -32,18 +32,17 @@ func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, met
 	}
 
 	env, retry, err := h.doInvoke(ctx, aRef, ap, method, data, opts.ActiveOnly)
-	if !retry {
-		return env, err
+	if retry {
+		// The placement was stale: drop it, re-resolve with a fresh lookup, and try once more
+		h.invalidatePlacement(aRef)
+		ap, err = h.lookupActor(ctx, aRef, true, opts.ActiveOnly)
+		if err != nil {
+			return nil, fmt.Errorf("failed to look up actor: %w", err)
+		}
+
+		env, _, err = h.doInvoke(ctx, aRef, ap, method, data, opts.ActiveOnly)
 	}
 
-	// The placement was stale: drop it, re-resolve with a fresh lookup, and try once more
-	h.invalidatePlacement(aRef)
-	ap, err = h.lookupActor(ctx, aRef, true, opts.ActiveOnly)
-	if err != nil {
-		return nil, fmt.Errorf("failed to look up actor: %w", err)
-	}
-
-	env, _, err = h.doInvoke(ctx, aRef, ap, method, data, opts.ActiveOnly)
 	return env, err
 }
 
@@ -53,6 +52,7 @@ func (h *Host) doInvoke(ctx context.Context, aRef ref.ActorRef, ap *actorPlaceme
 	if h.isLocal(ap) {
 		return h.doInvokeLocal(ctx, aRef, method, data, activeOnly)
 	}
+
 	return h.doInvokeRemote(ctx, aRef, ap, method, data, activeOnly)
 }
 
