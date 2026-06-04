@@ -303,3 +303,79 @@ func TestPeerStreamInvocationUnsupported(t *testing.T) {
 	require.NotNil(t, perr)
 	assert.Equal(t, protocol.ErrCodeInvokeModeUnsupported, perr.Code)
 }
+
+// partialThenFailStreamHandler writes part of the response body and then fails, simulating an actor whose stream invocation fails after it has started writing
+// The sleep gives the written bytes time to reach the caller so the test deterministically exercises the post-flush failure path
+func partialThenFailStreamHandler(_ context.Context, _ protocol.InvokeActorRequest, _ io.Reader, w actor.StreamResponseWriter) *protocol.Error {
+	w.SetContentType("application/test")
+	_, err := w.Write([]byte("partial-but-incomplete-response-body"))
+	if err != nil {
+		return protocol.NewErrorf(protocol.ErrCodeInvokeFailed, "failed to write response: %v", err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	return protocol.NewError(protocol.ErrCodeInvokeFailed, "boom after the body started")
+}
+
+// TestPeerStreamInvocationMidStreamFailure verifies that a mid-stream actor failure is surfaced to the caller as a read error rather than a clean, truncated success
+func TestPeerStreamInvocationMidStreamFailure(t *testing.T) {
+	addr := freeUDPAddr(t)
+
+	srvTLS, _, err := hosttls.HostTLSOptions{}.GetTLSConfig()
+	require.NoError(t, err)
+
+	ps := NewServer(ServerConfig{
+		Bind:          addr,
+		TLSConfig:     srvTLS,
+		HostID:        func() string { return "host-b" },
+		StreamHandler: partialThenFailStreamHandler,
+		Log:           slog.New(slog.DiscardHandler),
+	})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() {
+		_ = ps.Run(ctx)
+	}()
+
+	_, cliTLS, err := hosttls.HostTLSOptions{
+		InsecureSkipTLSValidation: true,
+	}.GetTLSConfig()
+	require.NoError(t, err)
+	pc := NewClient(ClientConfig{
+		TLSConfig:   cliTLS,
+		DialTimeout: 5 * time.Second,
+		Log:         slog.New(slog.DiscardHandler),
+	})
+	defer pc.Close()
+
+	// Retry until the server accepts the invocation and hands back a response body
+	var (
+		respBody io.ReadCloser
+		perr     *protocol.Error
+	)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		req := protocol.InvokeActorRequest{
+			TargetHostID: "host-b",
+			ActorType:    "T",
+			ActorID:      "a1",
+			Method:       "stream",
+		}
+		reqCtx, reqCancel := context.WithTimeout(ctx, 2*time.Second)
+		_, respBody, perr = pc.InvokeStream(reqCtx, addr, req, bytes.NewReader([]byte("request")))
+		reqCancel()
+		if perr == nil || !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	require.Nil(t, perr, "the metadata frame is sent before the failure, so the invocation call itself succeeds")
+	require.NotNil(t, respBody)
+	defer respBody.Close()
+
+	// Reading the body must fail rather than return a clean EOF, so the caller never mistakes the truncated body for a complete response
+	_, readErr := io.ReadAll(respBody)
+	require.Error(t, readErr, "a mid-stream failure must surface as a read error, not a clean EOF")
+	assert.ErrorIs(t, readErr, ErrStreamReset)
+}

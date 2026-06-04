@@ -237,11 +237,15 @@ func (s *Server) handleStreamInvoke(ctx context.Context, stream *webtransport.St
 	w := &peerStreamWriter{stream: stream, req: req}
 	perr := s.cfg.StreamHandler(ctx, payload, stream, w)
 	if perr != nil {
-		// We can only report a structured error if the response metadata frame has not been sent yet
-		// Once the body has started, a mid-stream failure surfaces as a truncated body when the stream closes
+		// If the response metadata frame has not been sent yet, we can still report the structured error in-band
 		if !w.flushed {
 			_ = protocol.WriteMessage(stream, req.ErrorReply(perr))
+			return
 		}
+
+		// The body has already started, so a clean close would look to the caller like a complete response
+		// Reset the send side instead, which the caller observes as a read error (ErrStreamReset)
+		stream.CancelWrite(streamErrorHandlerFailed)
 		return
 	}
 
