@@ -387,23 +387,20 @@ func (s *SQLiteProvider) LookupActor(ctx context.Context, ref ref.ActorRef, opts
 		// 1. existing_actor:
 		//    This CTE checks for an active actor on a healthy host.
 		//    This will return a row with "found_existing = 1" if the actor is active and the host it's on is healthy.
-		//    Note we don't apply a host filter (if any) here, to avoid the actor being considered as inactive (and replaced later in the query);
-		//    we will need to filter the result in the Go code at the end.
+		//    Note we don't apply a host filter (if any) here, to avoid the actor being considered as inactive (and replaced later in the query)
+		//    We will need to filter the result in the Go code at the end.
 		// 2. available_host:
 		//    This CTE selects a host with capacity to activate the actor on. It considers host filters (if any) too.
-		//    Note the `NOT EXISTS (SELECT 1 FROM existing_actor)` clause, which means the CTE will return 0 rows if existing_actor found
-		//    something previously.
+		//    Note the `NOT EXISTS (SELECT 1 FROM existing_actor)` clause, which means the CTE will return 0 rows if existing_actor found something previously.
 		// 3. actor_to_use:
 		//    This CTE combines the results of existing_actor and available_host in a UNION.
-		//    Because available_host doesn't return anything if there was an existing actor, this CTE will return *at most* one row
-		//    (it could be zero if there's no existing actor, and if no host is available).
+		//    Because available_host doesn't return anything if there was an existing actor, this CTE will return *at most* one row (it could be zero if there's no existing actor, and if no host is available).
 		// 4. Insert into the temporary table:
 		//    We insert the result of actor_to_use (including whether it was previously active or not) into the temporary table.
 		//    We need to do this because in SQLite we cannot have an INSERT (or REPLACE) query inside a CTE.
 		// 5. Activate a new actor if needed:
 		//    The REPLACE query activates a new actor if there's one with "found_existing = 0" in the temporary table.
-		//    We perform an upsert query here. This is because the actor (with same type and ID) may already be present in the table,
-		//    where it's active on a host that has failed but hasn't been garbage-collected yet.
+		//    We perform an upsert query here. This is because the actor (with same type and ID) may already be present in the table, where it's active on a host that has failed but hasn't been garbage-collected yet.
 		// 6. Return the result:
 		//    Finally, we return the result from the lookup_result table.
 		q := `

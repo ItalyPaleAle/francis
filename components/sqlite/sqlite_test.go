@@ -531,7 +531,8 @@ func TestActiveHostsList_HostForActorType(t *testing.T) {
 			},
 		}
 
-		// First three calls should return the host ID; fourth should be empty
+		// First three calls should return the host ID
+		// Fourth should be empty
 		for range 3 {
 			host := ahl.HostForActorType("typeA")
 			require.NotNil(t, host)

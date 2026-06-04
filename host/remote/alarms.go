@@ -70,7 +70,8 @@ func (h *Host) DeleteAlarm(ctx context.Context, actorType string, actorID string
 }
 
 // executeAlarm runs an alarm for an actor owned by this host
-// It is invoked by the runtime, which owns the alarm lease and schedule; this host only activates the actor and runs its Alarm method
+// It is invoked by the runtime, which owns the alarm lease and schedule
+// This host only activates the actor and runs its Alarm method
 func (h *Host) executeAlarm(ctx context.Context, req protocol.ExecuteAlarmRequest) (protocol.ExecuteAlarmResponse, *protocol.Error) {
 	aRef := ref.NewActorRef(req.ActorType, req.ActorID)
 

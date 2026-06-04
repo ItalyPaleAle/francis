@@ -10,10 +10,10 @@ import (
 )
 
 // LockAndStream runs a streamed invocation against a local actor and bridges the actor's writer to a reader for the caller.
-// fn must call the actor's InvokeStream with the provided writer; it runs under the actor's turn-based lock for the whole call.
+// fn must call the actor's InvokeStream with the provided writer, which runs under the actor's turn-based lock for the whole call.
 // The returned reader carries the response body and must be closed by the caller, which also unblocks the actor if the caller stops reading early.
 func (m *Manager) LockAndStream(parentCtx context.Context, r ref.ActorRef, activeOnly bool, fn func(ctx context.Context, act *ActiveActor, w actor.StreamResponseWriter) error) (contentType string, resp io.ReadCloser, err error) {
-	// The actor writes the response into the pipe; the caller reads it from the other end
+	// The actor writes the response into the pipe, the caller reads it from the other end
 	pr, pw := io.Pipe()
 	w := &pipeStreamWriter{pw: pw, ready: make(chan string, 1)}
 
@@ -21,7 +21,8 @@ func (m *Manager) LockAndStream(parentCtx context.Context, r ref.ActorRef, activ
 	finished := make(chan error, 1)
 
 	go func() {
-		// Run the actor under its turn-based lock; the lock is held for the entire streamed call
+		// Run the actor under its turn-based lock
+		// The lock is held for the entire streamed call
 		run := m.LockAndInvoke
 		if activeOnly {
 			run = m.LockAndInvokeActive

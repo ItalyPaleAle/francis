@@ -36,7 +36,8 @@ type ClientConfig struct {
 	DialTimeout time.Duration
 	// IdleTimeout closes a pooled session after it has been idle this long
 	IdleTimeout time.Duration
-	// Auth authenticates outgoing sessions; nil means transport-level TLS only
+	// Auth authenticates outgoing sessions
+	// Nil means transport-level TLS only
 	Auth Authenticator
 	// Log is the slog logger
 	Log *slog.Logger

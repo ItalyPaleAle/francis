@@ -347,7 +347,8 @@ func (rc *runtimeClient) handleExecuteAlarm(ctx context.Context, req *protocol.E
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode execute alarm request"))
 	}
 
-	// Run the alarm locally; a structured error is relayed back so the runtime can decide to retry or drop it
+	// Run the alarm locally
+	// A structured error is relayed back so the runtime can decide to retry or drop it
 	out, perr := rc.cfg.handlers.executeAlarm(ctx, payload)
 	if perr != nil {
 		return req.ErrorReply(perr)
@@ -379,12 +380,14 @@ func (rc *runtimeClient) handleTerminateActor(ctx context.Context, req *protocol
 	if perr != nil {
 		return req.ErrorReply(perr)
 	}
+
 	return req.Reply(protocol.KindTerminateActorResponse, nil)
 }
 
 // doRequest sends a host-to-runtime request on a new stream and decodes the response into out
 func (rc *runtimeClient) doRequest(ctx context.Context, kind string, payload any, out any) error {
-	// Snapshot the live session and identity; without a session there is nowhere to send the request
+	// Snapshot the live session and identity
+	// Without a session there is nowhere to send the request
 	session, hostID, sessionID := rc.snapshot()
 	if session == nil {
 		return errNotConnected

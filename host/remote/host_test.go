@@ -27,7 +27,8 @@ type testActor struct {
 	id    string
 	label string
 
-	// Optional observation channels; a nil channel means the event is not observed
+	// Optional observation channels
+	// A nil channel means the event is not observed
 	alarmCh      chan string
 	invokeCh     chan string
 	deactivateCh chan string

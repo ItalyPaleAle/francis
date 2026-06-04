@@ -37,7 +37,8 @@ type ActorProvider interface {
 	UnregisterHost(ctx context.Context, hostID string) error
 
 	// LookupActor returns the address of the actor host for a given actor type and ID.
-	// If the actor is not currently active on any host, a new actor is created and assigned to a random host; if it's not possible to find an instance capable of hosting the given actor, ErrNoHost is returned instead.
+	// If the actor is not currently active on any host, a new actor is created and assigned to a random host
+	// If it's not possible to find an instance capable of hosting the given actor, ErrNoHost is returned instead.
 	LookupActor(ctx context.Context, ref ref.ActorRef, opts LookupActorOpts) (LookupActorRes, error)
 
 	// RemoveActor removes an actor from the collection of active actors.

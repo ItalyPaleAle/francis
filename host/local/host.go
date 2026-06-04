@@ -58,6 +58,11 @@ type Host struct {
 	// resolver adapts this host to the placement resolver the shared messaging logic depends on
 	resolver actorcore.PlacementResolver
 
+	// ready is closed once the host has registered and is safe to invoke
+	// It also establishes a happens-before edge so a caller that waits on it observes the fully-initialized host
+	readyOnce sync.Once
+	ready     chan struct{}
+
 	// peerClient invokes actors owned by other hosts over WebTransport
 	peerClient *peer.Client
 	// peerServer serves invocations of actors owned by this host over WebTransport
@@ -227,6 +232,7 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 		bind:                   net.JoinHostPort(options.BindAddress, strconv.Itoa(options.BindPort)),
 		logSource:              options.Logger,
 		clock:                  options.clock,
+		ready:                  make(chan struct{}),
 	}
 	h.service = actor.NewService(h)
 
@@ -320,6 +326,10 @@ func (h *Host) Run(parentCtx context.Context) error {
 
 	h.log.InfoContext(ctx, "Registered actor host", slog.String("address", h.address))
 
+	// Signal readiness now that the host is registered and its fields are initialized
+	// Closing the channel also publishes those writes to any goroutine that waits on Ready
+	h.readyOnce.Do(func() { close(h.ready) })
+
 	// Before returning, we halt all remaining actors
 	defer func() {
 		haltErr := h.HaltAll()
@@ -370,6 +380,11 @@ func (h *Host) Run(parentCtx context.Context) error {
 // HaltAll halts all actors active on the host, gracefully
 func (h *Host) HaltAll() error {
 	return h.core.HaltAll()
+}
+
+// Ready returns a channel that is closed once the host has registered and is safe to invoke.
+func (h *Host) Ready() <-chan struct{} {
+	return h.ready
 }
 
 // HostID returns the ID of the host.

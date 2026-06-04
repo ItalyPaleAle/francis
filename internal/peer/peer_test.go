@@ -293,7 +293,8 @@ func TestPeerStreamInvocationUnsupported(t *testing.T) {
 		}
 		_, _, perr = pc.InvokeStream(reqCtx, addr, req, bytes.NewReader([]byte("body")))
 		reqCancel()
-		// Retry only transport failures while the server is starting; a structured reply ends the loop
+		// Retry only transport failures while the server is starting
+		// A structured reply ends the loop
 		if perr == nil || perr.Code != protocol.ErrCodeRetryLater || !time.Now().Before(deadline) {
 			break
 		}

@@ -25,7 +25,8 @@ const (
 )
 
 // Message kinds, grouped by traffic path so the allowed direction is obvious at a glance
-// Every request has a matching response kind; a response is correlated to its request via CorrelationID
+// Every request has a matching response kind
+// A response is correlated to its request via CorrelationID
 // Errors are reported with KindError regardless of the request, so a receiver can classify a reply as success-vs-error from the Kind alone and only then decode the operation-specific payload
 const (
 	// Host -> Runtime requests

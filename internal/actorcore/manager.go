@@ -18,14 +18,16 @@ import (
 )
 
 const (
-	// defaultActorsMapSize is the initial size of the active actors map; must be a power of 2
+	// defaultActorsMapSize is the initial size of the active actors map
+	// Must be a power of 2
 	defaultActorsMapSize = 128
 	// actorBusyReEnqueueInterval extends the idle time of an actor that is busy when selected for deactivation
 	actorBusyReEnqueueInterval = 10 * time.Second
 )
 
 // RemoveActorFunc removes an actor from the placement store when it is deactivated on this host
-// In local mode this calls the provider directly; in remote mode it notifies the runtime
+// In local mode this calls the provider directly
+// In remote mode it notifies the runtime
 type RemoveActorFunc func(ctx context.Context, r ref.ActorRef) error
 
 // Options configures a Manager
@@ -62,7 +64,7 @@ type Manager struct {
 	ActorsConfig map[string]components.ActorHostType
 	// Actors holds the actors currently active on this host, keyed by "actorType/actorID"
 	Actors *haxmap.Map[string, *ActiveActor]
-	// IdleProcessor schedules actors for deactivation when they become idle; created by Start
+	// IdleProcessor schedules actors for deactivation when they become idle
 	IdleProcessor *eventqueue.Processor[string, *ActiveActor]
 }
 
@@ -168,7 +170,7 @@ func (m *Manager) LockAndInvoke(parentCtx context.Context, r ref.ActorRef, fn fu
 // LockAndInvokeActive runs fn against an actor only if it is already active on this host
 // It never activates the actor, returning actor.ErrActorNotActive when the actor is not active, so active-only invocations can be honored authoritatively here
 func (m *Manager) LockAndInvokeActive(parentCtx context.Context, r ref.ActorRef, fn func(ctx context.Context, act *ActiveActor) (any, error)) (any, error) {
-	// Only proceed if the actor is already active; do not create it
+	// Only proceed if the actor is already active
 	act, ok := m.Actors.Get(r.String())
 	if !ok || act == nil {
 		return nil, actor.ErrActorNotActive
