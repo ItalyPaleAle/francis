@@ -33,6 +33,7 @@ type Runtime struct {
 	hostHealthCheckDeadline time.Duration
 	alarmsPollInterval      time.Duration
 	providerRequestTimeout  time.Duration
+	alarmExecutionTimeout   time.Duration
 	shutdownGracePeriod     time.Duration
 
 	// placementCache holds short-lived actor placement lookups to reduce provider load
@@ -88,6 +89,7 @@ func NewRuntime(provider components.ActorProvider, opts ...RuntimeOption) (*Runt
 		hostHealthCheckDeadline: options.hostHealthCheckDeadline,
 		alarmsPollInterval:      options.alarmsPollInterval,
 		providerRequestTimeout:  options.providerRequestTimeout,
+		alarmExecutionTimeout:   options.alarmExecutionTimeout,
 		shutdownGracePeriod:     options.shutdownGracePeriod,
 		activeAlarms:            make(map[string]struct{}),
 		retryingAlarms:          make(map[string]struct{}),

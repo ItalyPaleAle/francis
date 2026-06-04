@@ -312,3 +312,87 @@ func TestFetchAndEnqueueAlarmsScopedToConnectedHosts(t *testing.T) {
 		t.Fatal("expected the due alarm to be dispatched to the connected host")
 	}
 }
+
+func TestExecuteAlarmDispatchesOffTheProcessorLoop(t *testing.T) {
+	rt, prov := newTestRuntime(t)
+	c := connectTestHost(t, rt, prov, "10.1.0.20:1", protocol.ActorHostType{
+		ActorType:           "T",
+		MaxAttempts:         3,
+		InitialRetryDelayMs: 100,
+	})
+
+	// Lease two due alarms for the same host
+	err := prov.SetAlarm(t.Context(), ref.NewAlarmRef("T", "a1", "wake"), components.SetAlarmReq{
+		AlarmProperties: ref.AlarmProperties{DueTime: time.Now().Add(-time.Second)},
+	})
+	require.NoError(t, err)
+
+	err = prov.SetAlarm(t.Context(), ref.NewAlarmRef("T", "a2", "wake"), components.SetAlarmReq{
+		AlarmProperties: ref.AlarmProperties{DueTime: time.Now().Add(-time.Second)},
+	})
+	require.NoError(t, err)
+
+	leases, err := prov.FetchAndLeaseUpcomingAlarms(t.Context(), components.FetchAndLeaseUpcomingAlarmsReq{
+		Hosts: []string{c.hostID},
+	})
+	require.NoError(t, err)
+	require.Len(t, leases, 2)
+
+	// Every dispatch blocks until released, simulating a hung host
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	defer close(release)
+	rt.sendToHost = func(_ context.Context, _ *hostConn, env *protocol.Envelope) (*protocol.Envelope, error) {
+		var req protocol.ExecuteAlarmRequest
+		_ = env.DecodePayload(&req)
+		started <- req.ActorID
+		<-release
+		return env.ReplyWith(protocol.KindExecuteAlarmResponse, protocol.ExecuteAlarmResponse{})
+	}
+
+	// Invoke the processor callback serially, exactly as the event queue does
+	// If executeAlarm ran the dispatch inline, the first hung call would never return and the second would never start
+	for _, lease := range leases {
+		rt.executeAlarm(lease)
+	}
+
+	// Both dispatches must be in flight even though the first is still hung
+	got := map[string]bool{}
+	for range leases {
+		select {
+		case id := <-started:
+			got[id] = true
+		case <-time.After(2 * time.Second):
+			t.Fatal("a dispatch did not start while another was hung")
+		}
+	}
+	assert.Truef(t, got["a1"] && got["a2"], "both alarms should have been dispatched concurrently; a1:%v a2:%v", got["a1"], got["a2"])
+}
+
+func TestDispatchAlarmHostTimeoutRetryable(t *testing.T) {
+	rt, prov := newTestRuntime(t, WithAlarmExecutionTimeout(50*time.Millisecond))
+	c := connectTestHost(t, rt, prov, "10.1.0.21:1", protocol.ActorHostType{
+		ActorType:           "T",
+		MaxAttempts:         3,
+		InitialRetryDelayMs: 100,
+	})
+
+	aref := ref.NewAlarmRef("T", "a1", "wake")
+	lease := leaseTestAlarm(t, prov, c.hostID, aref, ref.AlarmProperties{
+		DueTime: time.Now().Add(-time.Second),
+	})
+
+	// The host accepts the request but never replies, so the round-trip must time out via the bounded context
+	rt.sendToHost = func(ctx context.Context, _ *hostConn, _ *protocol.Envelope) (*protocol.Envelope, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	start := time.Now()
+	status, err := rt.dispatchAlarm(t.Context(), lease)
+	elapsed := time.Since(start)
+	require.Error(t, err)
+	assert.Equal(t, executeAlarmStatusRetryable, status)
+	assert.GreaterOrEqual(t, elapsed, 50*time.Millisecond)
+	assert.Less(t, elapsed, 2*time.Second)
+}

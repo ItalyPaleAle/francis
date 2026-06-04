@@ -183,7 +183,8 @@ func (rt *Runtime) executeAlarm(lease *ref.AlarmLease) {
 	rt.alarmWg.Add(1)
 	rt.activeAlarmsLock.Unlock()
 
-	rt.executeActiveAlarm(lease)
+	// Run each execution on its own goroutine
+	go rt.executeActiveAlarm(lease)
 }
 
 // executeActiveAlarm dispatches an alarm to its owning host and handles the outcome
@@ -191,6 +192,8 @@ func (rt *Runtime) executeActiveAlarm(lease *ref.AlarmLease) {
 	// Release the shutdown drain barrier when this execution finishes
 	defer rt.alarmWg.Done()
 
+	// Use a background context rather than the runtime context so an in-flight execution is allowed to finish during the shutdown grace-period drain
+	// The host round-trip, which is the only unbounded step, is bounded separately in dispatchAlarm
 	ctx := context.Background()
 
 	key := lease.Key()
@@ -238,11 +241,18 @@ func (rt *Runtime) executeActiveAlarm(lease *ref.AlarmLease) {
 		multiplier := min(math.Pow(1.5, float64(lease.Attempts())), 10) * jitter
 		delay := rt.initialRetryDelay(lease.ActorRef().ActorType) * time.Duration(multiplier)
 		lease.IncreaseAttempts(rt.clock.Now().Add(delay))
-		enqErr := rt.alarmProcessor.Enqueue(lease)
-		if enqErr != nil {
-			log.Error("Error re-enqueueing alarm", slog.Any("error", enqErr))
+
+		// Do not re-enqueue once the runtime is draining: the processor is being torn down, so let the lease expire and another replica pick the alarm up
+		rt.activeAlarmsLock.Lock()
+		draining := rt.alarmsDraining
+		rt.activeAlarmsLock.Unlock()
+		if !draining {
+			enqErr := rt.alarmProcessor.Enqueue(lease)
+			if enqErr != nil {
+				log.Error("Error re-enqueueing alarm", slog.Any("error", enqErr))
+			}
+			isRetrying = true
 		}
-		isRetrying = true
 		return
 
 	case executeAlarmStatusCompleted:
@@ -304,9 +314,14 @@ func (rt *Runtime) dispatchAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 		return executeAlarmStatusRetryable, fmt.Errorf("error encoding execute alarm request: %w", err)
 	}
 
-	resp, err := rt.sendToHost(parentCtx, conn, req)
+	// Bound the host round-trip so a hung or half-open host cannot block the dispatch forever
+	// This is the call most likely to hang, since the host runs the actor's alarm handler before replying
+	sendCtx, sendCancel := context.WithTimeout(parentCtx, rt.alarmExecutionTimeout)
+	resp, err := rt.sendToHost(sendCtx, conn, req)
+	sendCancel()
 	if err != nil {
-		// The stream or session broke; retry later, and if the host has truly gone the next attempt abandons it
+		// The stream or session broke, or the round-trip timed out
+		// Retry later, and if the host has truly gone the next attempt abandons it
 		return executeAlarmStatusRetryable, fmt.Errorf("error dispatching alarm to host: %w", err)
 	}
 

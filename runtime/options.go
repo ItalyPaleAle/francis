@@ -24,6 +24,7 @@ func newRuntimeOptions() *runtimeOptions {
 		alarmsFetchAheadInterval:  2500 * time.Millisecond,
 		alarmsFetchAheadBatchSize: 25,
 		providerRequestTimeout:    15 * time.Second,
+		alarmExecutionTimeout:     60 * time.Second,
 		shutdownGracePeriod:       30 * time.Second,
 		clock:                     &clock.RealClock{},
 	}
@@ -39,6 +40,7 @@ type runtimeOptions struct {
 	alarmsFetchAheadInterval  time.Duration
 	alarmsFetchAheadBatchSize int
 	providerRequestTimeout    time.Duration
+	alarmExecutionTimeout     time.Duration
 	shutdownGracePeriod       time.Duration
 
 	// Allows setting a clock for testing
@@ -99,6 +101,11 @@ func WithAlarmsFetchAheadBatchSize(n int) RuntimeOption {
 // WithProviderRequestTimeout sets the timeout for requests to the provider
 func WithProviderRequestTimeout(d time.Duration) RuntimeOption {
 	return func(o *runtimeOptions) { o.providerRequestTimeout = d }
+}
+
+// WithAlarmExecutionTimeout sets the maximum time to wait for a host to execute a dispatched alarm
+func WithAlarmExecutionTimeout(d time.Duration) RuntimeOption {
+	return func(o *runtimeOptions) { o.alarmExecutionTimeout = d }
 }
 
 // WithShutdownGracePeriod sets the grace period for shutting down
