@@ -2,12 +2,10 @@ package local
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
-	"net/http"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -17,14 +15,13 @@ import (
 	"github.com/italypaleale/go-kit/eventqueue"
 	"github.com/italypaleale/go-kit/servicerunner"
 	"github.com/italypaleale/go-kit/ttlcache"
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/sqlite"
 	"github.com/italypaleale/francis/internal/actorcore"
+	"github.com/italypaleale/francis/internal/peer"
 	"github.com/italypaleale/francis/internal/peerauth"
 	"github.com/italypaleale/francis/internal/ref"
 )
@@ -57,13 +54,19 @@ type Host struct {
 	running       atomic.Bool
 	actorProvider components.ActorProvider
 	service       *actor.Service
-	client        *http.Client
 	core          *actorcore.Manager
+	// resolver adapts this host to the placement resolver the shared messaging logic depends on
+	resolver actorcore.PlacementResolver
+
+	// peerClient invokes actors owned by other hosts over WebTransport
+	peerClient *peer.Client
+	// peerServer serves invocations of actors owned by this host over WebTransport
+	peerServer *peer.Server
 
 	alarmProcessor *eventqueue.Processor[string, *ref.AlarmLease]
 
 	// Actor placement cache
-	placementCache *ttlcache.Cache[string, *actorPlacement]
+	placementCache *ttlcache.Cache[string, *actorcore.Placement]
 
 	// List of currently-active alarms
 	activeAlarmsLock sync.Mutex
@@ -71,8 +74,6 @@ type Host struct {
 	retryingAlarms   map[string]struct{}
 
 	bind                   string
-	serverTLSConfig        *tls.Config
-	peerAuth               peerauth.PeerAuthenticationMethod
 	alarmsPollInterval     time.Duration
 	providerRequestTimeout time.Duration
 	shutdownGracePeriod    time.Duration
@@ -223,10 +224,8 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 		alarmsPollInterval:     options.AlarmsPollInterval,
 		shutdownGracePeriod:    options.ShutdownGracePeriod,
 		providerRequestTimeout: options.ProviderRequestTimeout,
-		peerAuth:               options.PeerAuthentication,
 		bind:                   net.JoinHostPort(options.BindAddress, strconv.Itoa(options.BindPort)),
 		logSource:              options.Logger,
-		serverTLSConfig:        serverTLSConfig,
 		clock:                  options.clock,
 	}
 	h.service = actor.NewService(h)
@@ -242,15 +241,28 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 		ShutdownGracePeriod:    options.ShutdownGracePeriod,
 	})
 
-	// Init the HTTP client for the host
-	// This is configured with HTTP3 support
-	// TODO: Allow passing a client that is configured with OTel tracing
-	h.client = &http.Client{
-		Transport: &http3.Transport{
-			TLSClientConfig: clientTLSConfig,
-			QUICConfig:      &quic.Config{},
-		},
-	}
+	// The resolver lets the shared messaging logic resolve placement through the provider and confirm ownership before activating an actor
+	h.resolver = placementResolver{h: h}
+
+	// The peer client invokes actors owned by other hosts over WebTransport, authenticating the session at establishment
+	h.peerClient = peer.NewClient(peer.ClientConfig{
+		TLSConfig:   clientTLSConfig,
+		DialTimeout: options.ProviderRequestTimeout,
+		Auth:        options.PeerAuthentication,
+		Log:         options.Logger,
+	})
+
+	// The peer server serves invocations of actors owned by this host over WebTransport
+	// It reports our host ID so it can reject invocations aimed at a stale placement, and authorizes incoming sessions
+	h.peerServer = peer.NewServer(peer.ServerConfig{
+		Bind:          h.bind,
+		TLSConfig:     serverTLSConfig,
+		Handler:       h.peerInvokeObject,
+		StreamHandler: h.peerInvokeStream,
+		Auth:          options.PeerAuthentication,
+		Log:           options.Logger,
+		HostID:        h.HostID,
+	})
 
 	return h, nil
 }
@@ -275,10 +287,13 @@ func (h *Host) Run(parentCtx context.Context) error {
 	h.core.Start()
 	defer h.core.Close()
 
-	h.placementCache = ttlcache.NewCache[string, *actorPlacement](&ttlcache.CacheOptions{
+	h.placementCache = ttlcache.NewCache[string, *actorcore.Placement](&ttlcache.CacheOptions{
 		MaxTTL: placementCacheMaxTTL,
 	})
 	defer h.placementCache.Stop()
+
+	// Tear down pooled outbound peer sessions once the host stops serving
+	defer h.peerClient.Close()
 
 	// Perform provider initialization steps
 	initCtx, initCancel := context.WithTimeout(parentCtx, h.providerRequestTimeout)
@@ -343,8 +358,8 @@ func (h *Host) Run(parentCtx context.Context) error {
 			// In background also renew leases
 			h.runLeaseRenewal,
 
-			// Run the server that allows receiving requests from other nodes
-			h.runServer,
+			// Run the peer server that allows receiving invocations from other hosts
+			h.peerServer.Run,
 
 			// Run the actor provider
 			h.actorProvider.Run,

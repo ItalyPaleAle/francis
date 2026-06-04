@@ -17,7 +17,8 @@ type ActorInvoke interface {
 // ActorAlarm can be implemented by actors that offer the Alarm method.
 type ActorAlarm interface {
 	// Alarm is invoked upon execution of an alarm.
-	// The parameter "data" is an envelope that allows decoding the associated data into a custom object; it could be nil if there's no data
+	// The parameter "data" is an envelope that allows decoding the associated data into a custom object
+	// It could be nil if there's no data
 	Alarm(ctx context.Context, name string, data Envelope) error
 }
 

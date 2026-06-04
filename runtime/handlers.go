@@ -183,7 +183,8 @@ func (rt *Runtime) handleHealthCheck(parentCtx context.Context, c *hostConn, req
 		UpdateLastHealthCheck: true,
 	}
 
-	// A non-nil actor type list replaces the host's supported types; a nil list leaves them unchanged
+	// A non-nil actor type list replaces the host's supported types
+	// A nil list leaves them unchanged
 	if payload.ActorTypes != nil {
 		updateReq.ActorTypes = protocolActorTypesToComponents(payload.ActorTypes)
 		c.actorTypes = payload.ActorTypes

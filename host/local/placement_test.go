@@ -62,7 +62,7 @@ func TestLookupActor(t *testing.T) {
 		host.core.Start()
 
 		// Initialize placement cache
-		host.placementCache = ttlcache.NewCache[string, *actorPlacement](&ttlcache.CacheOptions{
+		host.placementCache = ttlcache.NewCache[string, *actorcore.Placement](&ttlcache.CacheOptions{
 			MaxTTL:      placementCacheMaxTTL,
 			InitialSize: 8,
 		})
@@ -112,7 +112,7 @@ func TestLookupActor(t *testing.T) {
 		actorRef := ref.NewActorRef("testactor", "actor2")
 
 		// Add an entry to the cache
-		cachedPlacement := &actorPlacement{
+		cachedPlacement := &actorcore.Placement{
 			HostID:  "cached-host-456",
 			Address: "cached.example.com:8080",
 		}
@@ -139,7 +139,7 @@ func TestLookupActor(t *testing.T) {
 		actorRef := ref.NewActorRef("testactor", "actor3")
 
 		// Add an entry to the cache
-		cachedPlacement := &actorPlacement{
+		cachedPlacement := &actorcore.Placement{
 			HostID:  "cached-host-456",
 			Address: "cached.example.com:8080",
 		}
@@ -220,7 +220,7 @@ func TestLookupActor(t *testing.T) {
 		actorRef := ref.NewActorRef("testactor", "error-no-host-actor")
 
 		// Add an entry to the cache first to verify it gets deleted
-		cachedPlacement := &actorPlacement{
+		cachedPlacement := &actorcore.Placement{
 			HostID:  "cached-host-456",
 			Address: "cached.example.com:8080",
 		}
@@ -256,7 +256,7 @@ func TestLookupActor(t *testing.T) {
 		actorRef := ref.NewActorRef("testactor", "error-other-actor")
 
 		// Add an entry to the cache first to verify it gets deleted
-		cachedPlacement := &actorPlacement{
+		cachedPlacement := &actorcore.Placement{
 			HostID:  "cached-host-456",
 			Address: "cached.example.com:8080",
 		}
@@ -466,7 +466,7 @@ func TestLookupActor(t *testing.T) {
 			Maybe()
 
 		const numGoroutines = 5
-		results := make([]*actorPlacement, numGoroutines)
+		results := make([]*actorcore.Placement, numGoroutines)
 		errors := make([]error, numGoroutines)
 
 		// Launch multiple concurrent lookups
@@ -524,7 +524,7 @@ func TestLookupActor(t *testing.T) {
 				Once()
 		}
 
-		results := make([]*actorPlacement, numActors)
+		results := make([]*actorcore.Placement, numActors)
 		errors := make([]error, numActors)
 
 		// Launch concurrent lookups for different actors
@@ -698,7 +698,7 @@ func TestIsLocal(t *testing.T) {
 			log:    log,
 		}
 
-		placement := &actorPlacement{
+		placement := &actorcore.Placement{
 			HostID:  "test-host-123",
 			Address: "localhost:8080",
 		}
@@ -712,7 +712,7 @@ func TestIsLocal(t *testing.T) {
 			log:    log,
 		}
 
-		placement := &actorPlacement{
+		placement := &actorcore.Placement{
 			HostID:  "remote-host-456",
 			Address: "remote.example.com:8080",
 		}

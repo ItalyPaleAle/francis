@@ -24,9 +24,11 @@ type AlarmRef struct {
 type AlarmProperties struct {
 	// DueTimeUnixMs is the absolute due time in Unix milliseconds
 	DueTimeUnixMs int64 `msgpack:"due"`
-	// Interval is the repetition interval as an ISO8601-formatted duration string; empty means non-repeating
+	// Interval is the repetition interval as an ISO8601-formatted duration string
+	// Empty means non-repeating
 	Interval string `msgpack:"interval,omitempty"`
-	// TTLUnixMs is the absolute deadline for repeating alarms in Unix milliseconds; zero means no deadline
+	// TTLUnixMs is the absolute deadline for repeating alarms in Unix milliseconds
+	// Zero means no deadline
 	TTLUnixMs int64 `msgpack:"ttl,omitempty"`
 	// Data is the opaque data associated with the alarm
 	Data []byte `msgpack:"data,omitempty"`
@@ -35,9 +37,11 @@ type AlarmProperties struct {
 // ActorHostType describes a supported actor type advertised by a host during registration
 type ActorHostType struct {
 	ActorType string `msgpack:"type"`
-	// IdleTimeoutMs is the idle timeout in milliseconds; a negative value means no timeout
+	// IdleTimeoutMs is the idle timeout in milliseconds
+	// A negative value means no timeout
 	IdleTimeoutMs int64 `msgpack:"idle,omitempty"`
-	// ConcurrencyLimit is the maximum number of concurrent actors of this type; zero means no limit
+	// ConcurrencyLimit is the maximum number of concurrent actors of this type
+	// Zero means no limit
 	ConcurrencyLimit int32 `msgpack:"limit,omitempty"`
 	// DeactivationTimeoutMs is the deactivation timeout in milliseconds
 	DeactivationTimeoutMs int64 `msgpack:"deact,omitempty"`
@@ -88,7 +92,7 @@ type UnregisterHostResponse struct {
 
 // HealthCheckRequest is a periodic health report from the host to the runtime
 type HealthCheckRequest struct {
-	// ActorTypes optionally replaces the set of supported actor types; nil leaves them unchanged
+	// ActorTypes optionally replaces the set of supported actor types, when non-nil
 	ActorTypes []ActorHostType `msgpack:"actorTypes,omitempty"`
 }
 
@@ -99,7 +103,7 @@ type LookupActorRequest struct {
 	// ActiveOnly looks up only actors that are already active and does not allocate a new placement
 	ActiveOnly bool `msgpack:"activeOnly,omitempty"`
 	// SkipCache bypasses any runtime-side placement cache and forces a fresh provider lookup
-	// Hosts set this when retrying after a stale-placement failure
+	// Hosts set this when retrying after a stale-placement failure and on the receiving side of a peer invocation to authoritatively confirm ownership before activating an actor
 	SkipCache bool `msgpack:"skipCache,omitempty"`
 }
 
@@ -156,7 +160,8 @@ type SetStateRequest struct {
 
 	// Data is the MessagePack-encoded actor state
 	Data []byte `msgpack:"data,omitempty"`
-	// TTLMs is an optional time-to-live for the state, in milliseconds; zero means no TTL
+	// TTLMs is an optional time-to-live for the state, in milliseconds
+	// Zero means no TTL
 	TTLMs int64 `msgpack:"ttl,omitempty"`
 }
 

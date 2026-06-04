@@ -197,7 +197,7 @@ func (rt *Runtime) runServer(ctx context.Context) error {
 }
 
 // serveSession serves a single host's WebTransport session
-// The first stream must carry the registration handshake; subsequent streams are dispatched concurrently
+// The first stream must carry the registration handshake, while subsequent streams are dispatched concurrently
 func (rt *Runtime) serveSession(parentCtx context.Context, session *webtransport.Session) {
 	sessCtx := session.Context()
 

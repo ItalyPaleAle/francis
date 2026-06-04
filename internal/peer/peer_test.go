@@ -1,10 +1,11 @@
-package remote
+package peer
 
 import (
 	"bytes"
 	"context"
 	"io"
 	"log/slog"
+	"net"
 	"testing"
 	"time"
 
@@ -15,6 +16,16 @@ import (
 	"github.com/italypaleale/francis/internal/hosttls"
 	"github.com/italypaleale/francis/protocol"
 )
+
+// freeUDPAddr returns a localhost address with a currently-free UDP port
+func freeUDPAddr(t *testing.T) string {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := pc.LocalAddr().String()
+	require.NoError(t, pc.Close())
+	return addr
+}
 
 // echoHandler returns the request argument as the result, or a structured error for the "boom" method
 func echoHandler(_ context.Context, req protocol.InvokeActorRequest) (protocol.InvokeActorResponse, *protocol.Error) {
@@ -33,31 +44,47 @@ func TestPeerServerHandleObject(t *testing.T) {
 	}
 
 	t.Run("object invocation returns the result", func(t *testing.T) {
-		ps := newPeerServer(peerServerConfig{hostID: func() string { return "host-b" }, handler: echoHandler})
-		resp := ps.handleObject(t.Context(), newReq(t, protocol.InvokeActorRequest{
+		ps := NewServer(ServerConfig{
+			HostID:  func() string { return "host-b" },
+			Handler: echoHandler,
+		})
+		env := newReq(t, protocol.InvokeActorRequest{
 			ActorType: "T",
 			ActorID:   "a1",
 			Method:    "echo",
 			Mode:      protocol.InvocationModeObject,
 			Data:      []byte("arg"),
-		}), protocol.InvokeActorRequest{Method: "echo", Data: []byte("arg")})
+		})
+		resp := ps.handleObject(t.Context(), env, protocol.InvokeActorRequest{
+			Method: "echo",
+			Data:   []byte("arg"),
+		})
 		require.Equal(t, protocol.KindInvokeActorResponse, resp.Kind)
+
 		var out protocol.InvokeActorResponse
-		require.NoError(t, resp.DecodePayload(&out))
+		err := resp.DecodePayload(&out)
+		require.NoError(t, err)
 		assert.Equal(t, []byte("arg"), out.Data)
 	})
 
 	t.Run("handler error is relayed", func(t *testing.T) {
-		ps := newPeerServer(peerServerConfig{hostID: func() string { return "host-b" }, handler: echoHandler})
-		resp := ps.handleObject(t.Context(), protocol.NewEnvelope(protocol.KindInvokeActor, nil), protocol.InvokeActorRequest{Method: "boom"})
+		ps := NewServer(ServerConfig{
+			HostID:  func() string { return "host-b" },
+			Handler: echoHandler,
+		})
+		env := protocol.NewEnvelope(protocol.KindInvokeActor, nil)
+		resp := ps.handleObject(t.Context(), env, protocol.InvokeActorRequest{Method: "boom"})
 		perr, ok := resp.AsError()
 		require.True(t, ok)
 		assert.Equal(t, protocol.ErrCodeInvokeFailed, perr.Code)
 	})
 
 	t.Run("object invocation is unsupported when no handler is registered", func(t *testing.T) {
-		ps := newPeerServer(peerServerConfig{hostID: func() string { return "host-b" }})
-		resp := ps.handleObject(t.Context(), protocol.NewEnvelope(protocol.KindInvokeActor, nil), protocol.InvokeActorRequest{})
+		ps := NewServer(ServerConfig{
+			HostID: func() string { return "host-b" },
+		})
+		env := protocol.NewEnvelope(protocol.KindInvokeActor, nil)
+		resp := ps.handleObject(t.Context(), env, protocol.InvokeActorRequest{})
 		perr, ok := resp.AsError()
 		require.True(t, ok)
 		assert.Equal(t, protocol.ErrCodeInvokeModeUnsupported, perr.Code)
@@ -70,12 +97,12 @@ func TestPeerInvocationIntegration(t *testing.T) {
 	srvTLS, _, err := hosttls.HostTLSOptions{}.GetTLSConfig()
 	require.NoError(t, err)
 
-	ps := newPeerServer(peerServerConfig{
-		bind:      addr,
-		tlsConfig: srvTLS,
-		hostID:    func() string { return "host-b" },
-		handler:   echoHandler,
-		log:       slog.New(slog.DiscardHandler),
+	ps := NewServer(ServerConfig{
+		Bind:      addr,
+		TLSConfig: srvTLS,
+		HostID:    func() string { return "host-b" },
+		Handler:   echoHandler,
+		Log:       slog.New(slog.DiscardHandler),
 	})
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -84,9 +111,15 @@ func TestPeerInvocationIntegration(t *testing.T) {
 		_ = ps.Run(ctx)
 	}()
 
-	_, cliTLS, err := hosttls.HostTLSOptions{InsecureSkipTLSValidation: true}.GetTLSConfig()
+	_, cliTLS, err := hosttls.HostTLSOptions{
+		InsecureSkipTLSValidation: true,
+	}.GetTLSConfig()
 	require.NoError(t, err)
-	pc := newPeerClient(cliTLS, 5*time.Second, slog.New(slog.DiscardHandler))
+	pc := NewClient(ClientConfig{
+		TLSConfig:   cliTLS,
+		DialTimeout: 5 * time.Second,
+		Log:         slog.New(slog.DiscardHandler),
+	})
 	defer pc.Close()
 
 	arg, err := protocol.Marshal("hello peer")
@@ -156,12 +189,12 @@ func TestPeerStreamInvocationIntegration(t *testing.T) {
 	srvTLS, _, err := hosttls.HostTLSOptions{}.GetTLSConfig()
 	require.NoError(t, err)
 
-	ps := newPeerServer(peerServerConfig{
-		bind:          addr,
-		tlsConfig:     srvTLS,
-		hostID:        func() string { return "host-b" },
-		streamHandler: echoStreamHandler,
-		log:           slog.New(slog.DiscardHandler),
+	ps := NewServer(ServerConfig{
+		Bind:          addr,
+		TLSConfig:     srvTLS,
+		HostID:        func() string { return "host-b" },
+		StreamHandler: echoStreamHandler,
+		Log:           slog.New(slog.DiscardHandler),
 	})
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -170,9 +203,15 @@ func TestPeerStreamInvocationIntegration(t *testing.T) {
 		_ = ps.Run(ctx)
 	}()
 
-	_, cliTLS, err := hosttls.HostTLSOptions{InsecureSkipTLSValidation: true}.GetTLSConfig()
+	_, cliTLS, err := hosttls.HostTLSOptions{
+		InsecureSkipTLSValidation: true,
+	}.GetTLSConfig()
 	require.NoError(t, err)
-	pc := newPeerClient(cliTLS, 5*time.Second, slog.New(slog.DiscardHandler))
+	pc := NewClient(ClientConfig{
+		TLSConfig:   cliTLS,
+		DialTimeout: 5 * time.Second,
+		Log:         slog.New(slog.DiscardHandler),
+	})
 	defer pc.Close()
 
 	payload := []byte("a streamed request body that travels as raw bytes")
@@ -185,14 +224,15 @@ func TestPeerStreamInvocationIntegration(t *testing.T) {
 	)
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		reqCtx, reqCancel := context.WithTimeout(ctx, 2*time.Second)
-		contentType, respBody, perr = pc.InvokeStream(reqCtx, addr, protocol.InvokeActorRequest{
+		req := protocol.InvokeActorRequest{
 			TargetHostID: "host-b",
 			ActorType:    "T",
 			ActorID:      "a1",
 			Method:       "stream",
 			ContentType:  "application/test",
-		}, bytes.NewReader(payload))
+		}
+		reqCtx, reqCancel := context.WithTimeout(ctx, 2*time.Second)
+		contentType, respBody, perr = pc.InvokeStream(reqCtx, addr, req, bytes.NewReader(payload))
 		reqCancel()
 		if perr == nil || !time.Now().Before(deadline) {
 			break
@@ -216,12 +256,12 @@ func TestPeerStreamInvocationUnsupported(t *testing.T) {
 	require.NoError(t, err)
 
 	// A server with only an object handler does not support stream invocation
-	ps := newPeerServer(peerServerConfig{
-		bind:      addr,
-		tlsConfig: srvTLS,
-		hostID:    func() string { return "host-b" },
-		handler:   echoHandler,
-		log:       slog.New(slog.DiscardHandler),
+	ps := NewServer(ServerConfig{
+		Bind:      addr,
+		TLSConfig: srvTLS,
+		HostID:    func() string { return "host-b" },
+		Handler:   echoHandler,
+		Log:       slog.New(slog.DiscardHandler),
 	})
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -230,21 +270,28 @@ func TestPeerStreamInvocationUnsupported(t *testing.T) {
 		_ = ps.Run(ctx)
 	}()
 
-	_, cliTLS, err := hosttls.HostTLSOptions{InsecureSkipTLSValidation: true}.GetTLSConfig()
+	_, cliTLS, err := hosttls.HostTLSOptions{
+		InsecureSkipTLSValidation: true,
+	}.GetTLSConfig()
 	require.NoError(t, err)
-	pc := newPeerClient(cliTLS, 5*time.Second, slog.New(slog.DiscardHandler))
+	pc := NewClient(ClientConfig{
+		TLSConfig:   cliTLS,
+		DialTimeout: 5 * time.Second,
+		Log:         slog.New(slog.DiscardHandler),
+	})
 	defer pc.Close()
 
 	var perr *protocol.Error
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		reqCtx, reqCancel := context.WithTimeout(ctx, 2*time.Second)
-		_, _, perr = pc.InvokeStream(reqCtx, addr, protocol.InvokeActorRequest{
+		req := protocol.InvokeActorRequest{
 			TargetHostID: "host-b",
 			ActorType:    "T",
 			ActorID:      "a1",
 			Method:       "stream",
-		}, bytes.NewReader([]byte("body")))
+		}
+		_, _, perr = pc.InvokeStream(reqCtx, addr, req, bytes.NewReader([]byte("body")))
 		reqCancel()
 		// Retry only transport failures while the server is starting; a structured reply ends the loop
 		if perr == nil || perr.Code != protocol.ErrCodeRetryLater || !time.Now().Before(deadline) {

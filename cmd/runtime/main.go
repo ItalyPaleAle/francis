@@ -103,7 +103,7 @@ func run(ctx context.Context, cfg *config, log *slog.Logger) error {
 		runtime.WithShutdownGracePeriod(shutdownGracePeriod),
 	}
 
-	// Load the TLS certificate if configured; otherwise the runtime generates a self-signed one
+	// Load the TLS certificate if configured, otherwise the runtime generates a self-signed one
 	if cfg.TLS.Cert != "" && cfg.TLS.Key != "" {
 		cert, certErr := tls.LoadX509KeyPair(cfg.TLS.Cert, cfg.TLS.Key)
 		if certErr != nil {

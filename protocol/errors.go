@@ -28,7 +28,7 @@ const (
 	ErrCodeSessionSuperseded ErrorCode = "session_superseded"
 	// ErrCodeHostUnregistered indicates the host registration is no longer valid
 	ErrCodeHostUnregistered ErrorCode = "host_unregistered"
-	// ErrCodeHostDraining indicates the target host is draining and cannot accept new work; retry after a delay
+	// ErrCodeHostDraining indicates the target host is draining and cannot accept new work, retry after a delay
 	ErrCodeHostDraining ErrorCode = "host_draining"
 	// ErrCodeHostMismatch indicates the request reached the wrong host, likely due to stale placement
 	ErrCodeHostMismatch ErrorCode = "host_mismatch"
@@ -40,7 +40,7 @@ const (
 	ErrCodeActorNotHosted ErrorCode = "actor_not_hosted"
 	// ErrCodeActorNotActive indicates an active-only lookup found no active actor, and is not retryable
 	ErrCodeActorNotActive ErrorCode = "actor_not_active"
-	// ErrCodeActorHalted indicates the actor is being halted; retry after a delay
+	// ErrCodeActorHalted indicates the actor is being halted, retry after a delay
 	ErrCodeActorHalted ErrorCode = "actor_halted"
 	// ErrCodeActorTypeUnsupported indicates the actor type is not supported in the cluster
 	ErrCodeActorTypeUnsupported ErrorCode = "actor_type_unsupported"

@@ -18,6 +18,7 @@ import (
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/actorcore"
+	"github.com/italypaleale/francis/internal/peer"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/protocol"
 )
@@ -40,16 +41,18 @@ type Host struct {
 
 	// core owns the active actors, their turn-based invocation, idle deactivation, and halting
 	core *actorcore.Manager
+	// resolver adapts this host to the placement resolver the shared messaging logic depends on
+	resolver actorcore.PlacementResolver
 
 	// runtimeClient maintains the persistent session to the runtime for placement, state, and alarm operations
 	runtimeClient *runtimeClient
 	// peerClient invokes actors owned by other hosts
-	peerClient *peerClient
+	peerClient *peer.Client
 	// peerServer serves invocations of actors owned by this host
-	peerServer *peerServer
+	peerServer *peer.Server
 
 	// Actor placement cache
-	placementCache *ttlcache.Cache[string, *actorPlacement]
+	placementCache *ttlcache.Cache[string, *actorcore.Placement]
 
 	clientTLSConfig     *tls.Config
 	requestTimeout      time.Duration
@@ -142,8 +145,15 @@ func newHost(options *newHostOptions) (*Host, error) {
 		ShutdownGracePeriod:    options.ShutdownGracePeriod,
 	})
 
+	// The resolver lets the shared messaging logic resolve placement through the runtime and confirm ownership before activating an actor
+	h.resolver = placementResolver{h: h}
+
 	// The peer client invokes actors owned by other hosts
-	h.peerClient = newPeerClient(clientTLSConfig, options.RequestTimeout, options.Logger)
+	h.peerClient = peer.NewClient(peer.ClientConfig{
+		TLSConfig:   clientTLSConfig,
+		DialTimeout: options.RequestTimeout,
+		Log:         options.Logger,
+	})
 
 	// The runtime client maintains the session to the runtime and serves runtime-initiated requests
 	// Its actor types are filled in at Run, once all actor types have been registered
@@ -154,6 +164,8 @@ func newHost(options *newHostOptions) (*Host, error) {
 		requestTimeout: options.RequestTimeout,
 		log:            options.Logger,
 		clock:          options.clock,
+		// On graceful shutdown the runtime client drains local actors while the session is still alive, so their deactivation can still persist state and clear placement through the runtime
+		onDrain: h.drainActors,
 		handlers: runtimeHandlers{
 			executeAlarm:   h.executeAlarm,
 			terminateActor: h.terminateActor,
@@ -162,13 +174,13 @@ func newHost(options *newHostOptions) (*Host, error) {
 
 	// The peer server serves invocations of actors owned by this host
 	// It reports our current runtime-assigned host ID so it can reject invocations aimed at a stale placement
-	h.peerServer = newPeerServer(peerServerConfig{
-		bind:          h.bind,
-		tlsConfig:     serverTLSConfig,
-		handler:       h.peerInvokeObject,
-		streamHandler: h.peerInvokeStream,
-		log:           options.Logger,
-		hostID:        h.runtimeClient.HostID,
+	h.peerServer = peer.NewServer(peer.ServerConfig{
+		Bind:          h.bind,
+		TLSConfig:     serverTLSConfig,
+		Handler:       h.peerInvokeObject,
+		StreamHandler: h.peerInvokeStream,
+		Log:           options.Logger,
+		HostID:        h.runtimeClient.HostID,
 	})
 
 	return h, nil
@@ -194,10 +206,13 @@ func (h *Host) Run(parentCtx context.Context) error {
 	h.core.Start()
 	defer h.core.Close()
 
-	h.placementCache = ttlcache.NewCache[string, *actorPlacement](&ttlcache.CacheOptions{
+	h.placementCache = ttlcache.NewCache[string, *actorcore.Placement](&ttlcache.CacheOptions{
 		MaxTTL: placementCacheMaxTTL,
 	})
 	defer h.placementCache.Stop()
+
+	// Tear down pooled outbound peer sessions once the host stops serving
+	defer h.peerClient.Close()
 
 	// Advertise the registered actor types to the runtime at registration time
 	h.runtimeClient.cfg.actorTypes = componentsActorTypesToProtocol(h.core.RegisteredActorTypes())
@@ -205,13 +220,9 @@ func (h *Host) Run(parentCtx context.Context) error {
 	// Use the runtime client's logger once it learns the host ID
 	h.log = h.logSource
 
-	// Before returning, halt all remaining actors so they deactivate cleanly
-	defer func() {
-		haltErr := h.HaltAll()
-		if haltErr != nil {
-			h.log.Warn("Error halting actors", slog.Any("error", haltErr))
-		}
-	}()
+	// On graceful shutdown the runtime client drains actors while its session is still alive, so this is only a fallback for an ungraceful exit where no runtime session was available
+	// Halting an already-halted actor is a no-op, so running it after a graceful drain is harmless
+	defer h.drainActors()
 
 	// Run all services
 	// This blocks until the context is canceled or one of the services returns
@@ -239,6 +250,15 @@ func (h *Host) HostID() string {
 // HaltAll halts all actors active on the host, gracefully
 func (h *Host) HaltAll() error {
 	return h.core.HaltAll()
+}
+
+// drainActors halts all active actors during graceful shutdown, logging any error
+// The runtime client calls this while its session is still alive, so actor deactivation can still persist state and clear placement through the runtime
+func (h *Host) drainActors() {
+	err := h.HaltAll()
+	if err != nil {
+		h.log.Warn("Error draining actors during shutdown", slog.Any("error", err))
+	}
 }
 
 // Halt gracefully halts an actor that is hosted on the current host

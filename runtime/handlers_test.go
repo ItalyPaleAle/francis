@@ -137,7 +137,8 @@ func TestHandleLookupActorCache(t *testing.T) {
 	resp := dispatchReq(t, rt, c, protocol.KindLookupActor, protocol.LookupActorRequest{ActorType: "T", ActorID: "a1"})
 	require.Equal(t, protocol.KindLookupActorResponse, resp.Kind)
 
-	// Remove the host from the provider; the cache should still serve the prior placement
+	// Remove the host from the provider
+	// The cache should still serve the prior placement
 	err := prov.UnregisterHost(t.Context(), hostID)
 	require.NoError(t, err)
 

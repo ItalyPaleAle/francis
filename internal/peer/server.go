@@ -1,4 +1,4 @@
-package remote
+package peer
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/quic-go/webtransport-go"
 
@@ -15,74 +16,109 @@ import (
 	"github.com/italypaleale/francis/protocol"
 )
 
-// peerInvokeHandler executes an object invocation for an actor owned by this host
+// InvokeHandler executes an object invocation for an actor owned by this host
 // It returns the encoded result, or a structured error such as actor_halted or invoke_failed
-type peerInvokeHandler func(ctx context.Context, req protocol.InvokeActorRequest) (protocol.InvokeActorResponse, *protocol.Error)
+type InvokeHandler func(ctx context.Context, req protocol.InvokeActorRequest) (protocol.InvokeActorResponse, *protocol.Error)
 
-// peerStreamHandler executes a stream invocation for an actor owned by this host
+// StreamHandler executes a stream invocation for an actor owned by this host
 // It reads the request body from body and writes the response to w, returning a structured error if the invocation fails
-type peerStreamHandler func(ctx context.Context, req protocol.InvokeActorRequest, body io.Reader, w actor.StreamResponseWriter) *protocol.Error
+type StreamHandler func(ctx context.Context, req protocol.InvokeActorRequest, body io.Reader, w actor.StreamResponseWriter) *protocol.Error
 
-// peerServerConfig configures a peerServer
-type peerServerConfig struct {
-	bind          string
-	tlsConfig     *tls.Config
-	handler       peerInvokeHandler
-	streamHandler peerStreamHandler
-	log           *slog.Logger
+// ServerConfig configures a Server
+type ServerConfig struct {
+	// Bind is the address and port the peer server listens on
+	Bind string
+	// TLSConfig is the server TLS configuration
+	TLSConfig *tls.Config
+	// IdleTimeout closes a session after it has been idle this long
+	IdleTimeout time.Duration
+	// Handler runs object invocations
+	// If nil, object invocation is unsupported
+	Handler InvokeHandler
+	// StreamHandler runs stream invocations
+	// If nil, stream invocation is unsupported
+	StreamHandler StreamHandler
+	// Auth authorizes incoming sessions
+	// If nil, there's no authnorization (we still use TLS for transport-level encryption)
+	Auth Authenticator
+	// Log is the slog logger
+	Log *slog.Logger
 
-	// hostID returns this host's current runtime-assigned ID, used to reject invocations aimed at a stale placement
-	hostID func() string
+	// HostID returns this host's current runtime-assigned ID, used to reject invocations aimed at a stale placement
+	HostID func() string
 }
 
-// peerServer accepts host-to-host actor invocations over WebTransport
-type peerServer struct {
-	cfg peerServerConfig
+// Server accepts host-to-host actor invocations over WebTransport
+type Server struct {
+	cfg ServerConfig
 }
 
-// newPeerServer returns a peerServer with defaults filled in
-func newPeerServer(cfg peerServerConfig) *peerServer {
-	if cfg.log == nil {
-		cfg.log = slog.New(slog.DiscardHandler)
+// NewServer returns a Server with defaults filled in
+func NewServer(cfg ServerConfig) *Server {
+	if cfg.Log == nil {
+		cfg.Log = slog.New(slog.DiscardHandler)
+	}
+	if cfg.IdleTimeout <= 0 {
+		cfg.IdleTimeout = defaultIdleTimeout
 	}
 
-	return &peerServer{
+	return &Server{
 		cfg: cfg,
 	}
 }
 
 // Run starts the peer WebTransport server and blocks until the context is canceled
-func (ps *peerServer) Run(ctx context.Context) error {
+func (s *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
-	srv := wt.NewServer(ps.cfg.bind, ps.cfg.tlsConfig, mux)
+	srv := wt.NewServer(s.cfg.Bind, s.cfg.TLSConfig, mux, wt.WithMaxIdleTimeout(s.cfg.IdleTimeout))
+
+	// Health endpoint for liveness probes over plain HTTP/3
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
 
 	// WebTransport endpoint that other hosts dial to invoke actors
 	mux.HandleFunc(protocol.PeerConnectPath, func(w http.ResponseWriter, r *http.Request) {
+		// Authorize the session before upgrading it
+		// A nil authenticator means transport-level TLS is the only check
+		if s.cfg.Auth != nil {
+			ok, rErr := s.cfg.Auth.ValidateIncomingRequest(r)
+			if rErr != nil {
+				s.cfg.Log.WarnContext(r.Context(), "Error authorizing peer session", slog.Any("error", rErr))
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			if !ok {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+		}
+
 		session, rErr := srv.Upgrade(w, r)
 		if rErr != nil {
-			ps.cfg.log.WarnContext(r.Context(), "Failed to upgrade peer WebTransport session", slog.Any("error", rErr))
+			s.cfg.Log.WarnContext(r.Context(), "Failed to upgrade peer WebTransport session", slog.Any("error", rErr))
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 
-		go ps.serveSession(ctx, session)
+		go s.serveSession(ctx, session)
 	})
 
-	ps.cfg.log.InfoContext(ctx, "Peer WebTransport server started", slog.String("bind", ps.cfg.bind))
+	s.cfg.Log.InfoContext(ctx, "Peer WebTransport server started", slog.String("bind", s.cfg.Bind))
 
-	// Serve in the background so we can shut down when the context is canceled
-	srvErr := make(chan error, 1)
+	// Start the server in a goroutine
+	srvErrCh := make(chan error, 1)
 	go func() {
 		rErr := srv.ListenAndServe()
 		if wt.IsServeError(rErr) {
-			srvErr <- fmt.Errorf("error running peer WebTransport server: %w", rErr)
+			srvErrCh <- fmt.Errorf("error running peer WebTransport server: %w", rErr)
 			return
 		}
-		srvErr <- nil
+		srvErrCh <- nil
 	}()
 
 	select {
-	case err := <-srvErr:
+	case err := <-srvErrCh:
 		return err
 	case <-ctx.Done():
 		// Fall through to graceful shutdown
@@ -91,14 +127,14 @@ func (ps *peerServer) Run(ctx context.Context) error {
 	// Close the server, terminating all peer sessions
 	err := srv.Close()
 	if err != nil {
-		ps.cfg.log.WarnContext(ctx, "Peer WebTransport server shutdown error", slog.Any("error", err))
+		s.cfg.Log.WarnContext(ctx, "Peer WebTransport server shutdown error", slog.Any("error", err))
 	}
 
 	return nil
 }
 
 // serveSession dispatches each stream of a peer session as an independent invocation
-func (ps *peerServer) serveSession(ctx context.Context, session *webtransport.Session) {
+func (s *Server) serveSession(ctx context.Context, session *webtransport.Session) {
 	sessCtx := session.Context()
 
 	// Close the session if the host shuts down
@@ -118,12 +154,12 @@ func (ps *peerServer) serveSession(ctx context.Context, session *webtransport.Se
 			return
 		}
 
-		go ps.handleStream(sessCtx, stream)
+		go s.handleStream(sessCtx, stream)
 	}
 }
 
 // handleStream reads one invocation from a stream, validates it, and dispatches by invocation mode
-func (ps *peerServer) handleStream(ctx context.Context, stream *webtransport.Stream) {
+func (s *Server) handleStream(ctx context.Context, stream *webtransport.Stream) {
 	defer stream.Close()
 
 	// Read the invocation metadata frame
@@ -148,7 +184,7 @@ func (ps *peerServer) handleStream(ctx context.Context, stream *webtransport.Str
 	}
 
 	// Reject invocations meant for a different host, which indicate the caller's placement is stale
-	if payload.TargetHostID != "" && payload.TargetHostID != ps.cfg.hostID() {
+	if payload.TargetHostID != "" && payload.TargetHostID != s.cfg.HostID() {
 		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeHostMismatch, "invocation is for a different host")))
 		return
 	}
@@ -157,23 +193,23 @@ func (ps *peerServer) handleStream(ctx context.Context, stream *webtransport.Str
 	// Object responses are a single frame, stream responses carry a trailing body
 	switch payload.Mode {
 	case protocol.InvocationModeObject:
-		_ = protocol.WriteMessage(stream, ps.handleObject(ctx, req, payload))
+		_ = protocol.WriteMessage(stream, s.handleObject(ctx, req, payload))
 	case protocol.InvocationModeStream:
-		ps.handleStreamInvoke(ctx, stream, req, payload)
+		s.handleStreamInvoke(ctx, stream, req, payload)
 	default:
 		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeInvokeModeUnsupported, "unsupported invocation mode %d", payload.Mode)))
 	}
 }
 
 // handleObject runs an object invocation and returns the response envelope
-func (ps *peerServer) handleObject(ctx context.Context, req *protocol.Envelope, payload protocol.InvokeActorRequest) *protocol.Envelope {
+func (s *Server) handleObject(ctx context.Context, req *protocol.Envelope, payload protocol.InvokeActorRequest) *protocol.Envelope {
 	// An actor type that does not implement object invocation cannot be called this way
-	if ps.cfg.handler == nil {
+	if s.cfg.Handler == nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInvokeModeUnsupported, "object invocation is not supported"))
 	}
 
 	// Run the actor locally and relay any structured failure back to the caller
-	out, perr := ps.cfg.handler(ctx, payload)
+	out, perr := s.cfg.Handler(ctx, payload)
 	if perr != nil {
 		return req.ErrorReply(perr)
 	}
@@ -183,13 +219,14 @@ func (ps *peerServer) handleObject(ctx context.Context, req *protocol.Envelope, 
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to encode invocation response"))
 	}
+
 	return resp
 }
 
 // handleStreamInvoke runs a stream invocation, reading the request body from the stream and writing the response metadata followed by the response body
-func (ps *peerServer) handleStreamInvoke(ctx context.Context, stream *webtransport.Stream, req *protocol.Envelope, payload protocol.InvokeActorRequest) {
+func (s *Server) handleStreamInvoke(ctx context.Context, stream *webtransport.Stream, req *protocol.Envelope, payload protocol.InvokeActorRequest) {
 	// An actor type that does not implement stream invocation cannot be called this way
-	if ps.cfg.streamHandler == nil {
+	if s.cfg.StreamHandler == nil {
 		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeInvokeModeUnsupported, "stream invocation is not supported")))
 		return
 	}
@@ -198,7 +235,7 @@ func (ps *peerServer) handleStreamInvoke(ctx context.Context, stream *webtranspo
 	// The handler writes the response through w
 	// w emits the response metadata frame on its first Write, so the content type can be set before any body bytes are produced
 	w := &peerStreamWriter{stream: stream, req: req}
-	perr := ps.cfg.streamHandler(ctx, payload, stream, w)
+	perr := s.cfg.StreamHandler(ctx, payload, stream, w)
 	if perr != nil {
 		// We can only report a structured error if the response metadata frame has not been sent yet
 		// Once the body has started, a mid-stream failure surfaces as a truncated body when the stream closes
@@ -215,39 +252,7 @@ func (ps *peerServer) handleStreamInvoke(ctx context.Context, stream *webtranspo
 			_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to encode invocation response")))
 			return
 		}
+
 		_ = protocol.WriteMessage(stream, respEnv)
 	}
-}
-
-// peerStreamWriter is a StreamResponseWriter that writes a peer stream response: a metadata frame followed by the raw response body
-type peerStreamWriter struct {
-	stream      *webtransport.Stream
-	req         *protocol.Envelope
-	contentType string
-	flushed     bool
-}
-
-// SetContentType records the content type, which is sent in the metadata frame on the first Write
-func (w *peerStreamWriter) SetContentType(contentType string) {
-	if !w.flushed {
-		w.contentType = contentType
-	}
-}
-
-// Write sends the response metadata frame on the first call, then writes the raw body bytes to the stream
-func (w *peerStreamWriter) Write(p []byte) (int, error) {
-	if !w.flushed {
-		w.flushed = true
-		env, err := w.req.ReplyWith(protocol.KindInvokeActorResponse, protocol.InvokeActorResponse{ContentType: w.contentType})
-		if err != nil {
-			return 0, err
-		}
-
-		err = protocol.WriteMessage(w.stream, env)
-		if err != nil {
-			return 0, err
-		}
-	}
-
-	return w.stream.Write(p)
 }

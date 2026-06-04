@@ -6,22 +6,36 @@ import (
 	"time"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/protocol"
 )
 
 const placementCacheMaxTTL = 5 * time.Second
 
-// actorPlacement is the resolved location of an actor
-type actorPlacement struct {
-	// Host ID
-	HostID string
-	// Host peer address (including port)
-	Address string
+// placementResolver adapts the host to the actorcore.PlacementResolver interface that the shared messaging logic depends on
+type placementResolver struct {
+	h *Host
+}
+
+func (r placementResolver) Resolve(ctx context.Context, aRef ref.ActorRef, skipCache bool, activeOnly bool) (*actorcore.Placement, error) {
+	return r.h.lookupActor(ctx, aRef, skipCache, activeOnly)
+}
+
+func (r placementResolver) ConfirmLocal(ctx context.Context, aRef ref.ActorRef) error {
+	return r.h.confirmLocal(ctx, aRef)
+}
+
+func (r placementResolver) Invalidate(aRef ref.ActorRef) {
+	r.h.invalidatePlacement(aRef)
+}
+
+func (r placementResolver) IsLocal(p *actorcore.Placement) bool {
+	return r.h.isLocal(p)
 }
 
 // lookupActor resolves where an actor is placed, checking the local host first, then the cache, then the runtime
-func (h *Host) lookupActor(parentCtx context.Context, aRef ref.ActorRef, skipCache bool, activeOnly bool) (*actorPlacement, error) {
+func (h *Host) lookupActor(parentCtx context.Context, aRef ref.ActorRef, skipCache bool, activeOnly bool) (*actorcore.Placement, error) {
 	key := aRef.String()
 
 	// First, check if the actor is active locally
@@ -30,7 +44,7 @@ func (h *Host) lookupActor(parentCtx context.Context, aRef ref.ActorRef, skipCac
 	if ok {
 		// Actor is running on the current host, so we can just return that
 		// Note we don't need to do anything with activeOnly, since the actor is definitely active
-		return &actorPlacement{
+		return &actorcore.Placement{
 			HostID:  h.HostID(),
 			Address: h.address,
 		}, nil
@@ -41,7 +55,7 @@ func (h *Host) lookupActor(parentCtx context.Context, aRef ref.ActorRef, skipCac
 		res, ok := h.placementCache.Get(key)
 		if ok {
 			// We have a cached value, so just use that
-			// The owning host enforces active-only on invocation, so a stale placement is rejected there and re-resolved
+			// The owning host re-confirms ownership before activating, so a stale placement is rejected there and re-resolved
 			return res, nil
 		}
 	}
@@ -65,7 +79,7 @@ func (h *Host) lookupActor(parentCtx context.Context, aRef ref.ActorRef, skipCac
 		return nil, fmt.Errorf("runtime returned an error: %w", err)
 	}
 
-	res := &actorPlacement{
+	res := &actorcore.Placement{
 		HostID:  resp.HostID,
 		Address: resp.Address,
 	}
@@ -81,8 +95,23 @@ func (h *Host) lookupActor(parentCtx context.Context, aRef ref.ActorRef, skipCac
 	return res, nil
 }
 
+// confirmLocal authoritatively claims an actor for this host, used on the receiving side of a peer invocation before the actor is activated
+// It does a fresh, cache-bypassing lookup through the runtime, which atomically resolves or allocates the placement, and rejects the invocation when the actor is owned elsewhere
+// This keeps placement provider-authoritative even when the caller routed here from a stale cached placement
+func (h *Host) confirmLocal(parentCtx context.Context, aRef ref.ActorRef) error {
+	ap, err := h.lookupActor(parentCtx, aRef, true, false)
+	if err != nil {
+		return err
+	}
+	if !h.isLocal(ap) {
+		// The actor is owned by another host, so the caller must re-resolve and retry
+		return actor.ErrActorNotHosted
+	}
+	return nil
+}
+
 // isLocal reports whether the placement points at the current host
-func (h *Host) isLocal(ap *actorPlacement) bool {
+func (h *Host) isLocal(ap *actorcore.Placement) bool {
 	hostID := h.HostID()
 	// Before registration the host ID is empty, in which case nothing is local
 	return hostID != "" && ap.HostID == hostID

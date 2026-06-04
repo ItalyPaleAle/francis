@@ -2,269 +2,40 @@ package local
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"io"
-	"net/http"
-	"net/url"
-
-	msgpack "github.com/vmihailenco/msgpack/v5"
 
 	"github.com/italypaleale/francis/actor"
-	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/types"
+	"github.com/italypaleale/francis/protocol"
 )
 
-const (
-	userAgentValue     = "actors/v1"
-	contentTypeMsgpack = "application/vnd.msgpack"
-	headerXHostID      = "X-Host-Id"
-	headerContentType  = "Content-Type"
-	headerUserAgent    = "User-Agent"
-	headerActiveOnly   = "X-Active-Only"
-)
-
-// Invoke performs the synchronous invocation of an actor running anywhere.
+// Invoke performs the synchronous invocation of an actor running anywhere in the cluster.
 func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, method string, data any, optsFn ...actor.InvokeOption) (actor.Envelope, error) {
 	opts := &types.InvokeOpts{}
 	for _, fn := range optsFn {
 		fn(opts)
 	}
 
-	aRef := ref.NewActorRef(actorType, actorID)
-
-	// Resolve the placement and invoke, using the cache on the first attempt
-	ap, err := h.lookupActor(ctx, aRef, false, opts.ActiveOnly)
-	if err != nil {
-		return nil, fmt.Errorf("failed to look up actor: %w", err)
-	}
-
-	env, retry, err := h.doInvoke(ctx, aRef, ap, method, data, opts.ActiveOnly)
-	if retry {
-		// An active-only invocation found the actor inactive on the cached placement
-		// Drop the stale placement and re-resolve through the provider, which is authoritative about active actors, in case it is active elsewhere
-		h.placementCache.Delete(aRef.String())
-		ap, err = h.lookupActor(ctx, aRef, true, opts.ActiveOnly)
-		if err != nil {
-			return nil, fmt.Errorf("failed to look up actor: %w", err)
-		}
-
-		// Re-invoke
-		env, _, err = h.doInvoke(ctx, aRef, ap, method, data, opts.ActiveOnly)
-	}
-
-	return env, err
+	return h.core.Invoke(ctx, h.resolver, h.peerClient, ref.NewActorRef(actorType, actorID), method, data, opts.ActiveOnly)
 }
 
-// doInvoke dispatches a single invocation attempt to the local actor or a remote host, depending on the placement
-// The bool return is true when an active-only invocation found the actor inactive locally, so the caller can re-resolve in case it is active elsewhere
-func (h *Host) doInvoke(ctx context.Context, aRef ref.ActorRef, ap *actorPlacement, method string, data any, activeOnly bool) (actor.Envelope, bool, error) {
-	if !h.isLocal(ap) {
-		// Actor is remote
-		env, err := h.doInvokeRemote(ctx, aRef, ap, method, data, activeOnly)
-
-		// Re-resolve and retry once when the placement looks stale or the actor was halting, or on an active-only miss that may be active elsewhere
-		switch {
-		case errors.Is(err, actor.ErrActorNotHosted), errors.Is(err, actor.ErrActorHalted):
-			return nil, true, err
-		case activeOnly && errors.Is(err, actor.ErrActorNotActive):
-			return nil, true, err
-		}
-
-		return env, false, err
-	}
-
-	// Actor is local
-	env, err := h.doInvokeLocal(ctx, aRef, method, data, activeOnly)
-	if activeOnly && errors.Is(err, actor.ErrActorNotActive) {
-		return nil, true, err
-	}
-
-	return env, false, err
-}
-
-// InvokeLocal performs the synchronous invocation of an actor running on the current node.
-// Returns ErrActorNotHosted if the actor is active on a different node.
-// Returns ErrActorHalted if the actor is being halted (callers should retry after a delay).
-func (h *Host) InvokeLocal(ctx context.Context, actorType string, actorID string, method string, data any, optsFn ...actor.InvokeOption) (actor.Envelope, error) {
+// InvokeStream performs a streamed invocation of an actor running anywhere in the cluster.
+func (h *Host) InvokeStream(ctx context.Context, actorType string, actorID string, method string, reqContentType string, body io.Reader, optsFn ...actor.InvokeOption) (string, io.ReadCloser, error) {
 	opts := &types.InvokeOpts{}
 	for _, fn := range optsFn {
 		fn(opts)
 	}
 
-	aRef := ref.NewActorRef(actorType, actorID)
-
-	// For an active-only invocation the local active-actor table is authoritative
-	// Skip the placement lookup so we never activate the actor or re-route, returning ErrActorNotActive if it is not active here
-	if opts.ActiveOnly {
-		return h.doInvokeLocal(ctx, aRef, method, data, true)
-	}
-
-	// Look up the actor
-	ap, err := h.lookupActor(ctx, aRef, false, false)
-	if err != nil {
-		return nil, fmt.Errorf("failed to look up actor: %w", err)
-	}
-
-	// Cannot invoke remote actors in this method
-	if !h.isLocal(ap) {
-		return nil, actor.ErrActorNotHosted
-	}
-
-	return h.doInvokeLocal(ctx, aRef, method, data, false)
+	return h.core.InvokeStream(ctx, h.resolver, h.peerClient, ref.NewActorRef(actorType, actorID), method, reqContentType, body, opts.ActiveOnly)
 }
 
-func (h *Host) doInvokeLocal(ctx context.Context, aRef ref.ActorRef, method string, data any, activeOnly bool) (actor.Envelope, error) {
-	invoke := func(ctx context.Context, act *actorcore.ActiveActor) (any, error) {
-		// The actor must implement the Invoke method to be called this way
-		obj, ok := act.Instance.(actor.ActorInvoke)
-		if !ok {
-			return nil, fmt.Errorf("actor of type '%s' does not implement the Invoke method", act.ActorType())
-		}
-
-		// Invoke the actor
-		// We wrap the data in an envelope as the receiver expects
-		res, err := obj.Invoke(ctx, method, actorcore.NewObjectEnvelope(data))
-		if err != nil {
-			return nil, fmt.Errorf("error from actor: %w", err)
-		}
-
-		return res, nil
-	}
-
-	// An active-only invocation must not activate the actor
-	// This host owns the actor lifecycle, so it is authoritative about whether it is active
-	var (
-		res any
-		err error
-	)
-	if activeOnly {
-		res, err = h.core.LockAndInvokeActive(ctx, aRef, invoke)
-	} else {
-		res, err = h.core.LockAndInvoke(ctx, aRef, invoke)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	// If there's a response, wrap in an envelope
-	if res != nil {
-		return actorcore.NewObjectEnvelope(res), nil
-	}
-
-	return nil, nil
+// peerInvokeObject executes an object invocation for an actor owned by this host, on behalf of a peer caller
+func (h *Host) peerInvokeObject(ctx context.Context, req protocol.InvokeActorRequest) (protocol.InvokeActorResponse, *protocol.Error) {
+	return h.core.PeerInvokeObject(ctx, h.resolver, req)
 }
 
-func (h *Host) doInvokeRemote(ctx context.Context, aRef ref.ActorRef, ap *actorPlacement, method string, data any, activeOnly bool) (actor.Envelope, error) {
-	// Request URL
-	u := url.URL{}
-	u.Scheme = "https"
-	u.Host = ap.Address
-	u.Path = "/v1/invoke/" + aRef.String() + "/" + method
-
-	// Encode the body using msgpack
-	var br io.ReadCloser
-	if data != nil {
-		var bw *io.PipeWriter
-		br, bw = io.Pipe()
-		go func() {
-			enc := msgpack.GetEncoder()
-			defer msgpack.PutEncoder(enc)
-			enc.Reset(bw)
-			be := enc.Encode(data)
-			if be != nil {
-				bw.CloseWithError(be)
-			}
-		}()
-	}
-
-	// TODO: retry in case of errors?
-	// TODO: Set timeout in context
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), br)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set(headerUserAgent, userAgentValue)
-	req.Header.Set(headerXHostID, ap.HostID)
-
-	// An active-only invocation must be enforced by the owning host, which is authoritative about whether the actor is active
-	if activeOnly {
-		req.Header.Set(headerActiveOnly, "1")
-	}
-
-	if br != nil {
-		// Set the content type for msgpack if we have a body
-		req.Header.Set(headerContentType, contentTypeMsgpack)
-	}
-
-	// Peer authenticator may modify the request header
-	err = h.peerAuth.UpdateRequest(req)
-	if err != nil {
-		return nil, fmt.Errorf("peer authenticator failed to modify the request: %w", err)
-	}
-
-	res, err := h.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer res.Body.Close()
-
-	dec := msgpack.GetDecoder()
-	dec.Reset(res.Body)
-	defer msgpack.PutDecoder(dec)
-
-	// Handle API errors
-	// The response must have status 2XX in case of success
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		// Parse the error in the body
-		// First, check if it's encoded with msgpack
-		if res.Header.Get(headerContentType) == contentTypeMsgpack {
-			var apiErr apiError
-			err = dec.Decode(&apiErr)
-			if err != nil {
-				return nil, fmt.Errorf("request failed with status code %d and failed to read msgpack response body with error: %w", res.StatusCode, err)
-			}
-
-			// Map the well-known API errors to their public actor equivalents so the caller can react
-			// The stale-placement and halted cases surface as errors doInvoke re-resolves and retries once
-			switch apiErr.Code {
-			case errApiActorNotActive.Code:
-				// An active-only invocation found the actor inactive on the owning host, it may be active elsewhere
-				return nil, actor.ErrActorNotActive
-			case errApiActorNotHosted.Code, errApiReqInvokeHostIdMismatch.Code:
-				// The cached placement is stale: the actor is no longer on this host, or this address now serves a different host
-				return nil, actor.ErrActorNotHosted
-			case errApiActorHalted.Code:
-				// The actor is being halted on the owning host
-				// Re-resolving may find it active elsewhere
-				return nil, actor.ErrActorHalted
-			}
-
-			return nil, fmt.Errorf("request failed with status code %d and API error: %w", res.StatusCode, apiErr)
-		}
-
-		// Return the error as-is
-		var body []byte
-		body, err = io.ReadAll(res.Body)
-		if err != nil {
-			return nil, fmt.Errorf("request failed with status code %d and failed to read raw response body with error: %w", res.StatusCode, err)
-		}
-
-		return nil, fmt.Errorf("request failed with status code %d and raw error: %s", res.StatusCode, string(body))
-	}
-
-	// Parse the response body unless the status code is 204 No Content
-	if res.StatusCode != http.StatusNoContent {
-		var out any
-		err = dec.Decode(&out)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode response body using msgpack: %w", err)
-		}
-
-		return actorcore.NewObjectEnvelope(out), nil
-	}
-
-	return nil, nil
+// peerInvokeStream executes a streamed invocation for an actor owned by this host, on behalf of a peer caller
+func (h *Host) peerInvokeStream(ctx context.Context, req protocol.InvokeActorRequest, body io.Reader, w actor.StreamResponseWriter) *protocol.Error {
+	return h.core.PeerInvokeStream(ctx, h.resolver, req, body, w)
 }

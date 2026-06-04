@@ -9,9 +9,9 @@ type PeerAuthenticationMethod interface {
 	// Validate the peer authentication method
 	Validate() error
 
-	// UpdateRequest updates a request object while messaging another host
-	UpdateRequest(r *http.Request) error
+	// UpdateHeader stamps authentication credentials on the headers of an outgoing peer session
+	UpdateHeader(h http.Header) error
 
-	// ValidateIncomingRequest checks if the incoming request is authorized
+	// ValidateIncomingRequest checks if the incoming peer session request is authorized
 	ValidateIncomingRequest(r *http.Request) (bool, error)
 }

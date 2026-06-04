@@ -1,4 +1,4 @@
-package remote
+package peer
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"sync/atomic"
 	"time"
 
@@ -17,51 +18,78 @@ import (
 	"github.com/italypaleale/francis/protocol"
 )
 
-// errPeerClientClosed is returned by session acquisition once the client has been closed
-var errPeerClientClosed = errors.New("peer client is closed")
+// defaultDialTimeout bounds how long a single peer dial may take
+const defaultDialTimeout = 15 * time.Second
 
-// peerClient invokes actors on other hosts over WebTransport, pooling one session per peer address
-type peerClient struct {
+// defaultIdleTimeout closes a pooled peer session after it has been idle this long
+// A session stays open across repeated calls and is reclaimed once it goes quiet
+const defaultIdleTimeout = 60 * time.Second
+
+// errClientClosed is returned by session acquisition once the client has been closed
+var errClientClosed = errors.New("peer client is closed")
+
+// ClientConfig configures a Client
+type ClientConfig struct {
+	// TLSConfig is the client TLS configuration, which must advertise the HTTP/3 ALPN
+	TLSConfig *tls.Config
+	// DialTimeout bounds a single peer dial
+	DialTimeout time.Duration
+	// IdleTimeout closes a pooled session after it has been idle this long
+	IdleTimeout time.Duration
+	// Auth authenticates outgoing sessions; nil means transport-level TLS only
+	Auth Authenticator
+	// Log is the slog logger
+	Log *slog.Logger
+}
+
+// Client invokes actors on other hosts over WebTransport, pooling one session per peer address
+type Client struct {
 	closed      atomic.Bool
+	dialed      atomic.Bool
 	dialer      *webtransport.Dialer
 	dialTimeout time.Duration
+	auth        Authenticator
 	log         *slog.Logger
 
 	// sessions pool is a lock-free map: dead sessions are detected via their context and atomically replaced, never deleted, so a concurrent redial can never be clobbered
 	sessions *haxmap.Map[string, *webtransport.Session]
 }
 
-// newPeerClient returns a peerClient that dials peers using the given client TLS configuration
-func newPeerClient(tlsConfig *tls.Config, dialTimeout time.Duration, log *slog.Logger) *peerClient {
-	// Set default options
-	if log == nil {
-		log = slog.New(slog.DiscardHandler)
+// NewClient returns a Client that dials peers using the given configuration
+func NewClient(cfg ClientConfig) *Client {
+	if cfg.Log == nil {
+		cfg.Log = slog.New(slog.DiscardHandler)
 	}
-	if dialTimeout <= 0 {
-		dialTimeout = 15 * time.Second
+	if cfg.DialTimeout <= 0 {
+		cfg.DialTimeout = defaultDialTimeout
+	}
+	if cfg.IdleTimeout <= 0 {
+		cfg.IdleTimeout = defaultIdleTimeout
 	}
 
-	return &peerClient{
-		dialer:      wt.NewDialer(tlsConfig),
-		dialTimeout: dialTimeout,
-		log:         log,
+	return &Client{
+		// The dialer's QUIC idle timeout reclaims a session once it stops carrying traffic, while an active stream keeps it alive
+		dialer:      wt.NewDialer(cfg.TLSConfig, wt.WithMaxIdleTimeout(cfg.IdleTimeout)),
+		dialTimeout: cfg.DialTimeout,
+		auth:        cfg.Auth,
+		log:         cfg.Log,
 		sessions:    haxmap.New[string, *webtransport.Session](),
 	}
 }
 
 // InvokeObject performs an object invocation against the actor on the peer at address
 // A returned protocol error that is Retryable signals the caller to invalidate its cached placement and retry a fresh lookup
-func (pc *peerClient) InvokeObject(ctx context.Context, address string, req protocol.InvokeActorRequest) (protocol.InvokeActorResponse, *protocol.Error) {
+func (c *Client) InvokeObject(ctx context.Context, address string, req protocol.InvokeActorRequest) (protocol.InvokeActorResponse, *protocol.Error) {
 	req.Mode = protocol.InvocationModeObject
 
 	// Reuse a live pooled session to the peer, dialing one if necessary
-	session, err := pc.session(ctx, address)
+	session, err := c.session(ctx, address)
 	if err != nil {
 		// A connection that cannot be established is treated as stale placement so the caller re-resolves it
 		return protocol.InvokeActorResponse{}, protocol.NewErrorf(protocol.ErrCodeRetryLater, "failed to connect to peer %s: %v", address, err)
 	}
 
-	// Open a fresh stream for this invocation, which WebTransport multiplexes over the peer connection
+	// Open a fresh stream for this invocation (which WebTransport multiplexes over the peer connection)
 	stream, err := session.OpenStreamSync(ctx)
 	if err != nil {
 		// The session may have died, in which case the next invocation's session() will detect and replace it
@@ -81,7 +109,7 @@ func (pc *peerClient) InvokeObject(ctx context.Context, address string, req prot
 		return protocol.InvokeActorResponse{}, protocol.NewErrorf(protocol.ErrCodeRetryLater, "invocation transport to peer %s failed: %v", address, err)
 	}
 
-	// Surface a structured error from the peer (host mismatch, halted actor, invocation failure, and so on)
+	// Surface a structured error from the peer
 	perr, isErr := respEnv.AsError()
 	if isErr {
 		return protocol.InvokeActorResponse{}, perr
@@ -101,11 +129,11 @@ func (pc *peerClient) InvokeObject(ctx context.Context, address string, req prot
 // The request body is streamed from body
 // On success the returned reader carries the streamed response body and must be closed by the caller
 // A returned protocol error that is Retryable signals the caller to invalidate its cached placement and retry a fresh lookup
-func (pc *peerClient) InvokeStream(ctx context.Context, address string, req protocol.InvokeActorRequest, body io.Reader) (string, io.ReadCloser, *protocol.Error) {
+func (c *Client) InvokeStream(ctx context.Context, address string, req protocol.InvokeActorRequest, body io.Reader) (string, io.ReadCloser, *protocol.Error) {
 	req.Mode = protocol.InvocationModeStream
 
 	// Reuse a live pooled session to the peer, dialing one if necessary
-	session, err := pc.session(ctx, address)
+	session, err := c.session(ctx, address)
 	if err != nil {
 		return "", nil, protocol.NewErrorf(protocol.ErrCodeRetryLater, "failed to connect to peer %s: %v", address, err)
 	}
@@ -118,7 +146,7 @@ func (pc *peerClient) InvokeStream(ctx context.Context, address string, req prot
 	}
 
 	// Bound the request send and response-metadata read by the caller's context
-	// quic streams are not context-aware, so a watcher forces the blocking calls to unblock until we hand the body reader to the caller
+	// QUIC streams are not context-aware, so a watcher forces the blocking calls to unblock until we hand the body reader to the caller
 	stopWatch := make(chan struct{})
 	watchStopped := false
 	stop := func() {
@@ -188,36 +216,21 @@ func (pc *peerClient) InvokeStream(ctx context.Context, address string, req prot
 	return meta.ContentType, &streamBody{stream: stream}, nil
 }
 
-// streamBody adapts a WebTransport stream's read side to an io.ReadCloser for a streamed response body
-type streamBody struct {
-	stream *webtransport.Stream
-}
-
-func (s *streamBody) Read(p []byte) (int, error) {
-	return s.stream.Read(p)
-}
-
-func (s *streamBody) Close() error {
-	// Releasing the body cancels the read side, which is harmless once the body has been fully read
-	s.stream.CancelRead(0)
-	return nil
-}
-
 // session returns a live pooled session for the peer address, dialing and pooling a new one when there is none or the pooled one has died
-func (pc *peerClient) session(ctx context.Context, address string) (*webtransport.Session, error) {
+func (c *Client) session(ctx context.Context, address string) (*webtransport.Session, error) {
 	// Reject early once the client is closed
-	if pc.closed.Load() {
-		return nil, errPeerClientClosed
+	if c.closed.Load() {
+		return nil, errClientClosed
 	}
 
 	// Fast path: reuse the pooled session while it is still alive
-	existing, ok := pc.sessions.Get(address)
+	existing, ok := c.sessions.Get(address)
 	if ok && existing.Context().Err() == nil {
-		return pc.guard(address, existing)
+		return c.guard(address, existing)
 	}
 
 	// Either nothing is pooled or the pooled session is dead, so dial a replacement
-	created, err := pc.dial(ctx, address)
+	created, err := c.dial(ctx, address)
 	if err != nil {
 		return nil, err
 	}
@@ -225,37 +238,37 @@ func (pc *peerClient) session(ctx context.Context, address string) (*webtranspor
 	// Replace the specific dead session we observed
 	// If another goroutine already replaced it, use theirs
 	if ok {
-		swapped := pc.sessions.CompareAndSwap(address, existing, created)
+		swapped := c.sessions.CompareAndSwap(address, existing, created)
 		if swapped {
 			_ = existing.CloseWithError(0, "")
-			return pc.guard(address, created)
+			return c.guard(address, created)
 		}
 
 		_ = created.CloseWithError(0, "")
-		current, _ := pc.sessions.Get(address)
-		return pc.guard(address, current)
+		current, _ := c.sessions.Get(address)
+		return c.guard(address, current)
 	}
 
 	// Nothing was pooled, so store ours unless another goroutine won the race
-	actual, loaded := pc.sessions.GetOrSet(address, created)
+	actual, loaded := c.sessions.GetOrSet(address, created)
 	if loaded {
 		_ = created.CloseWithError(0, "")
-		return pc.guard(address, actual)
+		return c.guard(address, actual)
 	}
 
-	return pc.guard(address, created)
+	return c.guard(address, created)
 }
 
 // guard reclaims a session that was pooled concurrently with Close, so Close can never leak a connection
 // If the client closed while we were dialing or storing, the just-pooled session is removed and closed here, and exactly one of guard or Close ends up closing it because both go through GetAndDel
-func (pc *peerClient) guard(address string, session *webtransport.Session) (*webtransport.Session, error) {
-	if pc.closed.Load() {
-		s, ok := pc.sessions.GetAndDel(address)
+func (c *Client) guard(address string, session *webtransport.Session) (*webtransport.Session, error) {
+	if c.closed.Load() {
+		s, ok := c.sessions.GetAndDel(address)
 		if ok {
 			_ = s.CloseWithError(0, "")
 		}
 
-		return nil, errPeerClientClosed
+		return nil, errClientClosed
 	}
 
 	if session == nil {
@@ -266,11 +279,24 @@ func (pc *peerClient) guard(address string, session *webtransport.Session) (*web
 }
 
 // dial opens a new WebTransport session to the peer at address
-func (pc *peerClient) dial(ctx context.Context, address string) (*webtransport.Session, error) {
-	dialCtx, cancel := context.WithTimeout(ctx, pc.dialTimeout)
+func (c *Client) dial(ctx context.Context, address string) (*webtransport.Session, error) {
+	dialCtx, cancel := context.WithTimeout(ctx, c.dialTimeout)
 	defer cancel()
 
-	rsp, session, err := pc.dialer.Dial(dialCtx, "https://"+address+protocol.PeerConnectPath, nil)
+	// Let the authenticator stamp credentials on the session upgrade request
+	// A nil authenticator means we rely on transport-level TLS authentication only
+	var hdr http.Header
+	if c.auth != nil {
+		hdr = http.Header{}
+		err := c.auth.UpdateHeader(hdr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to set peer authentication header: %w", err)
+		}
+	}
+
+	rsp, session, err := c.dialer.Dial(dialCtx, "https://"+address+protocol.PeerConnectPath, hdr)
+	// The dialer lazily initializes its transport on the first Dial, so record that it is now safe to close
+	c.dialed.Store(true)
 	if err != nil {
 		return nil, err
 	}
@@ -284,23 +310,26 @@ func (pc *peerClient) dial(ctx context.Context, address string) (*webtransport.S
 }
 
 // Close tears down all pooled sessions and the dialer
-func (pc *peerClient) Close() {
+func (c *Client) Close() {
 	// Flag the client closed so session() pools nothing more and reclaims any in-flight session via guard
-	pc.closed.Store(true)
+	c.closed.Store(true)
 
 	// Close the dialer so no new connection can be established
-	_ = pc.dialer.Close()
+	// The dialer's transport is created lazily on the first Dial, and closing it before then panics, so only close it if we ever dialed
+	if c.dialed.Load() {
+		_ = c.dialer.Close()
+	}
 
 	// Snapshot the pooled addresses, then remove and close each session
 	// A session pooled concurrently is reclaimed by exactly one of this drain or its own guard, since both use GetAndDel
-	addresses := make([]string, 0, pc.sessions.Len())
-	pc.sessions.ForEach(func(address string, _ *webtransport.Session) bool {
+	addresses := make([]string, 0, c.sessions.Len())
+	c.sessions.ForEach(func(address string, _ *webtransport.Session) bool {
 		addresses = append(addresses, address)
 		return true
 	})
 
 	for _, address := range addresses {
-		session, ok := pc.sessions.GetAndDel(address)
+		session, ok := c.sessions.GetAndDel(address)
 		if ok {
 			_ = session.CloseWithError(0, "")
 		}

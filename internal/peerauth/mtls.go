@@ -63,7 +63,7 @@ func (p *PeerAuthenticationMTLS) SetTLSOptions(opts *hosttls.HostTLSOptions) {
 	opts.ClientAuth = tls.RequireAndVerifyClientCert
 }
 
-func (p *PeerAuthenticationMTLS) UpdateRequest(r *http.Request) error {
+func (p *PeerAuthenticationMTLS) UpdateHeader(h http.Header) error {
 	// No-op in this implementation
 	return nil
 }

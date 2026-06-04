@@ -15,6 +15,7 @@ import (
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/standalone"
+	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/runtime"
 )
@@ -284,6 +285,56 @@ func TestHostRemoteMultiHostPeerInvocation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, hostB.HostID(), ap.HostID)
 	assert.False(t, hostA.isLocal(ap))
+}
+
+// TestHostRemoteStalePlacementReResolves verifies that a stale cached placement routing a call to the wrong host is detected by the ownership confirmation, re-resolved to the real owner, and never double-activates the actor
+func TestHostRemoteStalePlacementReResolves(t *testing.T) {
+	runtimeAddr, _ := startTestRuntime(t, t.Context())
+
+	// Both hosts can run "T", so the actor could be wrongly activated on either if ownership were not confirmed
+	hostA := newRemoteHost(t, runtimeAddr)
+	require.NoError(t, hostA.RegisterActor("T", func(actorID string, service *actor.Service) actor.Actor {
+		return &testActor{svc: service, id: actorID, label: "A:"}
+	}, RegisterActorOptions{}))
+
+	hostB := newRemoteHost(t, runtimeAddr)
+	require.NoError(t, hostB.RegisterActor("T", func(actorID string, service *actor.Service) actor.Actor {
+		return &testActor{svc: service, id: actorID, label: "B:"}
+	}, RegisterActorOptions{}))
+
+	runRemoteHost(t, hostA)
+	runRemoteHost(t, hostB)
+
+	aRef := ref.NewActorRef("T", "x")
+
+	// Activate the actor so the runtime fixes its placement on one host
+	_, err := hostA.Service().Invoke(t.Context(), "T", "x", "echo", "warmup")
+	require.NoError(t, err)
+
+	// Discover the real owner and pick the other host as the caller routing to a stale placement
+	placement, err := hostA.lookupActor(t.Context(), aRef, true, false)
+	require.NoError(t, err)
+	caller, ownerLabel := hostB, "A:"
+	if placement.HostID == hostB.HostID() {
+		caller, ownerLabel = hostA, "B:"
+	}
+
+	// Poison the caller's placement cache to claim it owns the actor, simulating a stale cached placement
+	caller.placementCache.Set(aRef.String(), &actorcore.Placement{
+		HostID:  caller.HostID(),
+		Address: caller.address,
+	}, time.Minute)
+
+	// The invocation must detect the stale local placement, re-resolve through the runtime, and run on the real owner
+	res, err := caller.Service().Invoke(t.Context(), "T", "x", "echo", "hi")
+	require.NoError(t, err)
+	var out string
+	require.NoError(t, res.Decode(&out))
+	assert.Equal(t, ownerLabel+"echo:hi", out)
+
+	// The actor must never have been activated on the non-owning caller
+	_, activatedOnCaller := caller.core.Actors.Get(aRef.String())
+	assert.False(t, activatedOnCaller, "the actor must not be double-activated on the non-owning caller")
 }
 
 // TestHostRemoteIdleDeactivation verifies an idle actor is deactivated and its placement is cleared at the runtime

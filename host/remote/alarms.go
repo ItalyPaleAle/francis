@@ -82,7 +82,7 @@ func (h *Host) executeAlarm(ctx context.Context, req protocol.ExecuteAlarmReques
 		// The actor must implement the Alarm method to receive alarms
 		obj, ok := act.Instance.(actor.ActorAlarm)
 		if !ok {
-			return nil, errActorMethodUnsupported
+			return nil, actorcore.ErrActorMethodUnsupported
 		}
 
 		// Wrap the alarm data so the actor can decode it into a custom object
@@ -104,7 +104,7 @@ func (h *Host) executeAlarm(ctx context.Context, req protocol.ExecuteAlarmReques
 		return nil, nil
 	})
 	if err != nil {
-		return protocol.ExecuteAlarmResponse{}, invokeErrorToProtocol(err)
+		return protocol.ExecuteAlarmResponse{}, actorcore.InvokeErrorToProtocol(err)
 	}
 
 	return protocol.ExecuteAlarmResponse{ExecutionTimeUnixMs: executionTime}, nil

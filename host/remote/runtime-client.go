@@ -38,8 +38,12 @@ type runtimeClientConfig struct {
 	minBackoff     time.Duration
 	maxBackoff     time.Duration
 	handlers       runtimeHandlers
-	log            *slog.Logger
-	clock          clock.WithTicker
+
+	// onDrain is called once during graceful shutdown, while the runtime session is still alive, to drain local actors before the session is unregistered and closed
+	onDrain func()
+
+	log   *slog.Logger
+	clock clock.WithTicker
 }
 
 // runtimeClient maintains a persistent WebTransport session to one runtime replica at a time
@@ -190,8 +194,12 @@ func (rc *runtimeClient) connectAndServe(ctx context.Context, addr string) (bool
 	// Serve runtime-initiated requests until the session ends or the context is canceled
 	rc.serveInbound(serveCtx, session)
 
-	// A canceled context means we are shutting down, so unregister gracefully while the session is still open
+	// A canceled context means we are shutting down gracefully
+	// Drain local actors while the session is still alive so their deactivation can persist state and clear placement, then unregister before the session closes
 	if ctx.Err() != nil {
+		if rc.cfg.onDrain != nil {
+			rc.cfg.onDrain()
+		}
 		rc.sendUnregister(session, resp.HostID, resp.SessionID)
 	}
 	return true, nil

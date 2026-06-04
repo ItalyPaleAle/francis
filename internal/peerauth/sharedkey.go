@@ -27,8 +27,8 @@ func (p *PeerAuthenticationSharedKey) Validate() error {
 	return nil
 }
 
-func (p *PeerAuthenticationSharedKey) UpdateRequest(r *http.Request) error {
-	r.Header.Set(headerAuthorization, authorizationHeaderSharedKey+" "+p.Key)
+func (p *PeerAuthenticationSharedKey) UpdateHeader(h http.Header) error {
+	h.Set(headerAuthorization, authorizationHeaderSharedKey+" "+p.Key)
 	return nil
 }
 

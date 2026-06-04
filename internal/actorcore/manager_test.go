@@ -1368,6 +1368,8 @@ func TestIdleActorHandling(t *testing.T) {
 		deactivateStarted := make(chan int, numActors)
 		deactivateCanContinue := make(chan struct{})
 		deactivateCompleted := make(chan int, numActors)
+		// RemoveActor runs after Deactivate, so we gate the assertions on it rather than on the host map being empty
+		removeActorCompleted := make(chan struct{}, numActors)
 
 		const idleTimeout = 1 * time.Minute
 
@@ -1403,8 +1405,12 @@ func TestIdleActorHandling(t *testing.T) {
 			instances[i] = instance
 
 			// Set expected method calls on provider
+			// Signal completion so the assertions can wait for RemoveActor, which runs after the actor leaves the host map
 			provider.
 				On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef).
+				Run(func(_ mock.Arguments) {
+					removeActorCompleted <- struct{}{}
+				}).
 				Return(nil).
 				Once()
 
@@ -1454,6 +1460,16 @@ func TestIdleActorHandling(t *testing.T) {
 		assert.Eventually(t, func() bool {
 			return host.Actors.Len() == 0
 		}, 3*time.Second, 100*time.Millisecond, "All actors should be removed from host")
+
+		// Wait for every RemoveActor call to land before asserting expectations, since it runs after the actor leaves the host map
+		removeTimeout := time.After(3 * time.Second)
+		for range numActors {
+			select {
+			case <-removeActorCompleted:
+			case <-removeTimeout:
+				t.Fatal("Timeout waiting for all RemoveActor calls to complete")
+			}
+		}
 
 		// Verify all actors are marked as halted
 		for i, activeAct := range activeActors {
