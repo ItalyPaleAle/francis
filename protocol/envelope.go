@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/google/uuid"
 	msgpack "github.com/vmihailenco/msgpack/v5"
 )
 
@@ -26,7 +25,7 @@ const (
 
 // Message kinds, grouped by traffic path so the allowed direction is obvious at a glance
 // Every request has a matching response kind
-// A response is correlated to its request via CorrelationID
+// A request and its response are exchanged on a single dedicated stream, so a response is matched to its request by the stream it arrives on rather than by any identifier
 // Errors are reported with KindError regardless of the request, so a receiver can classify a reply as success-vs-error from the Kind alone and only then decode the operation-specific payload
 const (
 	// Host -> Runtime requests
@@ -72,7 +71,8 @@ const (
 	KindInvokeActor         = "invoke.actor"
 	KindInvokeActorResponse = "invoke.actor.response"
 
-	// Error response, correlated to a request via CorrelationID; carries a serialized Error payload
+	// Error response, returned in place of any operation-specific response kind
+	// These carry a serialized Error payload
 
 	KindError = "error"
 )
@@ -82,10 +82,6 @@ const (
 type Envelope struct {
 	// ProtocolVersion is the version of the protocol used to encode this message
 	ProtocolVersion uint16 `msgpack:"v"`
-	// MessageID uniquely identifies this message and is used to correlate responses
-	MessageID string `msgpack:"id"`
-	// CorrelationID is set on a response to the MessageID of the request it answers
-	CorrelationID string `msgpack:"cid,omitempty"`
 	// Kind identifies the message type
 	Kind string `msgpack:"k"`
 	// HostID is the stable identity of the host sending or targeted by the message
@@ -96,11 +92,10 @@ type Envelope struct {
 	Payload []byte `msgpack:"p,omitempty"`
 }
 
-// NewEnvelope returns a new request envelope with a freshly-generated MessageID
+// NewEnvelope returns a new envelope of the given kind carrying the pre-encoded payload
 func NewEnvelope(kind string, payload []byte) *Envelope {
 	return &Envelope{
 		ProtocolVersion: ProtocolVersion,
-		MessageID:       uuid.NewString(),
 		Kind:            kind,
 		Payload:         payload,
 	}
@@ -116,14 +111,13 @@ func NewRequest(kind string, payload any) (*Envelope, error) {
 	return e, nil
 }
 
-// Reply returns a new response envelope correlated to this request
-func (e *Envelope) Reply(kind string, payload []byte) *Envelope {
-	r := NewEnvelope(kind, payload)
-	r.CorrelationID = e.MessageID
-	return r
+// Reply returns a response envelope of the given kind carrying the pre-encoded payload
+// A request and its response share one dedicated stream, so the response carries no correlation identifier and is matched to the request by the stream it arrives on
+func (*Envelope) Reply(kind string, payload []byte) *Envelope {
+	return NewEnvelope(kind, payload)
 }
 
-// ReplyWith returns a response envelope of the given kind correlated to this request, encoding payload as MessagePack
+// ReplyWith returns a response envelope of the given kind, encoding payload as MessagePack
 // A nil payload produces an empty-bodied acknowledgement, which is how ack-only operations respond
 func (e *Envelope) ReplyWith(kind string, payload any) (*Envelope, error) {
 	r := e.Reply(kind, nil)
@@ -134,7 +128,7 @@ func (e *Envelope) ReplyWith(kind string, payload any) (*Envelope, error) {
 	return r, nil
 }
 
-// ErrorReply returns a KindError response correlated to this request, carrying the structured error
+// ErrorReply returns a KindError response carrying the structured error
 func (e *Envelope) ErrorReply(perr *Error) *Envelope {
 	// Marshal directly: if it somehow fails we still return a usable error envelope
 	payload, err := Marshal(perr)

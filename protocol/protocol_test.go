@@ -23,7 +23,6 @@ func TestEnvelopePayloadRoundTrip(t *testing.T) {
 
 	e := NewEnvelope(KindRegisterHost, nil)
 	require.NoError(t, e.SetPayload(in))
-	require.NotEmpty(t, e.MessageID)
 	require.Equal(t, ProtocolVersion, e.ProtocolVersion)
 
 	var out RegisterHostRequest
@@ -41,14 +40,12 @@ func TestEnvelopeNilPayload(t *testing.T) {
 	require.NoError(t, e.DecodePayload(&out))
 }
 
-func TestEnvelopeReplyCorrelation(t *testing.T) {
+func TestEnvelopeReply(t *testing.T) {
 	req := NewEnvelope(KindLookupActor, nil)
 
 	res, err := req.ReplyWith(KindLookupActorResponse, LookupActorResponse{HostID: "h1", Address: "1.2.3.4:443"})
 	require.NoError(t, err)
-	assert.Equal(t, req.MessageID, res.CorrelationID)
 	assert.Equal(t, KindLookupActorResponse, res.Kind)
-	assert.NotEqual(t, req.MessageID, res.MessageID)
 
 	var out LookupActorResponse
 	require.NoError(t, res.DecodePayload(&out))
@@ -69,7 +66,6 @@ func TestWriteReadMessageRoundTrip(t *testing.T) {
 
 	got, err := ReadMessage(&buf)
 	require.NoError(t, err)
-	assert.Equal(t, e.MessageID, got.MessageID)
 	assert.Equal(t, e.HostID, got.HostID)
 	assert.Equal(t, e.SessionID, got.SessionID)
 	assert.Equal(t, KindSetState, got.Kind)
@@ -165,7 +161,6 @@ func TestErrorReplyAndAsError(t *testing.T) {
 
 	res := req.ErrorReply(perr)
 	assert.Equal(t, KindError, res.Kind)
-	assert.Equal(t, req.MessageID, res.CorrelationID)
 
 	got, ok := res.AsError()
 	require.True(t, ok)

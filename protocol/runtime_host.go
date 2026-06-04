@@ -5,7 +5,7 @@ package protocol
 // Each runtime-initiated operation is paired with its response in this file
 //
 // Alarm messages use explicit exported fields rather than internal/ref types
-// The lease itself stays runtime-side: the runtime correlates the host's response to the in-flight ExecuteAlarmRequest by CorrelationID and keeps renewing the lease meanwhile
+// The lease itself stays runtime-side: the runtime sends ExecuteAlarmRequest and synchronously waits for the host's response on the same stream, renewing the lease while the call is in flight
 
 // ExecuteAlarmRequest asks a host to execute an alarm for an actor it owns and waits for the response
 type ExecuteAlarmRequest struct {
@@ -28,7 +28,8 @@ type ExecuteAlarmResponse struct {
 	ExecutionTimeUnixMs int64 `msgpack:"executed,omitempty"`
 }
 
-// TerminateActorRequest asks a host to terminate an active actor it owns
+// TerminateActorRequest asks a host to terminate an active actor it owns and waits for the response
+// The host replies with an empty-bodied KindTerminateActorResponse acknowledgement, or a structured error on failure
 type TerminateActorRequest struct {
 	ActorType string `msgpack:"type"`
 	ActorID   string `msgpack:"id"`
