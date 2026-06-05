@@ -165,8 +165,9 @@ func TestCompleteAlarmDeletesOneShot(t *testing.T) {
 	lease := leaseTestAlarm(t, prov, c.hostID, aref, ref.AlarmProperties{DueTime: time.Now().Add(-time.Second)})
 	lease.SetExecutionTime(time.Now())
 
-	err := rt.completeAlarm(t.Context(), lease, slog.New(slog.DiscardHandler))
+	reEnqueue, err := rt.completeAlarm(t.Context(), lease, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
+	assert.False(t, reEnqueue, "a one-shot alarm must not be re-enqueued")
 
 	_, err = prov.GetAlarm(t.Context(), aref)
 	require.ErrorIs(t, err, components.ErrNoAlarm, "a one-shot alarm should be deleted after completion")
@@ -181,13 +182,36 @@ func TestCompleteAlarmReschedulesRepeating(t *testing.T) {
 	lease := leaseTestAlarm(t, prov, c.hostID, aref, ref.AlarmProperties{DueTime: execTime.Add(-time.Second), Interval: "PT1H"})
 	lease.SetExecutionTime(execTime)
 
-	err := rt.completeAlarm(t.Context(), lease, slog.New(slog.DiscardHandler))
+	reEnqueue, err := rt.completeAlarm(t.Context(), lease, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
+	// The next occurrence is an hour away, well beyond one poll interval, so the lease is dropped rather than kept for re-enqueue
+	assert.False(t, reEnqueue, "a far-future occurrence must not keep the lease for re-enqueue")
 
 	got, err := prov.GetAlarm(t.Context(), aref)
 	require.NoError(t, err, "a repeating alarm should still exist after completion")
 	// The next due time is one hour after the execution time
 	assert.WithinDuration(t, execTime.Add(time.Hour), got.DueTime, time.Second)
+}
+
+func TestCompleteAlarmKeepsLeaseForNearOccurrence(t *testing.T) {
+	// A generous poll interval ensures the one-second next occurrence falls within one poll interval, so the lease is kept for an in-memory re-enqueue
+	rt, prov := newTestRuntime(t, WithAlarmsPollInterval(10*time.Second))
+	c := connectTestHost(t, rt, prov, "10.1.0.9:1", protocol.ActorHostType{ActorType: "T"})
+
+	aref := ref.NewAlarmRef("T", "a1", "wake")
+	execTime := time.Now()
+	lease := leaseTestAlarm(t, prov, c.hostID, aref, ref.AlarmProperties{DueTime: execTime.Add(-time.Second), Interval: "PT1S"})
+	// Spend an attempt before recording the execution time, so we can prove the next occurrence starts fresh rather than inheriting it
+	lease.IncreaseAttempts(execTime)
+	lease.SetExecutionTime(execTime)
+
+	reEnqueue, err := rt.completeAlarm(t.Context(), lease, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	require.True(t, reEnqueue, "a near-future occurrence must keep the lease for re-enqueue")
+
+	// The in-memory lease must be advanced to the next occurrence with its retry state reset, otherwise the re-enqueue would carry a stale past due time and a depleted retry budget
+	assert.WithinDuration(t, execTime.Add(time.Second), lease.DueTime(), time.Second)
+	assert.Equal(t, 0, lease.Attempts(), "the next occurrence must start with a fresh attempts counter")
 }
 
 func TestDrainActiveAlarmsWaitsForInflight(t *testing.T) {
@@ -206,7 +230,8 @@ func TestDrainActiveAlarmsWaitsForInflight(t *testing.T) {
 	}
 
 	// Start an in-flight execution (the alarm is already due, so it runs immediately)
-	require.NoError(t, rt.enqueueAlarms([]*ref.AlarmLease{lease}))
+	err := rt.enqueueAlarms(lease)
+	require.NoError(t, err)
 	<-started
 
 	drained := make(chan struct{})
@@ -248,7 +273,8 @@ func TestDrainActiveAlarmsTimesOut(t *testing.T) {
 		return env.ReplyWith(protocol.KindExecuteAlarmResponse, protocol.ExecuteAlarmResponse{})
 	}
 
-	require.NoError(t, rt.enqueueAlarms([]*ref.AlarmLease{lease}))
+	err := rt.enqueueAlarms(lease)
+	require.NoError(t, err)
 	<-started
 
 	// The alarm never finishes within the grace period, so the drain returns after the deadline
@@ -276,7 +302,8 @@ func TestDrainActiveAlarmsStopsNewExecutions(t *testing.T) {
 	rt.drainActiveAlarms()
 
 	// After draining, enqueueing a due alarm must not start a new execution
-	require.NoError(t, rt.enqueueAlarms([]*ref.AlarmLease{lease}))
+	err := rt.enqueueAlarms(lease)
+	require.NoError(t, err)
 	time.Sleep(50 * time.Millisecond)
 	assert.False(t, called, "no new alarm should be dispatched once the runtime is draining")
 }

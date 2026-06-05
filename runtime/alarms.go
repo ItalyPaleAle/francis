@@ -108,12 +108,12 @@ func (rt *Runtime) fetchAndEnqueueAlarms(ctx context.Context) error {
 		return fmt.Errorf("error fetching alarms: %w", err)
 	}
 
-	return rt.enqueueAlarms(leases)
+	return rt.enqueueAlarms(leases...)
 }
 
 // enqueueAlarms schedules leases for dispatch, executing immediately any that are already due
 // Alarms already active or retrying are skipped so their in-memory retry state is not clobbered
-func (rt *Runtime) enqueueAlarms(leases []*ref.AlarmLease) error {
+func (rt *Runtime) enqueueAlarms(leases ...*ref.AlarmLease) error {
 	rt.activeAlarmsLock.Lock()
 
 	// Do not schedule new work once the runtime is draining for shutdown
@@ -206,7 +206,9 @@ func (rt *Runtime) executeActiveAlarm(lease *ref.AlarmLease) {
 	status, err := rt.dispatchAlarm(ctx, lease)
 
 	// Remove from the active set on return; track retrying alarms so lease renewal does not reset their attempts
+	// A repeating alarm whose lease we kept is re-enqueued here, only after the active flag is cleared, otherwise enqueueAlarms would skip it as already active
 	isRetrying := false
+	reEnqueue := false
 	defer func() {
 		rt.activeAlarmsLock.Lock()
 		delete(rt.activeAlarms, key)
@@ -216,6 +218,13 @@ func (rt *Runtime) executeActiveAlarm(lease *ref.AlarmLease) {
 			delete(rt.retryingAlarms, key)
 		}
 		rt.activeAlarmsLock.Unlock()
+
+		if reEnqueue {
+			enqErr := rt.enqueueAlarms(lease)
+			if enqErr != nil {
+				log.Error("Error re-enqueueing leased alarm", slog.Any("error", enqErr))
+			}
+		}
 	}()
 
 	switch status {
@@ -256,7 +265,8 @@ func (rt *Runtime) executeActiveAlarm(lease *ref.AlarmLease) {
 		return
 
 	case executeAlarmStatusCompleted:
-		compErr := rt.completeAlarm(ctx, lease, log)
+		var compErr error
+		reEnqueue, compErr = rt.completeAlarm(ctx, lease, log)
 		if compErr != nil {
 			log.Error("Error completing alarm", slog.Any("error", compErr))
 		}
@@ -377,15 +387,16 @@ func (rt *Runtime) initialRetryDelay(actorType string) time.Duration {
 }
 
 // completeAlarm reschedules a repeating alarm or deletes a one-shot alarm after a successful execution
-func (rt *Runtime) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, log *slog.Logger) error {
+// It returns true when the lease was kept for its next occurrence and must be re-enqueued by the caller once the active flag is cleared
+func (rt *Runtime) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, log *slog.Logger) (bool, error) {
 	// Re-read the alarm to confirm the lease is still valid and to observe any edits the actor made
 	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
 	alarm, err := rt.provider.GetLeasedAlarm(ctx, lease)
 	cancel()
 	if errors.Is(err, components.ErrNoAlarm) {
-		return nil
+		return false, nil
 	} else if err != nil {
-		return fmt.Errorf("error retrieving alarm from provider: %w", err)
+		return false, fmt.Errorf("error retrieving alarm from provider: %w", err)
 	}
 
 	// A non-repeating alarm is deleted once executed
@@ -396,9 +407,9 @@ func (rt *Runtime) completeAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 		defer cancel()
 		err = rt.provider.DeleteLeasedAlarm(ctx, lease)
 		if err != nil && !errors.Is(err, components.ErrNoAlarm) {
-			return fmt.Errorf("error removing completed alarm in provider: %w", err)
+			return false, fmt.Errorf("error removing completed alarm in provider: %w", err)
 		}
-		return nil
+		return false, nil
 	}
 
 	// A repeating alarm is rescheduled for its next occurrence
@@ -417,20 +428,19 @@ func (rt *Runtime) completeAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 	defer cancel()
 	err = rt.provider.UpdateLeasedAlarm(ctx, lease, updateReq)
 	if errors.Is(err, components.ErrNoAlarm) {
-		return nil
+		return false, nil
 	} else if err != nil {
-		return fmt.Errorf("error updating alarm in provider: %w", err)
+		return false, fmt.Errorf("error updating alarm in provider: %w", err)
 	}
 
-	// If we kept the lease, re-enqueue the alarm for its next occurrence
+	// If we kept the lease, advance the in-memory due time to the next occurrence and signal the caller to re-enqueue it
+	// The actual re-enqueue happens after the active flag is cleared, otherwise enqueueAlarms would skip it as already active
 	if updateReq.RefreshLease {
-		err = rt.enqueueAlarms([]*ref.AlarmLease{lease})
-		if err != nil {
-			return fmt.Errorf("error re-enqueueing leased alarm: %w", err)
-		}
+		lease.ResetForNextExecution(next)
+		return true, nil
 	}
 
-	return nil
+	return false, nil
 }
 
 // runLeaseRenewal periodically renews the leases for alarms owned by connected hosts
@@ -463,7 +473,7 @@ func (rt *Runtime) runLeaseRenewal(parentCtx context.Context) error {
 
 			if len(res.Leases) > 0 {
 				rt.log.DebugContext(parentCtx, "Renewed alarm leases", slog.Int("count", len(res.Leases)))
-				err = rt.enqueueAlarms(res.Leases)
+				err = rt.enqueueAlarms(res.Leases...)
 				if err != nil {
 					rt.log.ErrorContext(parentCtx, "Error while re-enqueueing alarms", slog.Any("error", err))
 				}
