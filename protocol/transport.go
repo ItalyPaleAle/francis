@@ -19,6 +19,25 @@ type Stream interface {
 	SetDeadline(t time.Time) error
 }
 
+// ReadMessageWithTimeout reads a single inbound envelope from a freshly accepted stream, bounding the read with a deadline
+// This stops a stalled or trickling peer from pinning a goroutine and read buffer on an inbound frame that never completes
+// The deadline is cleared once the frame is read, so it does not bound handler execution or a trailing streamed body on the same stream
+func ReadMessageWithTimeout(stream Stream, timeout time.Duration) (*Envelope, error) {
+	err := stream.SetDeadline(time.Now().Add(timeout))
+	if err != nil {
+		return nil, err
+	}
+
+	e, err := ReadMessage(stream)
+	if err != nil {
+		return nil, err
+	}
+
+	// Clear the deadline so the handler and any trailing body stream are not bounded by it
+	_ = stream.SetDeadline(time.Time{})
+	return e, nil
+}
+
 // RoundTrip writes req to the stream, then reads and returns the response
 // The caller's context bounds the exchange: when it is canceled or times out, the blocking read or write is unblocked and the context error is returned
 // quic streams are not context-aware, so a watcher forces the blocking call to return by setting a past deadline

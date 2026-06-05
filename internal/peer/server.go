@@ -158,13 +158,17 @@ func (s *Server) serveSession(ctx context.Context, session *webtransport.Session
 	}
 }
 
+// requestReadTimeout bounds how long the invocation metadata frame may take to arrive on an accepted stream before it is abandoned
+// It only covers the metadata frame: ReadMessageWithTimeout clears the deadline before any trailing request body is streamed
+const requestReadTimeout = 30 * time.Second
+
 // handleStream reads one invocation from a stream, validates it, and dispatches by invocation mode
 func (s *Server) handleStream(ctx context.Context, stream *webtransport.Stream) {
 	defer stream.Close()
 
 	// Read the invocation metadata frame
 	// For stream invocation the request body follows it on the same stream
-	req, err := protocol.ReadMessage(stream)
+	req, err := protocol.ReadMessageWithTimeout(stream, requestReadTimeout)
 	if err != nil {
 		return
 	}

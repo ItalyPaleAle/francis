@@ -16,6 +16,9 @@ import (
 // lookupCacheMaxTTL caps how long a placement lookup is cached at the runtime
 const lookupCacheMaxTTL = 5 * time.Second
 
+// registrationReadTimeout bounds the registration handshake read more tightly than a regular request, since a new session must register promptly before it is allowed to do anything else
+const registrationReadTimeout = 10 * time.Second
+
 // cachedPlacement is a placement lookup result held in the runtime placement cache
 type cachedPlacement struct {
 	HostID        string
@@ -32,7 +35,7 @@ func (rt *Runtime) handleRegistration(ctx context.Context, c *hostConn) bool {
 	}
 	defer stream.Close()
 
-	req, err := protocol.ReadMessage(stream)
+	req, err := protocol.ReadMessageWithTimeout(stream, registrationReadTimeout)
 	if err != nil {
 		return false
 	}

@@ -306,12 +306,15 @@ func (rc *runtimeClient) serveInbound(ctx context.Context, session *webtransport
 	}
 }
 
+// inboundReadTimeout bounds how long a runtime-initiated request frame may take to arrive on an accepted stream before it is abandoned
+const inboundReadTimeout = 30 * time.Second
+
 // handleInbound reads one runtime request from a stream, dispatches it, and writes the response
 func (rc *runtimeClient) handleInbound(ctx context.Context, stream *webtransport.Stream) {
 	defer stream.Close()
 
 	// Read the runtime's request off the stream
-	req, err := protocol.ReadMessage(stream)
+	req, err := protocol.ReadMessageWithTimeout(stream, inboundReadTimeout)
 	if err != nil {
 		// We cannot respond if we could not even read the request
 		return

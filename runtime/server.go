@@ -251,11 +251,14 @@ func (rt *Runtime) serveSession(parentCtx context.Context, session *webtransport
 	}
 }
 
+// requestReadTimeout bounds how long an inbound request frame may take to arrive on an accepted stream before it is abandoned
+const requestReadTimeout = 30 * time.Second
+
 // handleStream reads a single request from a stream, dispatches it, and writes the response
 func (rt *Runtime) handleStream(ctx context.Context, c *hostConn, stream *webtransport.Stream) {
 	defer stream.Close()
 
-	req, err := protocol.ReadMessage(stream)
+	req, err := protocol.ReadMessageWithTimeout(stream, requestReadTimeout)
 	if err != nil {
 		// Nothing we can usefully respond with if we cannot even read the request
 		return

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"net"
 	"testing"
 	"time"
 
@@ -92,6 +93,43 @@ func TestWriteReadMultipleMessages(t *testing.T) {
 	// The stream is now drained, so the next read reports EOF
 	_, err := ReadMessage(&buf)
 	assert.ErrorIs(t, err, io.EOF)
+}
+
+func TestReadMessageWithTimeout(t *testing.T) {
+	t.Run("times out when no frame arrives", func(t *testing.T) {
+		client, server := net.Pipe()
+		defer client.Close()
+		defer server.Close()
+
+		// Nothing is ever written, so the read must be abandoned once the deadline elapses
+		start := time.Now()
+		_, err := ReadMessageWithTimeout(server, 100*time.Millisecond)
+		require.Error(t, err)
+		assert.GreaterOrEqual(t, time.Since(start), 100*time.Millisecond)
+	})
+
+	t.Run("reads a frame and clears the deadline", func(t *testing.T) {
+		client, server := net.Pipe()
+		defer client.Close()
+		defer server.Close()
+
+		// Send the first frame promptly, then a second only after the original deadline would have elapsed
+		go func() {
+			_ = WriteMessage(client, NewEnvelope(KindHealthCheck, nil))
+			time.Sleep(150 * time.Millisecond)
+			_ = WriteMessage(client, NewEnvelope(KindGetState, nil))
+		}()
+
+		// The first frame arrives within the short deadline
+		got, err := ReadMessageWithTimeout(server, 100*time.Millisecond)
+		require.NoError(t, err)
+		assert.Equal(t, KindHealthCheck, got.Kind)
+
+		// The deadline must have been cleared, so the second frame still reads even though it arrives after the original deadline
+		got2, err := ReadMessage(server)
+		require.NoError(t, err)
+		assert.Equal(t, KindGetState, got2.Kind)
+	})
 }
 
 func TestReadMessageRejectsOversizedFrame(t *testing.T) {
