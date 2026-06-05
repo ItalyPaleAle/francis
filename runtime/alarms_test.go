@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/italypaleale/go-kit/eventqueue"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -306,6 +307,23 @@ func TestDrainActiveAlarmsStopsNewExecutions(t *testing.T) {
 	require.NoError(t, err)
 	time.Sleep(50 * time.Millisecond)
 	assert.False(t, called, "no new alarm should be dispatched once the runtime is draining")
+}
+
+func TestRunAlarmFetcherKeepsProcessorAfterShutdown(t *testing.T) {
+	rt, _ := newTestRuntime(t)
+
+	// An already-canceled context makes runAlarmFetcher drain and tear the processor down right away
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := rt.runAlarmFetcher(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+
+	// After shutdown the field must stay set to the closed processor rather than being nilled, so an in-flight execution that outlives the grace-period drain and reaches the re-enqueue path cannot nil-deref it
+	require.NotNil(t, rt.alarmProcessor)
+
+	// The closed processor rejects new work gracefully instead of panicking, which is what makes the late re-enqueue safe
+	require.ErrorIs(t, rt.alarmProcessor.Enqueue(), eventqueue.ErrProcessorStopped)
 }
 
 func TestFetchAndEnqueueAlarmsScopedToConnectedHosts(t *testing.T) {

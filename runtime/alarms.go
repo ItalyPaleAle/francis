@@ -36,7 +36,9 @@ func (rt *Runtime) runAlarmFetcher(ctx context.Context) error {
 		if apErr != nil {
 			rt.log.Error("Failed to close alarm processor", slog.Any("error", apErr))
 		}
-		rt.alarmProcessor = nil
+
+		// Intentionally leave the field set to the closed processor rather than setting it to nil, to prevent race conditions
+		// An in-flight execution that outlives the grace-period drain may still reach the re-enqueue path, where a closed processor returns ErrProcessorStopped from Enqueue while a nil one would panic
 	}()
 
 	t := rt.clock.NewTicker(rt.alarmsPollInterval)
