@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/italypaleale/go-kit/servicerunner"
 	"github.com/italypaleale/go-kit/ttlcache"
 	"k8s.io/utils/clock"
 
@@ -37,7 +36,9 @@ type Host struct {
 	bind string
 
 	running atomic.Bool
-	service *actor.Service
+	// draining is set once graceful shutdown begins, so the peer server rejects new invocations while local actors drain
+	draining atomic.Bool
+	service  *actor.Service
 
 	// core owns the active actors, their turn-based invocation, idle deactivation, and halting
 	core *actorcore.Manager
@@ -164,6 +165,7 @@ func newHost(options *newHostOptions) (*Host, error) {
 		requestTimeout: options.RequestTimeout,
 		log:            options.Logger,
 		clock:          options.clock,
+		onDrainStart:   func() { h.draining.Store(true) },
 		// On graceful shutdown the runtime client drains local actors while the session is still alive, so their deactivation can still persist state and clear placement through the runtime
 		onDrain: h.drainActors,
 		handlers: runtimeHandlers{
@@ -181,6 +183,7 @@ func newHost(options *newHostOptions) (*Host, error) {
 		StreamHandler: h.peerInvokeStream,
 		Log:           options.Logger,
 		HostID:        h.runtimeClient.HostID,
+		Draining:      h.isDraining,
 	})
 
 	return h, nil
@@ -224,17 +227,37 @@ func (h *Host) Run(parentCtx context.Context) error {
 	// Halting an already-halted actor is a no-op, so running it after a graceful drain is harmless
 	defer h.drainActors()
 
-	// Run all services
-	// This blocks until the context is canceled or one of the services returns
-	return servicerunner.
-		NewServiceRunner(
-			// Maintain the persistent session to the runtime, reconnecting as needed
-			h.runtimeClient.Run,
+	// The peer server runs under its own context so it keeps serving while local actors drain, then is stopped only after the runtime client returns
+	// This lets it reject new invocations with a retry-later error throughout the drain window, rather than tearing down alongside it
+	peerCtx, stopPeer := context.WithCancel(context.WithoutCancel(parentCtx))
+	defer stopPeer()
 
-			// Serve host-to-host invocations of actors owned by this host
-			h.peerServer.Run,
-		).
-		Run(ctx)
+	peerErrCh := make(chan error, 1)
+	go func() {
+		peerErrCh <- h.peerServer.Run(peerCtx)
+	}()
+
+	// Maintain the persistent session to the runtime, reconnecting as needed
+	// On graceful shutdown the runtime client sets the host draining, unregisters, and drains local actors before returning
+	runErrCh := make(chan error, 1)
+	go func() {
+		runErrCh <- h.runtimeClient.Run(ctx)
+	}()
+
+	// Wait for whichever service returns first
+	// If the runtime client returns, its drain has already run, so stop the peer server and wait for it
+	// If the peer server fails first, cancel the context to bring the runtime client down too
+	var runErr, peerErr error
+	select {
+	case runErr = <-runErrCh:
+		stopPeer()
+		peerErr = <-peerErrCh
+	case peerErr = <-peerErrCh:
+		cancel()
+		runErr = <-runErrCh
+	}
+
+	return errors.Join(runErr, peerErr)
 }
 
 // Ready returns a channel that is closed once the host has registered with a runtime for the first time
@@ -245,6 +268,11 @@ func (h *Host) Ready() <-chan struct{} {
 // HostID returns the current runtime-assigned ID of the host, or empty if not yet registered.
 func (h *Host) HostID() string {
 	return h.runtimeClient.HostID()
+}
+
+// isDraining reports whether the host has begun graceful shutdown
+func (h *Host) isDraining() bool {
+	return h.draining.Load()
 }
 
 // HaltAll halts all actors active on the host, gracefully

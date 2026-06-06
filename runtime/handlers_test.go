@@ -197,6 +197,24 @@ func TestHandleLookupActorDrainingHost(t *testing.T) {
 	assert.Positive(t, d)
 }
 
+func TestHandleUnregisterKeepsHostRegistered(t *testing.T) {
+	rt, prov := newTestRuntime(t)
+	c := connectTestHost(t, rt, prov, "10.0.0.20:1", protocol.ActorHostType{ActorType: "T"})
+
+	// Activate an actor on the host so we can prove its placement survives the unregister
+	aref := ref.NewActorRef("T", "a1")
+	_, err := prov.LookupActor(t.Context(), aref, components.LookupActorOpts{})
+	require.NoError(t, err)
+
+	resp := dispatchReq(t, rt, c, protocol.KindUnregisterHost, protocol.UnregisterHostRequest{})
+	require.Equal(t, protocol.KindUnregisterHostResponse, resp.Kind)
+
+	// The host is marked draining but must stay registered with its actor still active, so existing actors keep serving until the host is completely done
+	assert.True(t, c.IsDraining())
+	_, err = prov.LookupActor(t.Context(), aref, components.LookupActorOpts{ActiveOnly: true})
+	require.NoError(t, err, "the active actor must still be placed after a graceful unregister")
+}
+
 func TestHandleRemoveActor(t *testing.T) {
 	rt, prov := newTestRuntime(t)
 	rt.placementCache = ttlcache.NewCache[string, *cachedPlacement](&ttlcache.CacheOptions{MaxTTL: rt.placementCacheTTL()})

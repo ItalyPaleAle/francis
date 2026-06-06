@@ -151,21 +151,14 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 }
 
 // handleUnregister handles a graceful, drain-oriented host shutdown request
-func (rt *Runtime) handleUnregister(ctx context.Context, c *hostConn, req *protocol.Envelope) *protocol.Envelope {
+func (rt *Runtime) handleUnregister(_ context.Context, c *hostConn, req *protocol.Envelope) *protocol.Envelope {
 	// Mark the host draining so it is no longer selected for new placement or alarm work
+	// This alone makes the host ineligible for new work: ConnectedHostIDs excludes draining hosts and handleLookupActor returns retry-later for any actor resolved onto one
 	c.setDraining()
 
-	// Remove the host from the provider so it is no longer eligible for new actor placement
-	// This uses immediate removal, which is acceptable for the initial implementation
-	unregCtx, cancel := context.WithTimeout(ctx, rt.providerRequestTimeout)
-	defer cancel()
-	err := rt.provider.UnregisterHost(unregCtx, c.hostID)
-	if err != nil {
-		rt.log.WarnContext(ctx, "Error unregistering host from provider",
-			slog.String("hostId", c.hostID),
-			slog.Any("error", err),
-		)
-	}
+	// Deliberately do not remove the host from the provider here
+	// Its actors are still active and must stay resolvable until the host has finished draining them (provider removal happens once the session closes, in handleHostDisconnect)
+	// Removing it now would delete every active-actor placement for the host, yanking actors that are still running
 
 	resp, err := req.ReplyWith(protocol.KindUnregisterHostResponse, protocol.UnregisterHostResponse{})
 	if err != nil {

@@ -231,13 +231,8 @@ func (rt *Runtime) serveSession(parentCtx context.Context, session *webtransport
 		slog.String("address", c.address),
 	)
 
-	// On session teardown, remove the host from the manager, but only if we still own its current session
-	defer func() {
-		removed := rt.hosts.Remove(c.hostID, c.sessionID)
-		if removed {
-			rt.log.InfoContext(sessCtx, "Host disconnected", slog.String("hostId", c.hostID))
-		}
-	}()
+	// On session teardown, remove the host from the manager and clean up the provider for a host that drained gracefully
+	defer rt.handleHostDisconnect(c)
 
 	// Accept and dispatch subsequent streams until the session ends
 	for {
@@ -248,6 +243,37 @@ func (rt *Runtime) serveSession(parentCtx context.Context, session *webtransport
 		}
 
 		go rt.handleStream(sessCtx, c, stream)
+	}
+}
+
+// handleHostDisconnect removes a disconnected host from the manager and, for a host that drained gracefully, from the provider
+// It runs on session teardown, only if we still own the host's current session
+func (rt *Runtime) handleHostDisconnect(c *hostConn) {
+	// Only act if the session being torn down is still the one tracked for this host
+	// A superseded or stale session must not evict the host's newer session
+	removed := rt.hosts.Remove(c.hostID, c.sessionID)
+	if !removed {
+		return
+	}
+
+	rt.log.Info("Host disconnected", slog.String("hostId", c.hostID))
+
+	// A host that did not drain disconnected ungracefully: leave its provider record to the health deadline, since it may reconnect and reattach
+	if !c.IsDraining() {
+		return
+	}
+
+	// A draining host whose session has now closed is completely done, so remove it from the provider
+	// This also reaps any active-actor placements the host did not clear while draining
+	// Use a fresh context since the session context is already canceled
+	ctx, cancel := context.WithTimeout(context.Background(), rt.providerRequestTimeout)
+	defer cancel()
+	err := rt.provider.UnregisterHost(ctx, c.hostID)
+	if err != nil && !errors.Is(err, components.ErrHostUnregistered) {
+		rt.log.Warn("Error unregistering drained host from provider",
+			slog.String("hostId", c.hostID),
+			slog.Any("error", err),
+		)
 	}
 }
 

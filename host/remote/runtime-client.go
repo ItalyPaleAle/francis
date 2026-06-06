@@ -39,7 +39,10 @@ type runtimeClientConfig struct {
 	maxBackoff     time.Duration
 	handlers       runtimeHandlers
 
-	// onDrain is called once during graceful shutdown, while the runtime session is still alive, to drain local actors before the session is unregistered and closed
+	// onDrainStart is called once at the very start of graceful shutdown, before anything else, so the host can mark itself draining and begin rejecting new peer invocations
+	onDrainStart func()
+
+	// onDrain is called once during graceful shutdown, while the runtime session is still alive, to drain local actors after the runtime has been told we are draining
 	onDrain func()
 
 	log   *slog.Logger
@@ -195,12 +198,20 @@ func (rc *runtimeClient) connectAndServe(ctx context.Context, addr string) (bool
 	rc.serveInbound(serveCtx, session)
 
 	// A canceled context means we are shutting down gracefully
-	// Drain local actors while the session is still alive so their deactivation can persist state and clear placement, then unregister before the session closes
+	// Order matters: mark ourselves draining, tell the runtime, then drain local actors, all while the session is still alive
 	if ctx.Err() != nil {
+		// Mark the host draining so the peer server rejects new invocations with retry-later before any actors are halted
+		if rc.cfg.onDrainStart != nil {
+			rc.cfg.onDrainStart()
+		}
+
+		// Tell the runtime we are draining so it stops selecting us for new placement and alarm work
+		rc.sendUnregister(session, resp.HostID, resp.SessionID)
+
+		// Drain local actors so their deactivation can persist state and clear placement through the still-open runtime session
 		if rc.cfg.onDrain != nil {
 			rc.cfg.onDrain()
 		}
-		rc.sendUnregister(session, resp.HostID, resp.SessionID)
 	}
 	return true, nil
 }

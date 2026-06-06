@@ -158,6 +158,29 @@ func TestDispatchAlarmAbandonedWhenActorNotActive(t *testing.T) {
 	assert.Equal(t, executeAlarmStatusAbandoned, status)
 }
 
+func TestDispatchAlarmAbandonedWhenHostDraining(t *testing.T) {
+	rt, prov := newTestRuntime(t)
+	c := connectTestHost(t, rt, prov, "10.1.0.9:1", protocol.ActorHostType{ActorType: "T", MaxAttempts: 3, InitialRetryDelayMs: 100})
+
+	aref := ref.NewAlarmRef("T", "a1", "wake")
+	lease := leaseTestAlarm(t, prov, c.hostID, aref, ref.AlarmProperties{DueTime: time.Now().Add(-time.Second)})
+
+	// The owning host is draining, so the alarm must not be delivered to it
+	// It is abandoned and re-fetched once the actor re-activates elsewhere
+	c.setDraining()
+
+	called := false
+	rt.sendToHost = func(_ context.Context, _ *hostConn, _ *protocol.Envelope) (*protocol.Envelope, error) {
+		called = true
+		return nil, nil
+	}
+
+	status, err := rt.dispatchAlarm(t.Context(), lease)
+	require.NoError(t, err)
+	assert.Equal(t, executeAlarmStatusAbandoned, status)
+	assert.False(t, called, "an alarm must not be dispatched to a draining host")
+}
+
 func TestCompleteAlarmDeletesOneShot(t *testing.T) {
 	rt, prov := newTestRuntime(t)
 	c := connectTestHost(t, rt, prov, "10.1.0.7:1", protocol.ActorHostType{ActorType: "T"})

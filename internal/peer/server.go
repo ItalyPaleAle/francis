@@ -46,6 +46,11 @@ type ServerConfig struct {
 
 	// HostID returns this host's current runtime-assigned ID, used to reject invocations aimed at a stale placement
 	HostID func() string
+
+	// Draining reports whether the host is gracefully shutting down
+	// While draining, new invocations are rejected with a retry-later error so callers re-resolve to the actor's next placement
+	// If nil, the host is never considered draining
+	Draining func() bool
 }
 
 // Server accepts host-to-host actor invocations over WebTransport
@@ -162,6 +167,10 @@ func (s *Server) serveSession(ctx context.Context, session *webtransport.Session
 // It only covers the metadata frame: ReadMessageWithTimeout clears the deadline before any trailing request body is streamed
 const requestReadTimeout = 30 * time.Second
 
+// drainingRetryAfter is the retry-after hint returned when a draining host rejects a new invocation
+// It is only a hint: the caller re-resolves through the runtime, which returns its own retry-after for the actor's next placement
+const drainingRetryAfter = 500 * time.Millisecond
+
 // handleStream reads one invocation from a stream, validates it, and dispatches by invocation mode
 func (s *Server) handleStream(ctx context.Context, stream *webtransport.Stream) {
 	defer stream.Close()
@@ -190,6 +199,13 @@ func (s *Server) handleStream(ctx context.Context, stream *webtransport.Stream) 
 	// Reject invocations meant for a different host, which indicate the caller's placement is stale
 	if payload.TargetHostID != "" && payload.TargetHostID != s.cfg.HostID() {
 		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeHostMismatch, "invocation is for a different host")))
+		return
+	}
+
+	// Reject a new invocation while the host is draining, so the caller re-resolves to the actor's next placement
+	// In-flight invocations that started before draining keep running on their own goroutines and finish normally
+	if s.cfg.Draining != nil && s.cfg.Draining() {
+		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeHostDraining, "host is draining").WithRetryAfter(drainingRetryAfter)))
 		return
 	}
 

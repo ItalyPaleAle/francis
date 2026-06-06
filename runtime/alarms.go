@@ -207,7 +207,8 @@ func (rt *Runtime) executeActiveAlarm(lease *ref.AlarmLease) {
 
 	status, err := rt.dispatchAlarm(ctx, lease)
 
-	// Remove from the active set on return; track retrying alarms so lease renewal does not reset their attempts
+	// Remove from the active set on return
+	// We track retrying alarms so lease renewal does not reset their attempts
 	// A repeating alarm whose lease we kept is re-enqueued here, only after the active flag is cleared, otherwise enqueueAlarms would skip it as already active
 	isRetrying := false
 	reEnqueue := false
@@ -310,7 +311,7 @@ func (rt *Runtime) dispatchAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 		return executeAlarmStatusRetryable, fmt.Errorf("error retrieving leased alarm: %w", err)
 	}
 
-	// Record the execution time before dispatch; a successful response may refine it
+	// Record the execution time before dispatch,  a successful response may refine it
 	lease.SetExecutionTime(rt.clock.Now())
 
 	req, err := protocol.NewRequest(protocol.KindExecuteAlarm, protocol.ExecuteAlarmRequest{

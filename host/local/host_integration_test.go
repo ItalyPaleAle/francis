@@ -84,7 +84,8 @@ func TestHostLocalMultiHostPeerInvocation(t *testing.T) {
 		return host
 	}
 
-	// Host B owns actor type "S"; host A registers nothing, so it can only reach the actor by routing to a peer
+	// Host B owns actor type "S"
+	// Host A registers nothing, so it can only reach the actor by routing to a peer
 	hostB := newSharedHost(true)
 	hostA := newSharedHost(false)
 

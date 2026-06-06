@@ -183,7 +183,7 @@ func (e *Envelope) AsError() (*Error, bool) {
 }
 
 // CheckProtocolVersion validates the protocol version advertised by a peer
-// A higher version than this peer supports is rejected; equal or lower is accepted and the lower is used
+// A higher version than this peer supports is rejected, while equal or lower is accepted and the lower is used
 func CheckProtocolVersion(v uint16) error {
 	if v == 0 {
 		return errors.New("missing protocol version")

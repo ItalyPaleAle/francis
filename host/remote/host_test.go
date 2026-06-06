@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/italypaleale/francis/components/standalone"
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/protocol"
 	"github.com/italypaleale/francis/runtime"
 )
 
@@ -32,6 +35,9 @@ type testActor struct {
 	alarmCh      chan string
 	invokeCh     chan string
 	deactivateCh chan string
+
+	// deactivateBlock, if non-nil, blocks Deactivate until it is closed, so a test can hold the host mid-drain
+	deactivateBlock chan struct{}
 }
 
 func (a *testActor) Invoke(ctx context.Context, method string, data actor.Envelope) (any, error) {
@@ -76,6 +82,11 @@ func (a *testActor) InvokeStream(_ context.Context, method string, reqContentTyp
 
 func (a *testActor) Deactivate(_ context.Context) error {
 	signal(a.deactivateCh, a.id)
+
+	// Hold here while a test inspects the host mid-drain, if a block channel was provided
+	if a.deactivateBlock != nil {
+		<-a.deactivateBlock
+	}
 	return nil
 }
 
@@ -457,4 +468,238 @@ func TestHostRemoteStreamInvocation(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "B:stream:ping", string(got))
 	})
+}
+
+func TestHostRemoteGracefulShutdownDrainsAndUnregisters(t *testing.T) {
+	// Verifies that graceful shutdown halts local actors and that the runtime unregisters the host from the provider once its session closes
+	runtimeAddr, prov := startTestRuntime(t, t.Context())
+
+	deactivateCh := make(chan string, 1)
+	host := newRemoteHost(t, runtimeAddr)
+	err := host.RegisterActor("T",
+		func(actorID string, service *actor.Service) actor.Actor {
+			return &testActor{
+				svc:          service,
+				id:           actorID,
+				deactivateCh: deactivateCh,
+			}
+		},
+		RegisterActorOptions{},
+	)
+	require.NoError(t, err)
+
+	// Run the host under a context we can cancel independently to trigger graceful shutdown
+	hostCtx, hostCancel := context.WithCancel(t.Context())
+	hostErr := make(chan error, 1)
+	go func() {
+		hostErr <- host.Run(hostCtx)
+	}()
+	select {
+	case <-host.Ready():
+	case <-time.After(15 * time.Second):
+		t.Fatal("host did not connect to the runtime")
+	}
+
+	// Activate an actor so there is something to drain and a placement for the runtime to clean up
+	_, err = host.Service().Invoke(t.Context(), "T", "x", "echo", "hi")
+	require.NoError(t, err)
+
+	aRef := ref.NewActorRef("T", "x")
+	_, err = prov.LookupActor(t.Context(), aRef, components.LookupActorOpts{
+		ActiveOnly: true,
+	})
+	require.NoError(t, err, "the actor should be active before shutdown")
+
+	// Begin graceful shutdown
+	hostCancel()
+
+	// The drain halts the active actor, which calls its Deactivate method
+	select {
+	case <-deactivateCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("active actor was not deactivated during graceful shutdown")
+	}
+
+	// Run returns once shutdown completes
+	select {
+	case <-hostErr:
+	case <-time.After(10 * time.Second):
+		t.Fatal("host did not shut down")
+	}
+
+	// The host drained gracefully, so once its session closed the runtime unregistered it from the provider
+	// With no host left to own "T", allocating a brand-new actor reports that no host is available
+	require.Eventually(t, func() bool {
+		_, lookupErr := prov.LookupActor(t.Context(), ref.NewActorRef("T", "brandnew"), components.LookupActorOpts{})
+		return errors.Is(lookupErr, components.ErrNoHost)
+	}, 10*time.Second, 50*time.Millisecond, "the gracefully drained host should be unregistered from the provider")
+}
+
+func TestHostRemoteGracefulDrainRejectsPeerInvocations(t *testing.T) {
+	// Verifies the peer server keeps serving while local actors drain and rejects new invocations with a retryable draining error, rather than tearing down alongside the drain
+	runtimeAddr, _ := startTestRuntime(t, t.Context())
+
+	// Host B owns "T" and blocks in Deactivate, so the drain stays open with the peer server still up while we probe it
+	deactivating := make(chan string, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseDrain := func() {
+		releaseOnce.Do(func() {
+			close(release)
+		})
+	}
+	t.Cleanup(releaseDrain)
+
+	hostB := newRemoteHost(t, runtimeAddr)
+	err := hostB.RegisterActor("T",
+		func(actorID string, service *actor.Service) actor.Actor {
+			return &testActor{
+				svc:             service,
+				id:              actorID,
+				label:           "B:",
+				deactivateCh:    deactivating,
+				deactivateBlock: release,
+			}
+		},
+		RegisterActorOptions{},
+	)
+	require.NoError(t, err)
+
+	hostBCtx, hostBCancel := context.WithCancel(t.Context())
+	hostBErr := make(chan error, 1)
+	go func() {
+		hostBErr <- hostB.Run(hostBCtx)
+	}()
+	select {
+	case <-hostB.Ready():
+	case <-time.After(15 * time.Second):
+		t.Fatal("host B did not connect to the runtime")
+	}
+
+	// Host A is used only as a peer caller, to drive a direct invocation against host B's peer server
+	hostA := newRemoteHost(t, runtimeAddr)
+	runRemoteHost(t, hostA)
+
+	// Activate an actor on host B so the drain has something to halt, holding the drain open via the blocking Deactivate
+	_, err = hostB.Service().Invoke(t.Context(), "T", "x", "echo", "hi")
+	require.NoError(t, err)
+
+	// Begin host B graceful shutdown: it marks itself draining, unregisters, then drains, blocking in Deactivate
+	hostBCancel()
+	select {
+	case <-deactivating:
+	case <-time.After(10 * time.Second):
+		t.Fatal("host B did not begin draining")
+	}
+
+	// While host B is mid-drain, its peer server must still be serving and must reject a new invocation with a retryable draining error
+	// A transport failure here would mean the peer server tore down alongside the drain instead of outliving it
+	reqCtx, reqCancel := context.WithTimeout(t.Context(), 5*time.Second)
+	_, perr := hostA.peerClient.InvokeObject(reqCtx, hostB.address, protocol.InvokeActorRequest{
+		TargetHostID: hostB.HostID(),
+		ActorType:    "T",
+		ActorID:      "x",
+		Method:       "echo",
+		Mode:         protocol.InvocationModeObject,
+	})
+	reqCancel()
+	require.NotNil(t, perr, "a draining host must reject the peer invocation rather than dropping the connection")
+	assert.Equal(t, protocol.ErrCodeHostDraining, perr.Code)
+	assert.True(t, perr.Retryable())
+
+	// Release the drain so host B can finish shutting down
+	releaseDrain()
+
+	select {
+	case <-hostBErr:
+	case <-time.After(10 * time.Second):
+		t.Fatal("host B did not shut down")
+	}
+}
+
+func TestHostRemoteGracefulDrainNotifiesRuntimeBeforeDraining(t *testing.T) {
+	// Verifies the host tells the runtime it is draining before halting local actors, so the runtime stops handing out the host's placements while its actors are still draining
+	runtimeAddr, _ := startTestRuntime(t, t.Context())
+
+	// Host B owns "T" and blocks in Deactivate, holding the drain open after it has told the runtime it is draining
+	deactivating := make(chan string, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseDrain := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseDrain)
+
+	hostB := newRemoteHost(t, runtimeAddr)
+	err := hostB.RegisterActor("T", func(actorID string, service *actor.Service) actor.Actor {
+		return &testActor{svc: service, id: actorID, label: "B:", deactivateCh: deactivating, deactivateBlock: release}
+	}, RegisterActorOptions{})
+	require.NoError(t, err)
+
+	hostBCtx, hostBCancel := context.WithCancel(t.Context())
+	hostBErr := make(chan error, 1)
+	go func() { hostBErr <- hostB.Run(hostBCtx) }()
+	select {
+	case <-hostB.Ready():
+	case <-time.After(15 * time.Second):
+		t.Fatal("host B did not connect to the runtime")
+	}
+
+	// Host A resolves placement through the runtime
+	hostA := newRemoteHost(t, runtimeAddr)
+	runRemoteHost(t, hostA)
+
+	// Activate an actor on host B so it has something to drain, which holds the drain open
+	_, err = hostB.Service().Invoke(t.Context(), "T", "x", "echo", "hi")
+	require.NoError(t, err)
+
+	// Begin host B graceful shutdown and wait until it is mid-drain
+	hostBCancel()
+	select {
+	case <-deactivating:
+	case <-time.After(10 * time.Second):
+		t.Fatal("host B did not begin draining")
+	}
+
+	// The shutdown order sends UnregisterHost before halting local actors, so by the time actors are draining the runtime already treats host B as draining
+	// A fresh placement lookup for the still-active actor must therefore return a retry-later error rather than host B's placement
+	// Were the order reversed, the runtime would not yet know host B is draining and would hand back its placement
+	_, err = hostA.lookupActor(t.Context(), ref.NewActorRef("T", "x"), true, false)
+	require.Error(t, err, "the runtime must already see host B as draining while its actors are still draining")
+	assert.True(t, isProtocolErrorCode(err, protocol.ErrCodeRetryLater), "the lookup should fail with a retry-later error, got: %v", err)
+
+	// Release the drain so host B can finish shutting down
+	releaseDrain()
+	select {
+	case <-hostBErr:
+	case <-time.After(10 * time.Second):
+		t.Fatal("host B did not shut down")
+	}
+}
+
+// TestHostRemoteRunFailsWhenPeerServerCannotBind verifies that a failure to start the peer server brings the whole host down instead of hanging, exercising the peer-server-first branch of Run's shutdown coordination
+func TestHostRemoteRunFailsWhenPeerServerCannotBind(t *testing.T) {
+	runtimeAddr, _ := startTestRuntime(t, t.Context())
+
+	// Occupy a UDP port so the host's peer server cannot bind to it
+	occupier, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer occupier.Close()
+	occupied := occupier.LocalAddr().String()
+
+	host, err := NewHost(
+		WithAddress(occupied),
+		WithRuntimeAddresses(runtimeAddr),
+		WithServerTLSInsecureSkipTLSValidation(),
+		WithLogger(slog.New(slog.DiscardHandler)),
+	)
+	require.NoError(t, err)
+
+	// Run must return an error promptly rather than hanging when the peer server cannot start
+	runErr := make(chan error, 1)
+	go func() { runErr <- host.Run(t.Context()) }()
+	select {
+	case err := <-runErr:
+		require.Error(t, err, "Run must fail when the peer server cannot bind")
+	case <-time.After(15 * time.Second):
+		t.Fatal("Run did not return after the peer server failed to start")
+	}
 }
