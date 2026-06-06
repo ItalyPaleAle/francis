@@ -1,3 +1,6 @@
-data.db
-data.db-*
+bin/
+worker1/
+worker2/
 certs/
+supervisord.log
+supervisord.pid

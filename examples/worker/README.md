@@ -13,9 +13,40 @@ The sample includes:
   - Registers the actor type "myactor"
 - A control server that allows invoking actors and scheduling alarms
 
-## How to run
+## How to run (with supervisord)
 
-Start two instances of the worker:
+Build the binary first:
+
+```sh
+go build -o bin/worker .
+```
+
+Each worker stores its state in a `data.db` file relative to its working directory, so
+create a subdirectory for each:
+
+```sh
+mkdir -p worker1 worker2
+```
+
+Then start the cluster:
+
+```sh
+supervisord -c supervisord.conf
+```
+
+This starts two workers whose control servers listen on ports 8081 and 8082. Logs from
+both are streamed to the console.
+
+You can manage the processes with `supervisorctl`, e.g.:
+
+```sh
+supervisorctl -c supervisord.conf status
+supervisorctl -c supervisord.conf restart worker1
+```
+
+## How to run (manually, without supervisord)
+
+Start two instances in separate terminals:
 
 ```sh
 # Terminal 1
@@ -24,6 +55,12 @@ go run . -worker-address 127.0.0.1:8081 -actor-host-address 127.0.0.1:7571
 # Terminal 2
 go run . -worker-address 127.0.0.1:8082 -actor-host-address 127.0.0.1:7572
 ```
+
+> When running manually each instance writes `data.db` to the current directory.
+> Start them from different directories (or with different working directories) to
+> avoid sharing the same database file.
+
+## Invoking actors
 
 The control servers run on ports 8081 and 8082. You can perform operations on the actor
 by invoking either endpoint (run these in a separate terminal):
