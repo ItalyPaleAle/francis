@@ -68,6 +68,12 @@ func WithRequestTimeout(d time.Duration) HostOption {
 	return func(o *newHostOptions) { o.RequestTimeout = d }
 }
 
+// WithMaxInFlightRequests sets how many peer invocations this host's peer server processes concurrently per session
+// Invocations past the limit are rejected with a retryable overloaded error so callers back off and re-resolve
+func WithMaxInFlightRequests(n int) HostOption {
+	return func(o *newHostOptions) { o.MaxInFlightRequests = n }
+}
+
 type newHostOptions struct {
 	Address             string
 	BindPort            int
@@ -77,6 +83,7 @@ type newHostOptions struct {
 	Logger              *slog.Logger
 	ShutdownGracePeriod time.Duration
 	RequestTimeout      time.Duration
+	MaxInFlightRequests int
 
 	// Allows setting a clock for testing
 	clock clock.WithTicker

@@ -355,6 +355,126 @@ func TestPeerInFlightInvocationCompletesDuringDrain(t *testing.T) {
 	}
 }
 
+func TestPeerInvocationRejectedWhenOverloaded(t *testing.T) {
+	addr := freeUDPAddr(t)
+
+	srvTLS, _, err := hosttls.HostTLSOptions{}.GetTLSConfig()
+	require.NoError(t, err)
+
+	// The "block" method holds its in-flight slot until released, so the test can saturate the single-slot session
+	started := make(chan struct{})
+	release := make(chan struct{})
+	handler := func(_ context.Context, req protocol.InvokeActorRequest) (protocol.InvokeActorResponse, *protocol.Error) {
+		if req.Method == "block" {
+			close(started)
+			<-release
+		}
+		return protocol.InvokeActorResponse{Data: req.Data}, nil
+	}
+
+	// A single in-flight slot makes the limit trivial to saturate
+	ps := NewServer(ServerConfig{
+		Bind:                addr,
+		TLSConfig:           srvTLS,
+		HostID:              func() string { return "host-b" },
+		Handler:             handler,
+		MaxInFlightRequests: 1,
+		Log:                 slog.New(slog.DiscardHandler),
+	})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() {
+		_ = ps.Run(ctx)
+	}()
+
+	_, cliTLS, err := hosttls.HostTLSOptions{
+		InsecureSkipTLSValidation: true,
+	}.GetTLSConfig()
+	require.NoError(t, err)
+	pc := NewClient(ClientConfig{
+		TLSConfig:   cliTLS,
+		DialTimeout: 5 * time.Second,
+		Log:         slog.New(slog.DiscardHandler),
+	})
+	defer pc.Close()
+
+	baseReq := protocol.InvokeActorRequest{
+		TargetHostID: "host-b",
+		ActorType:    "T",
+		ActorID:      "a1",
+		Mode:         protocol.InvocationModeObject,
+	}
+
+	// Warm up with a quick echo, retrying until the server is accepting connections
+	var perr *protocol.Error
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		warmReq := baseReq
+		warmReq.Method = "echo"
+		reqCtx, reqCancel := context.WithTimeout(ctx, 2*time.Second)
+		_, perr = pc.InvokeObject(reqCtx, addr, warmReq)
+		reqCancel()
+		if perr == nil || !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	require.Nil(t, perr, "warmup invocation should succeed")
+
+	// Start an invocation that blocks in the handler, occupying the session's only in-flight slot
+	type result struct {
+		resp protocol.InvokeActorResponse
+		perr *protocol.Error
+	}
+	inflight := make(chan result, 1)
+	go func() {
+		req := baseReq
+		req.Method = "block"
+		req.Data = []byte("payload")
+		resp, bperr := pc.InvokeObject(ctx, addr, req)
+		inflight <- result{resp: resp, perr: bperr}
+	}()
+
+	// Wait until the in-flight handler has claimed the slot
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("in-flight invocation did not start")
+	}
+
+	// A second invocation cannot claim a slot, so it is rejected in-band with a retryable overloaded error
+	// That it gets a structured reply at all proves the QUIC stream buffer admits the excess stream rather than stalling it
+	reqCtx, reqCancel := context.WithTimeout(ctx, 5*time.Second)
+	overReq := baseReq
+	overReq.Method = "echo"
+	_, perr = pc.InvokeObject(reqCtx, addr, overReq)
+	reqCancel()
+	require.NotNil(t, perr, "an invocation past the in-flight limit must be rejected")
+	assert.Equal(t, protocol.ErrCodeOverloaded, perr.Code)
+	assert.True(t, perr.Retryable(), "an overloaded rejection must be retryable")
+
+	// Releasing the in-flight handler frees the slot and completes the blocked invocation
+	close(release)
+	select {
+	case res := <-inflight:
+		require.Nil(t, res.perr, "the in-flight invocation should complete normally")
+		assert.Equal(t, []byte("payload"), res.resp.Data)
+	case <-time.After(10 * time.Second):
+		t.Fatal("in-flight invocation did not complete")
+	}
+
+	// With the slot freed, a fresh invocation succeeds again
+	reqCtx, reqCancel = context.WithTimeout(ctx, 5*time.Second)
+	freeReq := baseReq
+	freeReq.Method = "echo"
+	freeReq.Data = []byte("after")
+	resp, perr := pc.InvokeObject(reqCtx, addr, freeReq)
+	reqCancel()
+	require.Nil(t, perr, "an invocation after the slot is freed should succeed")
+	assert.Equal(t, []byte("after"), resp.Data)
+}
+
 // echoStreamHandler reads the entire request body and writes it back as the response body
 func echoStreamHandler(_ context.Context, _ protocol.InvokeActorRequest, body io.Reader, w actor.StreamResponseWriter) *protocol.Error {
 	data, err := io.ReadAll(body)

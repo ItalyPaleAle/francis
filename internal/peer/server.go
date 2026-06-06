@@ -32,6 +32,10 @@ type ServerConfig struct {
 	TLSConfig *tls.Config
 	// IdleTimeout closes a session after it has been idle this long
 	IdleTimeout time.Duration
+	// MaxInFlightRequests bounds how many invocations a single peer session processes concurrently
+	// Invocations past the limit are rejected in-band with a retryable overloaded error
+	// If not positive, defaultMaxInFlightRequests is used
+	MaxInFlightRequests int
 	// Handler runs object invocations
 	// If nil, object invocation is unsupported
 	Handler InvokeHandler
@@ -66,6 +70,9 @@ func NewServer(cfg ServerConfig) *Server {
 	if cfg.IdleTimeout <= 0 {
 		cfg.IdleTimeout = defaultIdleTimeout
 	}
+	if cfg.MaxInFlightRequests <= 0 {
+		cfg.MaxInFlightRequests = defaultMaxInFlightRequests
+	}
 
 	return &Server{
 		cfg: cfg,
@@ -75,7 +82,13 @@ func NewServer(cfg ServerConfig) *Server {
 // Run starts the peer WebTransport server and blocks until the context is canceled
 func (s *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
-	srv := wt.NewServer(s.cfg.Bind, s.cfg.TLSConfig, mux, wt.WithMaxIdleTimeout(s.cfg.IdleTimeout))
+
+	// Allow a few streams beyond the in-flight limit so the server can still accept and reject excess invocations in-band, rather than stalling new streams at the QUIC layer
+	maxStreams := int64(s.cfg.MaxInFlightRequests + inFlightStreamBuffer)
+	srv := wt.NewServer(s.cfg.Bind, s.cfg.TLSConfig, mux,
+		wt.WithMaxIdleTimeout(s.cfg.IdleTimeout),
+		wt.WithMaxIncomingStreams(maxStreams),
+	)
 
 	// Health endpoint for liveness probes over plain HTTP/3
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -152,6 +165,10 @@ func (s *Server) serveSession(ctx context.Context, session *webtransport.Session
 		}
 	}()
 
+	// inFlight is a per-session semaphore that bounds how many invocations this session processes concurrently
+	// The QUIC server admits a few more streams than this so the excess can be rejected in-band
+	inFlight := make(chan struct{}, s.cfg.MaxInFlightRequests)
+
 	// Each invocation arrives on its own stream and is handled concurrently
 	for {
 		stream, err := session.AcceptStream(sessCtx)
@@ -159,20 +176,32 @@ func (s *Server) serveSession(ctx context.Context, session *webtransport.Session
 			return
 		}
 
-		go s.handleStream(sessCtx, stream)
+		go s.handleStream(sessCtx, stream, inFlight)
 	}
 }
 
-// requestReadTimeout bounds how long the invocation metadata frame may take to arrive on an accepted stream before it is abandoned
-// It only covers the metadata frame: ReadMessageWithTimeout clears the deadline before any trailing request body is streamed
-const requestReadTimeout = 30 * time.Second
+const (
+	// requestReadTimeout bounds how long the invocation metadata frame may take to arrive on an accepted stream before it is abandoned
+	// It only covers the metadata frame: ReadMessageWithTimeout clears the deadline before any trailing request body is streamed
+	requestReadTimeout = 30 * time.Second
 
-// drainingRetryAfter is the retry-after hint returned when a draining host rejects a new invocation
-// It is only a hint: the caller re-resolves through the runtime, which returns its own retry-after for the actor's next placement
-const drainingRetryAfter = 500 * time.Millisecond
+	// drainingRetryAfter is the retry-after hint returned when a draining host rejects a new invocation
+	// It is only a hint: the caller re-resolves through the runtime, which returns its own retry-after for the actor's next placement
+	drainingRetryAfter = 500 * time.Millisecond
+
+	// defaultMaxInFlightRequests bounds how many invocations a single peer session processes concurrently when none is configured
+	defaultMaxInFlightRequests = 100
+
+	// inFlightStreamBuffer is how many streams beyond the in-flight limit the QUIC server still admits, leaving room to reject excess invocations in-band instead of stalling them at the transport layer
+	inFlightStreamBuffer = 8
+
+	// overloadRetryAfter is the retry-after hint returned when a session is already at its in-flight limit
+	overloadRetryAfter = 100 * time.Millisecond
+)
 
 // handleStream reads one invocation from a stream, validates it, and dispatches by invocation mode
-func (s *Server) handleStream(ctx context.Context, stream *webtransport.Stream) {
+// inFlight bounds concurrent invocation handling for the session: a stream that cannot claim a slot is rejected with a retryable overloaded error
+func (s *Server) handleStream(ctx context.Context, stream *webtransport.Stream, inFlight chan struct{}) {
 	defer stream.Close()
 
 	// Read the invocation metadata frame
@@ -206,6 +235,16 @@ func (s *Server) handleStream(ctx context.Context, stream *webtransport.Stream) 
 	// In-flight invocations that started before draining keep running on their own goroutines and finish normally
 	if s.cfg.Draining != nil && s.cfg.Draining() {
 		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeHostDraining, "host is draining").WithRetryAfter(drainingRetryAfter)))
+		return
+	}
+
+	// Claim an in-flight slot for the duration of the actual invocation
+	// If the session is already at its limit, reject with a retryable overloaded error so the caller backs off and re-resolves
+	select {
+	case inFlight <- struct{}{}:
+		defer func() { <-inFlight }()
+	default:
+		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeOverloaded, "host has too many in-flight requests").WithRetryAfter(overloadRetryAfter)))
 		return
 	}
 

@@ -261,13 +261,14 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 	// The peer server serves invocations of actors owned by this host over WebTransport
 	// It reports our host ID so it can reject invocations aimed at a stale placement, and authorizes incoming sessions
 	h.peerServer = peer.NewServer(peer.ServerConfig{
-		Bind:          h.bind,
-		TLSConfig:     serverTLSConfig,
-		Handler:       h.peerInvokeObject,
-		StreamHandler: h.peerInvokeStream,
-		Auth:          options.PeerAuthentication,
-		Log:           options.Logger,
-		HostID:        h.HostID,
+		Bind:                h.bind,
+		TLSConfig:           serverTLSConfig,
+		Handler:             h.peerInvokeObject,
+		StreamHandler:       h.peerInvokeStream,
+		Auth:                options.PeerAuthentication,
+		Log:                 options.Logger,
+		HostID:              h.HostID,
+		MaxInFlightRequests: options.MaxInFlightRequests,
 	})
 
 	return h, nil

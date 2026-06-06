@@ -34,6 +34,8 @@ const (
 	ErrCodeHostMismatch ErrorCode = "host_mismatch"
 	// ErrCodeRetryLater indicates the operation cannot complete now and the caller should retry after a delay
 	ErrCodeRetryLater ErrorCode = "retry_later"
+	// ErrCodeOverloaded indicates the target has too many in-flight requests and the caller should retry after a delay
+	ErrCodeOverloaded ErrorCode = "overloaded"
 	// ErrCodeNoHost indicates no host is available to place the actor
 	ErrCodeNoHost ErrorCode = "no_host"
 	// ErrCodeActorNotHosted indicates the actor is not active on the target host
@@ -136,7 +138,7 @@ func (e *Error) RetryAfter() (time.Duration, bool) {
 // Retryable reports whether the caller should invalidate any cached placement and retry after a delay
 func (e *Error) Retryable() bool {
 	switch e.Code {
-	case ErrCodeRetryLater, ErrCodeHostDraining, ErrCodeActorHalted, ErrCodeHostMismatch, ErrCodeActorNotHosted:
+	case ErrCodeRetryLater, ErrCodeOverloaded, ErrCodeHostDraining, ErrCodeActorHalted, ErrCodeHostMismatch, ErrCodeActorNotHosted:
 		return true
 	default:
 		return false

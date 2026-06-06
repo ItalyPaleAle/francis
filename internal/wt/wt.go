@@ -25,6 +25,16 @@ func WithMaxIdleTimeout(d time.Duration) Option {
 	}
 }
 
+// WithMaxIncomingStreams caps the number of concurrent bidirectional streams a peer may open on a connection
+// A server uses this to bound the streams a single connection can hold open, which backs its in-flight request limit
+func WithMaxIncomingStreams(n int64) Option {
+	return func(c *quic.Config) {
+		if n > 0 {
+			c.MaxIncomingStreams = n
+		}
+	}
+}
+
 // NewServer builds a WebTransport server bound to addr that serves handler
 // It advertises the HTTP/3 ALPN and the WebTransport SETTINGS so clients can negotiate sessions
 func NewServer(addr string, tlsConfig *tls.Config, handler http.Handler, opts ...Option) *webtransport.Server {
