@@ -10,7 +10,8 @@ import (
 )
 
 // ProtocolVersion is the current version of the wire protocol
-// During host registration both ends negotiate down to the lowest commonly-supported version
+// The host advertises it when registering
+// Hosts requiring a newer version than supported are rejected
 const ProtocolVersion uint16 = 1
 
 // Size limits for protocol messages
@@ -80,7 +81,9 @@ const (
 // Envelope is the shared wrapper for every protocol message
 // It is encoded with MessagePack and framed with a length prefix on a stream
 type Envelope struct {
-	// ProtocolVersion is the version of the protocol used to encode this message
+	// ProtocolVersion records the protocol version of the node that encoded this message
+	// The runtime negotiates the session version from it during the registration handshake
+	// It is ignored on other messages
 	ProtocolVersion uint16 `msgpack:"v"`
 	// Kind identifies the message type
 	Kind string `msgpack:"k"`
@@ -182,24 +185,18 @@ func (e *Envelope) AsError() (*Error, bool) {
 	return perr, true
 }
 
-// CheckProtocolVersion validates the protocol version advertised by a peer
-// A higher version than this peer supports is rejected, while equal or lower is accepted and the lower is used
-func CheckProtocolVersion(v uint16) error {
-	if v == 0 {
-		return errors.New("missing protocol version")
+// NegotiateVersion validates a peer's advertised protocol version and returns the version the session will use
+// The session runs at the version the peer advertised, which is the lower of the two when the peer is older, so older peers stay supported
+// A missing version, or one newer than this node understands, is rejected: this node does not assume forward compatibility with a version it has never seen
+func NegotiateVersion(peerVersion uint16) (uint16, error) {
+	switch {
+	case peerVersion == 0:
+		return 0, errors.New("missing protocol version")
+	case peerVersion > ProtocolVersion:
+		return 0, fmt.Errorf("unsupported protocol version %d: this node supports up to %d", peerVersion, ProtocolVersion)
+	default:
+		return peerVersion, nil
 	}
-	if v > ProtocolVersion {
-		return fmt.Errorf("unsupported protocol version %d: this peer supports up to %d", v, ProtocolVersion)
-	}
-	return nil
-}
-
-// NegotiateVersion returns the version both peers should use, given the peer's advertised version
-func NegotiateVersion(peerVersion uint16) uint16 {
-	if peerVersion == 0 || peerVersion > ProtocolVersion {
-		return ProtocolVersion
-	}
-	return peerVersion
 }
 
 // Marshal encodes v using MessagePack

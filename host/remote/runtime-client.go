@@ -262,13 +262,12 @@ func (rc *runtimeClient) register(ctx context.Context, session *webtransport.Ses
 	}
 	defer stream.Close()
 
-	// Advertise our protocol version, actor types, and peer address
+	// Advertise our actor types and peer address; our protocol version travels in the request envelope
 	// PreviousHostID is our last known host ID so the runtime reattaches us rather than minting a new identity on reconnect
 	req, err := protocol.NewRequest(protocol.KindRegisterHost, protocol.RegisterHostRequest{
-		ProtocolVersion: protocol.ProtocolVersion,
-		PreviousHostID:  rc.HostID(),
-		Address:         rc.cfg.peerAddress,
-		ActorTypes:      rc.cfg.actorTypes,
+		PreviousHostID: rc.HostID(),
+		Address:        rc.cfg.peerAddress,
+		ActorTypes:     rc.cfg.actorTypes,
 	})
 	if err != nil {
 		return protocol.RegisterHostResponse{}, err

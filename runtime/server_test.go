@@ -98,9 +98,8 @@ func registerOnSession(t *testing.T, ctx context.Context, session *webtransport.
 	defer stream.Close()
 
 	req, err := protocol.NewRequest(protocol.KindRegisterHost, protocol.RegisterHostRequest{
-		ProtocolVersion: protocol.ProtocolVersion,
-		Address:         "10.9.0.1:1",
-		ActorTypes:      []protocol.ActorHostType{{ActorType: "T", IdleTimeoutMs: 60000}},
+		Address:    "10.9.0.1:1",
+		ActorTypes: []protocol.ActorHostType{{ActorType: "T", IdleTimeoutMs: 60000}},
 	})
 	require.NoError(t, err)
 

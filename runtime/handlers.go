@@ -98,8 +98,8 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode registration request"))
 	}
 
-	// Negotiate the protocol version
-	verErr := protocol.CheckProtocolVersion(payload.ProtocolVersion)
+	// Negotiate the session protocol version from the version the host advertised in the envelope
+	negotiatedVersion, verErr := protocol.NegotiateVersion(req.ProtocolVersion)
 	if verErr != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeProtocolVersion, verErr.Error()))
 	}
@@ -125,7 +125,7 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 	c.sessionID = uuid.NewString()
 	c.address = payload.Address
 	c.setActorTypes(payload.ActorTypes)
-	c.protocolVersion = protocol.NegotiateVersion(payload.ProtocolVersion)
+	c.protocolVersion = negotiatedVersion
 
 	// Track the session, superseding any prior session for the same host
 	superseded := rt.hosts.Register(c)

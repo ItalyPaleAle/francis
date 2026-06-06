@@ -15,8 +15,7 @@ import (
 
 func TestEnvelopePayloadRoundTrip(t *testing.T) {
 	in := RegisterHostRequest{
-		ProtocolVersion: ProtocolVersion,
-		Address:         "10.0.0.5:8443",
+		Address: "10.0.0.5:8443",
 		ActorTypes: []ActorHostType{
 			{ActorType: "myactor", IdleTimeoutMs: 10000},
 		},
@@ -152,17 +151,22 @@ func TestSetPayloadRejectsOversizedPayload(t *testing.T) {
 	assert.Contains(t, err.Error(), "exceeds maximum")
 }
 
-func TestCheckProtocolVersion(t *testing.T) {
-	require.NoError(t, CheckProtocolVersion(ProtocolVersion))
-
-	require.Error(t, CheckProtocolVersion(0))
-	require.Error(t, CheckProtocolVersion(ProtocolVersion+1))
-}
-
 func TestNegotiateVersion(t *testing.T) {
-	assert.Equal(t, ProtocolVersion, NegotiateVersion(0))
-	assert.Equal(t, ProtocolVersion, NegotiateVersion(ProtocolVersion+1))
-	assert.Equal(t, ProtocolVersion, NegotiateVersion(ProtocolVersion))
+	t.Run("uses the peer's version when supported", func(t *testing.T) {
+		v, err := NegotiateVersion(ProtocolVersion)
+		require.NoError(t, err)
+		assert.Equal(t, ProtocolVersion, v)
+	})
+
+	t.Run("rejects a missing version", func(t *testing.T) {
+		_, err := NegotiateVersion(0)
+		require.Error(t, err)
+	})
+
+	t.Run("rejects a version newer than this node supports", func(t *testing.T) {
+		_, err := NegotiateVersion(ProtocolVersion + 1)
+		require.Error(t, err)
+	})
 }
 
 func TestErrorIsByCode(t *testing.T) {

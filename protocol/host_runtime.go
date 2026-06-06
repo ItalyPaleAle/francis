@@ -52,9 +52,8 @@ type ActorHostType struct {
 }
 
 // RegisterHostRequest registers or reattaches a host with the runtime
+// The host's protocol version is carried by the envelope, so it is not duplicated here
 type RegisterHostRequest struct {
-	// ProtocolVersion is the highest protocol version the host supports
-	ProtocolVersion uint16 `msgpack:"v"`
 	// PreviousHostID is set on reconnect to reattach to an existing host registration by stable identity
 	PreviousHostID string `msgpack:"prevHostId,omitempty"`
 	// Address is the peer address where this host accepts host-to-host invocations
