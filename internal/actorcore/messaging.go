@@ -166,7 +166,14 @@ func (m *Manager) InvokeStream(parentCtx context.Context, resolver PlacementReso
 	}
 
 	if resolver.IsLocal(ap) {
-		return m.invokeLocalStream(parentCtx, resolver, r, method, reqContentType, body, activeOnly)
+		ct, resp, err := m.invokeLocalStream(parentCtx, resolver, r, method, reqContentType, body, activeOnly)
+		if err != nil && (errors.Is(err, actor.ErrActorNotActive) || errors.Is(err, actor.ErrActorNotHosted)) {
+			// A stale cached placement routed us here, but the actor is inactive or owned elsewhere: drop the entry so the next call re-resolves
+			// We do not retry the current call because the request body has already been consumed, mirroring the object path's stale-local handling
+			resolver.Invalidate(r)
+		}
+
+		return ct, resp, err
 	}
 
 	// Stream to the peer that owns the actor

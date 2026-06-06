@@ -123,7 +123,7 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 	c.hostID = res.HostID
 	c.sessionID = uuid.NewString()
 	c.address = payload.Address
-	c.actorTypes = payload.ActorTypes
+	c.setActorTypes(payload.ActorTypes)
 	c.protocolVersion = protocol.NegotiateVersion(payload.ProtocolVersion)
 
 	// Track the session, superseding any prior session for the same host
@@ -183,7 +183,7 @@ func (rt *Runtime) handleHealthCheck(parentCtx context.Context, c *hostConn, req
 	// A nil list leaves them unchanged
 	if payload.ActorTypes != nil {
 		updateReq.ActorTypes = protocolActorTypesToComponents(payload.ActorTypes)
-		c.actorTypes = payload.ActorTypes
+		c.setActorTypes(payload.ActorTypes)
 	}
 
 	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)

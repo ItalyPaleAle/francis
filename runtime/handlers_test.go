@@ -87,7 +87,11 @@ func TestHandleHealthCheck(t *testing.T) {
 			ActorTypes: []protocol.ActorHostType{{ActorType: "T2", IdleTimeoutMs: 60000}},
 		})
 		assert.Equal(t, protocol.KindHealthCheckResponse, resp.Kind)
-		assert.Equal(t, []protocol.ActorHostType{{ActorType: "T2", IdleTimeoutMs: 60000}}, c.actorTypes)
+		stored := c.actorTypes.Load()
+		require.NotNil(t, stored)
+		assert.Equal(t, []protocol.ActorHostType{
+			{ActorType: "T2", IdleTimeoutMs: 60000},
+		}, *stored)
 	})
 }
 

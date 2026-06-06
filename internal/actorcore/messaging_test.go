@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +32,21 @@ func (e *echoActor) Invoke(_ context.Context, method string, data actor.Envelope
 	}
 	return "echo:" + method + ":" + s, nil
 }
+
+// streamActor is a minimal actor that echoes the request body back through the streamed response
+type streamActor struct{}
+
+func (s *streamActor) InvokeStream(_ context.Context, method string, reqContentType string, body io.Reader, w actor.StreamResponseWriter) error {
+	in, err := io.ReadAll(body)
+	if err != nil {
+		return err
+	}
+	w.SetContentType(reqContentType)
+	_, err = w.Write([]byte("stream:" + method + ":" + string(in)))
+	return err
+}
+
+func streamFactory(_ string, _ *actor.Service) actor.Actor { return &streamActor{} }
 
 // fakeResolver is a scripted PlacementResolver: each Resolve call returns the next placement, and IsLocal compares the placement to localHostID
 type fakeResolver struct {
@@ -272,5 +288,62 @@ func TestManagerPeerInvokeObject(t *testing.T) {
 		require.NotNil(t, perr)
 		assert.Equal(t, protocol.ErrCodeActorNotActive, perr.Code)
 		assert.Equal(t, 0, resolver.confirmCalls)
+	})
+}
+
+func TestManagerInvokeStreamStaleLocal(t *testing.T) {
+	t.Run("a stale local placement is invalidated when the actor is owned elsewhere", func(t *testing.T) {
+		m := newMessagingManager(t, echoFactory)
+		// A stale cache routes us here, but the claim reveals the actor is owned by another host
+		resolver := &fakeResolver{
+			localHostID: "h1",
+			placements:  []*Placement{{HostID: "h1", Address: "addr1"}},
+			confirmErr:  actor.ErrActorNotHosted,
+		}
+		peer := &fakePeer{}
+
+		_, _, err := m.InvokeStream(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "", nil, false)
+		require.ErrorIs(t, err, actor.ErrActorNotHosted)
+
+		// The one-shot body cannot be replayed, so the call is not retried, but the stale entry is dropped so the next call re-resolves
+		assert.Equal(t, 1, resolver.invalidated)
+		assert.Equal(t, 1, resolver.resolveCalls)
+	})
+
+	t.Run("an inactive local placement is invalidated for an active-only invocation", func(t *testing.T) {
+		m := newMessagingManager(t, echoFactory)
+		resolver := &fakeResolver{
+			localHostID: "h1",
+			placements:  []*Placement{{HostID: "h1", Address: "addr1"}},
+		}
+		peer := &fakePeer{}
+
+		// An active-only stream invocation never claims the actor and finds it inactive here
+		_, _, err := m.InvokeStream(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "", nil, true)
+		require.ErrorIs(t, err, actor.ErrActorNotActive)
+
+		assert.Equal(t, 1, resolver.invalidated)
+		assert.Equal(t, 0, resolver.confirmCalls)
+	})
+
+	t.Run("a healthy local stream is not invalidated", func(t *testing.T) {
+		m := newMessagingManager(t, streamFactory)
+		resolver := &fakeResolver{
+			localHostID: "h1",
+			placements:  []*Placement{{HostID: "h1", Address: "addr1"}},
+		}
+		peer := &fakePeer{}
+
+		ct, resp, err := m.InvokeStream(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "text/plain", strings.NewReader("hi"), false)
+		require.NoError(t, err)
+		assert.Equal(t, "text/plain", ct)
+		got, err := io.ReadAll(resp)
+		require.NoError(t, err)
+		require.NoError(t, resp.Close())
+		assert.Equal(t, "stream:ping:hi", string(got))
+
+		// A successful invocation leaves the cached placement in place
+		assert.Equal(t, 0, resolver.invalidated)
+		assert.Equal(t, 1, resolver.confirmCalls)
 	})
 }

@@ -265,7 +265,12 @@ func TestHandleHostDisconnectIgnoresSupersededSession(t *testing.T) {
 	c := connectTestHost(t, rt, prov, "10.0.0.23:1", protocol.ActorHostType{ActorType: "T"})
 
 	// A newer session for the same host supersedes the original, so the original conn (session s1) is now stale
-	newer := &hostConn{hostID: c.hostID, sessionID: "s2", address: c.address, actorTypes: c.actorTypes}
+	newer := &hostConn{
+		hostID:    c.hostID,
+		sessionID: "s2",
+		address:   c.address,
+	}
+	newer.actorTypes.Store(c.actorTypes.Load())
 	rt.hosts.Register(newer)
 
 	aref := ref.NewActorRef("T", "a1")

@@ -20,6 +20,19 @@ import (
 // errNotConnected is returned by host-to-runtime requests when there is no active runtime session
 var errNotConnected = errors.New("not connected to a runtime")
 
+// errFatalRegistration wraps a registration rejection that will never succeed on retry, such as a protocol version mismatch
+var errFatalRegistration = errors.New("runtime permanently rejected registration")
+
+// isFatalRegistrationError reports whether a registration rejection is permanent, so reconnecting to any replica would fail the same way
+func isFatalRegistrationError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// A protocol version mismatch is decided against a constant compiled into both sides, so every replica rejects it identically
+	return isProtocolErrorCode(err, protocol.ErrCodeProtocolVersion)
+}
+
 // runtimeHandlers are the callbacks invoked for runtime-initiated requests
 type runtimeHandlers struct {
 	// executeAlarm runs an alarm for an actor owned by this host and returns the result
@@ -126,6 +139,11 @@ func (rc *runtimeClient) Run(ctx context.Context) error {
 			// The context was canceled: this is a graceful shutdown
 			return nil
 		}
+		if errors.Is(err, errFatalRegistration) {
+			// The runtime rejected our registration in a way that no reconnect can fix, so stop and report it rather than spinning and never closing Ready
+			rc.cfg.log.ErrorContext(ctx, "Runtime permanently rejected registration; giving up", slog.String("address", addr), slog.Any("error", err))
+			return err
+		}
 		if err != nil {
 			rc.cfg.log.WarnContext(ctx, "Runtime connection failed, will reconnect", slog.String("address", addr), slog.Any("error", err))
 		} else {
@@ -170,7 +188,10 @@ func (rc *runtimeClient) connectAndServe(ctx context.Context, addr string) (bool
 	regCtx, cancel := context.WithTimeout(ctx, rc.cfg.requestTimeout)
 	resp, err := rc.register(regCtx, session)
 	cancel()
-	if err != nil {
+	if isFatalRegistrationError(err) {
+		// A permanent rejection (such as a protocol version mismatch) will never succeed on retry, so surface it as fatal to stop the reconnect loop
+		return false, fmt.Errorf("%w: %w", errFatalRegistration, err)
+	} else if err != nil {
 		return false, fmt.Errorf("failed to register with runtime: %w", err)
 	}
 

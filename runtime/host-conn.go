@@ -29,7 +29,10 @@ type hostConn struct {
 	address   string
 
 	protocolVersion uint16
-	actorTypes      []protocol.ActorHostType
+
+	// actorTypes holds the host's advertised actor type configuration
+	// It is stored as an atomic pointer to an immutable slice
+	actorTypes atomic.Pointer[[]protocol.ActorHostType]
 
 	// draining is set when a graceful UnregisterHost is in progress
 	// While draining the host must not be selected for new placement or alarm work
@@ -67,9 +70,19 @@ func (c *hostConn) close(code webtransport.SessionErrorCode, msg string) {
 	_ = c.session.CloseWithError(code, msg)
 }
 
+// setActorTypes replaces the host's advertised actor type configuration with an immutable snapshot
+func (c *hostConn) setActorTypes(types []protocol.ActorHostType) {
+	c.actorTypes.Store(&types)
+}
+
 // actorTypeConfig returns the host's advertised configuration for an actor type
 func (c *hostConn) actorTypeConfig(actorType string) (protocol.ActorHostType, bool) {
-	for _, at := range c.actorTypes {
+	types := c.actorTypes.Load()
+	if types == nil {
+		return protocol.ActorHostType{}, false
+	}
+
+	for _, at := range *types {
 		if at.ActorType == actorType {
 			return at, true
 		}

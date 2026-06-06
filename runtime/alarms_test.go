@@ -27,7 +27,12 @@ func connectTestHost(t *testing.T, rt *Runtime, prov *standalone.StandaloneMemor
 	})
 	require.NoError(t, err)
 
-	c := &hostConn{hostID: res.HostID, sessionID: "s1", address: address, actorTypes: []protocol.ActorHostType{at}}
+	c := &hostConn{
+		hostID:    res.HostID,
+		sessionID: "s1",
+		address:   address,
+	}
+	c.setActorTypes([]protocol.ActorHostType{at})
 	rt.hosts.Register(c)
 	return c
 }

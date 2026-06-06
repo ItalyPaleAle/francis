@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"net/http"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/standalone"
 	"github.com/italypaleale/francis/internal/hosttls"
+	"github.com/italypaleale/francis/internal/wt"
 	"github.com/italypaleale/francis/protocol"
 	"github.com/italypaleale/francis/runtime"
 )
@@ -129,5 +131,89 @@ func TestRuntimeClientIntegration(t *testing.T) {
 	case <-rtErr:
 	case <-time.After(10 * time.Second):
 		t.Fatal("runtime did not shut down")
+	}
+}
+
+// startRejectingRuntime starts a minimal WebTransport server that rejects every registration with a permanent protocol-version error
+// It returns the address the client should dial
+func startRejectingRuntime(t *testing.T) string {
+	t.Helper()
+
+	addr := freeUDPAddr(t)
+	serverTLS, _, err := hosttls.HostTLSOptions{InsecureSkipTLSValidation: true}.GetTLSConfig()
+	require.NoError(t, err)
+
+	mux := http.NewServeMux()
+	wtServer := wt.NewServer(addr, serverTLS, mux)
+	mux.HandleFunc(protocol.RuntimeConnectPath, func(w http.ResponseWriter, r *http.Request) {
+		session, uErr := wtServer.Upgrade(w, r)
+		if uErr != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		// The first stream carries the registration handshake; read it and reject it
+		stream, sErr := session.AcceptStream(r.Context())
+		if sErr != nil {
+			return
+		}
+		req, rErr := protocol.ReadMessageWithTimeout(stream, 5*time.Second)
+		if rErr != nil {
+			_ = stream.Close()
+			return
+		}
+		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeProtocolVersion, "unsupported protocol version")))
+		_ = stream.Close()
+
+		// Hold the session open until the client tears it down after receiving the rejection
+		<-session.Context().Done()
+	})
+
+	go func() {
+		_ = wtServer.ListenAndServe()
+	}()
+	t.Cleanup(func() {
+		_ = wtServer.Close()
+	})
+
+	return addr
+}
+
+// TestRuntimeClientFailsFastOnPermanentRegistrationRejection verifies that a permanent registration rejection stops the reconnect loop instead of spinning forever
+func TestRuntimeClientFailsFastOnPermanentRegistrationRejection(t *testing.T) {
+	addr := startRejectingRuntime(t)
+
+	_, clientTLS, err := hosttls.HostTLSOptions{InsecureSkipTLSValidation: true}.GetTLSConfig()
+	require.NoError(t, err)
+
+	rc := newRuntimeClient(runtimeClientConfig{
+		addresses:   []string{addr},
+		peerAddress: "127.0.0.1:7001",
+		actorTypes:  []protocol.ActorHostType{{ActorType: "T", IdleTimeoutMs: 60000}},
+		tlsConfig:   clientTLS,
+		minBackoff:  50 * time.Millisecond,
+		log:         slog.New(slog.DiscardHandler),
+	})
+
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- rc.Run(t.Context())
+	}()
+
+	// A permanent rejection must stop Run quickly rather than reconnecting forever
+	select {
+	case rErr := <-runErr:
+		require.Error(t, rErr)
+		assert.ErrorIs(t, rErr, errFatalRegistration)
+		assert.True(t, isProtocolErrorCode(rErr, protocol.ErrCodeProtocolVersion), "the fatal error should carry the protocol-version code")
+	case <-time.After(15 * time.Second):
+		t.Fatal("Run did not fail fast on a permanent registration rejection")
+	}
+
+	// Ready never closes, because the host never successfully registered
+	select {
+	case <-rc.Ready():
+		t.Fatal("Ready must not close when registration is permanently rejected")
+	default:
 	}
 }
