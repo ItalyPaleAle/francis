@@ -30,7 +30,7 @@ var (
 const peerAuthKey = "test-auth-key-1234567890"
 
 func main() {
-	flag.StringVar(&actorHostAddress, "actor-host-address", "127.0.0.1:7571", "Address and port for the actor host to bind to")
+	flag.StringVar(&actorHostAddress, "actor-host-address", "127.0.0.1:7571", "Address and port for the actor host (peer server) to bind to and advertise to other hosts")
 	flag.StringVar(&workerAddress, "worker-address", "127.0.0.1:8081", "Address and port for the example worker to bind to")
 	flag.StringVar(&certName, "cert", "", "Name of the certificate in the 'certs' folder (e.g. 'node-1')")
 	flag.Parse()
