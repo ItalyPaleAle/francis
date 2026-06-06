@@ -1,16 +1,19 @@
 package runtime
 
 import (
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/italypaleale/go-kit/ttlcache"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/standalone"
+	components_mocks "github.com/italypaleale/francis/internal/mocks/components"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/protocol"
 )
@@ -63,6 +66,39 @@ func requireError(t *testing.T, resp *protocol.Envelope, code protocol.ErrorCode
 	perr, ok := resp.AsError()
 	require.True(t, ok, "expected an error response, got kind %q", resp.Kind)
 	assert.Equal(t, code, perr.Code)
+}
+
+func TestHandlerDoesNotLeakProviderErrorDetail(t *testing.T) {
+	// Verifies that an internal provider failure is reported to the client with a generic message, not the raw error
+	provider := components_mocks.NewMockActorProvider(t)
+
+	// A provider error whose detail must never reach the client
+	secret := errors.New("dial tcp 10.0.0.5:5432: connect with user=admin password=hunter2")
+	provider.EXPECT().
+		SetState(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+		Return(secret)
+
+	rt, err := NewRuntime(provider, WithBind("127.0.0.1:0"))
+	require.NoError(t, err)
+
+	c := &hostConn{
+		hostID:    "h1",
+		sessionID: "s1",
+	}
+	req, err := protocol.NewRequest(protocol.KindSetState, protocol.SetStateRequest{
+		ActorRef: protocol.ActorRef{ActorType: "T", ActorID: "a1"},
+		Data:     []byte("data"),
+	})
+	require.NoError(t, err)
+
+	resp := rt.handleSetState(t.Context(), c, req)
+
+	perr, ok := resp.AsError()
+	require.True(t, ok)
+	assert.Equal(t, protocol.ErrCodeInternal, perr.Code)
+	assert.Equal(t, "failed to set state", perr.Message, "the client message must be generic")
+	assert.NotContains(t, perr.Message, "password", "the provider error detail must not be echoed to the client")
+	assert.NotContains(t, perr.Message, "10.0.0.5", "the provider error detail must not be echoed to the client")
 }
 
 func TestHandleHealthCheck(t *testing.T) {

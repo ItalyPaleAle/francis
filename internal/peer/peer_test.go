@@ -557,6 +557,74 @@ func TestPeerStreamInvocationIntegration(t *testing.T) {
 	assert.Equal(t, payload, got)
 }
 
+func TestPeerStreamInvocationBodyTooLarge(t *testing.T) {
+	addr := freeUDPAddr(t)
+
+	srvTLS, _, err := hosttls.HostTLSOptions{}.GetTLSConfig()
+	require.NoError(t, err)
+
+	// A tiny body cap makes the limit easy to exceed
+	ps := NewServer(ServerConfig{
+		Bind:               addr,
+		TLSConfig:          srvTLS,
+		HostID:             func() string { return "host-b" },
+		StreamHandler:      echoStreamHandler,
+		MaxRequestBodySize: 8,
+		Log:                slog.New(slog.DiscardHandler),
+	})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() {
+		_ = ps.Run(ctx)
+	}()
+
+	_, cliTLS, err := hosttls.HostTLSOptions{
+		InsecureSkipTLSValidation: true,
+	}.GetTLSConfig()
+	require.NoError(t, err)
+	pc := NewClient(ClientConfig{
+		TLSConfig:   cliTLS,
+		DialTimeout: 5 * time.Second,
+		Log:         slog.New(slog.DiscardHandler),
+	})
+	defer pc.Close()
+
+	baseReq := protocol.InvokeActorRequest{
+		TargetHostID: "host-b",
+		ActorType:    "T",
+		ActorID:      "a1",
+		Method:       "stream",
+		ContentType:  "application/test",
+	}
+
+	// Warm up with a body within the cap, retrying until the server is accepting connections
+	var (
+		respBody io.ReadCloser
+		perr     *protocol.Error
+	)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		reqCtx, reqCancel := context.WithTimeout(ctx, 2*time.Second)
+		_, respBody, perr = pc.InvokeStream(reqCtx, addr, baseReq, bytes.NewReader([]byte("ok")))
+		reqCancel()
+		if perr == nil || !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	require.Nil(t, perr, "a body within the cap should succeed")
+	require.NotNil(t, respBody)
+	require.NoError(t, respBody.Close())
+
+	// A body exceeding the cap fails the invocation rather than being read unbounded
+	reqCtx, reqCancel := context.WithTimeout(ctx, 5*time.Second)
+	_, _, perr = pc.InvokeStream(reqCtx, addr, baseReq, bytes.NewReader([]byte("this body is well beyond eight bytes")))
+	reqCancel()
+	require.NotNil(t, perr, "a body exceeding the cap must fail the invocation")
+	assert.Equal(t, protocol.ErrCodeInvokeFailed, perr.Code)
+}
+
 func TestPeerStreamInvocationUnsupported(t *testing.T) {
 	addr := freeUDPAddr(t)
 

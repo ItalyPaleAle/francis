@@ -9,6 +9,7 @@ import (
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/internal/hosttls"
+	"github.com/italypaleale/francis/internal/peerauth"
 )
 
 type HostOption func(*newHostOptions)
@@ -74,16 +75,44 @@ func WithMaxInFlightRequests(n int) HostOption {
 	return func(o *newHostOptions) { o.MaxInFlightRequests = n }
 }
 
+// WithMaxRequestBodySize caps the size of a streamed peer invocation request body this host will accept, in bytes
+func WithMaxRequestBodySize(n int64) HostOption {
+	return func(o *newHostOptions) { o.MaxRequestBodySize = n }
+}
+
+// WithPeerAuthenticationSharedKey configures host-to-host (peer) authentication to use a pre-shared key
+// Peer authentication is required: a remote host must configure either a shared key or mTLS
+func WithPeerAuthenticationSharedKey(key string) HostOption {
+	return func(o *newHostOptions) {
+		o.PeerAuthentication = &peerauth.PeerAuthenticationSharedKey{
+			Key: key,
+		}
+	}
+}
+
+// WithPeerAuthenticationMTLS configures host-to-host (peer) authentication to use mTLS
+// mTLS sets the cluster TLS certificates itself, so it cannot be combined with the individual server TLS options
+func WithPeerAuthenticationMTLS(certificate *tls.Certificate, ca *x509.Certificate) HostOption {
+	return func(o *newHostOptions) {
+		o.PeerAuthentication = &peerauth.PeerAuthenticationMTLS{
+			CA:          ca,
+			Certificate: certificate,
+		}
+	}
+}
+
 type newHostOptions struct {
 	Address             string
 	BindPort            int
 	BindAddress         string
 	RuntimeAddresses    []string
 	TLSOptions          hosttls.HostTLSOptions
+	PeerAuthentication  peerauth.PeerAuthenticationMethod
 	Logger              *slog.Logger
 	ShutdownGracePeriod time.Duration
 	RequestTimeout      time.Duration
 	MaxInFlightRequests int
+	MaxRequestBodySize  int64
 
 	// Allows setting a clock for testing
 	clock clock.WithTicker

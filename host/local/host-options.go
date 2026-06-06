@@ -125,6 +125,11 @@ func WithMaxInFlightRequests(n int) HostOption {
 	return func(o *newHostOptions) { o.MaxInFlightRequests = n }
 }
 
+// WithMaxRequestBodySize caps the size of a streamed peer invocation request body this host will accept, in bytes
+func WithMaxRequestBodySize(n int64) HostOption {
+	return func(o *newHostOptions) { o.MaxRequestBodySize = n }
+}
+
 type newHostOptions struct {
 	Address                   string
 	BindPort                  int
@@ -141,6 +146,7 @@ type newHostOptions struct {
 	ShutdownGracePeriod       time.Duration
 	ProviderRequestTimeout    time.Duration
 	MaxInFlightRequests       int
+	MaxRequestBodySize        int64
 
 	// Allows setting a clock for testing
 	clock clock.WithTicker

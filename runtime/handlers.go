@@ -116,7 +116,8 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 		ExistingHostID: payload.PreviousHostID,
 	})
 	if err != nil {
-		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeInternal, "failed to register host: %v", err))
+		rt.log.ErrorContext(ctx, "Failed to register host", slog.Any("error", err))
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to register host"))
 	}
 
 	// Record the host identity and session on the connection
@@ -192,7 +193,8 @@ func (rt *Runtime) handleHealthCheck(parentCtx context.Context, c *hostConn, req
 	if errors.Is(err, components.ErrHostUnregistered) {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeHostUnregistered, "host registration is no longer valid"))
 	} else if err != nil {
-		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeInternal, "failed to persist health check: %v", err))
+		rt.log.ErrorContext(ctx, "Failed to persist health check", slog.Any("error", err))
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to persist health check"))
 	}
 
 	return req.Reply(protocol.KindHealthCheckResponse, nil)
@@ -241,7 +243,8 @@ func (rt *Runtime) handleLookupActor(parentCtx context.Context, _ *hostConn, req
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeActorNotActive, "actor is not currently active"))
 	case err != nil:
 		rt.deletePlacement(key)
-		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeInternal, "failed to look up actor: %v", err))
+		rt.log.ErrorContext(ctx, "Failed to look up actor", slog.Any("error", err))
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to look up actor"))
 	}
 
 	// Never hand out a placement on a host that is draining on this runtime
@@ -291,7 +294,8 @@ func (rt *Runtime) handleRemoveActor(parentCtx context.Context, _ *hostConn, req
 		// The actor was already gone, which is the desired end state, so report it without treating it as a hard failure
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeActorNotActive, "actor is not currently active"))
 	} else if err != nil {
-		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeInternal, "failed to remove actor: %v", err))
+		rt.log.ErrorContext(ctx, "Failed to remove actor", slog.Any("error", err))
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to remove actor"))
 	}
 
 	return req.Reply(protocol.KindRemoveActorResponse, nil)
@@ -311,7 +315,8 @@ func (rt *Runtime) handleGetAlarm(parentCtx context.Context, _ *hostConn, req *p
 	if errors.Is(err, components.ErrNoAlarm) {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeAlarmNotFound, "alarm does not exist"))
 	} else if err != nil {
-		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeInternal, "failed to get alarm: %v", err))
+		rt.log.ErrorContext(ctx, "Failed to get alarm", slog.Any("error", err))
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to get alarm"))
 	}
 
 	return rt.reply(req, protocol.KindGetAlarmResponse, protocol.GetAlarmResponse{
@@ -333,7 +338,8 @@ func (rt *Runtime) handleSetAlarm(parentCtx context.Context, _ *hostConn, req *p
 		AlarmProperties: protocolAlarmPropsToRef(payload.AlarmProperties),
 	})
 	if err != nil {
-		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeInternal, "failed to set alarm: %v", err))
+		rt.log.ErrorContext(ctx, "Failed to set alarm", slog.Any("error", err))
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to set alarm"))
 	}
 
 	return req.Reply(protocol.KindSetAlarmResponse, nil)
@@ -353,7 +359,8 @@ func (rt *Runtime) handleDeleteAlarm(parentCtx context.Context, _ *hostConn, req
 	if errors.Is(err, components.ErrNoAlarm) {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeAlarmNotFound, "alarm does not exist"))
 	} else if err != nil {
-		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeInternal, "failed to delete alarm: %v", err))
+		rt.log.ErrorContext(ctx, "Failed to delete alarm", slog.Any("error", err))
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to delete alarm"))
 	}
 
 	return req.Reply(protocol.KindDeleteAlarmResponse, nil)
@@ -373,7 +380,8 @@ func (rt *Runtime) handleGetState(parentCtx context.Context, _ *hostConn, req *p
 	if errors.Is(err, components.ErrNoState) {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeStateNotFound, "no state found for the actor"))
 	} else if err != nil {
-		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeInternal, "failed to get state: %v", err))
+		rt.log.ErrorContext(ctx, "Failed to get state", slog.Any("error", err))
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to get state"))
 	}
 
 	return rt.reply(req, protocol.KindGetStateResponse, protocol.GetStateResponse{Data: data})
@@ -396,7 +404,8 @@ func (rt *Runtime) handleSetState(parentCtx context.Context, _ *hostConn, req *p
 	defer cancel()
 	err = rt.provider.SetState(ctx, ref.NewActorRef(payload.ActorType, payload.ActorID), payload.Data, opts)
 	if err != nil {
-		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeInternal, "failed to set state: %v", err))
+		rt.log.ErrorContext(ctx, "Failed to set state", slog.Any("error", err))
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to set state"))
 	}
 
 	return req.Reply(protocol.KindSetStateResponse, nil)
@@ -416,7 +425,8 @@ func (rt *Runtime) handleDeleteState(parentCtx context.Context, _ *hostConn, req
 	if errors.Is(err, components.ErrNoState) {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeStateNotFound, "no state found for the actor"))
 	} else if err != nil {
-		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeInternal, "failed to delete state: %v", err))
+		rt.log.ErrorContext(ctx, "Failed to delete state", slog.Any("error", err))
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to delete state"))
 	}
 
 	return req.Reply(protocol.KindDeleteStateResponse, nil)

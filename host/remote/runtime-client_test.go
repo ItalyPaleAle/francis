@@ -152,7 +152,7 @@ func startRejectingRuntime(t *testing.T) string {
 			return
 		}
 
-		// The first stream carries the registration handshake; read it and reject it
+		// The first stream carries the registration handshake - read it and reject it
 		stream, sErr := session.AcceptStream(r.Context())
 		if sErr != nil {
 			return

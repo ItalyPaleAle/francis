@@ -1,6 +1,7 @@
 package peerauth
 
 import (
+	"crypto/subtle"
 	"errors"
 	"net/http"
 	"strings"
@@ -38,5 +39,7 @@ func (p *PeerAuthenticationSharedKey) ValidateIncomingRequest(r *http.Request) (
 		return false, nil
 	}
 
-	return value == p.Key, nil
+	// Use a constant-time comparison
+	eq := subtle.ConstantTimeCompare([]byte(value), []byte(p.Key))
+	return eq == 1, nil
 }

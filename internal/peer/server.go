@@ -36,6 +36,10 @@ type ServerConfig struct {
 	// Invocations past the limit are rejected in-band with a retryable overloaded error
 	// If not positive, defaultMaxInFlightRequests is used
 	MaxInFlightRequests int
+	// MaxRequestBodySize caps the size of a streamed invocation request body, bounding the memory a single invocation can consume
+	// A body exceeding it fails the invocation rather than being read unbounded
+	// If not positive, defaultMaxRequestBodySize is used
+	MaxRequestBodySize int64
 	// Handler runs object invocations
 	// If nil, object invocation is unsupported
 	Handler InvokeHandler
@@ -72,6 +76,9 @@ func NewServer(cfg ServerConfig) *Server {
 	}
 	if cfg.MaxInFlightRequests <= 0 {
 		cfg.MaxInFlightRequests = defaultMaxInFlightRequests
+	}
+	if cfg.MaxRequestBodySize <= 0 {
+		cfg.MaxRequestBodySize = defaultMaxRequestBodySize
 	}
 
 	return &Server{
@@ -197,6 +204,9 @@ const (
 
 	// overloadRetryAfter is the retry-after hint returned when a session is already at its in-flight limit
 	overloadRetryAfter = 100 * time.Millisecond
+
+	// defaultMaxRequestBodySize caps a streamed invocation request body when none is configured
+	defaultMaxRequestBodySize = 16 << 20 // 16 MiB
 )
 
 // handleStream reads one invocation from a stream, validates it, and dispatches by invocation mode
@@ -290,11 +300,12 @@ func (s *Server) handleStreamInvoke(ctx context.Context, stream *webtransport.St
 		return
 	}
 
-	// The remaining bytes on the stream are the request body
+	// The remaining bytes on the stream are the request body (capped to prevent unbound memory usage)
 	// The handler writes the response through w
 	// w emits the response metadata frame on its first Write, so the content type can be set before any body bytes are produced
+	body := newMaxBytesReader(stream, s.cfg.MaxRequestBodySize)
 	w := &peerStreamWriter{stream: stream, req: req}
-	perr := s.cfg.StreamHandler(ctx, payload, stream, w)
+	perr := s.cfg.StreamHandler(ctx, payload, body, w)
 	if perr != nil {
 		// If the response metadata frame has not been sent yet, we can still report the structured error in-band
 		if !w.flushed {

@@ -109,11 +109,15 @@ func newRemoteHost(t *testing.T, runtimeAddr string) *Host {
 		WithAddress(freeUDPAddr(t)),
 		WithRuntimeAddresses(runtimeAddr),
 		WithServerTLSInsecureSkipTLSValidation(),
+		WithPeerAuthenticationSharedKey(testPeerSharedKey),
 		WithLogger(slog.New(slog.DiscardHandler)),
 	)
 	require.NoError(t, err)
 	return host
 }
+
+// testPeerSharedKey is a valid (>=16 char) shared key used to satisfy the required peer authentication in tests
+const testPeerSharedKey = "test-peer-shared-key"
 
 // runRemoteHost starts the host and waits until it has registered with the runtime
 func runRemoteHost(t *testing.T, host *Host) {
@@ -180,6 +184,7 @@ func TestHostRemoteIntegration(t *testing.T) {
 		WithAddress(freeUDPAddr(t)),
 		WithRuntimeAddresses(runtimeAddr),
 		WithServerTLSInsecureSkipTLSValidation(),
+		WithPeerAuthenticationSharedKey(testPeerSharedKey),
 		WithLogger(slog.New(slog.DiscardHandler)),
 	)
 	require.NoError(t, err)
@@ -689,6 +694,7 @@ func TestHostRemoteRunFailsWhenPeerServerCannotBind(t *testing.T) {
 		WithAddress(occupied),
 		WithRuntimeAddresses(runtimeAddr),
 		WithServerTLSInsecureSkipTLSValidation(),
+		WithPeerAuthenticationSharedKey(testPeerSharedKey),
 		WithLogger(slog.New(slog.DiscardHandler)),
 	)
 	require.NoError(t, err)

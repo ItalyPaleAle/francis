@@ -18,6 +18,7 @@ import (
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/peer"
+	"github.com/italypaleale/francis/internal/peerauth"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/protocol"
 )
@@ -117,6 +118,41 @@ func newHost(options *newHostOptions) (*Host, error) {
 		options.clock = &clock.RealClock{}
 	}
 
+	// Configure host-to-host (peer) authentication, which is required so peer invocations are authenticated rather than protected by transport-level TLS alone
+	switch x := options.PeerAuthentication.(type) {
+	case *peerauth.PeerAuthenticationSharedKey:
+		err = x.Validate()
+		if err != nil {
+			return nil, fmt.Errorf("failed to validate PeerAuthenticationSharedKey: %w", err)
+		}
+	case *peerauth.PeerAuthenticationMTLS:
+		err = x.Validate()
+		if err != nil {
+			return nil, fmt.Errorf("failed to validate PeerAuthenticationMTLS: %w", err)
+		}
+
+		// mTLS configures the cluster TLS certificates itself, so it cannot be combined with these options
+		if options.TLSOptions.CACertificate != nil {
+			return nil, errors.New("cannot set TLSOptions.CACertificate when peer authentication is mTLS")
+		}
+		if options.TLSOptions.ServerCertificate != nil {
+			return nil, errors.New("cannot set TLSOptions.ServerCertificate when peer authentication is mTLS")
+		}
+		if options.TLSOptions.ClientCertificate != nil {
+			return nil, errors.New("cannot set TLSOptions.ClientCertificate when peer authentication is mTLS")
+		}
+		if options.TLSOptions.InsecureSkipTLSValidation {
+			return nil, errors.New("cannot set TLSOptions.InsecureSkipTLSValidation when peer authentication is mTLS")
+		}
+
+		// mTLS drives the TLS configuration for both peer and runtime connections
+		x.SetTLSOptions(&options.TLSOptions)
+	case nil:
+		return nil, errors.New("option PeerAuthentication is required")
+	default:
+		return nil, fmt.Errorf("unsupported value for PeerAuthentication: %T", options.PeerAuthentication)
+	}
+
 	// Init the TLS configuration for the peer server and the runtime/peer clients
 	serverTLSConfig, clientTLSConfig, err := options.TLSOptions.GetTLSConfig()
 	if err != nil {
@@ -149,10 +185,11 @@ func newHost(options *newHostOptions) (*Host, error) {
 	// The resolver lets the shared messaging logic resolve placement through the runtime and confirm ownership before activating an actor
 	h.resolver = placementResolver{h: h}
 
-	// The peer client invokes actors owned by other hosts
+	// The peer client invokes actors owned by other hosts, authenticating outgoing sessions when peer auth is configured
 	h.peerClient = peer.NewClient(peer.ClientConfig{
 		TLSConfig:   clientTLSConfig,
 		DialTimeout: options.RequestTimeout,
+		Auth:        options.PeerAuthentication,
 		Log:         options.Logger,
 	})
 
@@ -181,10 +218,12 @@ func newHost(options *newHostOptions) (*Host, error) {
 		TLSConfig:           serverTLSConfig,
 		Handler:             h.peerInvokeObject,
 		StreamHandler:       h.peerInvokeStream,
+		Auth:                options.PeerAuthentication,
 		Log:                 options.Logger,
 		HostID:              h.runtimeClient.HostID,
 		Draining:            h.isDraining,
 		MaxInFlightRequests: options.MaxInFlightRequests,
+		MaxRequestBodySize:  options.MaxRequestBodySize,
 	})
 
 	return h, nil

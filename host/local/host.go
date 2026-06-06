@@ -269,6 +269,7 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 		Log:                 options.Logger,
 		HostID:              h.HostID,
 		MaxInFlightRequests: options.MaxInFlightRequests,
+		MaxRequestBodySize:  options.MaxRequestBodySize,
 	})
 
 	return h, nil
