@@ -17,13 +17,14 @@ import (
 	"github.com/lmittmann/tint"
 	"github.com/mattn/go-isatty"
 
-	"github.com/italypaleale/francis/host/local"
+	"github.com/italypaleale/francis/host/remote"
 )
 
 var (
 	log              *slog.Logger
 	actorHostAddress string
 	workerAddress    string
+	runtimeAddress   string
 	certName         string
 )
 
@@ -31,7 +32,8 @@ const peerAuthKey = "test-auth-key-1234567890"
 
 func main() {
 	flag.StringVar(&actorHostAddress, "actor-host-address", "127.0.0.1:7571", "Address and port for the actor host (peer server) to bind to and advertise to other hosts")
-	flag.StringVar(&workerAddress, "worker-address", "127.0.0.1:8081", "Address and port for the example worker to bind to")
+	flag.StringVar(&workerAddress, "worker-address", "127.0.0.1:8081", "Address and port for the example worker's control server to bind to")
+	flag.StringVar(&runtimeAddress, "runtime-address", "127.0.0.1:7400", "Address and port of the Francis runtime to connect to")
 	flag.StringVar(&certName, "cert", "", "Name of the certificate in the 'certs' folder (e.g. 'node-1')")
 	flag.Parse()
 
@@ -48,13 +50,13 @@ func main() {
 
 func runWorker(ctx context.Context) error {
 	// Options for the host
-	opts := []local.HostOption{
-		local.WithAddress(actorHostAddress),
-		local.WithLogger(log.With("scope", "actor-host")),
-		local.WithSQLiteProvider(local.SQLiteProviderOptions{
-			ConnectionString: "data.db",
-		}),
-		local.WithShutdownGracePeriod(10 * time.Second),
+	// Unlike the local example, this host does not embed a data store: it connects
+	// to the standalone runtime, which owns placement, state, and alarms.
+	opts := []remote.HostOption{
+		remote.WithAddress(actorHostAddress),
+		remote.WithRuntimeAddresses(runtimeAddress),
+		remote.WithLogger(log.With("scope", "actor-host")),
+		remote.WithShutdownGracePeriod(10 * time.Second),
 	}
 
 	// Check if we're using mTLS
@@ -66,21 +68,21 @@ func runWorker(ctx context.Context) error {
 		opts = append(opts, mtlsOpt)
 	} else {
 		opts = append(opts,
-			// Use shared key for auth
-			local.WithPeerAuthenticationSharedKey(peerAuthKey),
+			// Use shared key for peer (host-to-host) auth
+			remote.WithPeerAuthenticationSharedKey(peerAuthKey),
 			// Use self-signed certs
-			local.WithServerTLSInsecureSkipTLSValidation(),
+			remote.WithServerTLSInsecureSkipTLSValidation(),
 		)
 	}
 
 	// Create a new actor host
-	h, err := local.NewHost(opts...)
+	h, err := remote.NewHost(opts...)
 	if err != nil {
 		return fmt.Errorf("failed to create actor host: %w", err)
 	}
 
 	// Register all supported actors
-	err = h.RegisterActor("myactor", NewMyActor, local.RegisterActorOptions{
+	err = h.RegisterActor("myactor", NewMyActor, remote.RegisterActorOptions{
 		IdleTimeout: 10 * time.Second,
 	})
 	if err != nil {
@@ -120,7 +122,7 @@ func initLogger(level slog.Level) *slog.Logger {
 	return slog.New(handler)
 }
 
-func getMTLSHostOption() (local.HostOption, error) {
+func getMTLSHostOption() (remote.HostOption, error) {
 	// Load the certificate and key
 	cert, err := tls.LoadX509KeyPair("certs/"+certName+".crt", "certs/"+certName+".key")
 	if err != nil {
@@ -144,5 +146,5 @@ func getMTLSHostOption() (local.HostOption, error) {
 		return nil, fmt.Errorf("failed to parse CA certificate: %w", err)
 	}
 
-	return local.WithPeerAuthenticationMTLS(&cert, caCert), nil
+	return remote.WithPeerAuthenticationMTLS(&cert, caCert), nil
 }
