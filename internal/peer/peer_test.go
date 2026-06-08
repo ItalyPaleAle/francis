@@ -3,6 +3,10 @@ package peer
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"io"
 	"log/slog"
 	"net"
@@ -14,9 +18,38 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/internal/ca"
+	"github.com/italypaleale/francis/internal/certholder"
 	"github.com/italypaleale/francis/internal/hosttls"
 	"github.com/italypaleale/francis/protocol"
 )
+
+// peerTestPSK is the fixed runtime PSK the peer tests derive their cluster CA from
+var peerTestPSK = []byte("peer-test-psk-0123456789abcdef")
+
+// peerTLSPair builds matching server and client TLS configs for host-to-host mTLS, both signed by the same test CA
+func peerTLSPair(t *testing.T) (server *tls.Config, client *tls.Config) {
+	t.Helper()
+	cas, err := ca.CABundle([][]byte{peerTestPSK})
+	require.NoError(t, err)
+	pool := ca.NewCertPool(cas)
+
+	server = hosttls.PeerServerTLSConfig(newHostHolder(t, cas[0], pool, "host-b"))
+	client = hosttls.PeerClientTLSConfig(newHostHolder(t, cas[0], pool, "host-a"))
+	return server, client
+}
+
+// newHostHolder issues a workload certificate for hostID and returns a holder seeded with it and the trust pool
+func newHostHolder(t *testing.T, signer *ca.CA, pool *x509.CertPool, hostID string) *certholder.Holder {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	der, err := signer.IssueWorkloadCert(ca.HostURI(hostID), pub, time.Hour)
+	require.NoError(t, err)
+	leaf, err := x509.ParseCertificate(der)
+	require.NoError(t, err)
+	return certholder.New(&tls.Certificate{Certificate: [][]byte{der}, PrivateKey: priv, Leaf: leaf}, pool)
+}
 
 // freeUDPAddr returns a localhost address with a currently-free UDP port
 func freeUDPAddr(t *testing.T) string {
@@ -95,8 +128,7 @@ func TestPeerServerHandleObject(t *testing.T) {
 func TestPeerInvocationIntegration(t *testing.T) {
 	addr := freeUDPAddr(t)
 
-	srvTLS, _, err := hosttls.HostTLSOptions{}.GetTLSConfig()
-	require.NoError(t, err)
+	srvTLS, cliTLS := peerTLSPair(t)
 
 	ps := NewServer(ServerConfig{
 		Bind:      addr,
@@ -112,10 +144,6 @@ func TestPeerInvocationIntegration(t *testing.T) {
 		_ = ps.Run(ctx)
 	}()
 
-	_, cliTLS, err := hosttls.HostTLSOptions{
-		InsecureSkipTLSValidation: true,
-	}.GetTLSConfig()
-	require.NoError(t, err)
 	pc := NewClient(ClientConfig{
 		TLSConfig:   cliTLS,
 		DialTimeout: 5 * time.Second,
@@ -171,8 +199,7 @@ func TestPeerInvocationIntegration(t *testing.T) {
 func TestPeerInvocationRejectedWhenDraining(t *testing.T) {
 	addr := freeUDPAddr(t)
 
-	srvTLS, _, err := hosttls.HostTLSOptions{}.GetTLSConfig()
-	require.NoError(t, err)
+	srvTLS, cliTLS := peerTLSPair(t)
 
 	// The server flips into draining mid-test so we can prove both that it serves normally and that it then rejects new invocations
 	var draining atomic.Bool
@@ -192,10 +219,6 @@ func TestPeerInvocationRejectedWhenDraining(t *testing.T) {
 		_ = ps.Run(ctx)
 	}()
 
-	_, cliTLS, err := hosttls.HostTLSOptions{
-		InsecureSkipTLSValidation: true,
-	}.GetTLSConfig()
-	require.NoError(t, err)
 	pc := NewClient(ClientConfig{
 		TLSConfig:   cliTLS,
 		DialTimeout: 5 * time.Second,
@@ -248,8 +271,7 @@ func TestPeerInvocationRejectedWhenDraining(t *testing.T) {
 func TestPeerInFlightInvocationCompletesDuringDrain(t *testing.T) {
 	addr := freeUDPAddr(t)
 
-	srvTLS, _, err := hosttls.HostTLSOptions{}.GetTLSConfig()
-	require.NoError(t, err)
+	srvTLS, cliTLS := peerTLSPair(t)
 
 	// The "block" method holds the handler open until released, so a test can flip draining while the invocation is in flight
 	var draining atomic.Bool
@@ -278,10 +300,6 @@ func TestPeerInFlightInvocationCompletesDuringDrain(t *testing.T) {
 		_ = ps.Run(ctx)
 	}()
 
-	_, cliTLS, err := hosttls.HostTLSOptions{
-		InsecureSkipTLSValidation: true,
-	}.GetTLSConfig()
-	require.NoError(t, err)
 	pc := NewClient(ClientConfig{
 		TLSConfig:   cliTLS,
 		DialTimeout: 5 * time.Second,
@@ -358,8 +376,7 @@ func TestPeerInFlightInvocationCompletesDuringDrain(t *testing.T) {
 func TestPeerInvocationRejectedWhenOverloaded(t *testing.T) {
 	addr := freeUDPAddr(t)
 
-	srvTLS, _, err := hosttls.HostTLSOptions{}.GetTLSConfig()
-	require.NoError(t, err)
+	srvTLS, cliTLS := peerTLSPair(t)
 
 	// The "block" method holds its in-flight slot until released, so the test can saturate the single-slot session
 	started := make(chan struct{})
@@ -388,10 +405,6 @@ func TestPeerInvocationRejectedWhenOverloaded(t *testing.T) {
 		_ = ps.Run(ctx)
 	}()
 
-	_, cliTLS, err := hosttls.HostTLSOptions{
-		InsecureSkipTLSValidation: true,
-	}.GetTLSConfig()
-	require.NoError(t, err)
 	pc := NewClient(ClientConfig{
 		TLSConfig:   cliTLS,
 		DialTimeout: 5 * time.Second,
@@ -494,8 +507,7 @@ func echoStreamHandler(_ context.Context, _ protocol.InvokeActorRequest, body io
 func TestPeerStreamInvocationIntegration(t *testing.T) {
 	addr := freeUDPAddr(t)
 
-	srvTLS, _, err := hosttls.HostTLSOptions{}.GetTLSConfig()
-	require.NoError(t, err)
+	srvTLS, cliTLS := peerTLSPair(t)
 
 	ps := NewServer(ServerConfig{
 		Bind:          addr,
@@ -511,10 +523,6 @@ func TestPeerStreamInvocationIntegration(t *testing.T) {
 		_ = ps.Run(ctx)
 	}()
 
-	_, cliTLS, err := hosttls.HostTLSOptions{
-		InsecureSkipTLSValidation: true,
-	}.GetTLSConfig()
-	require.NoError(t, err)
 	pc := NewClient(ClientConfig{
 		TLSConfig:   cliTLS,
 		DialTimeout: 5 * time.Second,
@@ -560,8 +568,7 @@ func TestPeerStreamInvocationIntegration(t *testing.T) {
 func TestPeerStreamInvocationBodyTooLarge(t *testing.T) {
 	addr := freeUDPAddr(t)
 
-	srvTLS, _, err := hosttls.HostTLSOptions{}.GetTLSConfig()
-	require.NoError(t, err)
+	srvTLS, cliTLS := peerTLSPair(t)
 
 	// A tiny body cap makes the limit easy to exceed
 	ps := NewServer(ServerConfig{
@@ -579,10 +586,6 @@ func TestPeerStreamInvocationBodyTooLarge(t *testing.T) {
 		_ = ps.Run(ctx)
 	}()
 
-	_, cliTLS, err := hosttls.HostTLSOptions{
-		InsecureSkipTLSValidation: true,
-	}.GetTLSConfig()
-	require.NoError(t, err)
 	pc := NewClient(ClientConfig{
 		TLSConfig:   cliTLS,
 		DialTimeout: 5 * time.Second,
@@ -628,8 +631,7 @@ func TestPeerStreamInvocationBodyTooLarge(t *testing.T) {
 func TestPeerStreamInvocationUnsupported(t *testing.T) {
 	addr := freeUDPAddr(t)
 
-	srvTLS, _, err := hosttls.HostTLSOptions{}.GetTLSConfig()
-	require.NoError(t, err)
+	srvTLS, cliTLS := peerTLSPair(t)
 
 	// A server with only an object handler does not support stream invocation
 	ps := NewServer(ServerConfig{
@@ -646,10 +648,6 @@ func TestPeerStreamInvocationUnsupported(t *testing.T) {
 		_ = ps.Run(ctx)
 	}()
 
-	_, cliTLS, err := hosttls.HostTLSOptions{
-		InsecureSkipTLSValidation: true,
-	}.GetTLSConfig()
-	require.NoError(t, err)
 	pc := NewClient(ClientConfig{
 		TLSConfig:   cliTLS,
 		DialTimeout: 5 * time.Second,
@@ -697,8 +695,7 @@ func partialThenFailStreamHandler(_ context.Context, _ protocol.InvokeActorReque
 func TestPeerStreamInvocationMidStreamFailure(t *testing.T) {
 	addr := freeUDPAddr(t)
 
-	srvTLS, _, err := hosttls.HostTLSOptions{}.GetTLSConfig()
-	require.NoError(t, err)
+	srvTLS, cliTLS := peerTLSPair(t)
 
 	ps := NewServer(ServerConfig{
 		Bind:          addr,
@@ -714,10 +711,6 @@ func TestPeerStreamInvocationMidStreamFailure(t *testing.T) {
 		_ = ps.Run(ctx)
 	}()
 
-	_, cliTLS, err := hosttls.HostTLSOptions{
-		InsecureSkipTLSValidation: true,
-	}.GetTLSConfig()
-	require.NoError(t, err)
 	pc := NewClient(ClientConfig{
 		TLSConfig:   cliTLS,
 		DialTimeout: 5 * time.Second,

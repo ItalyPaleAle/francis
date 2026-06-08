@@ -51,6 +51,35 @@ type ActorHostType struct {
 	InitialRetryDelayMs int64 `msgpack:"retryDelay,omitempty"`
 }
 
+// RegisterAuth carries a host's bootstrap credential at registration
+// It is present only on the first registration of a host; once a host holds a workload certificate it reconnects with mTLS and omits this
+type RegisterAuth struct {
+	// Method is the bootstrap method, either "psk" or "jwt"
+	Method string `msgpack:"method"`
+	// Proof is the host's channel-bound HMAC proof for the PSK method
+	Proof []byte `msgpack:"proof,omitempty"`
+	// Token is the bearer token for the JWT method
+	Token string `msgpack:"token,omitempty"`
+}
+
+// RegisterAuthBeginRequest opens the PSK challenge-response on a new session
+// The host sends its nonce so the runtime can compute its own proof in the challenge response
+type RegisterAuthBeginRequest struct {
+	// Method is the bootstrap method the host intends to use
+	Method string `msgpack:"method"`
+	// ClientNonce is the host's random nonce for the PSK challenge-response
+	ClientNonce []byte `msgpack:"cnonce,omitempty"`
+}
+
+// RegisterAuthChallengeResponse is the runtime's reply to RegisterAuthBeginRequest
+// The server proof lets the host authenticate the runtime before it sends its own proof
+type RegisterAuthChallengeResponse struct {
+	// ServerNonce is the runtime's random nonce for the PSK challenge-response
+	ServerNonce []byte `msgpack:"snonce,omitempty"`
+	// ServerProof is the runtime's channel-bound HMAC proof, proving it holds the host PSK and observed the same TLS session
+	ServerProof []byte `msgpack:"sproof,omitempty"`
+}
+
 // RegisterHostRequest registers or reattaches a host with the runtime
 // The host's protocol version is carried by the envelope, so it is not duplicated here
 type RegisterHostRequest struct {
@@ -60,6 +89,11 @@ type RegisterHostRequest struct {
 	Address string `msgpack:"address"`
 	// ActorTypes is the set of actor types the host can run
 	ActorTypes []ActorHostType `msgpack:"actorTypes,omitempty"`
+	// Auth is the bootstrap credential, omitted on an mTLS reconnect where identity comes from the client certificate
+	Auth RegisterAuth `msgpack:"auth,omitempty"`
+	// WorkloadPubKey is the host's freshly generated Ed25519 public key the runtime signs into a workload certificate
+	// It is omitted on an mTLS reconnect that does not need a new certificate
+	WorkloadPubKey []byte `msgpack:"wlpub,omitempty"`
 }
 
 // RegisterHostResponse is the runtime's response to RegisterHostRequest
@@ -74,6 +108,28 @@ type RegisterHostResponse struct {
 	HealthCheckIntervalMs int64 `msgpack:"healthInterval"`
 	// Reattached is true if the runtime reattached to an existing registration rather than creating a new one
 	Reattached bool `msgpack:"reattached,omitempty"`
+	// WorkloadCertDER is the host's newly issued workload certificate, omitted when no new certificate was issued
+	WorkloadCertDER []byte `msgpack:"wlcert,omitempty"`
+	// CABundlePEM is the set of trust anchors the host should trust, carrying more than one entry during a root rotation
+	CABundlePEM [][]byte `msgpack:"cabundle,omitempty"`
+	// CertNotAfterMs is the workload certificate's expiry in Unix milliseconds, used to schedule renewal
+	CertNotAfterMs int64 `msgpack:"certExp,omitempty"`
+}
+
+// RenewCertRequest asks the runtime for a fresh workload certificate over an already authenticated session
+type RenewCertRequest struct {
+	// WorkloadPubKey is the host's public key for the renewed certificate, which may be a freshly rotated key
+	WorkloadPubKey []byte `msgpack:"wlpub"`
+}
+
+// RenewCertResponse carries a renewed workload certificate and the current trust bundle
+type RenewCertResponse struct {
+	// WorkloadCertDER is the renewed workload certificate
+	WorkloadCertDER []byte `msgpack:"wlcert"`
+	// CABundlePEM is the current set of trust anchors
+	CABundlePEM [][]byte `msgpack:"cabundle"`
+	// CertNotAfterMs is the renewed certificate's expiry in Unix milliseconds
+	CertNotAfterMs int64 `msgpack:"certExp"`
 }
 
 // UnregisterHostRequest requests a graceful, drain-oriented shutdown of the host

@@ -1,8 +1,6 @@
 package local
 
 import (
-	"crypto/tls"
-	"crypto/x509"
 	"log/slog"
 	"time"
 
@@ -10,8 +8,6 @@ import (
 	"github.com/italypaleale/francis/components/postgres"
 	"github.com/italypaleale/francis/components/sqlite"
 	"github.com/italypaleale/francis/components/standalone"
-	"github.com/italypaleale/francis/internal/hosttls"
-	"github.com/italypaleale/francis/internal/peerauth"
 	"k8s.io/utils/clock"
 )
 
@@ -34,21 +30,11 @@ func WithBindAddress(addr string) HostOption {
 	return func(o *newHostOptions) { o.BindAddress = addr }
 }
 
-// WithServerTLSCertificate sets the TLS certificate for the host
-// If empty, uses a self-signed certificate
-func WithServerTLSCertificate(cert *tls.Certificate) HostOption {
-	return func(o *newHostOptions) { o.TLSOptions.ServerCertificate = cert }
-}
-
-// WithServerTLSCA sets the TLS CA certificate used by all hosts in the cluster
-func WithServerTLSCA(ca *x509.Certificate) HostOption {
-	return func(o *newHostOptions) { o.TLSOptions.CACertificate = ca }
-}
-
-// WithServerTLSInsecureSkipTLSValidation configures the node to skip validating TLS certificates when communicating with other hosts
-// This is automatically set when using self-signed certificates
-func WithServerTLSInsecureSkipTLSValidation() HostOption {
-	return func(o *newHostOptions) { o.TLSOptions.InsecureSkipTLSValidation = true }
+// WithRuntimePSKs sets the runtime pre-shared keys from which the cluster CA is derived
+// In local mode every host self-issues its workload certificate from this CA, so hosts that share the PSKs authenticate each other with mTLS
+// The first key is the primary used to sign this host's certificate, and additional keys are trusted during a rolling root rotation
+func WithRuntimePSKs(psks ...[]byte) HostOption {
+	return func(o *newHostOptions) { o.RuntimePSKs = psks }
 }
 
 // WithLogger sets the instance of the slog logger
@@ -79,25 +65,6 @@ func WithStandaloneSQLiteProvider(opts standalone.StandaloneSQLiteOptions) HostO
 // WithStandalonePostgresProvider sets the standalone Postgres-backed provider
 func WithStandalonePostgresProvider(opts standalone.StandalonePostgresOptions) HostOption {
 	return func(o *newHostOptions) { o.ProviderOptions = opts }
-}
-
-// WithPeerAuthenticationSharedKey configures peer authentication to use a pre-shared key
-func WithPeerAuthenticationSharedKey(key string) HostOption {
-	return func(o *newHostOptions) {
-		o.PeerAuthentication = &peerauth.PeerAuthenticationSharedKey{
-			Key: key,
-		}
-	}
-}
-
-// WithPeerAuthenticationMTLS configures peer authentication to use mTLS
-func WithPeerAuthenticationMTLS(certificate *tls.Certificate, ca *x509.Certificate) HostOption {
-	return func(o *newHostOptions) {
-		o.PeerAuthentication = &peerauth.PeerAuthenticationMTLS{
-			CA:          ca,
-			Certificate: certificate,
-		}
-	}
 }
 
 // WithHostHealthCheckDeadline sets the maximum interval between pings received from an actor host
@@ -150,10 +117,9 @@ type newHostOptions struct {
 	Address                   string
 	BindPort                  int
 	BindAddress               string
-	TLSOptions                hosttls.HostTLSOptions
+	RuntimePSKs               [][]byte
 	Logger                    *slog.Logger
 	ProviderOptions           components.ProviderOptions
-	PeerAuthentication        peerauth.PeerAuthenticationMethod
 	HostHealthCheckDeadline   time.Duration
 	AlarmsPollInterval        time.Duration
 	AlarmsLeaseDuration       time.Duration

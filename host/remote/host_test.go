@@ -108,16 +108,45 @@ func newRemoteHost(t *testing.T, runtimeAddr string) *Host {
 	host, err := NewHost(
 		WithAddress(freeUDPAddr(t)),
 		WithRuntimeAddresses(runtimeAddr),
-		WithServerTLSInsecureSkipTLSValidation(),
-		WithPeerAuthenticationSharedKey(testPeerSharedKey),
+		WithHostBootstrapPSK(testHostPSK),
+		WithUnsafeNoPinnedCA(),
 		WithLogger(slog.New(slog.DiscardHandler)),
 	)
 	require.NoError(t, err)
 	return host
 }
 
-// testPeerSharedKey is a valid (>=16 char) shared key used to satisfy the required peer authentication in tests
-const testPeerSharedKey = "test-peer-shared-key"
+// testRuntimePSK derives the test cluster CA, and testHostPSK is the host bootstrap key the test runtime accepts
+var (
+	testRuntimePSK = []byte("runtime-test-psk-0123456789abcd")
+	testHostPSK    = []byte("host-test-psk-0123456789abcdef")
+)
+
+// TestNewHostRequiresExplicitCATrust verifies the first-connection trust decision must be made explicitly
+func TestNewHostRequiresExplicitCATrust(t *testing.T) {
+	base := []HostOption{
+		WithAddress("127.0.0.1:7000"),
+		WithRuntimeAddresses("127.0.0.1:7400"),
+		WithHostBootstrapPSK(testHostPSK),
+		WithLogger(slog.New(slog.DiscardHandler)),
+	}
+
+	t.Run("rejects when neither pinning nor opt-out is set", func(t *testing.T) {
+		_, err := NewHost(base...)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "explicitly")
+	})
+
+	t.Run("rejects when both are set", func(t *testing.T) {
+		_, err := NewHost(append(append([]HostOption{}, base...), WithPinnedCA([]byte("x")), WithUnsafeNoPinnedCA())...)
+		require.Error(t, err)
+	})
+
+	t.Run("accepts the unsafe opt-out", func(t *testing.T) {
+		_, err := NewHost(append(append([]HostOption{}, base...), WithUnsafeNoPinnedCA())...)
+		require.NoError(t, err)
+	})
+}
 
 // runRemoteHost starts the host and waits until it has registered with the runtime
 func runRemoteHost(t *testing.T, host *Host) {
@@ -161,6 +190,8 @@ func startTestRuntime(t *testing.T, ctx context.Context) (string, *standalone.St
 	rt, err := runtime.NewRuntime(prov,
 		runtime.WithBind(addr),
 		runtime.WithAlarmsPollInterval(300*time.Millisecond),
+		runtime.WithRuntimePSKs(testRuntimePSK),
+		runtime.WithHostBootstrapPSK(testHostPSK),
 	)
 	require.NoError(t, err)
 
@@ -169,6 +200,49 @@ func startTestRuntime(t *testing.T, ctx context.Context) (string, *standalone.St
 	}()
 
 	return addr, prov
+}
+
+// TestHostRemoteCertRenewal verifies the host rotates its workload certificate before the short lifetime elapses
+func TestHostRemoteCertRenewal(t *testing.T) {
+	hostCtx, hostCancel := context.WithCancel(t.Context())
+	t.Cleanup(hostCancel)
+
+	addr := freeUDPAddr(t)
+	prov, err := standalone.NewStandaloneMemory(slog.New(slog.DiscardHandler), standalone.StandaloneMemoryOptions{}, components.ProviderConfig{
+		HostHealthCheckDeadline:   20 * time.Second,
+		AlarmsLeaseDuration:       20 * time.Second,
+		AlarmsFetchAheadInterval:  2500 * time.Millisecond,
+		AlarmsFetchAheadBatchSize: 25,
+	})
+	require.NoError(t, err)
+
+	// A short certificate lifetime makes the renewal loop fire within the test window
+	rt, err := runtime.NewRuntime(prov,
+		runtime.WithBind(addr),
+		runtime.WithAlarmsPollInterval(time.Hour),
+		runtime.WithRuntimePSKs(testRuntimePSK),
+		runtime.WithHostBootstrapPSK(testHostPSK),
+		runtime.WithWorkloadCertTTL(3*time.Second),
+	)
+	require.NoError(t, err)
+	go func() {
+		_ = rt.Run(hostCtx)
+	}()
+
+	host := newRemoteHost(t, addr)
+	runRemoteHost(t, host)
+
+	// Capture the certificate serial issued at bootstrap
+	first := host.holder.Certificate()
+	require.NotNil(t, first)
+	require.NotNil(t, first.Leaf)
+	firstSerial := first.Leaf.SerialNumber.String()
+
+	// The renewal loop should install a new certificate before the short TTL elapses
+	require.Eventually(t, func() bool {
+		cur := host.holder.Certificate()
+		return cur != nil && cur.Leaf != nil && cur.Leaf.SerialNumber.String() != firstSerial
+	}, 15*time.Second, 200*time.Millisecond, "the host should renew its workload certificate")
 }
 
 // TestHostRemoteIntegration exercises the remote host end-to-end against a real runtime over WebTransport
@@ -183,8 +257,8 @@ func TestHostRemoteIntegration(t *testing.T) {
 	host, err := NewHost(
 		WithAddress(freeUDPAddr(t)),
 		WithRuntimeAddresses(runtimeAddr),
-		WithServerTLSInsecureSkipTLSValidation(),
-		WithPeerAuthenticationSharedKey(testPeerSharedKey),
+		WithHostBootstrapPSK(testHostPSK),
+		WithUnsafeNoPinnedCA(),
 		WithLogger(slog.New(slog.DiscardHandler)),
 	)
 	require.NoError(t, err)
@@ -694,8 +768,8 @@ func TestHostRemoteRunFailsWhenPeerServerCannotBind(t *testing.T) {
 	host, err := NewHost(
 		WithAddress(occupied),
 		WithRuntimeAddresses(runtimeAddr),
-		WithServerTLSInsecureSkipTLSValidation(),
-		WithPeerAuthenticationSharedKey(testPeerSharedKey),
+		WithHostBootstrapPSK(testHostPSK),
+		WithUnsafeNoPinnedCA(),
 		WithLogger(slog.New(slog.DiscardHandler)),
 	)
 	require.NoError(t, err)

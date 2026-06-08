@@ -24,6 +24,40 @@ The setup here is:
 Because this requires running multiple processes, the example uses
 [supervisord](http://supervisord.org/) to launch them all together.
 
+## Configuration
+
+The runtime is configured by `config.yaml` (create it next to `supervisord.conf`):
+
+```yaml
+bind: "127.0.0.1:7400"
+
+# The runtime PSKs derive the cluster CA: every runtime sharing these keys is the same issuer.
+# Keep them secret; in production inject them from the environment, e.g. "${FRANCIS_RUNTIME_PSK}".
+runtimePSKs:
+  - "example-runtime-psk-change-me"
+
+# How joining hosts authenticate. This example uses a shared host PSK, which must match the
+# worker's hostBootstrapPSK in main.go. (The other option is "jwt", validated against a JWKS.)
+bootstrap:
+  method: psk
+  hostPSK: "example-host-bootstrap-psk-change-me"
+
+provider:
+  type: sqlite
+  connectionString: "data.db"
+
+log:
+  level: debug
+```
+
+Once a host bootstraps, the runtime issues it a short-lived workload certificate and all
+later connections — to the runtime and between peer hosts — use mTLS. To close the
+first-connection trust gap, print the CA and pin it on the workers:
+
+```sh
+bin/runtime print-ca -config config.yaml   # the worker can pass this to remote.WithPinnedCA
+```
+
 ## How to run (with supervisord)
 
 First build the two binaries:

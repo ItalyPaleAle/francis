@@ -1,15 +1,13 @@
 package remote
 
 import (
-	"crypto/tls"
-	"crypto/x509"
+	"fmt"
 	"log/slog"
+	"os"
+	"strings"
 	"time"
 
 	"k8s.io/utils/clock"
-
-	"github.com/italypaleale/francis/internal/hosttls"
-	"github.com/italypaleale/francis/internal/peerauth"
 )
 
 type HostOption func(*newHostOptions)
@@ -37,21 +35,45 @@ func WithRuntimeAddresses(addresses ...string) HostOption {
 	return func(o *newHostOptions) { o.RuntimeAddresses = addresses }
 }
 
-// WithServerTLSCertificate sets the TLS certificate for the host
-// If empty, uses a self-signed certificate
-func WithServerTLSCertificate(cert *tls.Certificate) HostOption {
-	return func(o *newHostOptions) { o.TLSOptions.ServerCertificate = cert }
+// WithHostBootstrapPSK configures the host to bootstrap with a host pre-shared key, proven to the runtime via a channel-bound challenge-response
+func WithHostBootstrapPSK(psk []byte) HostOption {
+	return func(o *newHostOptions) { o.BootstrapPSK = psk }
 }
 
-// WithServerTLSCA sets the TLS CA certificate used by all hosts and runtimes in the cluster
-func WithServerTLSCA(ca *x509.Certificate) HostOption {
-	return func(o *newHostOptions) { o.TLSOptions.CACertificate = ca }
+// WithHostBootstrapJWT configures the host to bootstrap with a static JWT
+// This is primarily useful for tests; production deployments usually use WithHostBootstrapJWTFile so a rotated token is re-read
+func WithHostBootstrapJWT(token string) HostOption {
+	return func(o *newHostOptions) {
+		o.BootstrapTokenFn = func() (string, error) { return token, nil }
+	}
 }
 
-// WithServerTLSInsecureSkipTLSValidation configures the node to skip validating TLS certificates when connecting to runtimes and other hosts
-// This is automatically set when using self-signed certificates
-func WithServerTLSInsecureSkipTLSValidation() HostOption {
-	return func(o *newHostOptions) { o.TLSOptions.InsecureSkipTLSValidation = true }
+// WithHostBootstrapJWTFile configures the host to bootstrap with a JWT read from a file
+// The file is read fresh on every bootstrap so a rotated token, such as a Kubernetes projected service-account token, is picked up
+func WithHostBootstrapJWTFile(path string) HostOption {
+	return func(o *newHostOptions) {
+		o.BootstrapTokenFn = func() (string, error) {
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return "", fmt.Errorf("failed to read bootstrap token file: %w", err)
+			}
+			return strings.TrimSpace(string(b)), nil
+		}
+	}
+}
+
+// WithPinnedCA pins one or more PEM-encoded cluster CA certificates the host trusts before its first connection
+// Pinning closes the bootstrap trust gap, so the host verifies the runtime from the very first connection
+// Exactly one of WithPinnedCA or WithUnsafeNoPinnedCA must be set, forcing the trust decision to be explicit
+func WithPinnedCA(caPEM ...[]byte) HostOption {
+	return func(o *newHostOptions) { o.PinnedCAPEM = caPEM }
+}
+
+// WithUnsafeNoPinnedCA opts out of CA pinning, trusting the runtime's certificate on the first connection
+// This is unsafe: a man-in-the-middle on the first connection can impersonate the runtime, which is especially dangerous for JWT bootstrap where a bearer token would be exposed
+// Exactly one of WithPinnedCA or WithUnsafeNoPinnedCA must be set, forcing the trust decision to be explicit
+func WithUnsafeNoPinnedCA() HostOption {
+	return func(o *newHostOptions) { o.UnsafeNoPinnedCA = true }
 }
 
 // WithLogger sets the instance of the slog logger
@@ -80,34 +102,19 @@ func WithMaxRequestBodySize(n int64) HostOption {
 	return func(o *newHostOptions) { o.MaxRequestBodySize = n }
 }
 
-// WithPeerAuthenticationSharedKey configures host-to-host (peer) authentication to use a pre-shared key
-// Peer authentication is required: a remote host must configure either a shared key or mTLS
-func WithPeerAuthenticationSharedKey(key string) HostOption {
-	return func(o *newHostOptions) {
-		o.PeerAuthentication = &peerauth.PeerAuthenticationSharedKey{
-			Key: key,
-		}
-	}
-}
-
-// WithPeerAuthenticationMTLS configures host-to-host (peer) authentication to use mTLS
-// mTLS sets the cluster TLS certificates itself, so it cannot be combined with the individual server TLS options
-func WithPeerAuthenticationMTLS(certificate *tls.Certificate, ca *x509.Certificate) HostOption {
-	return func(o *newHostOptions) {
-		o.PeerAuthentication = &peerauth.PeerAuthenticationMTLS{
-			CA:          ca,
-			Certificate: certificate,
-		}
-	}
-}
-
 type newHostOptions struct {
-	Address             string
-	BindPort            int
-	BindAddress         string
-	RuntimeAddresses    []string
-	TLSOptions          hosttls.HostTLSOptions
-	PeerAuthentication  peerauth.PeerAuthenticationMethod
+	Address          string
+	BindPort         int
+	BindAddress      string
+	RuntimeAddresses []string
+	// BootstrapPSK is the host pre-shared key, set when bootstrapping with PSK
+	BootstrapPSK []byte
+	// BootstrapTokenFn returns a fresh bootstrap JWT, set when bootstrapping with JWT
+	BootstrapTokenFn func() (string, error)
+	// PinnedCAPEM holds pinned cluster CA certificates trusted before the first connection
+	PinnedCAPEM [][]byte
+	// UnsafeNoPinnedCA opts out of pinning, trusting the runtime on first connection
+	UnsafeNoPinnedCA    bool
 	Logger              *slog.Logger
 	ShutdownGracePeriod time.Duration
 	RequestTimeout      time.Duration

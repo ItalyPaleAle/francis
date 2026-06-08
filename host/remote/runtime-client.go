@@ -2,7 +2,10 @@ package remote
 
 import (
 	"context"
+	"crypto/ed25519"
+	cryptorand "crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,6 +16,10 @@ import (
 	"github.com/quic-go/webtransport-go"
 	"k8s.io/utils/clock"
 
+	"github.com/italypaleale/francis/internal/bootstrapauth"
+	"github.com/italypaleale/francis/internal/ca"
+	"github.com/italypaleale/francis/internal/certholder"
+	"github.com/italypaleale/francis/internal/channelbind"
 	"github.com/italypaleale/francis/internal/wt"
 	"github.com/italypaleale/francis/protocol"
 )
@@ -43,14 +50,20 @@ type runtimeHandlers struct {
 
 // runtimeClientConfig configures a runtimeClient
 type runtimeClientConfig struct {
-	addresses      []string
-	peerAddress    string
-	actorTypes     []protocol.ActorHostType
-	tlsConfig      *tls.Config
-	requestTimeout time.Duration
-	minBackoff     time.Duration
-	maxBackoff     time.Duration
-	handlers       runtimeHandlers
+	addresses   []string
+	peerAddress string
+	actorTypes  []protocol.ActorHostType
+	tlsConfig   *tls.Config
+	// holder stores the live workload certificate and trust bundle, updated on bootstrap and renewal
+	holder *certholder.Holder
+	// bootstrapPSK proves the host with a channel-bound challenge-response, set for PSK bootstrap
+	bootstrapPSK *bootstrapauth.PSK
+	// bootstrapTokenFn returns a fresh bootstrap JWT, set for JWT bootstrap
+	bootstrapTokenFn func() (string, error)
+	requestTimeout   time.Duration
+	minBackoff       time.Duration
+	maxBackoff       time.Duration
+	handlers         runtimeHandlers
 
 	// onDrainStart is called once at the very start of graceful shutdown, before anything else, so the host can mark itself draining and begin rejecting new peer invocations
 	onDrainStart func()
@@ -223,6 +236,9 @@ func (rc *runtimeClient) connectAndServe(ctx context.Context, addr string) (bool
 	healthInterval := time.Duration(resp.HealthCheckIntervalMs) * time.Millisecond
 	go rc.runHealthChecks(serveCtx, session, healthInterval)
 
+	// Renew the workload certificate before it expires, while the session is alive
+	go rc.runCertRenewal(serveCtx, rc.certNotAfter(resp.CertNotAfterMs))
+
 	// Serve runtime-initiated requests until the session ends or the context is canceled
 	rc.serveInbound(serveCtx, session)
 
@@ -262,6 +278,7 @@ func (rc *runtimeClient) dial(ctx context.Context, addr string) (*webtransport.S
 }
 
 // register performs the registration handshake on the first stream of a new session
+// A host with no workload certificate yet bootstraps, while one that already holds a certificate reconnects over mTLS
 func (rc *runtimeClient) register(ctx context.Context, session *webtransport.Session) (protocol.RegisterHostResponse, error) {
 	// Registration is the first exchange on a new session, so it gets its own dedicated stream
 	stream, err := session.OpenStreamSync(ctx)
@@ -270,9 +287,61 @@ func (rc *runtimeClient) register(ctx context.Context, session *webtransport.Ses
 	}
 	defer stream.Close()
 
-	// Advertise our actor types and peer address; our protocol version travels in the request envelope
-	// PreviousHostID is our last known host ID so the runtime reattaches us rather than minting a new identity on reconnect
-	req, err := protocol.NewRequest(protocol.KindRegisterHost, protocol.RegisterHostRequest{
+	if rc.cfg.holder.Certificate() == nil {
+		return rc.bootstrap(ctx, session, stream)
+	}
+	return rc.reconnect(ctx, stream)
+}
+
+// bootstrap authenticates a first-time host with PSK or JWT, then installs the issued workload certificate and trust bundle
+func (rc *runtimeClient) bootstrap(ctx context.Context, session *webtransport.Session, stream protocol.Stream) (protocol.RegisterHostResponse, error) {
+	// Generate a fresh workload key the runtime will sign into a certificate
+	pub, priv, err := ed25519.GenerateKey(cryptorand.Reader)
+	if err != nil {
+		return protocol.RegisterHostResponse{}, fmt.Errorf("failed to generate workload key: %w", err)
+	}
+
+	reg := protocol.RegisterHostRequest{
+		Address:        rc.cfg.peerAddress,
+		ActorTypes:     rc.cfg.actorTypes,
+		WorkloadPubKey: pub,
+	}
+
+	// Attach the bootstrap credential for the configured method
+	switch {
+	case rc.cfg.bootstrapPSK != nil:
+		auth, authErr := rc.pskHandshake(ctx, session, stream)
+		if authErr != nil {
+			return protocol.RegisterHostResponse{}, authErr
+		}
+		reg.Auth = auth
+	case rc.cfg.bootstrapTokenFn != nil:
+		token, tokErr := rc.cfg.bootstrapTokenFn()
+		if tokErr != nil {
+			return protocol.RegisterHostResponse{}, fmt.Errorf("failed to obtain bootstrap token: %w", tokErr)
+		}
+		reg.Auth = protocol.RegisterAuth{Method: bootstrapauth.MethodJWT, Token: token}
+	default:
+		return protocol.RegisterHostResponse{}, errors.New("no bootstrap method configured")
+	}
+
+	out, err := rc.sendRegister(ctx, stream, reg)
+	if err != nil {
+		return protocol.RegisterHostResponse{}, err
+	}
+
+	// Install the issued certificate and trust bundle so this and later connections use mTLS
+	err = rc.installIdentity(priv, out.WorkloadCertDER, out.CABundlePEM)
+	if err != nil {
+		return protocol.RegisterHostResponse{}, err
+	}
+	return out, nil
+}
+
+// reconnect re-registers a host that already holds a workload certificate, identified by the client certificate the TLS layer presented
+func (rc *runtimeClient) reconnect(ctx context.Context, stream protocol.Stream) (protocol.RegisterHostResponse, error) {
+	// PreviousHostID lets the runtime reattach us, and it is cross-checked against our certificate identity
+	out, err := rc.sendRegister(ctx, stream, protocol.RegisterHostRequest{
 		PreviousHostID: rc.HostID(),
 		Address:        rc.cfg.peerAddress,
 		ActorTypes:     rc.cfg.actorTypes,
@@ -281,25 +350,198 @@ func (rc *runtimeClient) register(ctx context.Context, session *webtransport.Ses
 		return protocol.RegisterHostResponse{}, err
 	}
 
-	// Send the request and wait for the runtime's reply
+	// Refresh the trust bundle so a root rotation that happened while we were away is picked up
+	if len(out.CABundlePEM) > 0 {
+		pool, poolErr := ca.PoolFromPEM(out.CABundlePEM)
+		if poolErr != nil {
+			return protocol.RegisterHostResponse{}, fmt.Errorf("failed to parse trust bundle: %w", poolErr)
+		}
+		rc.cfg.holder.SetRoots(pool)
+	}
+	return out, nil
+}
+
+// pskHandshake runs the host side of the PSK challenge-response on the registration stream and returns the host's proof
+// It authenticates the runtime from the server proof before producing the host proof
+func (rc *runtimeClient) pskHandshake(ctx context.Context, session *webtransport.Session, stream protocol.Stream) (protocol.RegisterAuth, error) {
+	// Bind the proofs to this exact TLS session so a man-in-the-middle that terminates TLS cannot relay them
+	cb, err := channelbind.Export(session)
+	if err != nil {
+		return protocol.RegisterAuth{}, fmt.Errorf("failed to compute channel binding: %w", err)
+	}
+
+	clientNonce, err := bootstrapauth.Nonce()
+	if err != nil {
+		return protocol.RegisterAuth{}, err
+	}
+
+	begin, err := protocol.NewRequest(protocol.KindRegisterHostAuth, protocol.RegisterAuthBeginRequest{
+		Method:      bootstrapauth.MethodPSK,
+		ClientNonce: clientNonce,
+	})
+	if err != nil {
+		return protocol.RegisterAuth{}, err
+	}
+
+	// First exchange on the stream: send the nonce and read the runtime's challenge
+	challengeEnv, err := protocol.RoundTrip(ctx, stream, begin)
+	if err != nil {
+		return protocol.RegisterAuth{}, err
+	}
+	perr, isErr := challengeEnv.AsError()
+	if isErr {
+		return protocol.RegisterAuth{}, perr
+	}
+	var challenge protocol.RegisterAuthChallengeResponse
+	err = challengeEnv.DecodePayload(&challenge)
+	if err != nil {
+		return protocol.RegisterAuth{}, fmt.Errorf("failed to decode challenge: %w", err)
+	}
+
+	// Authenticate the runtime before revealing our own proof
+	ok := rc.cfg.bootstrapPSK.VerifyServerProof(cb, clientNonce, challenge.ServerNonce, challenge.ServerProof)
+	if !ok {
+		return protocol.RegisterAuth{}, errors.New("runtime failed PSK authentication")
+	}
+
+	clientProof := rc.cfg.bootstrapPSK.ClientProof(cb, clientNonce, challenge.ServerNonce)
+	return protocol.RegisterAuth{Method: bootstrapauth.MethodPSK, Proof: clientProof}, nil
+}
+
+// sendRegister writes a registration request and decodes the runtime's response
+func (rc *runtimeClient) sendRegister(ctx context.Context, stream protocol.Stream, reg protocol.RegisterHostRequest) (protocol.RegisterHostResponse, error) {
+	// Our protocol version travels in the request envelope
+	req, err := protocol.NewRequest(protocol.KindRegisterHost, reg)
+	if err != nil {
+		return protocol.RegisterHostResponse{}, err
+	}
+
 	resp, err := protocol.RoundTrip(ctx, stream, req)
 	if err != nil {
 		return protocol.RegisterHostResponse{}, err
 	}
 
-	// A structured error here means the runtime rejected the registration (for example a protocol version mismatch)
+	// A structured error here means the runtime rejected the registration, for example a protocol version mismatch or failed authentication
 	perr, isErr := resp.AsError()
 	if isErr {
 		return protocol.RegisterHostResponse{}, perr
 	}
 
-	// Decode the assigned host ID, session ID, and health check interval
 	var out protocol.RegisterHostResponse
 	err = resp.DecodePayload(&out)
 	if err != nil {
 		return protocol.RegisterHostResponse{}, fmt.Errorf("failed to decode registration response: %w", err)
 	}
 	return out, nil
+}
+
+// installIdentity stores a freshly issued workload certificate and trust bundle in the holder, so the next handshake presents and verifies against them
+func (rc *runtimeClient) installIdentity(priv ed25519.PrivateKey, certDER []byte, bundlePEM [][]byte) error {
+	if len(certDER) == 0 {
+		return errors.New("runtime did not issue a workload certificate")
+	}
+	if len(bundlePEM) == 0 {
+		return errors.New("runtime did not return a trust bundle")
+	}
+
+	// Parse the leaf so the TLS stack does not have to re-parse it on every handshake
+	leaf, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		return fmt.Errorf("failed to parse issued certificate: %w", err)
+	}
+	pool, err := ca.PoolFromPEM(bundlePEM)
+	if err != nil {
+		return fmt.Errorf("failed to parse trust bundle: %w", err)
+	}
+
+	rc.cfg.holder.SetRoots(pool)
+	rc.cfg.holder.SetCertificate(&tls.Certificate{
+		Certificate: [][]byte{certDER},
+		PrivateKey:  priv,
+		Leaf:        leaf,
+	})
+	return nil
+}
+
+// certRenewRetryDelay is how soon a failed certificate renewal is retried
+const certRenewRetryDelay = 5 * time.Second
+
+// certNotAfter resolves the certificate expiry used to schedule renewal, preferring the value the runtime reported and falling back to the installed certificate
+func (rc *runtimeClient) certNotAfter(reportedMs int64) time.Time {
+	if reportedMs > 0 {
+		return time.UnixMilli(reportedMs)
+	}
+	cert := rc.cfg.holder.Certificate()
+	if cert != nil && cert.Leaf != nil {
+		return cert.Leaf.NotAfter
+	}
+	return time.Time{}
+}
+
+// runCertRenewal renews the workload certificate before it expires, until the session context ends
+func (rc *runtimeClient) runCertRenewal(ctx context.Context, notAfter time.Time) {
+	// Without a known expiry there is nothing to schedule, which only happens if no certificate was ever installed
+	if notAfter.IsZero() {
+		return
+	}
+
+	for {
+		// Renew at the midpoint of the remaining lifetime so there is ample time to retry before expiry
+		wait := time.Until(notAfter) / 2
+		if wait < 0 {
+			wait = 0
+		}
+
+		t := rc.cfg.clock.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return
+		case <-t.C():
+		}
+
+		newNotAfter, err := rc.renewCert(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			rc.cfg.log.WarnContext(ctx, "Workload certificate renewal failed; will retry", slog.Any("error", err))
+			retry := rc.cfg.clock.NewTimer(certRenewRetryDelay)
+			select {
+			case <-ctx.Done():
+				retry.Stop()
+				return
+			case <-retry.C():
+			}
+			continue
+		}
+		notAfter = newNotAfter
+	}
+}
+
+// renewCert generates a fresh key, asks the runtime to sign it over the authenticated session, and installs the result
+func (rc *runtimeClient) renewCert(ctx context.Context) (time.Time, error) {
+	pub, priv, err := ed25519.GenerateKey(cryptorand.Reader)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("failed to generate workload key: %w", err)
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, rc.cfg.requestTimeout)
+	defer cancel()
+
+	var out protocol.RenewCertResponse
+	err = rc.doRequest(reqCtx, protocol.KindRenewCert, protocol.RenewCertRequest{WorkloadPubKey: pub}, &out)
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	err = rc.installIdentity(priv, out.WorkloadCertDER, out.CABundlePEM)
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	rc.cfg.log.InfoContext(ctx, "Renewed workload certificate")
+	return time.UnixMilli(out.CertNotAfterMs), nil
 }
 
 // runHealthChecks sends periodic health checks and closes the session if one fails, triggering a reconnect

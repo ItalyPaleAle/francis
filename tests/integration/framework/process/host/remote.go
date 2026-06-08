@@ -11,6 +11,7 @@ import (
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/host/remote"
+	"github.com/italypaleale/francis/tests/integration/framework/process/clustersecret"
 )
 
 // RemoteOptions configures a remote host process
@@ -21,8 +22,6 @@ type RemoteOptions struct {
 	RuntimeAddresses []string
 	// Actors to register before the host starts
 	Actors []ActorReg
-	// PeerAuthKey is the shared peer-authentication key, defaulting to DefaultPeerAuthKey
-	PeerAuthKey string
 	// Logger is optional and defaults to the host's discarding logger
 	Logger *slog.Logger
 	// Extra host options applied last, e.g. custom timeouts
@@ -61,18 +60,14 @@ func (p *Remote) Address() string {
 func (p *Remote) Run(t *testing.T) {
 	t.Helper()
 
-	key := p.opts.PeerAuthKey
-	if key == "" {
-		key = DefaultPeerAuthKey
-	}
-
 	// Assemble the host options, pointing the host at the runtime replicas
 	hostOpts := []remote.HostOption{
 		remote.WithAddress(p.opts.Address),
 		remote.WithRuntimeAddresses(p.opts.RuntimeAddresses...),
-		remote.WithPeerAuthenticationSharedKey(key),
-		// The runtime and peers use self-signed certs, so skip validation in tests
-		remote.WithServerTLSInsecureSkipTLSValidation(),
+		// The host bootstraps with the shared host PSK; once registered it holds a workload cert and reconnects over mTLS
+		remote.WithHostBootstrapPSK(clustersecret.HostBootstrapPSK),
+		// Tests trust the runtime on first connection rather than pinning its CA
+		remote.WithUnsafeNoPinnedCA(),
 		remote.WithShutdownGracePeriod(ShutdownGrace),
 	}
 	if p.opts.Logger != nil {

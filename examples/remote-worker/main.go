@@ -2,10 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/pem"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -25,16 +21,16 @@ var (
 	actorHostAddress string
 	workerAddress    string
 	runtimeAddress   string
-	certName         string
 )
 
-const peerAuthKey = "test-auth-key-1234567890"
+// hostBootstrapPSK is the shared secret the host proves to the runtime when it first joins
+// It must match the runtime's bootstrap.hostPSK in config.yaml
+const hostBootstrapPSK = "example-host-bootstrap-psk-change-me"
 
 func main() {
 	flag.StringVar(&actorHostAddress, "actor-host-address", "127.0.0.1:7571", "Address and port for the actor host (peer server) to bind to and advertise to other hosts")
 	flag.StringVar(&workerAddress, "worker-address", "127.0.0.1:8081", "Address and port for the example worker's control server to bind to")
 	flag.StringVar(&runtimeAddress, "runtime-address", "127.0.0.1:7400", "Address and port of the Francis runtime to connect to")
-	flag.StringVar(&certName, "cert", "", "Name of the certificate in the 'certs' folder (e.g. 'node-1')")
 	flag.Parse()
 
 	log = initLogger(slog.LevelDebug)
@@ -55,24 +51,14 @@ func runWorker(ctx context.Context) error {
 	opts := []remote.HostOption{
 		remote.WithAddress(actorHostAddress),
 		remote.WithRuntimeAddresses(runtimeAddress),
+		// The host bootstraps with a shared PSK; the runtime then issues it a workload
+		// certificate, and all later connections (to the runtime and to peer hosts) use mTLS.
+		remote.WithHostBootstrapPSK([]byte(hostBootstrapPSK)),
+		// This example trusts the runtime on first connection; for production, pin the
+		// cluster CA with remote.WithPinnedCA instead (see "runtime print-ca").
+		remote.WithUnsafeNoPinnedCA(),
 		remote.WithLogger(log.With("scope", "actor-host")),
 		remote.WithShutdownGracePeriod(10 * time.Second),
-	}
-
-	// Check if we're using mTLS
-	if certName != "" {
-		mtlsOpt, err := getMTLSHostOption()
-		if err != nil {
-			return err
-		}
-		opts = append(opts, mtlsOpt)
-	} else {
-		opts = append(opts,
-			// Use shared key for peer (host-to-host) auth
-			remote.WithPeerAuthenticationSharedKey(peerAuthKey),
-			// Use self-signed certs
-			remote.WithServerTLSInsecureSkipTLSValidation(),
-		)
 	}
 
 	// Create a new actor host
@@ -120,31 +106,4 @@ func initLogger(level slog.Level) *slog.Logger {
 	}
 
 	return slog.New(handler)
-}
-
-func getMTLSHostOption() (remote.HostOption, error) {
-	// Load the certificate and key
-	cert, err := tls.LoadX509KeyPair("certs/"+certName+".crt", "certs/"+certName+".key")
-	if err != nil {
-		return nil, fmt.Errorf("failed to load certificate and key from 'certs/%s.crt' and 'certs/%s.key': %w", certName, certName, err)
-	}
-
-	// Load the CA certificate
-	caData, err := os.ReadFile("certs/ca.crt")
-	if err != nil {
-		return nil, fmt.Errorf("failed to read CA certificate from certs/ca.crt: %w", err)
-	}
-
-	// Parse the CA certificate
-	caBlock, _ := pem.Decode(caData)
-	if caBlock == nil {
-		return nil, errors.New("failed to parse PEM block from CA certificate")
-	}
-
-	caCert, err := x509.ParseCertificate(caBlock.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse CA certificate: %w", err)
-	}
-
-	return remote.WithPeerAuthenticationMTLS(&cert, caCert), nil
 }

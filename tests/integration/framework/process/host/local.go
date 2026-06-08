@@ -11,6 +11,7 @@ import (
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/host/local"
+	"github.com/italypaleale/francis/tests/integration/framework/process/clustersecret"
 	"github.com/italypaleale/francis/tests/integration/framework/process/provider"
 )
 
@@ -22,8 +23,6 @@ type LocalOptions struct {
 	Backend provider.Backend
 	// Actors to register before the host starts
 	Actors []ActorReg
-	// PeerAuthKey is the shared peer-authentication key, defaulting to DefaultPeerAuthKey
-	PeerAuthKey string
 	// Logger is optional and defaults to the host's discarding logger
 	Logger *slog.Logger
 	// Extra host options applied last, e.g. custom timeouts
@@ -61,17 +60,11 @@ func (p *Local) Address() string {
 func (p *Local) Run(t *testing.T) {
 	t.Helper()
 
-	key := p.opts.PeerAuthKey
-	if key == "" {
-		key = DefaultPeerAuthKey
-	}
-
 	// Assemble the host options, embedding the shared backend's provider
 	hostOpts := []local.HostOption{
 		local.WithAddress(p.opts.Address),
-		local.WithPeerAuthenticationSharedKey(key),
-		// Hosts use self-signed certs and must accept each other's certificates for peer invocation
-		local.WithServerTLSInsecureSkipTLSValidation(),
+		// Every local host derives the same CA from the shared runtime PSK, so they authenticate each other with mTLS
+		local.WithRuntimePSKs(clustersecret.RuntimePSK),
 		local.WithShutdownGracePeriod(ShutdownGrace),
 		p.opts.Backend.LocalHostOption(t),
 	}

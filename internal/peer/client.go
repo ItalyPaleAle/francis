@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
 	"sync/atomic"
 	"time"
 
@@ -30,15 +29,12 @@ var errClientClosed = errors.New("peer client is closed")
 
 // ClientConfig configures a Client
 type ClientConfig struct {
-	// TLSConfig is the client TLS configuration, which must advertise the HTTP/3 ALPN
+	// TLSConfig is the client TLS configuration, which must advertise the HTTP/3 ALPN and present the host's workload certificate for mutual authentication
 	TLSConfig *tls.Config
 	// DialTimeout bounds a single peer dial
 	DialTimeout time.Duration
 	// IdleTimeout closes a pooled session after it has been idle this long
 	IdleTimeout time.Duration
-	// Auth authenticates outgoing sessions
-	// Nil means transport-level TLS only
-	Auth Authenticator
 	// Log is the slog logger
 	Log *slog.Logger
 }
@@ -49,7 +45,6 @@ type Client struct {
 	dialed      atomic.Bool
 	dialer      *webtransport.Dialer
 	dialTimeout time.Duration
-	auth        Authenticator
 	log         *slog.Logger
 
 	// sessions pool is a lock-free map: dead sessions are detected via their context and atomically replaced, never deleted, so a concurrent redial can never be clobbered
@@ -72,7 +67,6 @@ func NewClient(cfg ClientConfig) *Client {
 		// The dialer's QUIC idle timeout reclaims a session once it stops carrying traffic, while an active stream keeps it alive
 		dialer:      wt.NewDialer(cfg.TLSConfig, wt.WithMaxIdleTimeout(cfg.IdleTimeout)),
 		dialTimeout: cfg.DialTimeout,
-		auth:        cfg.Auth,
 		log:         cfg.Log,
 		sessions:    haxmap.New[string, *webtransport.Session](),
 	}
@@ -280,22 +274,12 @@ func (c *Client) guard(address string, session *webtransport.Session) (*webtrans
 }
 
 // dial opens a new WebTransport session to the peer at address
+// Mutual authentication is performed by the TLS layer: the dialer presents the host's workload certificate and verifies the peer's
 func (c *Client) dial(ctx context.Context, address string) (*webtransport.Session, error) {
 	dialCtx, cancel := context.WithTimeout(ctx, c.dialTimeout)
 	defer cancel()
 
-	// Let the authenticator stamp credentials on the session upgrade request
-	// A nil authenticator means we rely on transport-level TLS authentication only
-	var hdr http.Header
-	if c.auth != nil {
-		hdr = http.Header{}
-		err := c.auth.UpdateHeader(hdr)
-		if err != nil {
-			return nil, fmt.Errorf("failed to set peer authentication header: %w", err)
-		}
-	}
-
-	rsp, session, err := c.dialer.Dial(dialCtx, "https://"+address+protocol.PeerConnectPath, hdr)
+	rsp, session, err := c.dialer.Dial(dialCtx, "https://"+address+protocol.PeerConnectPath, nil)
 	// The dialer lazily initializes its transport on the first Dial, so record that it is now safe to close
 	c.dialed.Store(true)
 	if err != nil {

@@ -2,12 +2,12 @@ package remote
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -17,8 +17,11 @@ import (
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/actorcore"
+	"github.com/italypaleale/francis/internal/bootstrapauth"
+	"github.com/italypaleale/francis/internal/ca"
+	"github.com/italypaleale/francis/internal/certholder"
+	"github.com/italypaleale/francis/internal/hosttls"
 	"github.com/italypaleale/francis/internal/peer"
-	"github.com/italypaleale/francis/internal/peerauth"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/protocol"
 )
@@ -56,7 +59,8 @@ type Host struct {
 	// Actor placement cache
 	placementCache *ttlcache.Cache[string, *actorcore.Placement]
 
-	clientTLSConfig     *tls.Config
+	// holder stores the live workload certificate and trust bundle shared by the runtime and peer TLS configs
+	holder              *certholder.Holder
 	requestTimeout      time.Duration
 	shutdownGracePeriod time.Duration
 
@@ -118,52 +122,55 @@ func newHost(options *newHostOptions) (*Host, error) {
 		options.clock = &clock.RealClock{}
 	}
 
-	// Configure host-to-host (peer) authentication, which is required so peer invocations are authenticated rather than protected by transport-level TLS alone
-	switch x := options.PeerAuthentication.(type) {
-	case *peerauth.PeerAuthenticationSharedKey:
-		err = x.Validate()
+	// Resolve the host bootstrap method, which must be exactly one of PSK or JWT
+	// PSK proves the host with a channel-bound challenge-response, while JWT presents a bearer token validated by the runtime
+	hasPSK := len(options.BootstrapPSK) > 0
+	hasJWT := options.BootstrapTokenFn != nil
+	var bootstrapPSK *bootstrapauth.PSK
+	switch {
+	case hasPSK && hasJWT:
+		return nil, errors.New("only one host bootstrap method may be configured")
+	case hasPSK:
+		bootstrapPSK, err = bootstrapauth.NewPSK(options.BootstrapPSK)
 		if err != nil {
-			return nil, fmt.Errorf("failed to validate PeerAuthenticationSharedKey: %w", err)
+			return nil, fmt.Errorf("invalid host bootstrap PSK: %w", err)
 		}
-	case *peerauth.PeerAuthenticationMTLS:
-		err = x.Validate()
-		if err != nil {
-			return nil, fmt.Errorf("failed to validate PeerAuthenticationMTLS: %w", err)
-		}
-
-		// mTLS configures the cluster TLS certificates itself, so it cannot be combined with these options
-		if options.TLSOptions.CACertificate != nil {
-			return nil, errors.New("cannot set TLSOptions.CACertificate when peer authentication is mTLS")
-		}
-		if options.TLSOptions.ServerCertificate != nil {
-			return nil, errors.New("cannot set TLSOptions.ServerCertificate when peer authentication is mTLS")
-		}
-		if options.TLSOptions.ClientCertificate != nil {
-			return nil, errors.New("cannot set TLSOptions.ClientCertificate when peer authentication is mTLS")
-		}
-		if options.TLSOptions.InsecureSkipTLSValidation {
-			return nil, errors.New("cannot set TLSOptions.InsecureSkipTLSValidation when peer authentication is mTLS")
-		}
-
-		// mTLS drives the TLS configuration for both peer and runtime connections
-		x.SetTLSOptions(&options.TLSOptions)
-	case nil:
-		return nil, errors.New("option PeerAuthentication is required")
+	case hasJWT:
+		// The token provider is invoked on each bootstrap so a rotated token is re-read
 	default:
-		return nil, fmt.Errorf("unsupported value for PeerAuthentication: %T", options.PeerAuthentication)
+		return nil, errors.New("a host bootstrap method is required: configure either a host PSK or JWT")
 	}
 
-	// Init the TLS configuration for the peer server and the runtime/peer clients
-	serverTLSConfig, clientTLSConfig, err := options.TLSOptions.GetTLSConfig()
-	if err != nil {
-		return nil, err
+	// The first-connection trust decision must be explicit: pin the CA, or opt out unsafely
+	hasPinned := len(options.PinnedCAPEM) > 0
+	switch {
+	case hasPinned && options.UnsafeNoPinnedCA:
+		return nil, errors.New("cannot set both WithPinnedCA and WithUnsafeNoPinnedCA")
+	case !hasPinned && !options.UnsafeNoPinnedCA:
+		return nil, errors.New("the cluster CA trust must be set explicitly: use WithPinnedCA to pin the CA, or WithUnsafeNoPinnedCA to trust the runtime on first connection")
 	}
+
+	// Seed the trust bundle with the pinned CA so the host can verify the runtime from its very first connection
+	holder := certholder.New(nil, nil)
+	if hasPinned {
+		pool, poolErr := ca.PoolFromPEM(options.PinnedCAPEM)
+		if poolErr != nil {
+			return nil, fmt.Errorf("failed to parse pinned CA: %w", poolErr)
+		}
+		holder.SetRoots(pool)
+	}
+
+	// Build the TLS configurations, which all read the live certificate and trust bundle from the holder
+	warnUnpinned := newWarnOnce(options.Logger)
+	runtimeTLSConfig := hosttls.RuntimeClientTLSConfig(holder, warnUnpinned)
+	peerClientTLSConfig := hosttls.PeerClientTLSConfig(holder)
+	peerServerTLSConfig := hosttls.PeerServerTLSConfig(holder)
 
 	// Create the host
 	h := &Host{
 		address:             options.Address,
 		bind:                net.JoinHostPort(options.BindAddress, strconv.Itoa(options.BindPort)),
-		clientTLSConfig:     clientTLSConfig,
+		holder:              holder,
 		requestTimeout:      options.RequestTimeout,
 		shutdownGracePeriod: options.ShutdownGracePeriod,
 		logSource:           options.Logger,
@@ -185,24 +192,26 @@ func newHost(options *newHostOptions) (*Host, error) {
 	// The resolver lets the shared messaging logic resolve placement through the runtime and confirm ownership before activating an actor
 	h.resolver = placementResolver{h: h}
 
-	// The peer client invokes actors owned by other hosts, authenticating outgoing sessions when peer auth is configured
+	// The peer client invokes actors owned by other hosts, presenting this host's workload certificate for mutual authentication
 	h.peerClient = peer.NewClient(peer.ClientConfig{
-		TLSConfig:   clientTLSConfig,
+		TLSConfig:   peerClientTLSConfig,
 		DialTimeout: options.RequestTimeout,
-		Auth:        options.PeerAuthentication,
 		Log:         options.Logger,
 	})
 
-	// The runtime client maintains the session to the runtime and serves runtime-initiated requests
+	// The runtime client maintains the session to the runtime, bootstraps the host, installs the issued workload certificate, and serves runtime-initiated requests
 	// Its actor types are filled in at Run, once all actor types have been registered
 	h.runtimeClient = newRuntimeClient(runtimeClientConfig{
-		addresses:      options.RuntimeAddresses,
-		peerAddress:    options.Address,
-		tlsConfig:      clientTLSConfig,
-		requestTimeout: options.RequestTimeout,
-		log:            options.Logger,
-		clock:          options.clock,
-		onDrainStart:   func() { h.draining.Store(true) },
+		addresses:        options.RuntimeAddresses,
+		peerAddress:      options.Address,
+		tlsConfig:        runtimeTLSConfig,
+		holder:           holder,
+		bootstrapPSK:     bootstrapPSK,
+		bootstrapTokenFn: options.BootstrapTokenFn,
+		requestTimeout:   options.RequestTimeout,
+		log:              options.Logger,
+		clock:            options.clock,
+		onDrainStart:     func() { h.draining.Store(true) },
 		// On graceful shutdown the runtime client drains local actors while the session is still alive, so their deactivation can still persist state and clear placement through the runtime
 		onDrain: h.drainActors,
 		// When a session ends, drop cached placements so they are re-resolved against the next session
@@ -217,10 +226,9 @@ func newHost(options *newHostOptions) (*Host, error) {
 	// It reports our current runtime-assigned host ID so it can reject invocations aimed at a stale placement
 	h.peerServer = peer.NewServer(peer.ServerConfig{
 		Bind:                h.bind,
-		TLSConfig:           serverTLSConfig,
+		TLSConfig:           peerServerTLSConfig,
 		Handler:             h.peerInvokeObject,
 		StreamHandler:       h.peerInvokeStream,
-		Auth:                options.PeerAuthentication,
 		Log:                 options.Logger,
 		HostID:              h.runtimeClient.HostID,
 		Draining:            h.isDraining,
@@ -229,6 +237,16 @@ func newHost(options *newHostOptions) (*Host, error) {
 	})
 
 	return h, nil
+}
+
+// newWarnOnce returns a function that logs the unpinned-CA warning at most once
+func newWarnOnce(log *slog.Logger) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			log.Warn("Connecting to a runtime without a pinned CA: trusting the runtime certificate on first use; pin the cluster CA to close this gap, especially for JWT bootstrap")
+		})
+	}
 }
 
 // Service returns a Service object configured to interact with this host.

@@ -9,6 +9,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/bootstrapauth"
+	"github.com/italypaleale/francis/internal/channelbind"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/protocol"
 )
@@ -35,23 +37,106 @@ func (rt *Runtime) handleRegistration(ctx context.Context, c *hostConn) bool {
 	}
 	defer stream.Close()
 
+	// Compute the channel binding once, used to verify a PSK challenge-response is bound to this exact TLS session
+	cb, err := channelbind.Export(c.session)
+	if err != nil {
+		rt.log.WarnContext(ctx, "Failed to compute channel binding for registration", slog.Any("error", err))
+		return false
+	}
+
 	req, err := protocol.ReadMessageWithTimeout(stream, registrationReadTimeout)
 	if err != nil {
 		return false
 	}
 
-	if req.Kind != protocol.KindRegisterHost {
+	// A host either opens with a PSK challenge, or registers directly for JWT bootstrap or an mTLS reconnect
+	preAuthed := false
+	switch req.Kind {
+	case protocol.KindRegisterHostAuth:
+		regReq, ok := rt.handleAuthBegin(stream, c, cb, req)
+		if !ok {
+			return false
+		}
+		req = regReq
+		preAuthed = true
+	case protocol.KindRegisterHost:
+		// No challenge round-trip is needed for these paths
+	default:
 		_ = protocol.WriteMessage(stream, req.ErrorReply(
 			protocol.NewError(protocol.ErrCodeBadRequest, "expected host registration as the first message"),
 		))
 		return false
 	}
 
-	resp := rt.handleRegister(ctx, c, req)
+	resp := rt.handleRegister(ctx, c, req, preAuthed)
 	_ = protocol.WriteMessage(stream, resp)
 
 	// Registration succeeded unless the response is an error
 	return resp.Kind != protocol.KindError
+}
+
+// handleAuthBegin runs the runtime side of the PSK challenge-response and returns the follow-up registration envelope on success
+// It proves to the host that the runtime holds the host PSK, then verifies the host's own proof, both bound to the channel binding
+func (rt *Runtime) handleAuthBegin(stream protocol.Stream, _ *hostConn, cb []byte, req *protocol.Envelope) (*protocol.Envelope, bool) {
+	// A PSK challenge is only valid when the cluster is configured for PSK bootstrap
+	if rt.bootstrapMethod != bootstrapauth.MethodPSK {
+		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeUnauthorized, "PSK bootstrap is not enabled")))
+		return nil, false
+	}
+
+	var begin protocol.RegisterAuthBeginRequest
+	err := req.DecodePayload(&begin)
+	if err != nil || begin.Method != bootstrapauth.MethodPSK || len(begin.ClientNonce) == 0 {
+		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "invalid PSK bootstrap request")))
+		return nil, false
+	}
+
+	// Generate the server nonce and compute the runtime proof, which the host checks before sending its own proof
+	serverNonce, err := bootstrapauth.Nonce()
+	if err != nil {
+		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to generate nonce")))
+		return nil, false
+	}
+	serverProof := rt.bootstrapPSK.ServerProof(cb, begin.ClientNonce, serverNonce)
+
+	challenge, err := req.ReplyWith(protocol.KindRegisterHostAuthChallenge, protocol.RegisterAuthChallengeResponse{
+		ServerNonce: serverNonce,
+		ServerProof: serverProof,
+	})
+	if err != nil {
+		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to encode challenge")))
+		return nil, false
+	}
+	err = protocol.WriteMessage(stream, challenge)
+	if err != nil {
+		return nil, false
+	}
+
+	// Read the follow-up registration carrying the host's proof
+	regReq, err := protocol.ReadMessageWithTimeout(stream, registrationReadTimeout)
+	if err != nil {
+		return nil, false
+	}
+	if regReq.Kind != protocol.KindRegisterHost {
+		_ = protocol.WriteMessage(stream, regReq.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "expected host registration after the challenge")))
+		return nil, false
+	}
+
+	var payload protocol.RegisterHostRequest
+	err = regReq.DecodePayload(&payload)
+	if err != nil {
+		_ = protocol.WriteMessage(stream, regReq.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode registration request")))
+		return nil, false
+	}
+
+	// Verify the host proof over the same channel binding and nonces, which fails for a wrong PSK, a replay, or a man-in-the-middle
+	ok := payload.Auth.Method == bootstrapauth.MethodPSK && rt.bootstrapPSK.VerifyClientProof(cb, begin.ClientNonce, serverNonce, payload.Auth.Proof)
+	if !ok {
+		_ = protocol.WriteMessage(stream, regReq.ErrorReply(protocol.NewError(protocol.ErrCodeUnauthorized, "PSK authentication failed")))
+		return nil, false
+	}
+
+	return regReq, true
 }
 
 // dispatch routes a request to its handler and returns the response envelope
@@ -65,6 +150,8 @@ func (rt *Runtime) dispatch(ctx context.Context, c *hostConn, req *protocol.Enve
 	}
 
 	switch req.Kind {
+	case protocol.KindRenewCert:
+		return rt.handleRenewCert(ctx, c, req)
 	case protocol.KindUnregisterHost:
 		return rt.handleUnregister(ctx, c, req)
 	case protocol.KindHealthCheck:
@@ -90,8 +177,9 @@ func (rt *Runtime) dispatch(ctx context.Context, c *hostConn, req *protocol.Enve
 	}
 }
 
-// handleRegister registers or reattaches a host with the provider and tracks its session
-func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protocol.Envelope) *protocol.Envelope {
+// handleRegister authenticates, registers or reattaches a host with the provider, tracks its session, and issues a workload certificate when needed
+// preAuthed is true when a PSK challenge-response already authenticated the session on this stream
+func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protocol.Envelope, preAuthed bool) *protocol.Envelope {
 	var payload protocol.RegisterHostRequest
 	err := req.DecodePayload(&payload)
 	if err != nil {
@@ -107,13 +195,49 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "registration is missing the host address"))
 	}
 
-	// Register the host with the provider, reattaching to an existing registration if the host supplied a previous ID
+	// Authenticate the host and decide whether a fresh workload certificate must be issued
+	// A PSK challenge already authenticated the session, while JWT and mTLS reconnect are authenticated here
+	reattachID := ""
+	issueCert := preAuthed
+	if !preAuthed {
+		switch {
+		case payload.Auth.Method == bootstrapauth.MethodJWT:
+			authErr := rt.authenticateJWT(ctx, payload.Auth.Token)
+			if authErr != nil {
+				return req.ErrorReply(protocol.NewError(protocol.ErrCodeUnauthorized, authErr.Error()))
+			}
+			issueCert = true
+		case payload.Auth.Method == "":
+			// An mTLS reconnect carries no bootstrap credential and is identified by its client certificate
+			hostID, certErr := rt.verifyHostClientCert(c)
+			if certErr != nil {
+				rt.log.WarnContext(ctx, "Client certificate authentication failed", slog.Any("error", certErr))
+				return req.ErrorReply(protocol.NewError(protocol.ErrCodeUnauthorized, "client certificate authentication failed"))
+			}
+			reattachID = hostID
+			// Mint a fresh certificate only when the host sent a new public key, otherwise it keeps the one it has
+			issueCert = len(payload.WorkloadPubKey) > 0
+		default:
+			return req.ErrorReply(protocol.NewError(protocol.ErrCodeUnauthorized, "unsupported bootstrap method"))
+		}
+	}
+
+	// Resolve the identity to reattach to, preferring the certificate identity on an mTLS reconnect over any claimed previous ID
+	existingID := payload.PreviousHostID
+	if reattachID != "" {
+		if existingID != "" && existingID != reattachID {
+			return req.ErrorReply(protocol.NewError(protocol.ErrCodeUnauthorized, "previous host ID does not match the certificate identity"))
+		}
+		existingID = reattachID
+	}
+
+	// Register the host with the provider, reattaching to an existing registration when an identity is supplied
 	regCtx, cancel := context.WithTimeout(ctx, rt.providerRequestTimeout)
 	defer cancel()
 	res, err := rt.provider.RegisterHost(regCtx, components.RegisterHostReq{
 		Address:        payload.Address,
 		ActorTypes:     protocolActorTypesToComponents(payload.ActorTypes),
-		ExistingHostID: payload.PreviousHostID,
+		ExistingHostID: existingID,
 	})
 	if err != nil {
 		rt.log.ErrorContext(ctx, "Failed to register host", slog.Any("error", err))
@@ -138,17 +262,79 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 		superseded.close(sessionErrorSuperseded, "session superseded by a newer connection")
 	}
 
-	resp, err := req.ReplyWith(protocol.KindRegisterHostResponse, protocol.RegisterHostResponse{
+	// Build the response, always sending the current trust bundle so the host can pick up a root rotation
+	resp := protocol.RegisterHostResponse{
 		HostID:                c.hostID,
 		SessionID:             c.sessionID,
 		ProtocolVersion:       c.protocolVersion,
 		HealthCheckIntervalMs: rt.provider.HealthCheckInterval().Milliseconds(),
 		Reattached:            res.Reattached,
-	})
+		CABundlePEM:           rt.caBundlePEM(),
+	}
+
+	// Issue a workload certificate when the host needs one, which is every bootstrap and any reconnect that rotated its key
+	if issueCert {
+		if len(payload.WorkloadPubKey) == 0 {
+			return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "registration is missing the workload public key"))
+		}
+		der, notAfter, certErr := rt.issueWorkloadCert(c.hostID, payload.WorkloadPubKey)
+		if certErr != nil {
+			rt.log.ErrorContext(ctx, "Failed to issue workload certificate", slog.Any("error", certErr))
+			return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to issue workload certificate"))
+		}
+		resp.WorkloadCertDER = der
+		resp.CertNotAfterMs = notAfter.UnixMilli()
+	}
+
+	out, err := req.ReplyWith(protocol.KindRegisterHostResponse, resp)
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to encode registration response"))
 	}
-	return resp
+	return out
+}
+
+// authenticateJWT validates a host bootstrap token, enforcing that the cluster is configured for JWT bootstrap
+func (rt *Runtime) authenticateJWT(ctx context.Context, token string) error {
+	if rt.bootstrapMethod != bootstrapauth.MethodJWT {
+		return errors.New("JWT bootstrap is not enabled")
+	}
+	if rt.bootstrapJWT == nil {
+		return errors.New("JWT validator is not ready")
+	}
+
+	// Log the real reason server-side but return a generic error to avoid leaking validation details to the caller
+	subject, err := rt.bootstrapJWT.Validate(token)
+	if err != nil {
+		rt.log.WarnContext(ctx, "JWT validation failed", slog.Any("error", err))
+		return errors.New("JWT authentication failed")
+	}
+	rt.log.DebugContext(ctx, "Host authenticated via JWT", slog.String("subject", subject))
+	return nil
+}
+
+// handleRenewCert issues a fresh workload certificate over an already authenticated session
+func (rt *Runtime) handleRenewCert(_ context.Context, c *hostConn, req *protocol.Envelope) *protocol.Envelope {
+	var payload protocol.RenewCertRequest
+	err := req.DecodePayload(&payload)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode renew cert request"))
+	}
+	if len(payload.WorkloadPubKey) == 0 {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "renew cert is missing the workload public key"))
+	}
+
+	// dispatch already verified the session and host ID, so the certificate is issued for this connection's host
+	der, notAfter, err := rt.issueWorkloadCert(c.hostID, payload.WorkloadPubKey)
+	if err != nil {
+		rt.log.Error("Failed to renew workload certificate", slog.String("hostId", c.hostID), slog.Any("error", err))
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to issue certificate"))
+	}
+
+	return rt.reply(req, protocol.KindRenewCertResponse, protocol.RenewCertResponse{
+		WorkloadCertDER: der,
+		CABundlePEM:     rt.caBundlePEM(),
+		CertNotAfterMs:  notAfter.UnixMilli(),
+	})
 }
 
 // handleUnregister handles a graceful, drain-oriented host shutdown request
