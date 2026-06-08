@@ -9,6 +9,7 @@ import (
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/postgres"
 	"github.com/italypaleale/francis/components/sqlite"
+	"github.com/italypaleale/francis/components/standalone"
 	"github.com/italypaleale/francis/internal/hosttls"
 	"github.com/italypaleale/francis/internal/peerauth"
 	"k8s.io/utils/clock"
@@ -62,6 +63,21 @@ func WithSQLiteProvider(opts sqlite.SQLiteProviderOptions) HostOption {
 
 // WithPostgresProvider sets the Postgres provider
 func WithPostgresProvider(opts postgres.PostgresProviderOptions) HostOption {
+	return func(o *newHostOptions) { o.ProviderOptions = opts }
+}
+
+// WithStandaloneMemoryProvider sets the standalone in-memory provider
+func WithStandaloneMemoryProvider(opts standalone.StandaloneMemoryOptions) HostOption {
+	return func(o *newHostOptions) { o.ProviderOptions = opts }
+}
+
+// WithStandaloneSQLiteProvider sets the standalone SQLite-backed provider
+func WithStandaloneSQLiteProvider(opts standalone.StandaloneSQLiteOptions) HostOption {
+	return func(o *newHostOptions) { o.ProviderOptions = opts }
+}
+
+// WithStandalonePostgresProvider sets the standalone Postgres-backed provider
+func WithStandalonePostgresProvider(opts standalone.StandalonePostgresOptions) HostOption {
 	return func(o *newHostOptions) { o.ProviderOptions = opts }
 }
 

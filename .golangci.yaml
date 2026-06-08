@@ -2,6 +2,7 @@ version: "2"
 run:
   build-tags:
     - unit
+    - integration
 output:
   formats:
     text:

@@ -19,7 +19,9 @@ import (
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/components/postgres"
 	"github.com/italypaleale/francis/components/sqlite"
+	"github.com/italypaleale/francis/components/standalone"
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/peer"
 	"github.com/italypaleale/francis/internal/peerauth"
@@ -40,8 +42,22 @@ const (
 	defaultAlarmsFetchAheadBatch    = 25
 )
 
-// SQLiteProviderOptions re-exports provider options
-type SQLiteProviderOptions = sqlite.SQLiteProviderOptions
+type (
+	// SQLiteProviderOptions re-exports provider options
+	SQLiteProviderOptions = sqlite.SQLiteProviderOptions
+
+	// PostgresProviderOptions re-exports provider options
+	PostgresProviderOptions = postgres.PostgresProviderOptions
+
+	// StandaloneMemoryProviderOptions re-exports provider options
+	StandaloneMemoryProviderOptions = standalone.StandaloneMemoryOptions
+
+	// StandaloneSQLiteProviderOptions re-exports provider options
+	StandaloneSQLiteProviderOptions = standalone.StandaloneSQLiteOptions
+
+	// StandalonePostgresProviderOptions re-exports provider options
+	StandalonePostgresProviderOptions = standalone.StandalonePostgresOptions
+)
 
 // Host is an actor host.
 type Host struct {
@@ -172,6 +188,31 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 		actorProvider, err = sqlite.NewSQLiteProvider(options.Logger, *x, options.getProviderConfig())
 		if err != nil {
 			return nil, fmt.Errorf("failed to create SQLite provider: %w", err)
+		}
+	case postgres.PostgresProviderOptions:
+		actorProvider, err = postgres.NewPostgresProvider(options.Logger, x, options.getProviderConfig())
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Postgres provider: %w", err)
+		}
+	case *postgres.PostgresProviderOptions:
+		actorProvider, err = postgres.NewPostgresProvider(options.Logger, *x, options.getProviderConfig())
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Postgres provider: %w", err)
+		}
+	case standalone.StandaloneMemoryOptions:
+		actorProvider, err = standalone.NewStandaloneMemory(options.Logger, x, options.getProviderConfig())
+		if err != nil {
+			return nil, fmt.Errorf("failed to create standalone memory provider: %w", err)
+		}
+	case standalone.StandaloneSQLiteOptions:
+		actorProvider, err = standalone.NewStandaloneSQLiteBacked(options.Logger, x, options.getProviderConfig())
+		if err != nil {
+			return nil, fmt.Errorf("failed to create standalone SQLite provider: %w", err)
+		}
+	case standalone.StandalonePostgresOptions:
+		actorProvider, err = standalone.NewStandalonePostgresBacked(options.Logger, x, options.getProviderConfig())
+		if err != nil {
+			return nil, fmt.Errorf("failed to create standalone Postgres provider: %w", err)
 		}
 	case nil:
 		return nil, errors.New("option ProviderOptions is required")
