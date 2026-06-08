@@ -20,6 +20,8 @@ var (
 	ErrActorHalted = errors.New("actor is halted")
 	// ErrActorTypeUnsupported is returned by methods that perform invocation when the actor type is not supported for this cluster.
 	ErrActorTypeUnsupported = errors.New("actor type is not supported in the cluster")
+	// ErrNoHost is returned by methods that perform invocation when no host is currently available to place the actor
+	ErrNoHost = errors.New("no host is available to place the actor")
 )
 
 // Service allows interacting with the actor host, to invoke actors and perform operations on state and alarms.

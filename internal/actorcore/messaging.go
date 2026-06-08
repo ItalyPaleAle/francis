@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	msgpack "github.com/vmihailenco/msgpack/v5"
 
@@ -59,25 +60,54 @@ func (m *Manager) Invoke(parentCtx context.Context, resolver PlacementResolver, 
 		return nil, fmt.Errorf("failed to look up actor: %w", err)
 	}
 
-	env, retry, err := m.doInvokeObject(parentCtx, resolver, peer, r, ap, method, data, activeOnly)
+	env, retry, retryAfter, err := m.doInvokeObject(parentCtx, resolver, peer, r, ap, method, data, activeOnly)
 	if !retry {
 		return env, err
 	}
 
-	// The placement was stale: drop it, re-resolve with a fresh lookup, and try once more
+	// The placement was stale, so drop it before re-resolving
 	resolver.Invalidate(r)
+
+	// If there's a retry-after, honor it (for example from a host that is draining or at capacity)
+	waitErr := m.waitRetryAfter(parentCtx, retryAfter)
+	if waitErr != nil {
+		return nil, waitErr
+	}
+
+	// Re-resolve with a fresh lookup and try once more
 	ap, err = resolver.Resolve(parentCtx, r, true, activeOnly)
 	if err != nil {
 		return nil, fmt.Errorf("failed to look up actor: %w", err)
 	}
 
-	env, _, err = m.doInvokeObject(parentCtx, resolver, peer, r, ap, method, data, activeOnly)
+	env, _, _, err = m.doInvokeObject(parentCtx, resolver, peer, r, ap, method, data, activeOnly)
 	return env, err
 }
 
+// maxInvokeRetryDelay caps how long a single object-invocation retry waits on a retry-after hint, so a large hint cannot stall the call
+const maxInvokeRetryDelay = time.Second
+
+// waitRetryAfter sleeps for the retry-after hint before the single invocation retry, capped and interruptible by the context
+func (m *Manager) waitRetryAfter(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	d = min(d, maxInvokeRetryDelay)
+
+	t := m.clock.NewTimer(d)
+	defer t.Stop()
+
+	select {
+	case <-t.C():
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // doInvokeObject dispatches a single object invocation attempt to the local actor or a peer, depending on the placement
-// The bool return is true when the attempt failed in a way that warrants re-resolving the placement and retrying
-func (m *Manager) doInvokeObject(ctx context.Context, resolver PlacementResolver, peer PeerInvoker, r ref.ActorRef, ap *Placement, method string, data any, activeOnly bool) (actor.Envelope, bool, error) {
+// The bool return is true when the attempt failed in a way that warrants re-resolving the placement and retrying, and the duration carries any retry-after hint to wait before that retry
+func (m *Manager) doInvokeObject(ctx context.Context, resolver PlacementResolver, peer PeerInvoker, r ref.ActorRef, ap *Placement, method string, data any, activeOnly bool) (actor.Envelope, bool, time.Duration, error) {
 	if resolver.IsLocal(ap) {
 		return m.invokeLocalObject(ctx, resolver, r, method, data, activeOnly)
 	}
@@ -85,8 +115,8 @@ func (m *Manager) doInvokeObject(ctx context.Context, resolver PlacementResolver
 }
 
 // invokeLocalObject invokes an actor owned by this host
-// The bool return is true when the placement looks stale (the actor is inactive or owned elsewhere) so the caller can re-resolve
-func (m *Manager) invokeLocalObject(ctx context.Context, resolver PlacementResolver, r ref.ActorRef, method string, data any, activeOnly bool) (actor.Envelope, bool, error) {
+// The bool return is true when the placement looks stale (the actor is inactive or owned elsewhere) so the caller can re-resolve; a local miss carries no retry-after hint
+func (m *Manager) invokeLocalObject(ctx context.Context, resolver PlacementResolver, r ref.ActorRef, method string, data any, activeOnly bool) (actor.Envelope, bool, time.Duration, error) {
 	invoke := func(invokeCtx context.Context, act *ActiveActor) (any, error) {
 		// The actor must implement the Invoke method to be called this way
 		obj, ok := act.Instance.(actor.ActorInvoke)
@@ -106,27 +136,30 @@ func (m *Manager) invokeLocalObject(ctx context.Context, resolver PlacementResol
 	if err != nil {
 		// An inactive actor or a placement owned elsewhere means the actor may be active on another host - re-resolve
 		retry := errors.Is(err, actor.ErrActorNotActive) || errors.Is(err, actor.ErrActorNotHosted)
-		return nil, retry, err
+		return nil, retry, 0, err
 	}
 
 	// If there's a response, wrap it in an envelope
 	if res != nil {
-		return NewObjectEnvelope(res), false, nil
+		return NewObjectEnvelope(res), false, 0, nil
 	}
-	return nil, false, nil
+	return nil, false, 0, nil
 }
 
 // invokePeerObject invokes an actor owned by a peer host over the peer transport
-// The bool return is true when the placement looks stale and the caller should re-resolve and retry
-func (m *Manager) invokePeerObject(ctx context.Context, peer PeerInvoker, r ref.ActorRef, ap *Placement, method string, data any, activeOnly bool) (actor.Envelope, bool, error) {
+// The bool return is true when the placement looks stale and the caller should re-resolve and retry, and the duration carries the peer's retry-after hint
+func (m *Manager) invokePeerObject(ctx context.Context, peer PeerInvoker, r ref.ActorRef, ap *Placement, method string, data any, activeOnly bool) (actor.Envelope, bool, time.Duration, error) {
 	// Encode the argument as MessagePack for the request body
-	var argData []byte
+	var (
+		argData []byte
+		err     error
+	)
+
 	if data != nil {
-		b, err := msgpack.Marshal(data)
+		argData, err = msgpack.Marshal(data)
 		if err != nil {
-			return nil, false, fmt.Errorf("failed to serialize data using msgpack: %w", err)
+			return nil, false, 0, fmt.Errorf("failed to serialize data using msgpack: %w", err)
 		}
-		argData = b
 	}
 
 	// Invoke the actor on the peer that owns it
@@ -141,19 +174,23 @@ func (m *Manager) invokePeerObject(ctx context.Context, peer PeerInvoker, r ref.
 	if perr != nil {
 		// Re-resolve and retry on a stale placement, a halted actor, a transport failure, or an active-only miss that may be active elsewhere
 		retry := perr.Retryable() || perr.Code == protocol.ErrCodeActorNotActive
-		return nil, retry, protocolErrorToActor(perr)
+		// Carry the retry-after hint so the caller waits a beat before re-resolving
+		retryAfter, _ := perr.RetryAfter()
+		return nil, retry, retryAfter, protocolErrorToActor(perr)
 	}
 
 	// Decode the result into an envelope
 	if len(resp.Data) == 0 {
-		return nil, false, nil
+		return nil, false, 0, nil
 	}
+
 	var out any
-	err := msgpack.Unmarshal(resp.Data, &out)
+	err = msgpack.Unmarshal(resp.Data, &out)
 	if err != nil {
-		return nil, false, fmt.Errorf("failed to decode response body using msgpack: %w", err)
+		return nil, false, 0, fmt.Errorf("failed to decode response body using msgpack: %w", err)
 	}
-	return NewObjectEnvelope(out), false, nil
+
+	return NewObjectEnvelope(out), false, 0, nil
 }
 
 // InvokeStream resolves an actor's placement and performs a streamed invocation

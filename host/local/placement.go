@@ -52,7 +52,8 @@ func (h *Host) lookupActor(parentCtx context.Context, aRef ref.ActorRef, skipCac
 	}
 
 	// Check if we have a cached response, assuming the caller doesn't want to skip the cache
-	if !skipCache {
+	// Active-only lookups always consult the provider
+	if !skipCache && !activeOnly {
 		res, ok := h.placementCache.Get(key)
 		if ok {
 			// We have a cached value, so just use that
@@ -71,7 +72,8 @@ func (h *Host) lookupActor(parentCtx context.Context, aRef ref.ActorRef, skipCac
 	case errors.Is(err, components.ErrNoHost):
 		// Delete from the cache in case it's present
 		h.placementCache.Delete(key)
-		return nil, actor.ErrActorTypeUnsupported
+		// No host can currently place the actor, which is distinct from the type being unsupported and may be transient
+		return nil, actor.ErrNoHost
 	case errors.Is(err, components.ErrNoActor) && activeOnly:
 		return nil, actor.ErrActorNotActive
 	case err != nil:

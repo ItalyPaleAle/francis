@@ -205,6 +205,8 @@ func newHost(options *newHostOptions) (*Host, error) {
 		onDrainStart:   func() { h.draining.Store(true) },
 		// On graceful shutdown the runtime client drains local actors while the session is still alive, so their deactivation can still persist state and clear placement through the runtime
 		onDrain: h.drainActors,
+		// When a session ends, drop cached placements so they are re-resolved against the next session
+		onSessionEnd: h.invalidateAllPlacements,
 		handlers: runtimeHandlers{
 			executeAlarm:   h.executeAlarm,
 			terminateActor: h.terminateActor,

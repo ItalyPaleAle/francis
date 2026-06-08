@@ -32,6 +32,10 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
+    env:
+      TEST_POSTGRES_CONNSTRING: "postgres://actors:actors@localhost:5432/actors"
+      TEST_STANDALONE_POSTGRES_CONNSTRING: "postgres://actors:actors@localhost:5432/actors"
+
     steps:
       - name: "Check out code"
         uses: actions/checkout@v6
@@ -52,8 +56,5 @@ jobs:
           version: "${{ env.GOLANGCI_LINT_VERSION }}"
 
       - name: "Test"
-        env:
-          TEST_POSTGRES_CONNSTRING: "postgres://actors:actors@localhost:5432/actors"
-          TEST_STANDALONE_POSTGRES_CONNSTRING: "postgres://actors:actors@localhost:5432/actors"
         run: |
           go test -v -tags unit ./...

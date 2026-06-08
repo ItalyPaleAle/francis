@@ -58,6 +58,9 @@ type runtimeClientConfig struct {
 	// onDrain is called once during graceful shutdown, while the runtime session is still alive, to drain local actors after the runtime has been told we are draining
 	onDrain func()
 
+	// onSessionEnd is called after a live runtime session ends, before reconnecting, so the host can drop cached placements that may have gone stale while disconnected
+	onSessionEnd func()
+
 	log   *slog.Logger
 	clock clock.WithTicker
 }
@@ -148,6 +151,11 @@ func (rc *runtimeClient) Run(ctx context.Context) error {
 			rc.cfg.log.WarnContext(ctx, "Runtime connection failed, will reconnect", slog.String("address", addr), slog.Any("error", err))
 		} else {
 			rc.cfg.log.InfoContext(ctx, "Runtime session ended, will reconnect", slog.String("address", addr))
+		}
+
+		// Invoke the onSessionEnd callback before reconnecting
+		if established && rc.cfg.onSessionEnd != nil {
+			rc.cfg.onSessionEnd()
 		}
 
 		// Reset the backoff after a session that actually connected, so a long-lived session reconnects quickly

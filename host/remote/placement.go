@@ -51,7 +51,8 @@ func (h *Host) lookupActor(parentCtx context.Context, aRef ref.ActorRef, skipCac
 	}
 
 	// Check if we have a cached response, assuming the caller doesn't want to skip the cache
-	if !skipCache {
+	// Active-only lookups always consult the runtime
+	if !skipCache && !activeOnly {
 		res, ok := h.placementCache.Get(key)
 		if ok {
 			// We have a cached value, so just use that
@@ -72,7 +73,8 @@ func (h *Host) lookupActor(parentCtx context.Context, aRef ref.ActorRef, skipCac
 	// Translate the well-known placement errors to their public actor equivalents
 	switch {
 	case isProtocolErrorCode(err, protocol.ErrCodeNoHost):
-		return nil, actor.ErrActorTypeUnsupported
+		// No host can currently place the actor, which is distinct from the type being unsupported and may be transient
+		return nil, actor.ErrNoHost
 	case isProtocolErrorCode(err, protocol.ErrCodeActorNotActive):
 		return nil, actor.ErrActorNotActive
 	case err != nil:
@@ -121,5 +123,12 @@ func (h *Host) isLocal(ap *actorcore.Placement) bool {
 func (h *Host) invalidatePlacement(aRef ref.ActorRef) {
 	if h.placementCache != nil {
 		h.placementCache.Delete(aRef.String())
+	}
+}
+
+// invalidateAllPlacements drops every cached placement so subsequent lookups re-resolve through the runtime
+func (h *Host) invalidateAllPlacements() {
+	if h.placementCache != nil {
+		h.placementCache.Reset()
 	}
 }

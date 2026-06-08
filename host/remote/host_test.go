@@ -404,9 +404,10 @@ func TestHostRemoteInvokeErrors(t *testing.T) {
 
 	svc := host.Service()
 
-	t.Run("unsupported actor type", func(t *testing.T) {
+	t.Run("no host for an unsupported actor type", func(t *testing.T) {
+		// The runtime can place no host for an unregistered type, surfaced as ErrNoHost
 		_, err := svc.Invoke(t.Context(), "Unsupported", "a1", "echo", "hi")
-		require.ErrorIs(t, err, actor.ErrActorTypeUnsupported)
+		require.ErrorIs(t, err, actor.ErrNoHost)
 	})
 
 	t.Run("active-only invoke of an inactive actor", func(t *testing.T) {

@@ -173,6 +173,34 @@ func TestLookupActor(t *testing.T) {
 		assert.Equal(t, "provider.example.com:8080", cached.Address)
 	})
 
+	t.Run("active-only lookup bypasses the cache", func(t *testing.T) {
+		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+
+		host, provider := newHost()
+		defer host.core.Close()
+		defer host.placementCache.Stop()
+
+		actorRef := ref.NewActorRef("testactor", "active-only-cached")
+
+		// Seed the cache with an allocating placement
+		host.placementCache.Set(actorRef.String(), &actorcore.Placement{
+			HostID:  "cached-host-456",
+			Address: "cached.example.com:8080",
+		}, 30*time.Second)
+
+		// An active-only lookup must consult the provider rather than serve the cached allocating placement, which may point at a host where the actor is not active
+		provider.
+			On("LookupActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.LookupActorOpts{ActiveOnly: true}).
+			Return(components.LookupActorRes{HostID: "active-host-789", Address: "active.example.com:8080"}, nil).
+			Once()
+
+		result, err := host.lookupActor(t.Context(), actorRef, false, true)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Equal(t, "active-host-789", result.HostID)
+		provider.AssertExpectations(t)
+	})
+
 	t.Run("cache miss calls provider successfully", func(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
@@ -235,7 +263,7 @@ func TestLookupActor(t *testing.T) {
 		// Test lookup with skipCache=true to force provider call
 		result, err := host.lookupActor(t.Context(), actorRef, true, false)
 		require.Error(t, err)
-		require.ErrorIs(t, err, actor.ErrActorTypeUnsupported)
+		require.ErrorIs(t, err, actor.ErrNoHost)
 		assert.Nil(t, result)
 
 		// Verify provider was called

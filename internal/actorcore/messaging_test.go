@@ -242,6 +242,54 @@ func TestManagerInvokePeer(t *testing.T) {
 	})
 }
 
+func TestManagerInvokeHonorsRetryAfter(t *testing.T) {
+	m := newMessagingManager(t, echoFactory)
+
+	// The manager uses a fake clock, so the retry-after wait is deterministic
+	clk, ok := m.clock.(*clocktesting.FakeClock)
+	require.True(t, ok)
+
+	// The first attempt hits a draining host that returns a retry-after; the re-resolve routes to a live host
+	resolver := &fakeResolver{
+		localHostID: "h1",
+		placements:  []*Placement{{HostID: "h2", Address: "addr2"}, {HostID: "h3", Address: "addr3"}},
+	}
+	out, _ := msgpack.Marshal("second-peer")
+	peer := &fakePeer{
+		results: []peerObjResult{
+			{err: protocol.NewError(protocol.ErrCodeHostDraining, "draining").WithRetryAfter(200 * time.Millisecond)},
+			{resp: protocol.InvokeActorResponse{Data: out}},
+		},
+	}
+
+	type result struct {
+		env actor.Envelope
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		env, err := m.Invoke(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "x", false)
+		done <- result{env: env, err: err}
+	}()
+
+	// The retryable first attempt parks the call on the retry-after timer rather than re-resolving immediately
+	require.Eventually(t, clk.HasWaiters, 2*time.Second, time.Millisecond)
+
+	// Advancing past the hint releases the wait and the single retry runs against the live host
+	clk.Step(200 * time.Millisecond)
+
+	select {
+	case res := <-done:
+		require.NoError(t, res.err)
+		assert.Equal(t, "second-peer", decodeEnvelope(t, res.env))
+		assert.Equal(t, 1, resolver.invalidated)
+		assert.Equal(t, 2, peer.calls)
+		assert.Equal(t, "addr3", peer.lastAddr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Invoke did not complete after the retry-after elapsed")
+	}
+}
+
 func TestManagerPeerInvokeObject(t *testing.T) {
 	t.Run("claims and invokes for a peer caller", func(t *testing.T) {
 		m := newMessagingManager(t, echoFactory)
