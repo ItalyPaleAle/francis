@@ -41,7 +41,7 @@ func WithHostBootstrapPSK(psk []byte) HostOption {
 }
 
 // WithHostBootstrapJWT configures the host to bootstrap with a static JWT
-// This is primarily useful for tests; production deployments usually use WithHostBootstrapJWTFile so a rotated token is re-read
+// This is primarily useful for tests: production deployments usually use WithHostBootstrapJWTFile so a rotated token is re-read
 func WithHostBootstrapJWT(token string) HostOption {
 	return func(o *newHostOptions) {
 		o.BootstrapTokenFn = func() (string, error) { return token, nil }
@@ -49,7 +49,7 @@ func WithHostBootstrapJWT(token string) HostOption {
 }
 
 // WithHostBootstrapJWTFile configures the host to bootstrap with a JWT read from a file
-// The file is read fresh on every bootstrap so a rotated token, such as a Kubernetes projected service-account token, is picked up
+// The file is read fresh on every bootstrap so a rotated token (e.g. a Kubernetes projected service-account token) is picked up
 func WithHostBootstrapJWTFile(path string) HostOption {
 	return func(o *newHostOptions) {
 		o.BootstrapTokenFn = func() (string, error) {
@@ -64,14 +64,14 @@ func WithHostBootstrapJWTFile(path string) HostOption {
 
 // WithPinnedCA pins one or more PEM-encoded cluster CA certificates the host trusts before its first connection
 // Pinning closes the bootstrap trust gap, so the host verifies the runtime from the very first connection
-// Exactly one of WithPinnedCA or WithUnsafeNoPinnedCA must be set, forcing the trust decision to be explicit
+// Exactly one of WithPinnedCA or WithUnsafeNoPinnedCA must be set
 func WithPinnedCA(caPEM ...[]byte) HostOption {
 	return func(o *newHostOptions) { o.PinnedCAPEM = caPEM }
 }
 
 // WithUnsafeNoPinnedCA opts out of CA pinning, trusting the runtime's certificate on the first connection
-// This is unsafe: a man-in-the-middle on the first connection can impersonate the runtime, which is especially dangerous for JWT bootstrap where a bearer token would be exposed
-// Exactly one of WithPinnedCA or WithUnsafeNoPinnedCA must be set, forcing the trust decision to be explicit
+// This is unsafe: a meddler-in-the-middle (MitM) on the first connection can impersonate the runtime, which is especially dangerous for JWT bootstrap where a bearer token would be exposed
+// Exactly one of WithPinnedCA or WithUnsafeNoPinnedCA must be set
 func WithUnsafeNoPinnedCA() HostOption {
 	return func(o *newHostOptions) { o.UnsafeNoPinnedCA = true }
 }
@@ -103,17 +103,13 @@ func WithMaxRequestBodySize(n int64) HostOption {
 }
 
 type newHostOptions struct {
-	Address          string
-	BindPort         int
-	BindAddress      string
-	RuntimeAddresses []string
-	// BootstrapPSK is the host pre-shared key, set when bootstrapping with PSK
-	BootstrapPSK []byte
-	// BootstrapTokenFn returns a fresh bootstrap JWT, set when bootstrapping with JWT
-	BootstrapTokenFn func() (string, error)
-	// PinnedCAPEM holds pinned cluster CA certificates trusted before the first connection
-	PinnedCAPEM [][]byte
-	// UnsafeNoPinnedCA opts out of pinning, trusting the runtime on first connection
+	Address             string
+	BindPort            int
+	BindAddress         string
+	RuntimeAddresses    []string
+	BootstrapPSK        []byte
+	BootstrapTokenFn    func() (string, error)
+	PinnedCAPEM         [][]byte
 	UnsafeNoPinnedCA    bool
 	Logger              *slog.Logger
 	ShutdownGracePeriod time.Duration

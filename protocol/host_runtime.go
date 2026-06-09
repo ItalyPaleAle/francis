@@ -52,7 +52,8 @@ type ActorHostType struct {
 }
 
 // RegisterAuth carries a host's bootstrap credential at registration
-// It is present only on the first registration of a host; once a host holds a workload certificate it reconnects with mTLS and omits this
+// It is present only on the first registration of a host
+// Once a host holds a workload certificate it reconnects with mTLS and omits this
 type RegisterAuth struct {
 	// Method is the bootstrap method, either "psk" or "jwt"
 	Method string `msgpack:"method"`

@@ -32,11 +32,13 @@ func RuntimeClientTLSConfig(holder *certholder.Holder, warnUnpinned func()) *tls
 	}
 
 	return &tls.Config{
-		MinVersion:            minTLSVersion,
-		NextProtos:            []string{http3.NextProtoH3},
-		GetClientCertificate:  holder.GetClientCertificate,
-		InsecureSkipVerify:    true,   //nolint:gosec // G402: intentional — VerifyPeerCertificate performs all verification against the live trust bundle
-		VerifyPeerCertificate: verify, //nolint:gosec // G123: session resumption reuses a session whose cert was already verified; the QUIC transport is the session boundary
+		MinVersion:           minTLSVersion,
+		NextProtos:           []string{http3.NextProtoH3},
+		GetClientCertificate: holder.GetClientCertificate,
+		// #nosec G402 -- VerifyPeerCertificate performs all verification against the live trust bundle
+		InsecureSkipVerify: true,
+		// #nosec G123 -- Session resumption reuses a session whose cert was already verified - the QUIC transport is the session boundary
+		VerifyPeerCertificate: verify,
 	}
 }
 
@@ -44,11 +46,13 @@ func RuntimeClientTLSConfig(holder *certholder.Holder, warnUnpinned func()) *tls
 // It presents the host's workload certificate and verifies the peer is a host signed by a current trust anchor
 func PeerClientTLSConfig(holder *certholder.Holder) *tls.Config {
 	return &tls.Config{
-		MinVersion:            minTLSVersion,
-		NextProtos:            []string{http3.NextProtoH3},
-		GetClientCertificate:  holder.GetClientCertificate,
-		InsecureSkipVerify:    true,                                                    //nolint:gosec // G402: intentional — VerifyPeerCertificate performs all verification against the live trust bundle
-		VerifyPeerCertificate: ca.VerifyPeerSPIFFE(holder.Roots, ca.HostPrefix, nil), //nolint:gosec // G123: see RuntimeClientTLSConfig
+		MinVersion:           minTLSVersion,
+		NextProtos:           []string{http3.NextProtoH3},
+		GetClientCertificate: holder.GetClientCertificate,
+		// #nosec G402 -- VerifyPeerCertificate performs all verification against the live trust bundle
+		InsecureSkipVerify: true,
+		// #nosec G123 -- see RuntimeClientTLSConfig
+		VerifyPeerCertificate: ca.VerifyPeerSPIFFE(holder.Roots, ca.HostPrefix, nil),
 	}
 }
 
@@ -56,9 +60,10 @@ func PeerClientTLSConfig(holder *certholder.Holder) *tls.Config {
 // It serves the host's workload certificate and requires every connecting peer to present a host certificate signed by a current trust anchor
 func PeerServerTLSConfig(holder *certholder.Holder) *tls.Config {
 	return &tls.Config{
-		MinVersion:            minTLSVersion,
-		GetCertificate:        holder.GetCertificate,
-		ClientAuth:            tls.RequireAnyClientCert,
-		VerifyPeerCertificate: ca.VerifyPeerSPIFFE(holder.Roots, ca.HostPrefix, nil), //nolint:gosec // G123: see RuntimeClientTLSConfig
+		MinVersion:     minTLSVersion,
+		GetCertificate: holder.GetCertificate,
+		ClientAuth:     tls.RequireAnyClientCert,
+		// #nosec G123 -- see RuntimeClientTLSConfig
+		VerifyPeerCertificate: ca.VerifyPeerSPIFFE(holder.Roots, ca.HostPrefix, nil),
 	}
 }

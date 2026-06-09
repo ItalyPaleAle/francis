@@ -129,7 +129,7 @@ func (rt *Runtime) handleAuthBegin(stream protocol.Stream, _ *hostConn, cb []byt
 		return nil, false
 	}
 
-	// Verify the host proof over the same channel binding and nonces, which fails for a wrong PSK, a replay, or a man-in-the-middle
+	// Verify the host proof over the same channel binding and nonces, which fails for a wrong PSK, a replay, or a MitM
 	ok := payload.Auth.Method == bootstrapauth.MethodPSK && rt.bootstrapPSK.VerifyClientProof(cb, begin.ClientNonce, serverNonce, payload.Auth.Proof)
 	if !ok {
 		_ = protocol.WriteMessage(stream, regReq.ErrorReply(protocol.NewError(protocol.ErrCodeUnauthorized, "PSK authentication failed")))

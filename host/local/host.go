@@ -433,6 +433,7 @@ func (h *Host) issueSelfCert() error {
 		PrivateKey:  priv,
 		Leaf:        leaf,
 	})
+
 	return nil
 }
 

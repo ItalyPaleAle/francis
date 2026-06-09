@@ -244,7 +244,7 @@ func newWarnOnce(log *slog.Logger) func() {
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			log.Warn("Connecting to a runtime without a pinned CA: trusting the runtime certificate on first use; pin the cluster CA to close this gap, especially for JWT bootstrap")
+			log.Warn("Connecting to a runtime without a pinned CA: trusting the runtime certificate on first use. Pin the cluster CA to close this gap, especially for JWT bootstrap")
 		})
 	}
 }

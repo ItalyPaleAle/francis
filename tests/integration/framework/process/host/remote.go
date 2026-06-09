@@ -64,7 +64,8 @@ func (p *Remote) Run(t *testing.T) {
 	hostOpts := []remote.HostOption{
 		remote.WithAddress(p.opts.Address),
 		remote.WithRuntimeAddresses(p.opts.RuntimeAddresses...),
-		// The host bootstraps with the shared host PSK; once registered it holds a workload cert and reconnects over mTLS
+		// The host bootstraps with the shared host PSK
+		// Once registered it holds a workload cert and reconnects over mTLS
 		remote.WithHostBootstrapPSK(clustersecret.HostBootstrapPSK),
 		// Tests trust the runtime on first connection rather than pinning its CA
 		remote.WithUnsafeNoPinnedCA(),

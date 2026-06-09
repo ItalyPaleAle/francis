@@ -11,9 +11,6 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// defaultJWTLeeway tolerates small clock differences between the token issuer and the runtime
-const defaultJWTLeeway = time.Minute
-
 // jwtValidMethods is the allowlist of signing algorithms, chosen to exclude "none" and symmetric algorithms that would be unsafe with public keys
 var jwtValidMethods = []string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512", "EdDSA"}
 
@@ -26,10 +23,8 @@ type JWTConfig struct {
 	Audience string
 	// JWKSURL is a remote JWKS endpoint whose keys are fetched and refreshed in the background
 	JWKSURL string
-	// StaticJWKS is an inline JWKS document, used for tests or air-gapped clusters
+	// StaticJWKS is an inline JWKS document (JSON-encoded), used for tests or air-gapped clusters
 	StaticJWKS json.RawMessage
-	// Leeway tolerates clock skew when validating exp and nbf
-	Leeway time.Duration
 }
 
 // JWTValidator validates host bootstrap tokens against a configured key source
@@ -65,18 +60,13 @@ func NewJWTValidator(ctx context.Context, cfg JWTConfig) (*JWTValidator, error) 
 		return nil, fmt.Errorf("failed to build JWT key source: %w", err)
 	}
 
-	leeway := cfg.Leeway
-	if leeway <= 0 {
-		leeway = defaultJWTLeeway
-	}
-
 	// Validate the standard claims as part of parsing so a malformed issuer, audience, or expiry is rejected centrally
 	parser := jwt.NewParser(
 		jwt.WithValidMethods(jwtValidMethods),
 		jwt.WithIssuer(cfg.Issuer),
 		jwt.WithAudience(cfg.Audience),
 		jwt.WithExpirationRequired(),
-		jwt.WithLeeway(leeway),
+		jwt.WithLeeway(time.Minute),
 	)
 
 	return &JWTValidator{parser: parser, keyfunc: kf.Keyfunc}, nil

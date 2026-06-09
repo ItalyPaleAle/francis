@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/italypaleale/go-kit/signals"
@@ -45,9 +46,9 @@ type config struct {
 type bootstrapConfig struct {
 	// Method is one of: psk, jwt
 	Method string `yaml:"method"`
-	// HostPSK is the host pre-shared key, used by the psk method
+	// HostPSK is the host pre-shared key, used by the "psk" method
 	HostPSK string `yaml:"hostPSK"`
-	// JWT configures the jwt method
+	// JWT configures the "jwt" method
 	JWT jwtConfig `yaml:"jwt"`
 }
 
@@ -71,7 +72,8 @@ type logConfig struct {
 func main() {
 	// The print-ca subcommand derives and prints the cluster CA so operators can pin it out-of-band
 	if len(os.Args) > 1 && os.Args[1] == "print-ca" {
-		os.Exit(runPrintCA(os.Args[2:]))
+		retCode := runPrintCA(os.Args[2:])
+		os.Exit(retCode)
 	}
 
 	var configPath string
@@ -150,37 +152,6 @@ func run(ctx context.Context, cfg *config, log *slog.Logger) error {
 	return rt.Run(ctx)
 }
 
-// runPrintCA derives the cluster CA from the configured runtime PSKs and writes the PEM-encoded certificates to stdout
-func runPrintCA(args []string) int {
-	fs := flag.NewFlagSet("print-ca", flag.ExitOnError)
-	var configPath string
-	fs.StringVar(&configPath, "config", "config.yaml", "Path to the configuration file")
-	_ = fs.Parse(args)
-
-	cfg, err := loadConfig(configPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
-		return 1
-	}
-
-	psks, err := parsePSKs(cfg.RuntimePSKs)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return 1
-	}
-
-	bundle, err := runtime.CABundlePEM(psks...)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error deriving CA: %v\n", err)
-		return 1
-	}
-
-	for _, pem := range bundle {
-		_, _ = os.Stdout.Write(pem)
-	}
-	return 0
-}
-
 // parsePSKs resolves the configured runtime PSK strings, expanding environment variables so secrets can be injected at deploy time
 func parsePSKs(in []string) ([][]byte, error) {
 	if len(in) == 0 {
@@ -200,7 +171,7 @@ func parsePSKs(in []string) ([][]byte, error) {
 
 // bootstrapOption builds the runtime option for the configured host bootstrap method
 func bootstrapOption(cfg bootstrapConfig) (runtime.RuntimeOption, error) {
-	switch cfg.Method {
+	switch strings.ToLower(cfg.Method) {
 	case "psk":
 		psk := os.ExpandEnv(cfg.HostPSK)
 		if psk == "" {
@@ -213,9 +184,11 @@ func bootstrapOption(cfg bootstrapConfig) (runtime.RuntimeOption, error) {
 			Audience: cfg.JWT.Audience,
 			JWKSURL:  cfg.JWT.JWKSURL,
 		}
+
 		if cfg.JWT.StaticJWKS != "" {
 			jcfg.StaticJWKS = json.RawMessage(cfg.JWT.StaticJWKS)
 		}
+
 		return runtime.WithHostBootstrapJWT(jcfg), nil
 	case "":
 		return nil, errors.New("bootstrap.method is required (psk or jwt)")

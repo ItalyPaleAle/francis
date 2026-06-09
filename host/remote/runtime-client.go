@@ -364,7 +364,7 @@ func (rc *runtimeClient) reconnect(ctx context.Context, stream protocol.Stream) 
 // pskHandshake runs the host side of the PSK challenge-response on the registration stream and returns the host's proof
 // It authenticates the runtime from the server proof before producing the host proof
 func (rc *runtimeClient) pskHandshake(ctx context.Context, session *webtransport.Session, stream protocol.Stream) (protocol.RegisterAuth, error) {
-	// Bind the proofs to this exact TLS session so a man-in-the-middle that terminates TLS cannot relay them
+	// Bind the proofs to this exact TLS session so a MitM that terminates TLS cannot relay them
 	cb, err := channelbind.Export(session)
 	if err != nil {
 		return protocol.RegisterAuth{}, fmt.Errorf("failed to compute channel binding: %w", err)

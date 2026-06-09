@@ -31,13 +31,15 @@ The runtime is configured by `config.yaml` (create it next to `supervisord.conf`
 ```yaml
 bind: "127.0.0.1:7400"
 
-# The runtime PSKs derive the cluster CA: every runtime sharing these keys is the same issuer.
-# Keep them secret; in production inject them from the environment, e.g. "${FRANCIS_RUNTIME_PSK}".
+# The runtime PSKs derive the cluster CA: every runtime sharing these keys is the same issuer
+# Iin production inject them from the environment, e.g. "${FRANCIS_RUNTIME_PSK}".
+# Keep them secret
 runtimePSKs:
   - "example-runtime-psk-change-me"
 
-# How joining hosts authenticate. This example uses a shared host PSK, which must match the
-# worker's hostBootstrapPSK in main.go. (The other option is "jwt", validated against a JWKS.)
+# How joining hosts authenticate
+# This example uses a shared host PSK, which must match the worker's hostBootstrapPSK in main.go
+# (The other option is "jwt", validated against a JWKS)
 bootstrap:
   method: psk
   hostPSK: "example-host-bootstrap-psk-change-me"
@@ -51,11 +53,12 @@ log:
 ```
 
 Once a host bootstraps, the runtime issues it a short-lived workload certificate and all
-later connections — to the runtime and between peer hosts — use mTLS. To close the
+later connections (to the runtime and between peer hosts) use mTLS. To close the
 first-connection trust gap, print the CA and pin it on the workers:
 
 ```sh
-bin/runtime print-ca -config config.yaml   # the worker can pass this to remote.WithPinnedCA
+# the worker can pass the output to remote.WithPinnedCA
+bin/runtime print-ca -config config.yaml
 ```
 
 ## How to run (with supervisord)

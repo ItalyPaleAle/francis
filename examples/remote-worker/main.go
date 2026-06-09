@@ -46,16 +46,14 @@ func main() {
 
 func runWorker(ctx context.Context) error {
 	// Options for the host
-	// Unlike the local example, this host does not embed a data store: it connects
-	// to the standalone runtime, which owns placement, state, and alarms.
+	// Unlike the local example, this host does not embed a data store: it connects to the standalone runtime, which owns placement, state, and alarms
 	opts := []remote.HostOption{
 		remote.WithAddress(actorHostAddress),
 		remote.WithRuntimeAddresses(runtimeAddress),
-		// The host bootstraps with a shared PSK; the runtime then issues it a workload
-		// certificate, and all later connections (to the runtime and to peer hosts) use mTLS.
+		// The host bootstraps with a shared PSK, the runtime then issues it a workload certificate, and all later connections (to the runtime and to peer hosts) use mTLS
 		remote.WithHostBootstrapPSK([]byte(hostBootstrapPSK)),
-		// This example trusts the runtime on first connection; for production, pin the
-		// cluster CA with remote.WithPinnedCA instead (see "runtime print-ca").
+		// This example trusts the runtime on first connection
+		// For production, pin the cluster CA with remote.WithPinnedCA instead (see "runtime print-ca")
 		remote.WithUnsafeNoPinnedCA(),
 		remote.WithLogger(log.With("scope", "actor-host")),
 		remote.WithShutdownGracePeriod(10 * time.Second),
