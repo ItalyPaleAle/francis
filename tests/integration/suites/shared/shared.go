@@ -5,10 +5,13 @@ package shared
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"time"
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/actorcore"
+	timeutils "github.com/italypaleale/francis/internal/time"
 	frameworkhost "github.com/italypaleale/francis/tests/integration/framework/process/host"
 )
 
@@ -64,4 +67,206 @@ func CounterReg(idle time.Duration) frameworkhost.ActorReg {
 		Factory: NewCounterActor,
 		Opts:    actorcore.RegisterActorOptions{IdleTimeout: idle},
 	}
+}
+
+// ProbeActorType is the registered type name for the probe actor
+const ProbeActorType = "probe"
+
+// Probe method names understood by the probe actor's Invoke
+const (
+	// ProbeMethodIncrement loads, increments, and persists the counter, returning the new value
+	ProbeMethodIncrement = "increment"
+	// ProbeMethodGet returns the persisted state without mutating it
+	ProbeMethodGet = "get"
+	// ProbeMethodPing returns a constant without touching state, so it activates an actor cheaply
+	ProbeMethodPing = "ping"
+	// ProbeMethodHold occupies the actor's turn for a short time, so overlapping calls to the same actor would be observable if turn-based concurrency were violated
+	ProbeMethodHold = "hold"
+)
+
+// ProbeState is the persisted state of the probe actor
+type ProbeState struct {
+	N int64 `json:"n"`
+}
+
+// ProbeActor is a versatile actor used by the alarm, invocation, and state scenarios
+// It persists a counter like the counter actor, but also records alarm executions and per-actor invocation concurrency into the process-global ProbeObserver so tests can assert on behavior that happens in background goroutines
+type ProbeActor struct {
+	actorID string
+	client  actor.Client[ProbeState]
+}
+
+// NewProbeActor is the actor.Factory for ProbeActor
+func NewProbeActor(actorID string, service *actor.Service) actor.Actor {
+	return &ProbeActor{
+		actorID: actorID,
+		client:  actor.NewActorClient[ProbeState](ProbeActorType, actorID, service),
+	}
+}
+
+// Invoke dispatches the probe methods used across scenarios
+func (a *ProbeActor) Invoke(ctx context.Context, method string, _ actor.Envelope) (any, error) {
+	switch method {
+	case ProbeMethodPing:
+		return "pong", nil
+
+	case ProbeMethodHold:
+		// Track concurrent turns for this actor, then hold the turn briefly
+		// With turn-based concurrency the observed maximum must never exceed one
+		ProbeObserver.enterHold(a.actorID)
+		defer ProbeObserver.exitHold(a.actorID)
+		time.Sleep(40 * time.Millisecond)
+		return nil, nil
+
+	case ProbeMethodIncrement, ProbeMethodGet:
+		state, err := a.client.GetState(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		if method == ProbeMethodIncrement {
+			state.N++
+			err = a.client.SetState(ctx, state, nil)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		return state, nil
+
+	default:
+		return nil, errors.New("unknown probe method: " + method)
+	}
+}
+
+// Alarm records the execution into the observer and fails when the actor has a fault configured, so alarm retry and failure handling can be exercised end to end
+func (a *ProbeActor) Alarm(_ context.Context, name string, data actor.Envelope) error {
+	// Decode any associated data so the observer can record what the alarm carried
+	var payload string
+	if data != nil {
+		_ = data.Decode(&payload)
+	}
+
+	// Recording also decides whether this execution should fail, consuming one transient failure if configured
+	fail := ProbeObserver.recordAlarm(a.actorID, name, payload)
+	if fail {
+		return errors.New("induced alarm failure")
+	}
+	return nil
+}
+
+// ProbeReg returns the registration for the probe actor with the given options
+func ProbeReg(opts actorcore.RegisterActorOptions) frameworkhost.ActorReg {
+	return frameworkhost.ActorReg{
+		Type:    ProbeActorType,
+		Factory: NewProbeActor,
+		Opts:    opts,
+	}
+}
+
+// AlarmFire is a single recorded execution of a probe actor's alarm
+type AlarmFire struct {
+	// Name is the alarm name passed to the Alarm method
+	Name string
+	// Data is the decoded string payload, empty when the alarm carried no data
+	Data string
+	// Failed reports whether this execution returned an induced failure
+	Failed bool
+}
+
+// ProbeObserver is the process-global registry the probe actor writes to
+// Integration scenarios run the host in the same process as the test, so background alarm executions and concurrent invocations can be observed here rather than through the provider
+// Scenarios must use unique actor IDs so their observations do not collide, since the suite shares one process across all scenarios
+var ProbeObserver = &probeObserver{
+	fires:   map[string][]AlarmFire{},
+	faults:  map[string]int{},
+	holdNow: map[string]int{},
+	holdMax: map[string]int{},
+}
+
+type probeObserver struct {
+	mu sync.Mutex
+	// fires records every alarm execution keyed by actor ID, in order
+	fires map[string][]AlarmFire
+	// faults holds the remaining induced failures keyed by actor ID: a positive value fails that many more executions, a negative value fails every execution
+	faults map[string]int
+	// holdNow and holdMax track current and peak concurrent hold invocations keyed by actor ID
+	holdNow map[string]int
+	holdMax map[string]int
+}
+
+// SetAlarmFault configures induced alarm failures for an actor before its alarm is triggered
+// A positive count fails that many executions before succeeding, modelling a transient fault, while a negative count fails every execution, modelling a persistent fault
+func (o *probeObserver) SetAlarmFault(actorID string, count int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.faults[actorID] = count
+}
+
+// recordAlarm appends an execution for the actor and reports whether it should fail, consuming one transient failure when configured
+func (o *probeObserver) recordAlarm(actorID string, name string, data string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	// Decide failure from the configured fault, consuming one transient failure
+	fail := false
+	remaining, ok := o.faults[actorID]
+	switch {
+	case ok && remaining < 0:
+		// Persistent fault: always fail
+		fail = true
+	case ok && remaining > 0:
+		// Transient fault: fail and consume one
+		fail = true
+		o.faults[actorID] = remaining - 1
+	}
+
+	o.fires[actorID] = append(o.fires[actorID], AlarmFire{Name: name, Data: data, Failed: fail})
+	return fail
+}
+
+// AlarmFires returns a copy of the recorded executions for an actor
+func (o *probeObserver) AlarmFires(actorID string) []AlarmFire {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	out := make([]AlarmFire, len(o.fires[actorID]))
+	copy(out, o.fires[actorID])
+	return out
+}
+
+// AlarmCount returns how many times an actor's alarm has executed
+func (o *probeObserver) AlarmCount(actorID string) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return len(o.fires[actorID])
+}
+
+// enterHold records the start of a hold invocation, updating the peak concurrency seen for the actor
+func (o *probeObserver) enterHold(actorID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.holdNow[actorID]++
+	if o.holdNow[actorID] > o.holdMax[actorID] {
+		o.holdMax[actorID] = o.holdNow[actorID]
+	}
+}
+
+// exitHold records the end of a hold invocation
+func (o *probeObserver) exitHold(actorID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.holdNow[actorID]--
+}
+
+// MaxHoldConcurrency returns the peak number of hold invocations that ran at once for an actor
+func (o *probeObserver) MaxHoldConcurrency(actorID string) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.holdMax[actorID]
+}
+
+// ISOInterval renders a Go duration as the ISO8601 string Francis expects for an alarm's repetition interval
+// Alarm intervals constructed directly in Go bypass the JSON normalization the public API performs, so scenarios use this to produce a value NextExecution can parse
+func ISOInterval(d time.Duration) string {
+	return timeutils.Duration{Time: d}.String()
 }
