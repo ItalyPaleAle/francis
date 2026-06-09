@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -158,11 +157,13 @@ func newHost(options *newHostOptions) (*Host, error) {
 			return nil, fmt.Errorf("failed to parse pinned CA: %w", poolErr)
 		}
 		holder.SetRoots(pool)
+	} else {
+		// Without a pinned CA the host trusts the runtime certificate on its first connection, so warn loudly up front
+		options.Logger.Warn("Connecting to a runtime without a pinned CA: trusting the runtime certificate on first use. Pin the cluster CA to close this gap, especially for JWT bootstrap")
 	}
 
 	// Build the TLS configurations, which all read the live certificate and trust bundle from the holder
-	warnUnpinned := newWarnOnce(options.Logger)
-	runtimeTLSConfig := hosttls.RuntimeClientTLSConfig(holder, warnUnpinned)
+	runtimeTLSConfig := hosttls.RuntimeClientTLSConfig(holder)
 	peerClientTLSConfig := hosttls.PeerClientTLSConfig(holder)
 	peerServerTLSConfig := hosttls.PeerServerTLSConfig(holder)
 
@@ -237,16 +238,6 @@ func newHost(options *newHostOptions) (*Host, error) {
 	})
 
 	return h, nil
-}
-
-// newWarnOnce returns a function that logs the unpinned-CA warning at most once
-func newWarnOnce(log *slog.Logger) func() {
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			log.Warn("Connecting to a runtime without a pinned CA: trusting the runtime certificate on first use. Pin the cluster CA to close this gap, especially for JWT bootstrap")
-		})
-	}
 }
 
 // Service returns a Service object configured to interact with this host.

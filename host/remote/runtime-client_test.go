@@ -42,7 +42,7 @@ func testBootstrap(t *testing.T) (*certholder.Holder, *bootstrapauth.PSK, *tls.C
 	holder := certholder.New(nil, nil)
 	psk, err := bootstrapauth.NewPSK(testHostPSK)
 	require.NoError(t, err)
-	return holder, psk, hosttls.RuntimeClientTLSConfig(holder, nil)
+	return holder, psk, hosttls.RuntimeClientTLSConfig(holder)
 }
 
 // testRuntimeServerTLS builds a server TLS config presenting a runtime certificate signed by the test CA
