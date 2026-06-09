@@ -200,14 +200,14 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 	reattachID := ""
 	issueCert := preAuthed
 	if !preAuthed {
-		switch {
-		case payload.Auth.Method == bootstrapauth.MethodJWT:
+		switch payload.Auth.Method {
+		case bootstrapauth.MethodJWT:
 			authErr := rt.authenticateJWT(ctx, payload.Auth.Token)
 			if authErr != nil {
 				return req.ErrorReply(protocol.NewError(protocol.ErrCodeUnauthorized, authErr.Error()))
 			}
 			issueCert = true
-		case payload.Auth.Method == "":
+		case "":
 			// An mTLS reconnect carries no bootstrap credential and is identified by its client certificate
 			hostID, certErr := rt.verifyHostClientCert(c)
 			if certErr != nil {

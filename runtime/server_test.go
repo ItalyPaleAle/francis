@@ -69,7 +69,7 @@ func dialRuntime(t *testing.T, ctx context.Context, addr string) *webtransport.S
 	cliTLS := &tls.Config{
 		MinVersion:         tls.VersionTLS13,
 		NextProtos:         []string{http3.NextProtoH3},
-		InsecureSkipVerify: true,
+		InsecureSkipVerify: true, //nolint:gosec // G402: test-only dialer exercises the unauthenticated bootstrap path
 	}
 	dialer := wt.NewDialer(cliTLS)
 	t.Cleanup(func() {

@@ -35,8 +35,8 @@ func RuntimeClientTLSConfig(holder *certholder.Holder, warnUnpinned func()) *tls
 		MinVersion:            minTLSVersion,
 		NextProtos:            []string{http3.NextProtoH3},
 		GetClientCertificate:  holder.GetClientCertificate,
-		InsecureSkipVerify:    true, // verification is performed by verify against the live trust bundle
-		VerifyPeerCertificate: verify,
+		InsecureSkipVerify:    true,   //nolint:gosec // G402: intentional — VerifyPeerCertificate performs all verification against the live trust bundle
+		VerifyPeerCertificate: verify, //nolint:gosec // G123: session resumption reuses a session whose cert was already verified; the QUIC transport is the session boundary
 	}
 }
 
@@ -47,8 +47,8 @@ func PeerClientTLSConfig(holder *certholder.Holder) *tls.Config {
 		MinVersion:            minTLSVersion,
 		NextProtos:            []string{http3.NextProtoH3},
 		GetClientCertificate:  holder.GetClientCertificate,
-		InsecureSkipVerify:    true, // verification is performed by VerifyPeerCertificate against the live trust bundle
-		VerifyPeerCertificate: ca.VerifyPeerSPIFFE(holder.Roots, ca.HostPrefix, nil),
+		InsecureSkipVerify:    true,                                                    //nolint:gosec // G402: intentional — VerifyPeerCertificate performs all verification against the live trust bundle
+		VerifyPeerCertificate: ca.VerifyPeerSPIFFE(holder.Roots, ca.HostPrefix, nil), //nolint:gosec // G123: see RuntimeClientTLSConfig
 	}
 }
 
@@ -59,6 +59,6 @@ func PeerServerTLSConfig(holder *certholder.Holder) *tls.Config {
 		MinVersion:            minTLSVersion,
 		GetCertificate:        holder.GetCertificate,
 		ClientAuth:            tls.RequireAnyClientCert,
-		VerifyPeerCertificate: ca.VerifyPeerSPIFFE(holder.Roots, ca.HostPrefix, nil),
+		VerifyPeerCertificate: ca.VerifyPeerSPIFFE(holder.Roots, ca.HostPrefix, nil), //nolint:gosec // G123: see RuntimeClientTLSConfig
 	}
 }

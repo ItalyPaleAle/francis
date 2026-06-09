@@ -76,7 +76,7 @@ func transcript(cb, clientNonce, serverNonce []byte) []byte {
 // appendField appends a 4-byte big-endian length followed by the field bytes
 func appendField(dst, field []byte) []byte {
 	var l [4]byte
-	binary.BigEndian.PutUint32(l[:], uint32(len(field)))
+	binary.BigEndian.PutUint32(l[:], uint32(len(field))) //nolint:gosec // G115: transcript fields are bounded well below 4 GiB
 	dst = append(dst, l[:]...)
 	dst = append(dst, field...)
 	return dst
