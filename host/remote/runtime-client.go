@@ -277,8 +277,12 @@ func (rc *runtimeClient) dial(ctx context.Context, addr string) (*webtransport.S
 	return session, nil
 }
 
+// reconnectCertMargin is how much valid lifetime the workload certificate must have left to be used for an mTLS reconnect
+// It covers clock skew between the host and runtime plus the time the registration round-trip takes, so a certificate the runtime would reject as expired is never used to reconnect
+const reconnectCertMargin = 5 * time.Minute
+
 // register performs the registration handshake on the first stream of a new session
-// A host with no workload certificate yet bootstraps, while one that already holds a certificate reconnects over mTLS
+// A host with no usable workload certificate bootstraps, while one that still holds a valid certificate reconnects over mTLS
 func (rc *runtimeClient) register(ctx context.Context, session *webtransport.Session) (protocol.RegisterHostResponse, error) {
 	// Registration is the first exchange on a new session, so it gets its own dedicated stream
 	stream, err := session.OpenStreamSync(ctx)
@@ -287,10 +291,20 @@ func (rc *runtimeClient) register(ctx context.Context, session *webtransport.Ses
 	}
 	defer stream.Close()
 
-	if rc.cfg.holder.Certificate() == nil {
-		return rc.bootstrap(ctx, session, stream)
+	if rc.canReconnect() {
+		return rc.reconnect(ctx, stream)
 	}
-	return rc.reconnect(ctx, stream)
+	return rc.bootstrap(ctx, session, stream)
+}
+
+// canReconnect reports whether the holder has a workload certificate with enough lifetime left to reconnect over mTLS
+// An expired or soon-to-expire certificate would be rejected by the runtime, so the host bootstraps again instead of looping on a doomed mTLS reconnect
+func (rc *runtimeClient) canReconnect() bool {
+	cert := rc.cfg.holder.Certificate()
+	if cert == nil || cert.Leaf == nil {
+		return false
+	}
+	return rc.cfg.clock.Now().Add(reconnectCertMargin).Before(cert.Leaf.NotAfter)
 }
 
 // bootstrap authenticates a first-time host with PSK or JWT, then installs the issued workload certificate and trust bundle

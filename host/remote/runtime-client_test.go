@@ -14,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	clocktesting "k8s.io/utils/clock/testing"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/standalone"
@@ -212,6 +213,49 @@ func startRejectingRuntime(t *testing.T) string {
 	})
 
 	return addr
+}
+
+// TestRuntimeClientCanReconnect verifies the reconnect-vs-bootstrap selection: only a certificate with enough lifetime left reconnects over mTLS
+// An expired or soon-to-expire certificate must fall back to bootstrap, so an outage longer than the cert lifetime can never strand the host on a doomed mTLS reconnect loop
+func TestRuntimeClientCanReconnect(t *testing.T) {
+	now := time.Now()
+	fakeClock := clocktesting.NewFakeClock(now)
+
+	newClient := func(cert *tls.Certificate) *runtimeClient {
+		holder := certholder.New(nil, nil)
+		if cert != nil {
+			holder.SetCertificate(cert)
+		}
+		return newRuntimeClient(runtimeClientConfig{
+			holder: holder,
+			clock:  fakeClock,
+			log:    slog.New(slog.DiscardHandler),
+		})
+	}
+
+	certExpiringAt := func(notAfter time.Time) *tls.Certificate {
+		return &tls.Certificate{Leaf: &x509.Certificate{NotAfter: notAfter}}
+	}
+
+	t.Run("no certificate bootstraps", func(t *testing.T) {
+		assert.False(t, newClient(nil).canReconnect())
+	})
+
+	t.Run("certificate without a parsed leaf bootstraps", func(t *testing.T) {
+		assert.False(t, newClient(&tls.Certificate{}).canReconnect())
+	})
+
+	t.Run("certificate with ample lifetime reconnects", func(t *testing.T) {
+		assert.True(t, newClient(certExpiringAt(now.Add(time.Hour))).canReconnect())
+	})
+
+	t.Run("expired certificate bootstraps", func(t *testing.T) {
+		assert.False(t, newClient(certExpiringAt(now.Add(-time.Minute))).canReconnect())
+	})
+
+	t.Run("certificate within the reconnect margin bootstraps", func(t *testing.T) {
+		assert.False(t, newClient(certExpiringAt(now.Add(reconnectCertMargin/2))).canReconnect())
+	})
 }
 
 // TestRuntimeClientFailsFastOnPermanentRegistrationRejection verifies that a permanent registration rejection stops the reconnect loop instead of spinning forever
