@@ -84,7 +84,12 @@ const (
 	ProbeMethodHold = "hold"
 	// ProbeMethodArmAlarm schedules an alarm on the actor itself through its client, so alarm scheduling from inside an invocation can be exercised
 	ProbeMethodArmAlarm = "arm-alarm"
+	// ProbeMethodFail returns an error, so error propagation back to the caller can be exercised
+	ProbeMethodFail = "fail"
 )
+
+// ProbeFailMessage is the error text the probe returns for ProbeMethodFail, so callers can assert it propagated
+const ProbeFailMessage = "induced invoke failure"
 
 // ProbeSelfAlarmName is the name of the alarm the probe actor schedules on itself for ProbeMethodArmAlarm
 const ProbeSelfAlarmName = "self"
@@ -119,6 +124,10 @@ func (a *ProbeActor) Invoke(ctx context.Context, method string, _ actor.Envelope
 	switch method {
 	case ProbeMethodPing:
 		return "pong", nil
+
+	case ProbeMethodFail:
+		// Return an error so the caller can assert it propagates back, including across a peer or runtime boundary
+		return nil, errors.New(ProbeFailMessage)
 
 	case ProbeMethodHold:
 		// Track concurrent turns for this actor, then hold the turn briefly
