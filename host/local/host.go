@@ -2,6 +2,10 @@ package local
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,10 +27,16 @@ import (
 	"github.com/italypaleale/francis/components/sqlite"
 	"github.com/italypaleale/francis/components/standalone"
 	"github.com/italypaleale/francis/internal/actorcore"
+	"github.com/italypaleale/francis/internal/ca"
+	"github.com/italypaleale/francis/internal/certholder"
+	"github.com/italypaleale/francis/internal/hosttls"
 	"github.com/italypaleale/francis/internal/peer"
-	"github.com/italypaleale/francis/internal/peerauth"
 	"github.com/italypaleale/francis/internal/ref"
 )
+
+// localCertTTL is the lifetime of a self-issued workload certificate in local mode
+// Local hosts issue their own certificate from the shared CA, so a long lifetime avoids a renewal path while the host process is alive
+const localCertTTL = 90 * 24 * time.Hour
 
 // This file contains code adapted from https://github.com/dapr/dapr/tree/v1.14.5/
 // Copyright (C) 2024 The Dapr Authors
@@ -83,6 +93,11 @@ type Host struct {
 	peerClient *peer.Client
 	// peerServer serves invocations of actors owned by this host over WebTransport
 	peerServer *peer.Server
+
+	// cas is the cluster CA bundle derived from the runtime PSKs, index 0 being the primary used to self-issue this host's certificate
+	cas []*ca.CA
+	// holder stores this host's self-issued workload certificate and the trust bundle, read live by the peer TLS configs
+	holder *certholder.Holder
 
 	alarmProcessor *eventqueue.Processor[string, *ref.AlarmLease]
 
@@ -220,51 +235,24 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 		return nil, fmt.Errorf("unsupported value for ProviderOptions: %T", options.ProviderOptions)
 	}
 
-	// Get the peer authentication method
-	switch x := options.PeerAuthentication.(type) {
-	case *peerauth.PeerAuthenticationSharedKey:
-		err = x.Validate()
-		if err != nil {
-			return nil, fmt.Errorf("failed to validate PeerAuthenticationSharedKey: %w", err)
-		}
-	case *peerauth.PeerAuthenticationMTLS:
-		err = x.Validate()
-		if err != nil {
-			return nil, fmt.Errorf("failed to validate PeerAuthenticationMTLS: %w", err)
-		}
-
-		// Cannot set certain TLSOption when peer authentication uses mTLS
-		if options.TLSOptions.CACertificate != nil {
-			return nil, errors.New("cannot set TLSOptions.CACertificate when peer authentication is mTLS")
-		}
-		if options.TLSOptions.ServerCertificate != nil {
-			return nil, errors.New("cannot set TLSOptions.ServerCertificate when peer authentication is mTLS")
-		}
-		if options.TLSOptions.ClientCertificate != nil {
-			return nil, errors.New("cannot set TLSOptions.ClientCertificate when peer authentication is mTLS")
-		}
-		if options.TLSOptions.InsecureSkipTLSValidation {
-			return nil, errors.New("cannot set TLSOptions.InsecureSkipTLSValidation when peer authentication is mTLS")
-		}
-
-		// Update the TLS options
-		x.SetTLSOptions(&options.TLSOptions)
-	case nil:
-		return nil, errors.New("option PeerAuthentication is required")
-	default:
-		return nil, fmt.Errorf("unsupported value for PeerAuthentication: %T", options.PeerAuthentication)
+	// Derive the cluster CA from the runtime PSKs so hosts that share the PSKs authenticate each other with mTLS
+	if len(options.RuntimePSKs) == 0 {
+		return nil, errors.New("option RuntimePSKs is required")
 	}
-
-	// Init the TLS configuration for the server and client
-	serverTLSConfig, clientTLSConfig, err := options.TLSOptions.GetTLSConfig()
+	cas, err := ca.CABundle(options.RuntimePSKs)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to derive cluster CA: %w", err)
 	}
+
+	// The holder starts with the trust bundle, and this host's certificate is self-issued once its ID is known at registration
+	holder := certholder.New(nil, ca.NewCertPool(cas))
 
 	// Create the host
 	h = &Host{
 		address:                options.Address,
 		actorProvider:          actorProvider,
+		cas:                    cas,
+		holder:                 holder,
 		activeAlarms:           map[string]struct{}{},
 		retryingAlarms:         map[string]struct{}{},
 		alarmsPollInterval:     options.AlarmsPollInterval,
@@ -291,22 +279,20 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 	// The resolver lets the shared messaging logic resolve placement through the provider and confirm ownership before activating an actor
 	h.resolver = placementResolver{h: h}
 
-	// The peer client invokes actors owned by other hosts over WebTransport, authenticating the session at establishment
+	// The peer client invokes actors owned by other hosts over WebTransport, presenting this host's workload certificate for mutual authentication
 	h.peerClient = peer.NewClient(peer.ClientConfig{
-		TLSConfig:   clientTLSConfig,
+		TLSConfig:   hosttls.PeerClientTLSConfig(holder),
 		DialTimeout: options.ProviderRequestTimeout,
-		Auth:        options.PeerAuthentication,
 		Log:         options.Logger,
 	})
 
 	// The peer server serves invocations of actors owned by this host over WebTransport
-	// It reports our host ID so it can reject invocations aimed at a stale placement, and authorizes incoming sessions
+	// It reports our host ID so it can reject invocations aimed at a stale placement, and requires a host certificate from every caller
 	h.peerServer = peer.NewServer(peer.ServerConfig{
 		Bind:                h.bind,
-		TLSConfig:           serverTLSConfig,
+		TLSConfig:           hosttls.PeerServerTLSConfig(holder),
 		Handler:             h.peerInvokeObject,
 		StreamHandler:       h.peerInvokeStream,
-		Auth:                options.PeerAuthentication,
 		Log:                 options.Logger,
 		HostID:              h.HostID,
 		MaxInFlightRequests: options.MaxInFlightRequests,
@@ -367,6 +353,12 @@ func (h *Host) Run(parentCtx context.Context) error {
 	h.log = h.logSource.With(slog.String("hostId", h.hostID))
 	h.core.SetLogger(h.log)
 
+	// Self-issue this host's workload certificate now that its ID is known, so the peer server can present it and peers can verify it
+	err = h.issueSelfCert()
+	if err != nil {
+		return fmt.Errorf("failed to issue workload certificate: %w", err)
+	}
+
 	h.log.InfoContext(ctx, "Registered actor host", slog.String("address", h.address))
 
 	// Signal readiness now that the host is registered and its fields are initialized
@@ -418,6 +410,31 @@ func (h *Host) Run(parentCtx context.Context) error {
 			h.actorProvider.Run,
 		).
 		Run(ctx)
+}
+
+// issueSelfCert generates a key pair and signs this host's workload certificate from the primary CA, installing it in the holder
+func (h *Host) issueSelfCert() error {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return fmt.Errorf("failed to generate workload key: %w", err)
+	}
+
+	der, err := h.cas[0].IssueWorkloadCert(ca.HostURI(h.hostID), pub, localCertTTL)
+	if err != nil {
+		return err
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		return fmt.Errorf("failed to parse issued certificate: %w", err)
+	}
+
+	h.holder.SetCertificate(&tls.Certificate{
+		Certificate: [][]byte{der},
+		PrivateKey:  priv,
+		Leaf:        leaf,
+	})
+
+	return nil
 }
 
 // HaltAll halts all actors active on the host, gracefully

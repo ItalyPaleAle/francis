@@ -249,7 +249,7 @@ func TestManagerInvokeHonorsRetryAfter(t *testing.T) {
 	clk, ok := m.clock.(*clocktesting.FakeClock)
 	require.True(t, ok)
 
-	// The first attempt hits a draining host that returns a retry-after; the re-resolve routes to a live host
+	// The first attempt hits a draining host that returns a retry-after, while the re-resolve routes to a live host
 	resolver := &fakeResolver{
 		localHostID: "h1",
 		placements:  []*Placement{{HostID: "h2", Address: "addr2"}, {HostID: "h3", Address: "addr3"}},

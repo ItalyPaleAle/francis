@@ -7,13 +7,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
 	"sync/atomic"
 	"time"
 
 	"github.com/alphadose/haxmap"
 	"github.com/quic-go/webtransport-go"
 
+	"github.com/italypaleale/francis/internal/ca"
 	"github.com/italypaleale/francis/internal/wt"
 	"github.com/italypaleale/francis/protocol"
 )
@@ -30,15 +30,12 @@ var errClientClosed = errors.New("peer client is closed")
 
 // ClientConfig configures a Client
 type ClientConfig struct {
-	// TLSConfig is the client TLS configuration, which must advertise the HTTP/3 ALPN
+	// TLSConfig is the client TLS configuration, which must advertise the HTTP/3 ALPN and present the host's workload certificate for mutual authentication
 	TLSConfig *tls.Config
 	// DialTimeout bounds a single peer dial
 	DialTimeout time.Duration
 	// IdleTimeout closes a pooled session after it has been idle this long
 	IdleTimeout time.Duration
-	// Auth authenticates outgoing sessions
-	// Nil means transport-level TLS only
-	Auth Authenticator
 	// Log is the slog logger
 	Log *slog.Logger
 }
@@ -49,7 +46,6 @@ type Client struct {
 	dialed      atomic.Bool
 	dialer      *webtransport.Dialer
 	dialTimeout time.Duration
-	auth        Authenticator
 	log         *slog.Logger
 
 	// sessions pool is a lock-free map: dead sessions are detected via their context and atomically replaced, never deleted, so a concurrent redial can never be clobbered
@@ -72,7 +68,6 @@ func NewClient(cfg ClientConfig) *Client {
 		// The dialer's QUIC idle timeout reclaims a session once it stops carrying traffic, while an active stream keeps it alive
 		dialer:      wt.NewDialer(cfg.TLSConfig, wt.WithMaxIdleTimeout(cfg.IdleTimeout)),
 		dialTimeout: cfg.DialTimeout,
-		auth:        cfg.Auth,
 		log:         cfg.Log,
 		sessions:    haxmap.New[string, *webtransport.Session](),
 	}
@@ -88,6 +83,12 @@ func (c *Client) InvokeObject(ctx context.Context, address string, req protocol.
 	if err != nil {
 		// A connection that cannot be established is treated as stale placement so the caller re-resolves it
 		return protocol.InvokeActorResponse{}, protocol.NewErrorf(protocol.ErrCodeRetryLater, "failed to connect to peer %s: %v", address, err)
+	}
+
+	// Pin the session to the host identity placement told us to dial before sending any payload to it
+	pinErr := c.verifyPeerHostID(session, req.TargetHostID)
+	if pinErr != nil {
+		return protocol.InvokeActorResponse{}, pinErr
 	}
 
 	// Open a fresh stream for this invocation (which WebTransport multiplexes over the peer connection)
@@ -137,6 +138,12 @@ func (c *Client) InvokeStream(ctx context.Context, address string, req protocol.
 	session, err := c.session(ctx, address)
 	if err != nil {
 		return "", nil, protocol.NewErrorf(protocol.ErrCodeRetryLater, "failed to connect to peer %s: %v", address, err)
+	}
+
+	// Pin the session to the host identity placement told us to dial before streaming any payload to it
+	pinErr := c.verifyPeerHostID(session, req.TargetHostID)
+	if pinErr != nil {
+		return "", nil, pinErr
 	}
 
 	// Open a fresh stream for this invocation
@@ -217,6 +224,33 @@ func (c *Client) InvokeStream(ctx context.Context, address string, req protocol.
 	return meta.ContentType, &streamBody{stream: stream}, nil
 }
 
+// verifyPeerHostID pins an established session to the host identity placement told us to dial
+// The peer certificate was already verified against the cluster CA during the handshake, so this only asserts it is the intended host, which stops a different but cluster-valid host at the same address from receiving the invocation
+// The pool is keyed by address, so this also guards against a pooled session for one host silently satisfying a call meant for another after an address is reused
+// An empty expected ID skips the check, since the caller did not pin a specific host
+func (c *Client) verifyPeerHostID(session *webtransport.Session, expectedHostID string) *protocol.Error {
+	if expectedHostID == "" {
+		return nil
+	}
+
+	// Read the peer's authenticated certificate from the completed handshake
+	certs := session.SessionState().ConnectionState.TLS.PeerCertificates
+	if len(certs) == 0 {
+		return protocol.NewError(protocol.ErrCodeHostMismatch, "peer presented no certificate")
+	}
+
+	// A mismatch means the host at this address is not the one placement selected, so the caller should re-resolve
+	gotHostID, err := ca.HostIDFromCert(certs[0])
+	if err != nil {
+		return protocol.NewErrorf(protocol.ErrCodeHostMismatch, "peer identity is invalid: %v", err)
+	}
+	if gotHostID != expectedHostID {
+		return protocol.NewErrorf(protocol.ErrCodeHostMismatch, "peer is host %q, not the expected %q", gotHostID, expectedHostID)
+	}
+
+	return nil
+}
+
 // session returns a live pooled session for the peer address, dialing and pooling a new one when there is none or the pooled one has died
 func (c *Client) session(ctx context.Context, address string) (*webtransport.Session, error) {
 	// Reject early once the client is closed
@@ -280,22 +314,12 @@ func (c *Client) guard(address string, session *webtransport.Session) (*webtrans
 }
 
 // dial opens a new WebTransport session to the peer at address
+// Mutual authentication is performed by the TLS layer: the dialer presents the host's workload certificate and verifies the peer's
 func (c *Client) dial(ctx context.Context, address string) (*webtransport.Session, error) {
 	dialCtx, cancel := context.WithTimeout(ctx, c.dialTimeout)
 	defer cancel()
 
-	// Let the authenticator stamp credentials on the session upgrade request
-	// A nil authenticator means we rely on transport-level TLS authentication only
-	var hdr http.Header
-	if c.auth != nil {
-		hdr = http.Header{}
-		err := c.auth.UpdateHeader(hdr)
-		if err != nil {
-			return nil, fmt.Errorf("failed to set peer authentication header: %w", err)
-		}
-	}
-
-	rsp, session, err := c.dialer.Dial(dialCtx, "https://"+address+protocol.PeerConnectPath, hdr)
+	rsp, session, err := c.dialer.Dial(dialCtx, "https://"+address+protocol.PeerConnectPath, nil)
 	// The dialer lazily initializes its transport on the first Dial, so record that it is now safe to close
 	c.dialed.Store(true)
 	if err != nil {

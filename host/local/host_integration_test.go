@@ -16,6 +16,9 @@ import (
 	"github.com/italypaleale/francis/internal/ref"
 )
 
+// localTestRuntimePSK is the shared runtime PSK the local integration tests derive their cluster CA from
+var localTestRuntimePSK = []byte("local-test-runtime-psk-0123456789")
+
 // runLocalHost starts the host and waits until it has registered with the provider, cleaning it up when the test ends
 func runLocalHost(t *testing.T, host *Host) {
 	t.Helper()
@@ -64,14 +67,13 @@ func (smokeActor) Invoke(_ context.Context, method string, data actor.Envelope) 
 func TestHostLocalMultiHostPeerInvocation(t *testing.T) {
 	// Both hosts share one SQLite database so they see the same placement table
 	dbPath := filepath.Join(t.TempDir(), "shared.db")
-	const sharedKey = "multihost-shared-key-1234567890"
 
 	newSharedHost := func(register bool) *Host {
 		host, err := NewHost(
 			WithAddress(localFreeUDPAddr(t)),
 			WithSQLiteProvider(sqlite.SQLiteProviderOptions{ConnectionString: dbPath}),
-			WithPeerAuthenticationSharedKey(sharedKey),
-			WithServerTLSInsecureSkipTLSValidation(),
+			// Both hosts share the same runtime PSK so they derive the same CA and authenticate each other with mTLS
+			WithRuntimePSKs(localTestRuntimePSK),
 			WithLogger(slog.New(slog.DiscardHandler)),
 		)
 		require.NoError(t, err)
@@ -113,8 +115,7 @@ func TestHostLocalInvocationSmoke(t *testing.T) {
 	host, err := NewHost(
 		WithAddress(localFreeUDPAddr(t)),
 		WithSQLiteProvider(sqlite.SQLiteProviderOptions{ConnectionString: dbPath}),
-		WithPeerAuthenticationSharedKey("smoke-shared-key-0123456789"),
-		WithServerTLSInsecureSkipTLSValidation(),
+		WithRuntimePSKs(localTestRuntimePSK),
 		WithLogger(slog.New(slog.DiscardHandler)),
 	)
 	require.NoError(t, err)

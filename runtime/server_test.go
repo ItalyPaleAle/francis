@@ -2,19 +2,24 @@ package runtime
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/tls"
 	"errors"
 	"log/slog"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/webtransport-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/standalone"
-	"github.com/italypaleale/francis/internal/hosttls"
+	"github.com/italypaleale/francis/internal/bootstrapauth"
+	"github.com/italypaleale/francis/internal/channelbind"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/wt"
 	"github.com/italypaleale/francis/protocol"
@@ -44,7 +49,7 @@ func runRuntimeServer(t *testing.T) (*Runtime, *standalone.StandaloneMemory, str
 	require.NoError(t, err)
 
 	// A long poll interval keeps the alarm fetcher quiet, since these tests only exercise the session lifecycle
-	rt, err := NewRuntime(prov, WithBind(addr), WithAlarmsPollInterval(time.Hour))
+	rt, err := NewRuntime(prov, append([]RuntimeOption{WithBind(addr), WithAlarmsPollInterval(time.Hour)}, baseRuntimeOpts()...)...)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -60,10 +65,12 @@ func runRuntimeServer(t *testing.T) (*Runtime, *standalone.StandaloneMemory, str
 func dialRuntime(t *testing.T, ctx context.Context, addr string) *webtransport.Session {
 	t.Helper()
 
-	_, cliTLS, err := hosttls.HostTLSOptions{
-		InsecureSkipTLSValidation: true,
-	}.GetTLSConfig()
-	require.NoError(t, err)
+	// The host verifies the runtime, so a test dialer skips verification and presents no client certificate, exercising the bootstrap path
+	cliTLS := &tls.Config{
+		MinVersion:         tls.VersionTLS13,
+		NextProtos:         []string{http3.NextProtoH3},
+		InsecureSkipVerify: true, //nolint:gosec // G402: test-only dialer exercises the unauthenticated bootstrap path
+	}
 	dialer := wt.NewDialer(cliTLS)
 	t.Cleanup(func() {
 		_ = dialer.Close()
@@ -89,7 +96,7 @@ func dialRuntime(t *testing.T, ctx context.Context, addr string) *webtransport.S
 	}
 }
 
-// registerOnSession runs the registration handshake on the session's first stream and returns the runtime's response
+// registerOnSession runs the PSK bootstrap handshake on the session's first stream and returns the runtime's response
 func registerOnSession(t *testing.T, ctx context.Context, session *webtransport.Session) protocol.RegisterHostResponse {
 	t.Helper()
 
@@ -97,9 +104,37 @@ func registerOnSession(t *testing.T, ctx context.Context, session *webtransport.
 	require.NoError(t, err)
 	defer stream.Close()
 
+	// Run the PSK challenge-response, bound to this session's channel binding
+	psk, err := bootstrapauth.NewPSK(testHostPSK)
+	require.NoError(t, err)
+	cb, err := channelbind.Export(session)
+	require.NoError(t, err)
+	clientNonce, err := bootstrapauth.Nonce()
+	require.NoError(t, err)
+
+	begin, err := protocol.NewRequest(protocol.KindRegisterHostAuth, protocol.RegisterAuthBeginRequest{
+		Method:      bootstrapauth.MethodPSK,
+		ClientNonce: clientNonce,
+	})
+	require.NoError(t, err)
+	challengeEnv, err := protocol.RoundTrip(ctx, stream, begin)
+	require.NoError(t, err)
+	_, isErr := challengeEnv.AsError()
+	require.False(t, isErr)
+	var challenge protocol.RegisterAuthChallengeResponse
+	require.NoError(t, challengeEnv.DecodePayload(&challenge))
+	require.True(t, psk.VerifyServerProof(cb, clientNonce, challenge.ServerNonce, challenge.ServerProof))
+
+	// Generate a workload key the runtime signs into a certificate
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	proof := psk.ClientProof(cb, clientNonce, challenge.ServerNonce)
+
 	req, err := protocol.NewRequest(protocol.KindRegisterHost, protocol.RegisterHostRequest{
-		Address:    "10.9.0.1:1",
-		ActorTypes: []protocol.ActorHostType{{ActorType: "T", IdleTimeoutMs: 60000}},
+		Address:        "10.9.0.1:1",
+		ActorTypes:     []protocol.ActorHostType{{ActorType: "T", IdleTimeoutMs: 60000}},
+		Auth:           protocol.RegisterAuth{Method: bootstrapauth.MethodPSK, Proof: proof},
+		WorkloadPubKey: pub,
 	})
 	require.NoError(t, err)
 

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/italypaleale/go-kit/eventqueue"
 	"github.com/italypaleale/go-kit/servicerunner"
 	"github.com/italypaleale/go-kit/ttlcache"
@@ -17,6 +18,8 @@ import (
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/bootstrapauth"
+	"github.com/italypaleale/francis/internal/ca"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/wt"
 	"github.com/italypaleale/francis/protocol"
@@ -28,8 +31,24 @@ type Runtime struct {
 	provider components.ActorProvider
 	hosts    *HostManager
 
-	bind                    string
-	serverTLSConfig         *tls.Config
+	bind            string
+	serverTLSConfig *tls.Config
+
+	// cas is the CA bundle derived from the runtime PSKs, index 0 being the primary used to mint new certificates
+	cas []*ca.CA
+	// runtimeID identifies this runtime in its server certificate
+	runtimeID string
+	// workloadCertTTL is the lifetime of issued host workload certificates
+	workloadCertTTL time.Duration
+	// bootstrapMethod is the cluster-wide host bootstrap method, either "psk" or "jwt"
+	bootstrapMethod string
+	// bootstrapPSK validates host PSK challenge-responses, set when bootstrapMethod is "psk"
+	bootstrapPSK *bootstrapauth.PSK
+	// bootstrapJWTConfig configures the JWT validator, built in Run so its JWKS refresh goroutine is tied to the run context
+	bootstrapJWTConfig *bootstrapauth.JWTConfig
+	// bootstrapJWT validates host bootstrap tokens, set when bootstrapMethod is "jwt"
+	bootstrapJWT *bootstrapauth.JWTValidator
+
 	hostHealthCheckDeadline time.Duration
 	alarmsPollInterval      time.Duration
 	providerRequestTimeout  time.Duration
@@ -73,12 +92,39 @@ func NewRuntime(provider components.ActorProvider, opts ...RuntimeOption) (*Runt
 	if options.bind == "" {
 		return nil, errors.New("option Bind is required")
 	}
+	if len(options.runtimePSKs) == 0 {
+		return nil, errors.New("option RuntimePSKs is required")
+	}
 
-	// Build the server TLS configuration
-	// The WebTransport server sets the HTTP/3 ALPN on it
-	serverTLSConfig, _, err := options.tlsOptions.GetTLSConfig()
+	// Derive the CA bundle from the runtime PSKs so every runtime sharing the PSKs acts as the same issuer without coordination
+	cas, err := ca.CABundle(options.runtimePSKs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive cluster CA: %w", err)
+	}
+
+	// Default the runtime ID to a random value so its server certificate has a stable identity for the process lifetime
+	runtimeID := options.runtimeID
+	if runtimeID == "" {
+		runtimeID = uuid.NewString()
+	}
+
+	// Mint the runtime server certificate from the primary CA, which hosts verify against the pinned or in-band CA bundle
+	serverCert, err := mintServerCert(cas[0], runtimeID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to mint runtime server certificate: %w", err)
+	}
+
+	// Resolve the cluster-wide host bootstrap method, which must be exactly one of PSK or JWT
+	bootstrapMethod, bootstrapPSK, err := resolveBootstrap(options)
 	if err != nil {
 		return nil, err
+	}
+
+	// The runtime requests but does not require a client certificate, so a first-time bootstrap that presents no certificate and an mTLS reconnect that does both reach the registration handler, which is the authority on whether a session is authenticated
+	serverTLSConfig := &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{serverCert},
+		ClientAuth:   tls.RequestClientCert,
 	}
 
 	rt := &Runtime{
@@ -86,6 +132,12 @@ func NewRuntime(provider components.ActorProvider, opts ...RuntimeOption) (*Runt
 		hosts:                   NewHostManager(),
 		bind:                    options.bind,
 		serverTLSConfig:         serverTLSConfig,
+		cas:                     cas,
+		runtimeID:               runtimeID,
+		workloadCertTTL:         options.workloadCertTTL,
+		bootstrapMethod:         bootstrapMethod,
+		bootstrapPSK:            bootstrapPSK,
+		bootstrapJWTConfig:      options.hostBootstrapJWT,
 		hostHealthCheckDeadline: options.hostHealthCheckDeadline,
 		alarmsPollInterval:      options.alarmsPollInterval,
 		providerRequestTimeout:  options.providerRequestTimeout,
@@ -115,6 +167,14 @@ func (rt *Runtime) Run(parentCtx context.Context) error {
 	initCancel()
 	if err != nil {
 		return fmt.Errorf("failed to init provider: %w", err)
+	}
+
+	// Build the JWT validator here so its background JWKS refresh goroutine is bound to the run context
+	if rt.bootstrapJWTConfig != nil {
+		rt.bootstrapJWT, err = bootstrapauth.NewJWTValidator(ctx, *rt.bootstrapJWTConfig)
+		if err != nil {
+			return fmt.Errorf("failed to build JWT validator: %w", err)
+		}
 	}
 
 	// Create the short-lived placement cache

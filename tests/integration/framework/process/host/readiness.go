@@ -4,6 +4,8 @@ package host
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/tls"
 	"net/http"
 	"testing"
@@ -11,6 +13,10 @@ import (
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+	"github.com/stretchr/testify/require"
+
+	"github.com/italypaleale/francis/internal/ca"
+	"github.com/italypaleale/francis/tests/integration/framework/process/clustersecret"
 )
 
 const (
@@ -27,12 +33,13 @@ const (
 func waitPeerServer(t *testing.T, address string) {
 	t.Helper()
 
-	// A dedicated HTTP/3 client that trusts the host's self-signed certificate
+	// The peer server requires a client certificate signed by the cluster CA, so the probe presents one derived from the shared runtime PSK
 	transport := &http3.Transport{
 		//nolint:gosec
 		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-			NextProtos:         []string{http3.NextProtoH3},
+			InsecureSkipVerify:   true,
+			NextProtos:           []string{http3.NextProtoH3},
+			GetClientCertificate: probeClientCert(t),
 		},
 		QUICConfig: &quic.Config{},
 	}
@@ -54,6 +61,23 @@ func waitPeerServer(t *testing.T, address string) {
 			t.Fatalf("peer server %s did not become ready within %s", address, peerReadyTimeout)
 		}
 		time.Sleep(peerProbeInterval)
+	}
+}
+
+// probeClientCert returns a GetClientCertificate callback that presents a host workload certificate signed by the cluster CA
+// The peer server verifies it against the same CA, so the readiness probe can complete the mTLS handshake
+func probeClientCert(t *testing.T) func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+	t.Helper()
+	cas, err := ca.CABundle([][]byte{clustersecret.RuntimePSK})
+	require.NoError(t, err)
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	der, err := cas[0].IssueWorkloadCert(ca.HostURI("readiness-probe"), pub, time.Hour)
+	require.NoError(t, err)
+
+	cert := &tls.Certificate{Certificate: [][]byte{der}, PrivateKey: priv}
+	return func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+		return cert, nil
 	}
 }
 

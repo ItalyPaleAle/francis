@@ -3,8 +3,10 @@ module github.com/italypaleale/francis
 go 1.26.3
 
 require (
+	github.com/MicahParks/keyfunc/v3 v3.8.0
 	github.com/alphadose/haxmap v1.4.1
 	github.com/cenkalti/backoff/v5 v5.0.3
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/italypaleale/go-kit v0.0.0-20260529153520-53847368b6d0
 	github.com/italypaleale/go-sql-utils v0.2.3
@@ -23,6 +25,7 @@ require (
 )
 
 require (
+	github.com/MicahParks/jwkset v0.11.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dunglas/httpsfv v1.1.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
@@ -41,6 +44,7 @@ require (
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
+	golang.org/x/time v0.12.0 // indirect
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
