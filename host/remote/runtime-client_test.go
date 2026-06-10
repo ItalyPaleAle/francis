@@ -238,23 +238,28 @@ func TestRuntimeClientCanReconnect(t *testing.T) {
 	}
 
 	t.Run("no certificate bootstraps", func(t *testing.T) {
-		assert.False(t, newClient(nil).canReconnect())
+		ok := newClient(nil).canReconnect()
+		assert.False(t, ok)
 	})
 
 	t.Run("certificate without a parsed leaf bootstraps", func(t *testing.T) {
-		assert.False(t, newClient(&tls.Certificate{}).canReconnect())
+		ok := newClient(&tls.Certificate{}).canReconnect()
+		assert.False(t, ok)
 	})
 
 	t.Run("certificate with ample lifetime reconnects", func(t *testing.T) {
-		assert.True(t, newClient(certExpiringAt(now.Add(time.Hour))).canReconnect())
+		ok := newClient(certExpiringAt(now.Add(time.Hour))).canReconnect()
+		assert.True(t, ok)
 	})
 
 	t.Run("expired certificate bootstraps", func(t *testing.T) {
-		assert.False(t, newClient(certExpiringAt(now.Add(-time.Minute))).canReconnect())
+		ok := newClient(certExpiringAt(now.Add(-time.Minute))).canReconnect()
+		assert.False(t, ok)
 	})
 
 	t.Run("certificate within the reconnect margin bootstraps", func(t *testing.T) {
-		assert.False(t, newClient(certExpiringAt(now.Add(reconnectCertMargin/2))).canReconnect())
+		ok := newClient(certExpiringAt(now.Add(reconnectCertMargin / 2))).canReconnect()
+		assert.False(t, ok)
 	})
 }
 
