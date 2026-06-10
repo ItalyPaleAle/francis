@@ -13,6 +13,7 @@ import (
 	"github.com/alphadose/haxmap"
 	"github.com/quic-go/webtransport-go"
 
+	"github.com/italypaleale/francis/internal/ca"
 	"github.com/italypaleale/francis/internal/wt"
 	"github.com/italypaleale/francis/protocol"
 )
@@ -84,6 +85,12 @@ func (c *Client) InvokeObject(ctx context.Context, address string, req protocol.
 		return protocol.InvokeActorResponse{}, protocol.NewErrorf(protocol.ErrCodeRetryLater, "failed to connect to peer %s: %v", address, err)
 	}
 
+	// Pin the session to the host identity placement told us to dial before sending any payload to it
+	pinErr := c.verifyPeerHostID(session, req.TargetHostID)
+	if pinErr != nil {
+		return protocol.InvokeActorResponse{}, pinErr
+	}
+
 	// Open a fresh stream for this invocation (which WebTransport multiplexes over the peer connection)
 	stream, err := session.OpenStreamSync(ctx)
 	if err != nil {
@@ -131,6 +138,12 @@ func (c *Client) InvokeStream(ctx context.Context, address string, req protocol.
 	session, err := c.session(ctx, address)
 	if err != nil {
 		return "", nil, protocol.NewErrorf(protocol.ErrCodeRetryLater, "failed to connect to peer %s: %v", address, err)
+	}
+
+	// Pin the session to the host identity placement told us to dial before streaming any payload to it
+	pinErr := c.verifyPeerHostID(session, req.TargetHostID)
+	if pinErr != nil {
+		return "", nil, pinErr
 	}
 
 	// Open a fresh stream for this invocation
@@ -209,6 +222,33 @@ func (c *Client) InvokeStream(ctx context.Context, address string, req protocol.
 
 	// The remaining bytes on the stream are the response body, which the caller reads and then closes
 	return meta.ContentType, &streamBody{stream: stream}, nil
+}
+
+// verifyPeerHostID pins an established session to the host identity placement told us to dial
+// The peer certificate was already verified against the cluster CA during the handshake, so this only asserts it is the intended host, which stops a different but cluster-valid host at the same address from receiving the invocation
+// The pool is keyed by address, so this also guards against a pooled session for one host silently satisfying a call meant for another after an address is reused
+// An empty expected ID skips the check, since the caller did not pin a specific host
+func (c *Client) verifyPeerHostID(session *webtransport.Session, expectedHostID string) *protocol.Error {
+	if expectedHostID == "" {
+		return nil
+	}
+
+	// Read the peer's authenticated certificate from the completed handshake
+	certs := session.SessionState().ConnectionState.TLS.PeerCertificates
+	if len(certs) == 0 {
+		return protocol.NewError(protocol.ErrCodeHostMismatch, "peer presented no certificate")
+	}
+
+	// A mismatch means the host at this address is not the one placement selected, so the caller should re-resolve
+	gotHostID, err := ca.HostIDFromCert(certs[0])
+	if err != nil {
+		return protocol.NewErrorf(protocol.ErrCodeHostMismatch, "peer identity is invalid: %v", err)
+	}
+	if gotHostID != expectedHostID {
+		return protocol.NewErrorf(protocol.ErrCodeHostMismatch, "peer is host %q, not the expected %q", gotHostID, expectedHostID)
+	}
+
+	return nil
 }
 
 // session returns a live pooled session for the peer address, dialing and pooling a new one when there is none or the pooled one has died

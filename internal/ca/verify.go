@@ -34,6 +34,21 @@ func PoolFromPEM(pems [][]byte) (*x509.CertPool, error) {
 	return pool, nil
 }
 
+// HostIDFromCert returns the host identity carried by a peer certificate's SPIFFE ID
+// It errors when the certificate has no SPIFFE host identity, so a caller can reject a non-host peer
+func HostIDFromCert(cert *x509.Certificate) (string, error) {
+	id, err := SPIFFEIDFromCert(cert)
+	if err != nil {
+		return "", err
+	}
+
+	if !strings.HasPrefix(id.Path, HostPrefix) {
+		return "", fmt.Errorf("peer SPIFFE identity %q is not a host identity", id.String())
+	}
+
+	return strings.TrimPrefix(id.Path, HostPrefix), nil
+}
+
 // SPIFFEIDFromCert extracts the single spiffe:// URI SAN from a certificate
 func SPIFFEIDFromCert(cert *x509.Certificate) (*url.URL, error) {
 	var found *url.URL

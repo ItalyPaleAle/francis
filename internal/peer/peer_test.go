@@ -504,6 +504,78 @@ func TestPeerInvocationRejectedWhenOverloaded(t *testing.T) {
 	assert.Equal(t, []byte("after"), resp.Data)
 }
 
+func TestPeerInvocationPinsHostIdentity(t *testing.T) {
+	addr := freeUDPAddr(t)
+
+	// The peer's certificate identity is host-b, but it claims host-z at the application layer
+	// so the server's own TargetHostID check would accept host-z and only the client-side certificate pin can catch the mismatch
+	cas, err := ca.CABundle([][]byte{peerTestPSK})
+	require.NoError(t, err)
+	pool := ca.NewCertPool(cas)
+	srvTLS := hosttls.PeerServerTLSConfig(newHostHolder(t, cas[0], pool, "host-b"))
+	cliTLS := hosttls.PeerClientTLSConfig(newHostHolder(t, cas[0], pool, "host-a"))
+
+	// The handler records whether any invocation payload ever reached the host
+	var invoked atomic.Bool
+	handler := func(_ context.Context, req protocol.InvokeActorRequest) (protocol.InvokeActorResponse, *protocol.Error) {
+		invoked.Store(true)
+		return protocol.InvokeActorResponse{Data: req.Data}, nil
+	}
+
+	ps := NewServer(ServerConfig{
+		Bind:      addr,
+		TLSConfig: srvTLS,
+		HostID:    func() string { return "host-z" },
+		Handler:   handler,
+		Log:       slog.New(slog.DiscardHandler),
+	})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() {
+		_ = ps.Run(ctx)
+	}()
+
+	pc := NewClient(ClientConfig{
+		TLSConfig:   cliTLS,
+		DialTimeout: 5 * time.Second,
+		Log:         slog.New(slog.DiscardHandler),
+	})
+	defer pc.Close()
+
+	// The client expects host-z at this address, but the peer authenticates as host-b
+	req := protocol.InvokeActorRequest{
+		TargetHostID: "host-z",
+		ActorType:    "T",
+		ActorID:      "a1",
+		Method:       "echo",
+		Mode:         protocol.InvocationModeObject,
+		Data:         []byte("secret"),
+	}
+
+	// Retry until the server is accepting connections; once it is up the identity pin fires
+	var perr *protocol.Error
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		reqCtx, reqCancel := context.WithTimeout(ctx, 2*time.Second)
+		_, perr = pc.InvokeObject(reqCtx, addr, req)
+		reqCancel()
+		// A connect failure is retryable while the server starts; a host-mismatch means we connected and the pin rejected before sending
+		if perr != nil && perr.Code == protocol.ErrCodeHostMismatch {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	require.NotNil(t, perr, "an invocation to a peer whose identity does not match must be rejected")
+	assert.Equal(t, protocol.ErrCodeHostMismatch, perr.Code)
+	assert.True(t, perr.Retryable(), "a host-mismatch rejection must be retryable so the caller re-resolves")
+	assert.False(t, invoked.Load(), "the payload must not reach the wrong host: the client pins the identity before sending")
+}
+
 // echoStreamHandler reads the entire request body and writes it back as the response body
 func echoStreamHandler(_ context.Context, _ protocol.InvokeActorRequest, body io.Reader, w actor.StreamResponseWriter) *protocol.Error {
 	data, err := io.ReadAll(body)

@@ -72,6 +72,48 @@ func TestIssueWorkloadCertVerifies(t *testing.T) {
 	}
 }
 
+func TestHostIDFromCert(t *testing.T) {
+	root, err := DeriveCA([]byte("runtime-psk-abcdefghijklmnop"))
+	if err != nil {
+		t.Fatalf("DeriveCA: %v", err)
+	}
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	// A host certificate yields its host ID
+	hostDER, err := root.IssueWorkloadCert(HostURI("host-1"), pub, time.Hour)
+	if err != nil {
+		t.Fatalf("IssueWorkloadCert: %v", err)
+	}
+	hostLeaf, err := x509.ParseCertificate(hostDER)
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+	got, err := HostIDFromCert(hostLeaf)
+	if err != nil {
+		t.Fatalf("HostIDFromCert: %v", err)
+	}
+	if got != "host-1" {
+		t.Fatalf("unexpected host ID %q", got)
+	}
+
+	// A runtime certificate is not a host identity and must be rejected
+	runtimeDER, err := root.IssueWorkloadCert(RuntimeURI("runtime-1"), pub, time.Hour)
+	if err != nil {
+		t.Fatalf("IssueWorkloadCert: %v", err)
+	}
+	runtimeLeaf, err := x509.ParseCertificate(runtimeDER)
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+	_, err = HostIDFromCert(runtimeLeaf)
+	if err == nil {
+		t.Fatal("expected a runtime certificate to be rejected as a host identity")
+	}
+}
+
 func TestVerifyPeerSPIFFE(t *testing.T) {
 	root, err := DeriveCA([]byte("runtime-psk-abcdefghijklmnop"))
 	if err != nil {
