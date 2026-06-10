@@ -18,6 +18,7 @@ import (
 	"github.com/italypaleale/francis/tests/integration/suite"
 
 	// Blank-import every suite package so their init() registers the cases
+	_ "github.com/italypaleale/francis/tests/integration/suites/alarminvoke"
 	_ "github.com/italypaleale/francis/tests/integration/suites/alarms"
 	_ "github.com/italypaleale/francis/tests/integration/suites/crosshost"
 	_ "github.com/italypaleale/francis/tests/integration/suites/invocation"

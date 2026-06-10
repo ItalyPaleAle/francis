@@ -4,6 +4,7 @@
 package invocation
 
 import (
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -25,12 +26,18 @@ import (
 // Capacity enforcement lives in provider placement, so one variant per distinct placement implementation is enough: SQLite and Postgres each have their own SQL, and the standalone providers share one in-memory placement path that StandaloneMemory stands in for
 var variants = []provider.Variant{provider.SQLite, provider.Postgres, provider.StandaloneMemory}
 
-// Register the capacity and turn-based scenarios across the representative variants on both runtimes
+// Register the invocation scenarios across the representative variants on both runtimes
 func init() {
 	for _, v := range variants {
 		for _, k := range []cluster.Kind{cluster.Local, cluster.Remote} {
 			suite.Register(&capacity{kind: k, variant: v})
 			suite.Register(&turnBased{kind: k, variant: v})
+			suite.Register(&parallel{kind: k, variant: v})
+
+			// Two hosts share one backend, so on the local runtime only providers that coordinate across processes qualify
+			if k == cluster.Remote || v.LocalMultiHost() {
+				suite.Register(&crossHostSerial{kind: k, variant: v})
+			}
 		}
 	}
 }
@@ -160,5 +167,139 @@ func (s *turnBased) Run(t *testing.T) {
 		var got shared.ProbeState
 		require.NoError(t, svc.GetState(ctx, shared.ProbeActorType, actorID, &got))
 		assert.Equal(t, int64(callers), got.N, "every increment should be reflected in the final state")
+	})
+}
+
+// parallel verifies that the turn-based lock is per-actor, not global: invocations to distinct actors on one host run concurrently
+type parallel struct {
+	kind    cluster.Kind
+	variant provider.Variant
+
+	cluster *cluster.Cluster
+}
+
+func (s *parallel) Name() string {
+	return "invocation-parallel/" + string(s.kind) + "/" + string(s.variant)
+}
+
+func (s *parallel) Setup(t *testing.T) []framework.Option {
+	s.cluster = cluster.New(t, cluster.Options{
+		Kind:    s.kind,
+		Variant: s.variant,
+		Hosts:   1,
+		Actors:  []frameworkhost.ActorReg{shared.ProbeReg(actorcore.RegisterActorOptions{IdleTimeout: time.Minute})},
+	})
+	return []framework.Option{
+		framework.WithProcesses(s.cluster.Processes()...),
+	}
+}
+
+func (s *parallel) Run(t *testing.T) {
+	svc := s.cluster.Service(0)
+	ctx := t.Context()
+
+	const actors = 8
+
+	// Each distinct actor gets one holding invocation, all launched together
+	// If the host serialized across actors, the global peak concurrency would be one
+	shared.ProbeObserver.ResetGlobalConcurrency()
+
+	var wg sync.WaitGroup
+	errs := make([]error, actors)
+	for i := range actors {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			actorID := "parallel-" + strconv.Itoa(i)
+			_, errs[i] = svc.Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodHold, nil)
+		}()
+	}
+	wg.Wait()
+
+	for _, err := range errs {
+		require.NoError(t, err)
+	}
+
+	// Distinct actors must be able to run at the same time, so the peak crosses one
+	assert.Greater(t, shared.ProbeObserver.MaxGlobalConcurrency(), 1, "invocations to distinct actors should run concurrently")
+}
+
+// crossHostSerial verifies that turn-based serialization holds across hosts: an actor is placed on a single host, so concurrent calls from every host route there and never overlap
+type crossHostSerial struct {
+	kind    cluster.Kind
+	variant provider.Variant
+
+	cluster *cluster.Cluster
+}
+
+func (s *crossHostSerial) Name() string {
+	return "invocation-crosshost/" + string(s.kind) + "/" + string(s.variant)
+}
+
+func (s *crossHostSerial) Setup(t *testing.T) []framework.Option {
+	s.cluster = cluster.New(t, cluster.Options{
+		Kind:    s.kind,
+		Variant: s.variant,
+		Hosts:   2,
+		Actors:  []frameworkhost.ActorReg{shared.ProbeReg(actorcore.RegisterActorOptions{IdleTimeout: time.Minute})},
+	})
+	return []framework.Option{
+		framework.WithProcesses(s.cluster.Processes()...),
+	}
+}
+
+func (s *crossHostSerial) Run(t *testing.T) {
+	ctx := t.Context()
+
+	// A holding call to the same actor is issued from both hosts at once, several times over
+	// Because the actor lives on exactly one host, both hosts' calls converge on the same turn-based lock and must serialize
+	t.Run("same actor from two hosts is serialized", func(t *testing.T) {
+		const actorID = "crosshost-serialize"
+		const rounds = 6
+
+		var wg sync.WaitGroup
+		errs := make([]error, rounds*2)
+		for r := range rounds {
+			for h := range 2 {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					_, errs[r*2+h] = s.cluster.Service(h).Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodHold, nil)
+				}()
+			}
+		}
+		wg.Wait()
+
+		for _, err := range errs {
+			require.NoError(t, err)
+		}
+		assert.Equal(t, 1, shared.ProbeObserver.MaxHoldConcurrency(actorID), "an actor must process one invocation at a time even across hosts")
+	})
+
+	// Concurrent increments from both hosts must all land, proving the shared state stays consistent under cross-host contention
+	t.Run("concurrent increments from two hosts are consistent", func(t *testing.T) {
+		const actorID = "crosshost-increment"
+		const perHost = 10
+
+		var wg sync.WaitGroup
+		errs := make([]error, perHost*2)
+		for i := range perHost {
+			for h := range 2 {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					_, errs[i*2+h] = s.cluster.Service(h).Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodIncrement, nil)
+				}()
+			}
+		}
+		wg.Wait()
+
+		for _, err := range errs {
+			require.NoError(t, err)
+		}
+
+		var got shared.ProbeState
+		require.NoError(t, s.cluster.Service(0).GetState(ctx, shared.ProbeActorType, actorID, &got))
+		assert.Equal(t, int64(perHost*2), got.N, "every increment from both hosts should be reflected in the final state")
 	})
 }

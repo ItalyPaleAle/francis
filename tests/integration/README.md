@@ -28,8 +28,9 @@ Scenarios live under `suites/` and self-register via `init()`:
 
 - **state** / **statecrud** — single-host state: a basic round-trip across every provider, plus full CRUD coverage (get/set/update/delete, missing-key and TTL handling, per-actor isolation).
 - **crosshost** — two hosts sharing one backend, exercising cross-host placement and shared state.
-- **invocation** — placement and concurrency: the per-host limit on active actors of a kind (`invocation-capacity`), and turn-based serialization of calls to one actor (`invocation-turnbased`).
+- **invocation** — placement and concurrency: the per-host limit on active actors of a kind (`invocation-capacity`), turn-based serialization of calls to one actor (`invocation-turnbased`), per-actor (not global) locking so distinct actors run in parallel (`invocation-parallel`), and serialization plus state consistency for one actor called concurrently from multiple hosts (`invocation-crosshost`).
 - **alarms** — the alarm lifecycle: one-shot and repeating alarms, editing and deleting, transient and persistent execution failures with retry and removal, and fetching many alarms across batches.
+- **alarminvoke** — the interaction between alarms and invocations: that an alarm and an invocation on one actor share its turn and never overlap, and that an actor can schedule an alarm on itself from inside an invocation.
 
 Alarm scenarios set `cluster.Options.AlarmsPollInterval` to poll quickly instead of waiting on the multi-second component defaults; the cluster applies it to the local hosts or the remote runtime depending on the topology.
 

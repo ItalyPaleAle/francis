@@ -82,7 +82,12 @@ const (
 	ProbeMethodPing = "ping"
 	// ProbeMethodHold occupies the actor's turn for a short time, so overlapping calls to the same actor would be observable if turn-based concurrency were violated
 	ProbeMethodHold = "hold"
+	// ProbeMethodArmAlarm schedules an alarm on the actor itself through its client, so alarm scheduling from inside an invocation can be exercised
+	ProbeMethodArmAlarm = "arm-alarm"
 )
+
+// ProbeSelfAlarmName is the name of the alarm the probe actor schedules on itself for ProbeMethodArmAlarm
+const ProbeSelfAlarmName = "self"
 
 // ProbeState is the persisted state of the probe actor
 type ProbeState struct {
@@ -116,6 +121,14 @@ func (a *ProbeActor) Invoke(ctx context.Context, method string, _ actor.Envelope
 		ProbeObserver.enterHold(a.actorID)
 		defer ProbeObserver.exitHold(a.actorID)
 		time.Sleep(40 * time.Millisecond)
+		return nil, nil
+
+	case ProbeMethodArmAlarm:
+		// Schedule an alarm on this actor through its client, due immediately, so it fires shortly after this invocation returns
+		err := a.client.SetAlarm(ctx, ProbeSelfAlarmName, actor.AlarmProperties{DueTime: time.Now()})
+		if err != nil {
+			return nil, err
+		}
 		return nil, nil
 
 	case ProbeMethodIncrement, ProbeMethodGet:
@@ -152,6 +165,14 @@ func (a *ProbeActor) Alarm(_ context.Context, name string, data actor.Envelope) 
 	if fail {
 		return errors.New("induced alarm failure")
 	}
+
+	// When asked, occupy the actor's turn for a moment so a test can detect any overlap between an alarm execution and a concurrent invocation
+	// Alarm execution and invocation share the actor's turn-based lock, so the observed maximum must never exceed one
+	if ProbeObserver.alarmHoldEnabled(a.actorID) {
+		ProbeObserver.enterHold(a.actorID)
+		defer ProbeObserver.exitHold(a.actorID)
+		time.Sleep(40 * time.Millisecond)
+	}
 	return nil
 }
 
@@ -178,10 +199,11 @@ type AlarmFire struct {
 // Integration scenarios run the host in the same process as the test, so background alarm executions and concurrent invocations can be observed here rather than through the provider
 // Scenarios must use unique actor IDs so their observations do not collide, since the suite shares one process across all scenarios
 var ProbeObserver = &probeObserver{
-	fires:   map[string][]AlarmFire{},
-	faults:  map[string]int{},
-	holdNow: map[string]int{},
-	holdMax: map[string]int{},
+	fires:     map[string][]AlarmFire{},
+	faults:    map[string]int{},
+	holdNow:   map[string]int{},
+	holdMax:   map[string]int{},
+	alarmHold: map[string]bool{},
 }
 
 type probeObserver struct {
@@ -193,6 +215,11 @@ type probeObserver struct {
 	// holdNow and holdMax track current and peak concurrent hold invocations keyed by actor ID
 	holdNow map[string]int
 	holdMax map[string]int
+	// alarmHold marks actors whose alarm execution should also occupy the hold gauge, so alarm-versus-invocation overlap can be detected
+	alarmHold map[string]bool
+	// globalNow and globalMax track current and peak concurrent hold turns across all actors, so cross-actor parallelism can be measured
+	globalNow int
+	globalMax int
 }
 
 // SetAlarmFault configures induced alarm failures for an actor before its alarm is triggered
@@ -241,7 +268,7 @@ func (o *probeObserver) AlarmCount(actorID string) int {
 	return len(o.fires[actorID])
 }
 
-// enterHold records the start of a hold invocation, updating the peak concurrency seen for the actor
+// enterHold records the start of a hold turn, updating both the per-actor and the global peak concurrency
 func (o *probeObserver) enterHold(actorID string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -249,20 +276,55 @@ func (o *probeObserver) enterHold(actorID string) {
 	if o.holdNow[actorID] > o.holdMax[actorID] {
 		o.holdMax[actorID] = o.holdNow[actorID]
 	}
+	o.globalNow++
+	if o.globalNow > o.globalMax {
+		o.globalMax = o.globalNow
+	}
 }
 
-// exitHold records the end of a hold invocation
+// exitHold records the end of a hold turn
 func (o *probeObserver) exitHold(actorID string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.holdNow[actorID]--
+	o.globalNow--
 }
 
-// MaxHoldConcurrency returns the peak number of hold invocations that ran at once for an actor
+// MaxHoldConcurrency returns the peak number of hold turns that ran at once for an actor
 func (o *probeObserver) MaxHoldConcurrency(actorID string) int {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.holdMax[actorID]
+}
+
+// ResetGlobalConcurrency clears the global hold gauge so a test can measure cross-actor parallelism in isolation
+// The global gauge is process-wide and otherwise monotonic, so a test that asserts on it must reset first
+func (o *probeObserver) ResetGlobalConcurrency() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.globalNow = 0
+	o.globalMax = 0
+}
+
+// MaxGlobalConcurrency returns the peak number of hold turns that ran at once across all actors
+func (o *probeObserver) MaxGlobalConcurrency() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.globalMax
+}
+
+// SetAlarmHold marks an actor so its alarm execution also occupies the hold gauge, letting a test detect overlap between an alarm and concurrent invocations
+func (o *probeObserver) SetAlarmHold(actorID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.alarmHold[actorID] = true
+}
+
+// alarmHoldEnabled reports whether an actor's alarm execution should occupy the hold gauge
+func (o *probeObserver) alarmHoldEnabled(actorID string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.alarmHold[actorID]
 }
 
 // ISOInterval renders a Go duration as the ISO8601 string Francis expects for an alarm's repetition interval
