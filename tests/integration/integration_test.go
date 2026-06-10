@@ -27,6 +27,7 @@ import (
 	_ "github.com/italypaleale/francis/tests/integration/suites/lifecycle"
 	_ "github.com/italypaleale/francis/tests/integration/suites/state"
 	_ "github.com/italypaleale/francis/tests/integration/suites/statecrud"
+	_ "github.com/italypaleale/francis/tests/integration/suites/streaming"
 )
 
 // TestIntegration runs every registered integration scenario as a subtest

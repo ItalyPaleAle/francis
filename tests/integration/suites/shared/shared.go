@@ -6,6 +6,7 @@ package shared
 import (
 	"context"
 	"errors"
+	"io"
 	"sync"
 	"time"
 
@@ -197,6 +198,27 @@ func (a *ProbeActor) Alarm(_ context.Context, name string, data actor.Envelope) 
 func (a *ProbeActor) Deactivate(_ context.Context) error {
 	ProbeObserver.recordDeactivate(a.actorID)
 	return nil
+}
+
+// ProbeStreamContentType is the content type the probe sets on a streamed response, so callers can assert it round-tripped
+const ProbeStreamContentType = "application/x-probe-echo"
+
+// InvokeStream echoes the streamed request body back, prefixed with the method name, so streaming round-trips can be exercised end to end
+func (a *ProbeActor) InvokeStream(_ context.Context, method string, _ string, body io.Reader, w actor.StreamResponseWriter) error {
+	// Read the whole request body, which streams in over the transport
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return err
+	}
+
+	// Set the content type before the first write, then echo the method and the body back as the response
+	w.SetContentType(ProbeStreamContentType)
+	_, err = w.Write([]byte(method + ":"))
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(data)
+	return err
 }
 
 // ProbeReg returns the registration for the probe actor with the given options
