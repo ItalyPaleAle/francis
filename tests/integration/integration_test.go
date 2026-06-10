@@ -23,6 +23,7 @@ import (
 	_ "github.com/italypaleale/francis/tests/integration/suites/crosshost"
 	_ "github.com/italypaleale/francis/tests/integration/suites/failover"
 	_ "github.com/italypaleale/francis/tests/integration/suites/invocation"
+	_ "github.com/italypaleale/francis/tests/integration/suites/lifecycle"
 	_ "github.com/italypaleale/francis/tests/integration/suites/state"
 	_ "github.com/italypaleale/francis/tests/integration/suites/statecrud"
 )

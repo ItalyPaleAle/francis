@@ -184,6 +184,12 @@ func (a *ProbeActor) Alarm(_ context.Context, name string, data actor.Envelope) 
 	return nil
 }
 
+// Deactivate records that the actor was deactivated, so lifecycle scenarios can observe idle and halt-driven deactivation
+func (a *ProbeActor) Deactivate(_ context.Context) error {
+	ProbeObserver.recordDeactivate(a.actorID)
+	return nil
+}
+
 // ProbeReg returns the registration for the probe actor with the given options
 func ProbeReg(opts actorcore.RegisterActorOptions) frameworkhost.ActorReg {
 	return frameworkhost.ActorReg{
@@ -225,13 +231,14 @@ func HostLabel(svc *actor.Service) string {
 }
 
 var ProbeObserver = &probeObserver{
-	fires:      map[string][]AlarmFire{},
-	faults:     map[string]int{},
-	holdNow:    map[string]int{},
-	holdMax:    map[string]int{},
-	alarmHold:  map[string]bool{},
-	invokeHost: map[string]string{},
-	alarmHost:  map[string]string{},
+	fires:         map[string][]AlarmFire{},
+	faults:        map[string]int{},
+	holdNow:       map[string]int{},
+	holdMax:       map[string]int{},
+	alarmHold:     map[string]bool{},
+	invokeHost:    map[string]string{},
+	alarmHost:     map[string]string{},
+	deactivations: map[string]int{},
 }
 
 type probeObserver struct {
@@ -251,6 +258,22 @@ type probeObserver struct {
 	// invokeHost and alarmHost record the label of the host that last ran an invocation or alarm for an actor
 	invokeHost map[string]string
 	alarmHost  map[string]string
+	// deactivations counts how many times an actor's Deactivate hook has run, keyed by actor ID
+	deactivations map[string]int
+}
+
+// recordDeactivate notes that an actor's Deactivate hook ran
+func (o *probeObserver) recordDeactivate(actorID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.deactivations[actorID]++
+}
+
+// DeactivateCount returns how many times an actor has been deactivated
+func (o *probeObserver) DeactivateCount(actorID string) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.deactivations[actorID]
 }
 
 // recordInvokeHost notes the host that ran an invocation for an actor
