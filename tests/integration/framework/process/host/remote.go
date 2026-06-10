@@ -5,6 +5,8 @@ package host
 import (
 	"context"
 	"log/slog"
+	"net"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -12,6 +14,7 @@ import (
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/host/remote"
 	"github.com/italypaleale/francis/tests/integration/framework/process/clustersecret"
+	"github.com/italypaleale/francis/tests/integration/framework/process/ports"
 )
 
 // RemoteOptions configures a remote host process
@@ -104,6 +107,13 @@ func (p *Remote) Stop(t *testing.T) {
 	t.Helper()
 	waitShutdown(t, p.opts.Address, p.runErrC, p.cancel)
 	p.cancel = nil
+}
+
+// Rebind moves the host to a freshly reserved port for its next Run, modelling a restart as a new process
+func (p *Remote) Rebind(t *testing.T) {
+	t.Helper()
+	reserved := ports.Reserve(t, 1)
+	p.opts.Address = net.JoinHostPort("127.0.0.1", strconv.Itoa(reserved[0]))
 }
 
 func (p *Remote) Cleanup(t *testing.T) {

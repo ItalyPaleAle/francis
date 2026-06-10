@@ -21,6 +21,7 @@ import (
 	_ "github.com/italypaleale/francis/tests/integration/suites/alarminvoke"
 	_ "github.com/italypaleale/francis/tests/integration/suites/alarms"
 	_ "github.com/italypaleale/francis/tests/integration/suites/crosshost"
+	_ "github.com/italypaleale/francis/tests/integration/suites/durability"
 	_ "github.com/italypaleale/francis/tests/integration/suites/errorprop"
 	_ "github.com/italypaleale/francis/tests/integration/suites/failover"
 	_ "github.com/italypaleale/francis/tests/integration/suites/invocation"
