@@ -125,6 +125,23 @@ func (s *alarms) Run(t *testing.T) {
 		require.NoError(t, svc.DeleteAlarm(ctx, shared.ProbeActorType, actorID, "a"))
 	})
 
+	// A repeating alarm with a TTL stops repeating once the deadline passes, rather than firing forever
+	t.Run("repeating alarm stops at its TTL deadline", func(t *testing.T) {
+		const actorID = "ttl-1"
+
+		// The fire count is process-global, so measure this run's executions against a baseline
+		before := shared.ProbeObserver.AlarmCount(actorID)
+		require.NoError(t, svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
+			DueTime:  time.Now(),
+			Interval: shared.ISOInterval(400 * time.Millisecond),
+			TTL:      time.Now().Add(2 * time.Second),
+		}))
+
+		// settleAlarm returns only once the count stops changing, which a TTL-bounded alarm does but an unbounded repeating one would not
+		got := settleAlarm(t, actorID)
+		assert.GreaterOrEqual(t, got-before, 2, "the alarm should fire several times before its TTL deadline")
+	})
+
 	// Re-setting an alarm replaces its schedule and data, so an edit can bring a far-future alarm forward
 	t.Run("edit reschedules and updates data", func(t *testing.T) {
 		const actorID = "edit-1"
