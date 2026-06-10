@@ -98,6 +98,14 @@ func (p *Remote) Run(t *testing.T) {
 	waitPeerServer(t, p.opts.Address)
 }
 
+// Stop gracefully shuts the host down mid-test
+// After Stop the host can be restarted with Run, and the end-of-test Cleanup becomes a no-op
+func (p *Remote) Stop(t *testing.T) {
+	t.Helper()
+	waitShutdown(t, p.opts.Address, p.runErrC, p.cancel)
+	p.cancel = nil
+}
+
 func (p *Remote) Cleanup(t *testing.T) {
 	t.Helper()
 	waitShutdown(t, p.opts.Address, p.runErrC, p.cancel)

@@ -33,6 +33,9 @@ type Instance interface {
 	HostID() string
 	// Address returns the peer address the host is reachable at
 	Address() string
+	// Stop gracefully shuts the host down mid-test, leaving the rest of the topology running
+	// It is idempotent with Cleanup, and the host can be brought back up by calling Run again
+	Stop(t *testing.T)
 }
 
 // ActorReg describes an actor type to register on a host before it starts

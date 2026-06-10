@@ -98,6 +98,7 @@ type ProbeState struct {
 // It persists a counter like the counter actor, but also records alarm executions and per-actor invocation concurrency into the process-global ProbeObserver so tests can assert on behavior that happens in background goroutines
 type ProbeActor struct {
 	actorID string
+	service *actor.Service
 	client  actor.Client[ProbeState]
 }
 
@@ -105,12 +106,16 @@ type ProbeActor struct {
 func NewProbeActor(actorID string, service *actor.Service) actor.Actor {
 	return &ProbeActor{
 		actorID: actorID,
+		service: service,
 		client:  actor.NewActorClient[ProbeState](ProbeActorType, actorID, service),
 	}
 }
 
 // Invoke dispatches the probe methods used across scenarios
 func (a *ProbeActor) Invoke(ctx context.Context, method string, _ actor.Envelope) (any, error) {
+	// Record which host ran this invocation so placement and failover scenarios can observe where the actor lives
+	ProbeObserver.recordInvokeHost(a.actorID, HostLabel(a.service))
+
 	switch method {
 	case ProbeMethodPing:
 		return "pong", nil
@@ -160,6 +165,9 @@ func (a *ProbeActor) Alarm(_ context.Context, name string, data actor.Envelope) 
 		_ = data.Decode(&payload)
 	}
 
+	// Record which host ran this alarm so cross-host and migration scenarios can observe where it executed
+	ProbeObserver.recordAlarmHost(a.actorID, HostLabel(a.service))
+
 	// Recording also decides whether this execution should fail, consuming one transient failure if configured
 	fail := ProbeObserver.recordAlarm(a.actorID, name, payload)
 	if fail {
@@ -198,12 +206,32 @@ type AlarmFire struct {
 // ProbeObserver is the process-global registry the probe actor writes to
 // Integration scenarios run the host in the same process as the test, so background alarm executions and concurrent invocations can be observed here rather than through the provider
 // Scenarios must use unique actor IDs so their observations do not collide, since the suite shares one process across all scenarios
+// hostLabels maps a host's actor service to a stable label, so the probe can record which host ran an invocation or alarm
+// The factory receives the same *actor.Service that the host exposes, so a test can label each host's service and then read back where an actor was placed
+var hostLabels sync.Map
+
+// SetHostLabel associates a label with a host's actor service, for placement and failover assertions
+func SetHostLabel(svc *actor.Service, label string) {
+	hostLabels.Store(svc, label)
+}
+
+// HostLabel returns the label registered for a host's actor service, or an empty string if none was set
+func HostLabel(svc *actor.Service) string {
+	v, ok := hostLabels.Load(svc)
+	if !ok {
+		return ""
+	}
+	return v.(string)
+}
+
 var ProbeObserver = &probeObserver{
-	fires:     map[string][]AlarmFire{},
-	faults:    map[string]int{},
-	holdNow:   map[string]int{},
-	holdMax:   map[string]int{},
-	alarmHold: map[string]bool{},
+	fires:      map[string][]AlarmFire{},
+	faults:     map[string]int{},
+	holdNow:    map[string]int{},
+	holdMax:    map[string]int{},
+	alarmHold:  map[string]bool{},
+	invokeHost: map[string]string{},
+	alarmHost:  map[string]string{},
 }
 
 type probeObserver struct {
@@ -220,6 +248,43 @@ type probeObserver struct {
 	// globalNow and globalMax track current and peak concurrent hold turns across all actors, so cross-actor parallelism can be measured
 	globalNow int
 	globalMax int
+	// invokeHost and alarmHost record the label of the host that last ran an invocation or alarm for an actor
+	invokeHost map[string]string
+	alarmHost  map[string]string
+}
+
+// recordInvokeHost notes the host that ran an invocation for an actor
+func (o *probeObserver) recordInvokeHost(actorID string, label string) {
+	if label == "" {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.invokeHost[actorID] = label
+}
+
+// LastInvokeHost returns the label of the host that most recently ran an invocation for an actor
+func (o *probeObserver) LastInvokeHost(actorID string) string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.invokeHost[actorID]
+}
+
+// recordAlarmHost notes the host that ran an alarm for an actor
+func (o *probeObserver) recordAlarmHost(actorID string, label string) {
+	if label == "" {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.alarmHost[actorID] = label
+}
+
+// LastAlarmHost returns the label of the host that most recently ran an alarm for an actor
+func (o *probeObserver) LastAlarmHost(actorID string) string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.alarmHost[actorID]
 }
 
 // SetAlarmFault configures induced alarm failures for an actor before its alarm is triggered
