@@ -17,7 +17,7 @@ const minTLSVersion = tls.VersionTLS13
 
 // RuntimeClientTLSConfig builds the client TLS config for host-to-runtime connections
 // It presents the host's workload certificate once one has been issued and verifies the runtime's certificate against the live trust bundle
-// During the very first bootstrap there is no trust anchor yet: when the CA is not pinned the runtime certificate is accepted, since the PSK challenge-response still protects the credential and a JWT cluster is expected to pin the CA (the host warns about this at startup)
+// During the very first bootstrap there is no trust anchor yet: when the CA is not pinned the runtime certificate is accepted, since the PSK challenge-response still protects the credential and a JWT cluster is expected to pin the CA
 func RuntimeClientTLSConfig(holder *certholder.Holder) *tls.Config {
 	verifyRuntime := ca.VerifyPeerSPIFFE(holder.Roots, ca.RuntimePrefix, nil)
 	verify := func(rawCerts [][]byte, chains [][]*x509.Certificate) error {
@@ -25,6 +25,7 @@ func RuntimeClientTLSConfig(holder *certholder.Holder) *tls.Config {
 		if holder.Roots() == nil {
 			return nil
 		}
+
 		return verifyRuntime(rawCerts, chains)
 	}
 

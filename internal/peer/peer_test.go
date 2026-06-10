@@ -42,22 +42,30 @@ func peerTLSPair(t *testing.T) (server *tls.Config, client *tls.Config) {
 // newHostHolder issues a workload certificate for hostID and returns a holder seeded with it and the trust pool
 func newHostHolder(t *testing.T, signer *ca.CA, pool *x509.CertPool, hostID string) *certholder.Holder {
 	t.Helper()
+
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
+
 	der, err := signer.IssueWorkloadCert(ca.HostURI(hostID), pub, time.Hour)
 	require.NoError(t, err)
+
 	leaf, err := x509.ParseCertificate(der)
 	require.NoError(t, err)
+
 	return certholder.New(&tls.Certificate{Certificate: [][]byte{der}, PrivateKey: priv, Leaf: leaf}, pool)
 }
 
 // freeUDPAddr returns a localhost address with a currently-free UDP port
 func freeUDPAddr(t *testing.T) string {
 	t.Helper()
+
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	require.NoError(t, err)
+
 	addr := pc.LocalAddr().String()
-	require.NoError(t, pc.Close())
+	err = pc.Close()
+	require.NoError(t, err)
+
 	return addr
 }
 
@@ -66,14 +74,17 @@ func echoHandler(_ context.Context, req protocol.InvokeActorRequest) (protocol.I
 	if req.Method == "boom" {
 		return protocol.InvokeActorResponse{}, protocol.NewError(protocol.ErrCodeInvokeFailed, "actor failed")
 	}
+
 	return protocol.InvokeActorResponse{Data: req.Data}, nil
 }
 
 func TestPeerServerHandleObject(t *testing.T) {
 	newReq := func(t *testing.T, payload protocol.InvokeActorRequest) *protocol.Envelope {
 		t.Helper()
+
 		env, err := protocol.NewRequest(protocol.KindInvokeActor, payload)
 		require.NoError(t, err)
+
 		return env
 	}
 
@@ -82,6 +93,7 @@ func TestPeerServerHandleObject(t *testing.T) {
 			HostID:  func() string { return "host-b" },
 			Handler: echoHandler,
 		})
+
 		env := newReq(t, protocol.InvokeActorRequest{
 			ActorType: "T",
 			ActorID:   "a1",
@@ -89,6 +101,7 @@ func TestPeerServerHandleObject(t *testing.T) {
 			Mode:      protocol.InvocationModeObject,
 			Data:      []byte("arg"),
 		})
+
 		resp := ps.handleObject(t.Context(), env, protocol.InvokeActorRequest{
 			Method: "echo",
 			Data:   []byte("arg"),
@@ -106,6 +119,7 @@ func TestPeerServerHandleObject(t *testing.T) {
 			HostID:  func() string { return "host-b" },
 			Handler: echoHandler,
 		})
+
 		env := protocol.NewEnvelope(protocol.KindInvokeActor, nil)
 		resp := ps.handleObject(t.Context(), env, protocol.InvokeActorRequest{Method: "boom"})
 		perr, ok := resp.AsError()
@@ -117,6 +131,7 @@ func TestPeerServerHandleObject(t *testing.T) {
 		ps := NewServer(ServerConfig{
 			HostID: func() string { return "host-b" },
 		})
+
 		env := protocol.NewEnvelope(protocol.KindInvokeActor, nil)
 		resp := ps.handleObject(t.Context(), env, protocol.InvokeActorRequest{})
 		perr, ok := resp.AsError()
@@ -178,7 +193,8 @@ func TestPeerInvocationIntegration(t *testing.T) {
 	require.Nil(t, perr, "invocation should succeed once the peer server is up")
 
 	var got string
-	require.NoError(t, protocol.Unmarshal(out.Data, &got))
+	err = protocol.Unmarshal(out.Data, &got)
+	require.NoError(t, err)
 	assert.Equal(t, "hello peer", got)
 
 	// An invocation aimed at a stale placement is rejected with a retryable host mismatch
@@ -618,7 +634,9 @@ func TestPeerStreamInvocationBodyTooLarge(t *testing.T) {
 	}
 	require.Nil(t, perr, "a body within the cap should succeed")
 	require.NotNil(t, respBody)
-	require.NoError(t, respBody.Close())
+
+	err := respBody.Close()
+	require.NoError(t, err)
 
 	// A body exceeding the cap fails the invocation rather than being read unbounded
 	reqCtx, reqCancel := context.WithTimeout(ctx, 5*time.Second)

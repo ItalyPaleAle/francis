@@ -72,12 +72,12 @@ func (p *Runtime) Run(t *testing.T) {
 	// Build the provider the runtime owns from the shared backend
 	prov := p.opts.Backend.NewProvider(t, logger)
 
+	// The runtime derives its CA from the shared runtime PSK and bootstraps remote hosts with the shared host PSK
 	rtOpts := make([]runtimepkg.RuntimeOption, 0, len(p.opts.Extra)+5)
 	rtOpts = append(rtOpts,
 		runtimepkg.WithBind(p.opts.Bind),
 		runtimepkg.WithLogger(logger),
 		runtimepkg.WithShutdownGracePeriod(ShutdownGrace),
-		// The runtime derives its CA from the shared runtime PSK and bootstraps remote hosts with the shared host PSK
 		runtimepkg.WithRuntimePSKs(clustersecret.RuntimePSK),
 		runtimepkg.WithHostBootstrapPSK(clustersecret.HostBootstrapPSK),
 	)

@@ -92,7 +92,7 @@ type RegisterHostRequest struct {
 	ActorTypes []ActorHostType `msgpack:"actorTypes,omitempty"`
 	// Auth is the bootstrap credential, omitted on an mTLS reconnect where identity comes from the client certificate
 	Auth RegisterAuth `msgpack:"auth,omitempty"`
-	// WorkloadPubKey is the host's freshly generated Ed25519 public key the runtime signs into a workload certificate
+	// WorkloadPubKey is the host's freshly-generated Ed25519 public key the runtime signs into a workload certificate
 	// It is omitted on an mTLS reconnect that does not need a new certificate
 	WorkloadPubKey []byte `msgpack:"wlpub,omitempty"`
 }
