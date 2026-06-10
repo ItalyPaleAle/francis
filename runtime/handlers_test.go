@@ -1,6 +1,9 @@
 package runtime
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
 	"errors"
 	"log/slog"
 	"testing"
@@ -13,10 +16,59 @@ import (
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/standalone"
+	"github.com/italypaleale/francis/internal/ca"
 	components_mocks "github.com/italypaleale/francis/internal/mocks/components"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/protocol"
 )
+
+func TestHandleRenewCert(t *testing.T) {
+	rt, prov := newTestRuntime(t)
+	hostID := registerTestHost(t, prov, "10.0.0.30:1", "T")
+	c := &hostConn{hostID: hostID, sessionID: "s1"}
+
+	t.Run("issues a certificate for the connection's host", func(t *testing.T) {
+		pub, _, err := ed25519.GenerateKey(rand.Reader)
+		require.NoError(t, err)
+
+		resp := dispatchReq(t, rt, c, protocol.KindRenewCert, protocol.RenewCertRequest{WorkloadPubKey: pub})
+		require.Equal(t, protocol.KindRenewCertResponse, resp.Kind)
+
+		var out protocol.RenewCertResponse
+		require.NoError(t, resp.DecodePayload(&out))
+		require.NotEmpty(t, out.WorkloadCertDER)
+		require.NotEmpty(t, out.CABundlePEM)
+
+		// The issued certificate chains to the cluster CA and carries this host's SPIFFE identity
+		leaf, err := x509.ParseCertificate(out.WorkloadCertDER)
+		require.NoError(t, err)
+		pool := ca.NewCertPool(rt.cas)
+		_, err = leaf.Verify(x509.VerifyOptions{Roots: pool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}})
+		require.NoError(t, err)
+		id, err := ca.SPIFFEIDFromCert(leaf)
+		require.NoError(t, err)
+		assert.Equal(t, "/host/"+hostID, id.Path)
+	})
+
+	t.Run("rejects a request missing the public key", func(t *testing.T) {
+		resp := dispatchReq(t, rt, c, protocol.KindRenewCert, protocol.RenewCertRequest{})
+		requireError(t, resp, protocol.ErrCodeBadRequest)
+	})
+}
+
+// testRuntimePSK derives the test cluster CA, and testHostPSK is the host bootstrap key the test runtimes accept
+var (
+	testRuntimePSK = []byte("runtime-test-psk-0123456789abcd")
+	testHostPSK    = []byte("host-test-psk-0123456789abcdef")
+)
+
+// baseRuntimeOpts are the options every test runtime needs: a runtime PSK for the CA and a host bootstrap method
+func baseRuntimeOpts() []RuntimeOption {
+	return []RuntimeOption{
+		WithRuntimePSKs(testRuntimePSK),
+		WithHostBootstrapPSK(testHostPSK),
+	}
+}
 
 // newTestRuntime returns a Runtime backed by an in-memory provider, ready for dispatch-level tests
 func newTestRuntime(t *testing.T, opts ...RuntimeOption) (*Runtime, *standalone.StandaloneMemory) {
@@ -30,7 +82,9 @@ func newTestRuntime(t *testing.T, opts ...RuntimeOption) (*Runtime, *standalone.
 	})
 	require.NoError(t, err)
 
-	rt, err := NewRuntime(prov, append([]RuntimeOption{WithBind("127.0.0.1:0")}, opts...)...)
+	all := append([]RuntimeOption{WithBind("127.0.0.1:0")}, baseRuntimeOpts()...)
+	all = append(all, opts...)
+	rt, err := NewRuntime(prov, all...)
 	require.NoError(t, err)
 	require.NoError(t, prov.Init(t.Context()))
 
@@ -78,7 +132,7 @@ func TestHandlerDoesNotLeakProviderErrorDetail(t *testing.T) {
 		SetState(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 		Return(secret)
 
-	rt, err := NewRuntime(provider, WithBind("127.0.0.1:0"))
+	rt, err := NewRuntime(provider, append([]RuntimeOption{WithBind("127.0.0.1:0")}, baseRuntimeOpts()...)...)
 	require.NoError(t, err)
 
 	c := &hostConn{

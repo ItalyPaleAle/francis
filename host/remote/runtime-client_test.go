@@ -2,6 +2,10 @@ package remote
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"log/slog"
 	"net"
 	"net/http"
@@ -10,9 +14,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	clocktesting "k8s.io/utils/clock/testing"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/standalone"
+	"github.com/italypaleale/francis/internal/bootstrapauth"
+	"github.com/italypaleale/francis/internal/ca"
+	"github.com/italypaleale/francis/internal/certholder"
 	"github.com/italypaleale/francis/internal/hosttls"
 	"github.com/italypaleale/francis/internal/wt"
 	"github.com/italypaleale/francis/protocol"
@@ -27,6 +35,32 @@ func freeUDPAddr(t *testing.T) string {
 	addr := pc.LocalAddr().String()
 	require.NoError(t, pc.Close())
 	return addr
+}
+
+// testBootstrap returns a fresh holder, the host bootstrap PSK, and the runtime client TLS config bound to that holder
+func testBootstrap(t *testing.T) (*certholder.Holder, *bootstrapauth.PSK, *tls.Config) {
+	t.Helper()
+	holder := certholder.New(nil, nil)
+	psk, err := bootstrapauth.NewPSK(testHostPSK)
+	require.NoError(t, err)
+	return holder, psk, hosttls.RuntimeClientTLSConfig(holder)
+}
+
+// testRuntimeServerTLS builds a server TLS config presenting a runtime certificate signed by the test CA
+func testRuntimeServerTLS(t *testing.T) *tls.Config {
+	t.Helper()
+	cas, err := ca.CABundle([][]byte{testRuntimePSK})
+	require.NoError(t, err)
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	der, err := cas[0].IssueWorkloadCert(ca.RuntimeURI("test"), pub, time.Hour)
+	require.NoError(t, err)
+	leaf, err := x509.ParseCertificate(der)
+	require.NoError(t, err)
+	return &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: priv, Leaf: leaf}},
+	}
 }
 
 // TestRuntimeClientIntegration exercises the host-to-runtime client against a real runtime over WebTransport
@@ -44,6 +78,8 @@ func TestRuntimeClientIntegration(t *testing.T) {
 	rt, err := runtime.NewRuntime(prov,
 		runtime.WithBind(addr),
 		runtime.WithAlarmsPollInterval(300*time.Millisecond),
+		runtime.WithRuntimePSKs(testRuntimePSK),
+		runtime.WithHostBootstrapPSK(testHostPSK),
 	)
 	require.NoError(t, err)
 
@@ -55,18 +91,19 @@ func TestRuntimeClientIntegration(t *testing.T) {
 		rtErr <- rt.Run(ctx)
 	}()
 
-	// The runtime uses a self-signed certificate, so the client skips TLS verification
-	_, clientTLS, err := hosttls.HostTLSOptions{InsecureSkipTLSValidation: true}.GetTLSConfig()
-	require.NoError(t, err)
+	// The client bootstraps with the host PSK, then reconnects over mTLS using the issued certificate
+	holder, psk, clientTLS := testBootstrap(t)
 
 	alarmCh := make(chan protocol.ExecuteAlarmRequest, 1)
 	rc := newRuntimeClient(runtimeClientConfig{
-		addresses:   []string{addr},
-		peerAddress: "127.0.0.1:7000",
-		actorTypes:  []protocol.ActorHostType{{ActorType: "T", IdleTimeoutMs: 60000}},
-		tlsConfig:   clientTLS,
-		minBackoff:  50 * time.Millisecond,
-		log:         slog.New(slog.DiscardHandler),
+		addresses:    []string{addr},
+		peerAddress:  "127.0.0.1:7000",
+		actorTypes:   []protocol.ActorHostType{{ActorType: "T", IdleTimeoutMs: 60000}},
+		tlsConfig:    clientTLS,
+		holder:       holder,
+		bootstrapPSK: psk,
+		minBackoff:   50 * time.Millisecond,
+		log:          slog.New(slog.DiscardHandler),
 		handlers: runtimeHandlers{
 			executeAlarm: func(_ context.Context, req protocol.ExecuteAlarmRequest) (protocol.ExecuteAlarmResponse, *protocol.Error) {
 				select {
@@ -140,8 +177,7 @@ func startRejectingRuntime(t *testing.T) string {
 	t.Helper()
 
 	addr := freeUDPAddr(t)
-	serverTLS, _, err := hosttls.HostTLSOptions{InsecureSkipTLSValidation: true}.GetTLSConfig()
-	require.NoError(t, err)
+	serverTLS := testRuntimeServerTLS(t)
 
 	mux := http.NewServeMux()
 	wtServer := wt.NewServer(addr, serverTLS, mux)
@@ -179,20 +215,69 @@ func startRejectingRuntime(t *testing.T) string {
 	return addr
 }
 
+// TestRuntimeClientCanReconnect verifies the reconnect-vs-bootstrap selection: only a certificate with enough lifetime left reconnects over mTLS
+// An expired or soon-to-expire certificate must fall back to bootstrap, so an outage longer than the cert lifetime can never strand the host on a doomed mTLS reconnect loop
+func TestRuntimeClientCanReconnect(t *testing.T) {
+	now := time.Now()
+	fakeClock := clocktesting.NewFakeClock(now)
+
+	newClient := func(cert *tls.Certificate) *runtimeClient {
+		holder := certholder.New(nil, nil)
+		if cert != nil {
+			holder.SetCertificate(cert)
+		}
+		return newRuntimeClient(runtimeClientConfig{
+			holder: holder,
+			clock:  fakeClock,
+			log:    slog.New(slog.DiscardHandler),
+		})
+	}
+
+	certExpiringAt := func(notAfter time.Time) *tls.Certificate {
+		return &tls.Certificate{Leaf: &x509.Certificate{NotAfter: notAfter}}
+	}
+
+	t.Run("no certificate bootstraps", func(t *testing.T) {
+		ok := newClient(nil).canReconnect()
+		assert.False(t, ok)
+	})
+
+	t.Run("certificate without a parsed leaf bootstraps", func(t *testing.T) {
+		ok := newClient(&tls.Certificate{}).canReconnect()
+		assert.False(t, ok)
+	})
+
+	t.Run("certificate with ample lifetime reconnects", func(t *testing.T) {
+		ok := newClient(certExpiringAt(now.Add(time.Hour))).canReconnect()
+		assert.True(t, ok)
+	})
+
+	t.Run("expired certificate bootstraps", func(t *testing.T) {
+		ok := newClient(certExpiringAt(now.Add(-time.Minute))).canReconnect()
+		assert.False(t, ok)
+	})
+
+	t.Run("certificate within the reconnect margin bootstraps", func(t *testing.T) {
+		ok := newClient(certExpiringAt(now.Add(reconnectCertMargin / 2))).canReconnect()
+		assert.False(t, ok)
+	})
+}
+
 // TestRuntimeClientFailsFastOnPermanentRegistrationRejection verifies that a permanent registration rejection stops the reconnect loop instead of spinning forever
 func TestRuntimeClientFailsFastOnPermanentRegistrationRejection(t *testing.T) {
 	addr := startRejectingRuntime(t)
 
-	_, clientTLS, err := hosttls.HostTLSOptions{InsecureSkipTLSValidation: true}.GetTLSConfig()
-	require.NoError(t, err)
+	holder, psk, clientTLS := testBootstrap(t)
 
 	rc := newRuntimeClient(runtimeClientConfig{
-		addresses:   []string{addr},
-		peerAddress: "127.0.0.1:7001",
-		actorTypes:  []protocol.ActorHostType{{ActorType: "T", IdleTimeoutMs: 60000}},
-		tlsConfig:   clientTLS,
-		minBackoff:  50 * time.Millisecond,
-		log:         slog.New(slog.DiscardHandler),
+		addresses:    []string{addr},
+		peerAddress:  "127.0.0.1:7001",
+		actorTypes:   []protocol.ActorHostType{{ActorType: "T", IdleTimeoutMs: 60000}},
+		tlsConfig:    clientTLS,
+		holder:       holder,
+		bootstrapPSK: psk,
+		minBackoff:   50 * time.Millisecond,
+		log:          slog.New(slog.DiscardHandler),
 	})
 
 	runErr := make(chan error, 1)

@@ -1,15 +1,17 @@
 package runtime
 
 import (
-	"crypto/tls"
-	"crypto/x509"
 	"log/slog"
 	"time"
 
 	"k8s.io/utils/clock"
 
-	"github.com/italypaleale/francis/internal/hosttls"
+	"github.com/italypaleale/francis/internal/bootstrapauth"
 )
+
+// defaultWorkloadCertTTL is the default lifetime of a host workload certificate
+// A short lifetime keeps the renewal path exercised and bounds how long a revoked host stays trusted
+const defaultWorkloadCertTTL = time.Hour
 
 // RuntimeOption configures a Runtime
 type RuntimeOption func(*runtimeOptions)
@@ -18,6 +20,7 @@ type RuntimeOption func(*runtimeOptions)
 func newRuntimeOptions() *runtimeOptions {
 	return &runtimeOptions{
 		logger:                    slog.New(slog.DiscardHandler),
+		workloadCertTTL:           defaultWorkloadCertTTL,
 		hostHealthCheckDeadline:   20 * time.Second,
 		alarmsPollInterval:        1500 * time.Millisecond,
 		alarmsLeaseDuration:       20 * time.Second,
@@ -31,8 +34,18 @@ func newRuntimeOptions() *runtimeOptions {
 }
 
 type runtimeOptions struct {
-	bind                      string
-	tlsOptions                hosttls.HostTLSOptions
+	bind string
+	// runtimePSKs is the ordered list of runtime pre-shared keys, each deriving one CA, with index 0 being the primary used to mint new certificates
+	// More than one entry is used only during a rolling root rotation
+	runtimePSKs [][]byte
+	// runtimeID identifies this runtime in its server certificate SPIFFE SAN
+	runtimeID string
+	// hostBootstrapPSK, when set, configures the cluster to bootstrap hosts with a host pre-shared key
+	hostBootstrapPSK []byte
+	// hostBootstrapJWT, when set, configures the cluster to bootstrap hosts with a JWT validated against a JWKS
+	hostBootstrapJWT *bootstrapauth.JWTConfig
+	// workloadCertTTL is the lifetime of issued host workload certificates
+	workloadCertTTL           time.Duration
 	logger                    *slog.Logger
 	hostHealthCheckDeadline   time.Duration
 	alarmsPollInterval        time.Duration
@@ -52,20 +65,30 @@ func WithBind(bind string) RuntimeOption {
 	return func(o *runtimeOptions) { o.bind = bind }
 }
 
-// WithServerTLSCertificate sets the TLS certificate for the runtime server
-// If empty, a self-signed certificate is generated
-func WithServerTLSCertificate(cert *tls.Certificate) RuntimeOption {
-	return func(o *runtimeOptions) { o.tlsOptions.ServerCertificate = cert }
+// WithRuntimePSKs sets the runtime pre-shared keys from which the cluster CA is derived
+// The first key is the primary used to mint new certificates, and additional keys are trusted during a rolling root rotation
+func WithRuntimePSKs(psks ...[]byte) RuntimeOption {
+	return func(o *runtimeOptions) { o.runtimePSKs = psks }
 }
 
-// WithServerTLSCA sets the TLS CA certificate used to validate hosts in the cluster
-func WithServerTLSCA(ca *x509.Certificate) RuntimeOption {
-	return func(o *runtimeOptions) { o.tlsOptions.CACertificate = ca }
+// WithRuntimeID sets the identity placed in the runtime server certificate
+func WithRuntimeID(id string) RuntimeOption {
+	return func(o *runtimeOptions) { o.runtimeID = id }
 }
 
-// WithServerTLSClientAuth sets the client authentication mode, used to enable mTLS
-func WithServerTLSClientAuth(clientAuth tls.ClientAuthType) RuntimeOption {
-	return func(o *runtimeOptions) { o.tlsOptions.ClientAuth = clientAuth }
+// WithHostBootstrapPSK configures the cluster to authenticate joining hosts with a host pre-shared key via a channel-bound challenge-response
+func WithHostBootstrapPSK(hostPSK []byte) RuntimeOption {
+	return func(o *runtimeOptions) { o.hostBootstrapPSK = hostPSK }
+}
+
+// WithHostBootstrapJWT configures the cluster to authenticate joining hosts with a JWT validated against the given configuration
+func WithHostBootstrapJWT(cfg bootstrapauth.JWTConfig) RuntimeOption {
+	return func(o *runtimeOptions) { o.hostBootstrapJWT = &cfg }
+}
+
+// WithWorkloadCertTTL sets the lifetime of issued host workload certificates
+func WithWorkloadCertTTL(d time.Duration) RuntimeOption {
+	return func(o *runtimeOptions) { o.workloadCertTTL = d }
 }
 
 // WithLogger sets the slog logger

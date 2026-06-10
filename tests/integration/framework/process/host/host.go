@@ -16,10 +16,6 @@ import (
 	"github.com/italypaleale/francis/tests/integration/framework/process"
 )
 
-// DefaultPeerAuthKey is the shared key used for host-to-host peer authentication
-// All hosts in a single topology must use the same key
-const DefaultPeerAuthKey = "francis-integration-shared-key-0123456789"
-
 const (
 	readinessTimeout = 30 * time.Second
 	shutdownTimeout  = 45 * time.Second

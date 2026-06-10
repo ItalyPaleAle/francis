@@ -2,12 +2,13 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/italypaleale/go-kit/signals"
@@ -19,16 +20,20 @@ import (
 	"github.com/italypaleale/francis/components/postgres"
 	"github.com/italypaleale/francis/components/sqlite"
 	"github.com/italypaleale/francis/components/standalone"
+	"github.com/italypaleale/francis/internal/bootstrapauth"
 	timeutils "github.com/italypaleale/francis/internal/time"
 	"github.com/italypaleale/francis/runtime"
 )
 
 // config is the on-disk configuration for the runtime binary
 type config struct {
-	Bind     string         `yaml:"bind"`
-	TLS      tlsConfig      `yaml:"tls"`
-	Provider providerConfig `yaml:"provider"`
+	Bind        string          `yaml:"bind"`
+	RuntimeID   string          `yaml:"runtimeId"`
+	RuntimePSKs []string        `yaml:"runtimePSKs"`
+	Bootstrap   bootstrapConfig `yaml:"bootstrap"`
+	Provider    providerConfig  `yaml:"provider"`
 
+	WorkloadCertTTL     string `yaml:"workloadCertTTL"`
 	HealthCheckDeadline string `yaml:"healthCheckDeadline"`
 	AlarmsPollInterval  string `yaml:"alarmsPollInterval"`
 	AlarmsLeaseDuration string `yaml:"alarmsLeaseDuration"`
@@ -37,9 +42,21 @@ type config struct {
 	Log logConfig `yaml:"log"`
 }
 
-type tlsConfig struct {
-	Cert string `yaml:"cert"`
-	Key  string `yaml:"key"`
+// bootstrapConfig selects how joining hosts authenticate
+type bootstrapConfig struct {
+	// Method is one of: psk, jwt
+	Method string `yaml:"method"`
+	// HostPSK is the host pre-shared key, used by the "psk" method
+	HostPSK string `yaml:"hostPSK"`
+	// JWT configures the "jwt" method
+	JWT jwtConfig `yaml:"jwt"`
+}
+
+type jwtConfig struct {
+	Issuer     string `yaml:"issuer"`
+	Audience   string `yaml:"audience"`
+	JWKSURL    string `yaml:"jwksURL"`
+	StaticJWKS string `yaml:"staticJWKS"`
 }
 
 type providerConfig struct {
@@ -53,6 +70,12 @@ type logConfig struct {
 }
 
 func main() {
+	// The print-ca subcommand derives and prints the cluster CA so operators can pin it out-of-band
+	if len(os.Args) > 1 && os.Args[1] == "print-ca" {
+		retCode := runPrintCA(os.Args[2:])
+		os.Exit(retCode)
+	}
+
 	var configPath string
 	flag.StringVar(&configPath, "config", "config.yaml", "Path to the configuration file")
 	flag.Parse()
@@ -80,6 +103,7 @@ func run(ctx context.Context, cfg *config, log *slog.Logger) error {
 	alarmsLeaseDuration := timeutils.ParseDurationDefault(cfg.AlarmsLeaseDuration, components.DefaultAlarmsLeaseDuration)
 	alarmsPollInterval := timeutils.ParseDurationDefault(cfg.AlarmsPollInterval, 1500*time.Millisecond)
 	shutdownGracePeriod := timeutils.ParseDurationDefault(cfg.ShutdownGracePeriod, 30*time.Second)
+	workloadCertTTL := timeutils.ParseDurationDefault(cfg.WorkloadCertTTL, time.Hour)
 
 	providerCfg := components.ProviderConfig{
 		HostHealthCheckDeadline:   healthCheckDeadline,
@@ -93,23 +117,31 @@ func run(ctx context.Context, cfg *config, log *slog.Logger) error {
 		return fmt.Errorf("failed to build provider: %w", err)
 	}
 
-	// Build the runtime options
+	// Derive the runtime PSKs the cluster CA is built from
+	psks, err := parsePSKs(cfg.RuntimePSKs)
+	if err != nil {
+		return err
+	}
+
+	// Select the host bootstrap method
+	bootstrapOpt, err := bootstrapOption(cfg.Bootstrap)
+	if err != nil {
+		return err
+	}
+
 	opts := []runtime.RuntimeOption{
 		runtime.WithBind(cfg.Bind),
+		runtime.WithRuntimePSKs(psks...),
+		runtime.WithWorkloadCertTTL(workloadCertTTL),
+		bootstrapOpt,
 		runtime.WithLogger(log.With("scope", "runtime")),
 		runtime.WithHostHealthCheckDeadline(healthCheckDeadline),
 		runtime.WithAlarmsLeaseDuration(alarmsLeaseDuration),
 		runtime.WithAlarmsPollInterval(alarmsPollInterval),
 		runtime.WithShutdownGracePeriod(shutdownGracePeriod),
 	}
-
-	// Load the TLS certificate if configured, otherwise the runtime generates a self-signed one
-	if cfg.TLS.Cert != "" && cfg.TLS.Key != "" {
-		cert, certErr := tls.LoadX509KeyPair(cfg.TLS.Cert, cfg.TLS.Key)
-		if certErr != nil {
-			return fmt.Errorf("failed to load TLS certificate and key: %w", certErr)
-		}
-		opts = append(opts, runtime.WithServerTLSCertificate(&cert))
+	if cfg.RuntimeID != "" {
+		opts = append(opts, runtime.WithRuntimeID(cfg.RuntimeID))
 	}
 
 	rt, err := runtime.NewRuntime(provider, opts...)
@@ -118,6 +150,51 @@ func run(ctx context.Context, cfg *config, log *slog.Logger) error {
 	}
 
 	return rt.Run(ctx)
+}
+
+// parsePSKs resolves the configured runtime PSK strings, expanding environment variables so secrets can be injected at deploy time
+func parsePSKs(in []string) ([][]byte, error) {
+	if len(in) == 0 {
+		return nil, errors.New("at least one runtime PSK is required (runtimePSKs)")
+	}
+
+	out := make([][]byte, len(in))
+	for i, s := range in {
+		v := os.ExpandEnv(s)
+		if v == "" {
+			return nil, fmt.Errorf("runtime PSK at index %d is empty", i)
+		}
+		out[i] = []byte(v)
+	}
+	return out, nil
+}
+
+// bootstrapOption builds the runtime option for the configured host bootstrap method
+func bootstrapOption(cfg bootstrapConfig) (runtime.RuntimeOption, error) {
+	switch strings.ToLower(cfg.Method) {
+	case "psk":
+		psk := os.ExpandEnv(cfg.HostPSK)
+		if psk == "" {
+			return nil, errors.New("bootstrap.hostPSK is required for PSK bootstrap")
+		}
+		return runtime.WithHostBootstrapPSK([]byte(psk)), nil
+	case "jwt":
+		jcfg := bootstrapauth.JWTConfig{
+			Issuer:   cfg.JWT.Issuer,
+			Audience: cfg.JWT.Audience,
+			JWKSURL:  cfg.JWT.JWKSURL,
+		}
+
+		if cfg.JWT.StaticJWKS != "" {
+			jcfg.StaticJWKS = json.RawMessage(cfg.JWT.StaticJWKS)
+		}
+
+		return runtime.WithHostBootstrapJWT(jcfg), nil
+	case "":
+		return nil, errors.New("bootstrap.method is required (psk or jwt)")
+	default:
+		return nil, fmt.Errorf("unsupported bootstrap method %q", cfg.Method)
+	}
 }
 
 // buildProvider constructs the actor provider selected in the configuration

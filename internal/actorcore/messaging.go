@@ -115,7 +115,8 @@ func (m *Manager) doInvokeObject(ctx context.Context, resolver PlacementResolver
 }
 
 // invokeLocalObject invokes an actor owned by this host
-// The bool return is true when the placement looks stale (the actor is inactive or owned elsewhere) so the caller can re-resolve; a local miss carries no retry-after hint
+// The bool return is true when the placement looks stale (the actor is inactive or owned elsewhere) so the caller can re-resolve
+// A local miss carries no retry-after hint
 func (m *Manager) invokeLocalObject(ctx context.Context, resolver PlacementResolver, r ref.ActorRef, method string, data any, activeOnly bool) (actor.Envelope, bool, time.Duration, error) {
 	invoke := func(invokeCtx context.Context, act *ActiveActor) (any, error) {
 		// The actor must implement the Invoke method to be called this way

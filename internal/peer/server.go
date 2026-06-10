@@ -46,9 +46,6 @@ type ServerConfig struct {
 	// StreamHandler runs stream invocations
 	// If nil, stream invocation is unsupported
 	StreamHandler StreamHandler
-	// Auth authorizes incoming sessions
-	// If nil, there's no authnorization (we still use TLS for transport-level encryption)
-	Auth Authenticator
 	// Log is the slog logger
 	Log *slog.Logger
 
@@ -103,22 +100,8 @@ func (s *Server) Run(ctx context.Context) error {
 	})
 
 	// WebTransport endpoint that other hosts dial to invoke actors
+	// The peer is authenticated by the TLS layer, which requires and verifies a host workload certificate before the upgrade completes
 	mux.HandleFunc(protocol.PeerConnectPath, func(w http.ResponseWriter, r *http.Request) {
-		// Authorize the session before upgrading it
-		// A nil authenticator means transport-level TLS is the only check
-		if s.cfg.Auth != nil {
-			ok, rErr := s.cfg.Auth.ValidateIncomingRequest(r)
-			if rErr != nil {
-				s.cfg.Log.WarnContext(r.Context(), "Error authorizing peer session", slog.Any("error", rErr))
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			if !ok {
-				w.WriteHeader(http.StatusUnauthorized)
-				return
-			}
-		}
-
 		session, rErr := srv.Upgrade(w, r)
 		if rErr != nil {
 			s.cfg.Log.WarnContext(r.Context(), "Failed to upgrade peer WebTransport session", slog.Any("error", rErr))
