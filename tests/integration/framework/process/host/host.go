@@ -38,6 +38,7 @@ type Instance interface {
 	Stop(t *testing.T)
 	// Rebind moves the host to a freshly reserved port for its next Run
 	// A real host restart is a new process that frees its old port on exit, whereas an in-process restart on the same UDP port races the old socket, so a rebind models the restart cleanly
+	// See: https://github.com/quic-go/webtransport-go/issues/272
 	Rebind(t *testing.T)
 }
 

@@ -109,10 +109,13 @@ func (s *hostFailover) Run(t *testing.T) {
 	// The actor must be re-placed on a surviving host, with its persisted state carried over so the next increment yields two
 	// Re-placement and routing settle after the stopped host deregisters, so retry until an invocation succeeds
 	require.Eventually(t, func() bool {
-		e, invErr := s.cluster.Service(survivor).Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodIncrement, nil)
-		if invErr != nil {
+		e, rErr := s.cluster.
+			Service(survivor).
+			Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodIncrement, nil)
+		if rErr != nil {
 			return false
 		}
+
 		return e.Decode(&out) == nil
 	}, 45*time.Second, 500*time.Millisecond, "actor should be reachable again after its host is stopped")
 

@@ -89,8 +89,8 @@ func (s *capacity) Run(t *testing.T) {
 
 	// Deactivation propagates to the provider asynchronously, so retry until the freed slot is observable
 	require.Eventually(t, func() bool {
-		_, invErr := svc.Invoke(ctx, shared.ProbeActorType, "cap-c", shared.ProbeMethodPing, nil)
-		return invErr == nil
+		_, rErr := svc.Invoke(ctx, shared.ProbeActorType, "cap-c", shared.ProbeMethodPing, nil)
+		return rErr == nil
 	}, 15*time.Second, 200*time.Millisecond, "a slot freed by halting should allow a new actor to be placed")
 }
 
@@ -130,17 +130,16 @@ func (s *turnBased) Run(t *testing.T) {
 		var wg sync.WaitGroup
 		errs := make([]error, callers)
 		for i := range callers {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				_, errs[i] = svc.Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodHold, nil)
-			}()
+			})
 		}
 		wg.Wait()
 
 		for _, err := range errs {
 			require.NoError(t, err)
 		}
+
 		assert.Equal(t, 1, shared.ProbeObserver.MaxHoldConcurrency(actorID), "an actor must process only one invocation at a time")
 	})
 
@@ -152,11 +151,9 @@ func (s *turnBased) Run(t *testing.T) {
 		var wg sync.WaitGroup
 		errs := make([]error, callers)
 		for i := range callers {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				_, errs[i] = svc.Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodIncrement, nil)
-			}()
+			})
 		}
 		wg.Wait()
 
@@ -207,12 +204,10 @@ func (s *parallel) Run(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make([]error, actors)
 	for i := range actors {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			actorID := "parallel-" + strconv.Itoa(i)
 			_, errs[i] = svc.Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodHold, nil)
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -261,11 +256,9 @@ func (s *crossHostSerial) Run(t *testing.T) {
 		errs := make([]error, rounds*2)
 		for r := range rounds {
 			for h := range 2 {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					_, errs[r*2+h] = s.cluster.Service(h).Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodHold, nil)
-				}()
+				})
 			}
 		}
 		wg.Wait()
@@ -273,6 +266,7 @@ func (s *crossHostSerial) Run(t *testing.T) {
 		for _, err := range errs {
 			require.NoError(t, err)
 		}
+
 		assert.Equal(t, 1, shared.ProbeObserver.MaxHoldConcurrency(actorID), "an actor must process one invocation at a time even across hosts")
 	})
 
@@ -285,11 +279,9 @@ func (s *crossHostSerial) Run(t *testing.T) {
 		errs := make([]error, perHost*2)
 		for i := range perHost {
 			for h := range 2 {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					_, errs[i*2+h] = s.cluster.Service(h).Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodIncrement, nil)
-				}()
+				})
 			}
 		}
 		wg.Wait()

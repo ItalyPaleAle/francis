@@ -22,10 +22,13 @@ import (
 )
 
 // Register one local-runtime scenario per provider variant
-// Only the pure in-memory provider loses data on restart, since every other variant is backed by a store the host reopens
 func init() {
+	// Only the pure in-memory provider loses data on restart, since every other variant is backed by a store the host reopens
 	for _, v := range provider.All() {
-		suite.Register(&durability{variant: v, persists: v != provider.StandaloneMemory})
+		suite.Register(&durability{
+			variant: v,
+			persists: v != provider.StandaloneMemory,
+		})
 	}
 }
 
@@ -69,6 +72,7 @@ func (s *durability) Run(t *testing.T) {
 		s.runPersistent(t, actorID)
 		return
 	}
+
 	s.runEphemeral(t, actorID)
 }
 

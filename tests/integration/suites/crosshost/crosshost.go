@@ -29,6 +29,7 @@ func init() {
 			suite.Register(&invoke{kind: cluster.Local, variant: v})
 			suite.Register(&alarmPlacement{kind: cluster.Local, variant: v})
 		}
+
 		suite.Register(&invoke{kind: cluster.Remote, variant: v})
 		suite.Register(&alarmPlacement{kind: cluster.Remote, variant: v})
 	}

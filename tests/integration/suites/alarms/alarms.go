@@ -37,7 +37,7 @@ const (
 )
 
 // variants is the representative set the alarm scenarios run against
-// Alarm scheduling has three distinct provider implementations: the SQLite SQL path, the Postgres SQL path, and the in-memory standalone path that StandaloneMemory stands in for, so one variant each is enough
+// Alarm scheduling has three distinct provider implementations: the SQLite path, the Postgres path, and the in-memory standalone path that StandaloneMemory stands in for, so one variant each is enough
 var variants = []provider.Variant{provider.SQLite, provider.Postgres, provider.StandaloneMemory}
 
 // Register the alarm scenario across the representative variants on both runtimes

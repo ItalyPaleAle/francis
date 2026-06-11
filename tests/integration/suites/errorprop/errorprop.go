@@ -26,9 +26,16 @@ var variants = []provider.Variant{provider.SQLite, provider.Postgres, provider.S
 func init() {
 	for _, v := range variants {
 		for _, k := range []cluster.Kind{cluster.Local, cluster.Remote} {
-			suite.Register(&localError{kind: k, variant: v})
+			suite.Register(&localError{
+				kind: k,
+				variant: v,
+			})
+
 			if k == cluster.Remote || v.LocalMultiHost() {
-				suite.Register(&crossHostError{kind: k, variant: v})
+				suite.Register(&crossHostError{
+					kind: k,
+					variant: v,
+				})
 			}
 		}
 	}
@@ -99,7 +106,8 @@ func (s *crossHostError) Run(t *testing.T) {
 		shared.SetHostLabel(s.cluster.Service(i), labels[i])
 	}
 
-	// The first call activates the actor and fails; activation still places it, so we learn its host
+	// The first call activates the actor and fails
+	// Activation still places it, so we learn its host
 	_, err := s.cluster.Service(0).Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodFail, nil)
 	require.Error(t, err)
 	require.ErrorContains(t, err, shared.ProbeFailMessage)
