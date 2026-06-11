@@ -232,15 +232,14 @@ func (m *Manager) getOrCreateActor(r ref.ActorRef) (*ActiveActor, error) {
 		return a, nil
 	}
 
-	// Resolve the factory before locking so an unsupported type fails fast
+	// Get the factory function
 	fn, err := m.createActorFn(r)
 	if err != nil {
 		return nil, err
 	}
 
 	// Serialize creation so concurrent cold-start invocations of the same actor produce a single instance
-	// We cannot rely on the map's get-or-compute here: it can hand each racing goroutine its own computed value, which would create duplicate instances with separate turn-based locks and state caches, breaking the single-activation guarantee
-	// Creating the instance also enqueues it for idle deactivation, so an instance we built but did not store would become an orphan the idle processor could later use to evict the real one; building only under the lock avoids that
+	// We cannot rely on the map's getOrCompute here: it can hand each racing goroutine its own computed value, which would create duplicate instances with separate turn-based locks and state caches, breaking the single-activation guarantee
 	m.createLock.Lock()
 	defer m.createLock.Unlock()
 
@@ -253,6 +252,7 @@ func (m *Manager) getOrCreateActor(r ref.ActorRef) (*ActiveActor, error) {
 	// Create the actor and store it as the single active instance for this key
 	a = fn()
 	m.Actors.Set(key, a)
+
 	return a, nil
 }
 

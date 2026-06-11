@@ -19,7 +19,6 @@ import (
 
 // TestGetOrCreateActorConcurrentColdStart guards the single-activation invariant: when many callers invoke the same cold actor at once, they must all receive the one instance that is stored in the map
 // Handing different callers different instances would give each its own turn-based lock and state cache, allowing concurrent execution and lost updates
-// The map's get-or-compute cannot provide this on its own, since it returns each racing caller its own computed value, so creation is serialized in getOrCreateActor
 func TestGetOrCreateActorConcurrentColdStart(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 	m := &Manager{
@@ -31,9 +30,12 @@ func TestGetOrCreateActorConcurrentColdStart(t *testing.T) {
 			"t": {IdleTimeout: 5 * time.Minute},
 		},
 		ActorFactories: map[string]actor.Factory{
-			"t": func(actorID string, service *actor.Service) actor.Actor { return struct{}{} },
+			"t": func(actorID string, service *actor.Service) actor.Actor {
+				return struct{}{}
+			},
 		},
 	}
+
 	m.IdleProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ActiveActor]{
 		ExecuteFn: m.HandleIdleActor,
 		Clock:     clock,
@@ -50,15 +52,13 @@ func TestGetOrCreateActorConcurrentColdStart(t *testing.T) {
 		start := make(chan struct{})
 		var wg sync.WaitGroup
 		for c := range callers {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				// Release all callers together to maximize the overlap on the cold start
 				<-start
 				a, err := m.getOrCreateActor(r)
 				require.NoError(t, err)
 				got[c] = a
-			}()
+			})
 		}
 		close(start)
 		wg.Wait()
@@ -66,6 +66,7 @@ func TestGetOrCreateActorConcurrentColdStart(t *testing.T) {
 		// Every caller must have received the exact same instance, which must also be the one stored in the map
 		stored, ok := m.Actors.Get(r.String())
 		require.True(t, ok)
+
 		for _, a := range got {
 			require.Same(t, stored, a, "all concurrent cold-start callers must receive the single stored instance")
 		}
