@@ -70,7 +70,8 @@ func (s *lifecycle) Run(t *testing.T) {
 		env, err := svc.Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodIncrement, nil)
 		require.NoError(t, err)
 		var out shared.ProbeState
-		require.NoError(t, env.Decode(&out))
+		err = env.Decode(&out)
+		require.NoError(t, err)
 		require.Equal(t, int64(1), out.N)
 
 		// The deactivation count is process-global and the actor ID repeats across scenarios, so measure against a baseline taken while the actor is freshly active
@@ -84,7 +85,8 @@ func (s *lifecycle) Run(t *testing.T) {
 		// Invoking again reactivates the actor, and the persisted state carries over so the counter continues
 		env, err = svc.Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodIncrement, nil)
 		require.NoError(t, err)
-		require.NoError(t, env.Decode(&out))
+		err = env.Decode(&out)
+		require.NoError(t, err)
 		assert.Equal(t, int64(2), out.N, "state should survive deactivation")
 	})
 
@@ -95,11 +97,13 @@ func (s *lifecycle) Run(t *testing.T) {
 		env, err := svc.Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodIncrement, nil)
 		require.NoError(t, err)
 		var out shared.ProbeState
-		require.NoError(t, env.Decode(&out))
+		err = env.Decode(&out)
+		require.NoError(t, err)
 		require.Equal(t, int64(1), out.N)
 
 		before := shared.ProbeObserver.DeactivateCount(actorID)
-		require.NoError(t, svc.Halt(shared.ProbeActorType, actorID))
+		err = svc.Halt(shared.ProbeActorType, actorID)
+		require.NoError(t, err)
 
 		// Halting runs the Deactivate hook
 		require.Eventually(t, func() bool {
@@ -109,7 +113,8 @@ func (s *lifecycle) Run(t *testing.T) {
 		// The actor reactivates on the next invocation, resuming from its persisted state
 		env, err = svc.Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodIncrement, nil)
 		require.NoError(t, err)
-		require.NoError(t, env.Decode(&out))
+		err = env.Decode(&out)
+		require.NoError(t, err)
 		assert.Equal(t, int64(2), out.N, "state should survive halting")
 	})
 

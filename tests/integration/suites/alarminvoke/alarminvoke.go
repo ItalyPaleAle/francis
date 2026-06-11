@@ -79,20 +79,22 @@ func (s *alarmInvoke) Run(t *testing.T) {
 		shared.ProbeObserver.SetAlarmHold(actorID)
 
 		// A repeating alarm keeps firing throughout the invocation storm, maximizing the chance of an overlap if one were possible
-		require.NoError(t, svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
+		err := svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
 			DueTime:  time.Now(),
 			Interval: shared.ISOInterval(200 * time.Millisecond),
-		}))
+		})
+		require.NoError(t, err)
 
 		// Drive a sustained stream of holding invocations for long enough to span several alarm firings
 		deadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(deadline) {
-			_, err := svc.Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodHold, nil)
+			_, err = svc.Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodHold, nil)
 			require.NoError(t, err)
 		}
 
 		// Stop the alarm and confirm it actually fired during the storm, so the no-overlap result is meaningful
-		require.NoError(t, svc.DeleteAlarm(ctx, shared.ProbeActorType, actorID, "a"))
+		err = svc.DeleteAlarm(ctx, shared.ProbeActorType, actorID, "a")
+		require.NoError(t, err)
 		assert.GreaterOrEqual(t, shared.ProbeObserver.AlarmCount(actorID), 1, "the alarm should have fired during the invocation storm")
 		assert.Equal(t, 1, shared.ProbeObserver.MaxHoldConcurrency(actorID), "an alarm and an invocation must not run concurrently on one actor")
 	})

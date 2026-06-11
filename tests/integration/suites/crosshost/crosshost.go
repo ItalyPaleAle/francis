@@ -67,13 +67,15 @@ func (s *invoke) Run(t *testing.T) {
 	require.NoError(t, err)
 
 	var out shared.CounterResult
-	require.NoError(t, env.Decode(&out))
+	err = env.Decode(&out)
+	require.NoError(t, err)
 	require.Equal(t, int64(1), out.N)
 
 	// Invoking the same actor from the second host hits the same placement and shared state, advancing the counter to 2
 	env, err = s.cluster.Service(1).Invoke(t.Context(), shared.CounterActorType, actorID, "increment", nil)
 	require.NoError(t, err)
-	require.NoError(t, env.Decode(&out))
+	err = env.Decode(&out)
+	require.NoError(t, err)
 	require.Equal(t, int64(2), out.N)
 }
 
@@ -122,9 +124,10 @@ func (s *alarmPlacement) Run(t *testing.T) {
 	// Schedule a one-shot alarm and wait for this run's execution
 	// The fire count is process-global, so measure against a baseline to stay correct even when the binary reruns the suite
 	before := shared.ProbeObserver.AlarmCount(actorID)
-	require.NoError(t, s.cluster.Service(0).SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
+	err = s.cluster.Service(0).SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
 		DueTime: time.Now(),
-	}))
+	})
+	require.NoError(t, err)
 	require.Eventually(t, func() bool {
 		return shared.ProbeObserver.AlarmCount(actorID) > before
 	}, 20*time.Second, 100*time.Millisecond, "the alarm should fire")

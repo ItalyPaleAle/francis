@@ -85,7 +85,8 @@ func (s *capacity) Run(t *testing.T) {
 	require.ErrorIs(t, err, actor.ErrNoHost)
 
 	// Halting an active actor frees its slot, after which the previously rejected actor can be placed
-	require.NoError(t, svc.Halt(shared.ProbeActorType, "cap-a"))
+	err = svc.Halt(shared.ProbeActorType, "cap-a")
+	require.NoError(t, err)
 
 	// Deactivation propagates to the provider asynchronously, so retry until the freed slot is observable
 	require.Eventually(t, func() bool {
@@ -162,7 +163,8 @@ func (s *turnBased) Run(t *testing.T) {
 		}
 
 		var got shared.ProbeState
-		require.NoError(t, svc.GetState(ctx, shared.ProbeActorType, actorID, &got))
+		err := svc.GetState(ctx, shared.ProbeActorType, actorID, &got)
+		require.NoError(t, err)
 		assert.Equal(t, int64(callers), got.N, "every increment should be reflected in the final state")
 	})
 }
@@ -291,7 +293,8 @@ func (s *crossHostSerial) Run(t *testing.T) {
 		}
 
 		var got shared.ProbeState
-		require.NoError(t, s.cluster.Service(0).GetState(ctx, shared.ProbeActorType, actorID, &got))
+		err := s.cluster.Service(0).GetState(ctx, shared.ProbeActorType, actorID, &got)
+		require.NoError(t, err)
 		assert.Equal(t, int64(perHost*2), got.N, "every increment from both hosts should be reflected in the final state")
 	})
 }

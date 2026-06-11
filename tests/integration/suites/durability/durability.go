@@ -65,7 +65,8 @@ func (s *durability) Run(t *testing.T) {
 	env, err := s.cluster.Service(0).Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodIncrement, nil)
 	require.NoError(t, err)
 	var out shared.ProbeState
-	require.NoError(t, env.Decode(&out))
+	err = env.Decode(&out)
+	require.NoError(t, err)
 	require.Equal(t, int64(1), out.N)
 
 	if s.persists {
@@ -81,10 +82,11 @@ func (s *durability) runPersistent(t *testing.T, actorID string) {
 	ctx := t.Context()
 
 	// Arm a repeating alarm and wait for it to fire at least once before the restart
-	require.NoError(t, s.cluster.Service(0).SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
+	err := s.cluster.Service(0).SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
 		DueTime:  time.Now(),
 		Interval: shared.ISOInterval(300 * time.Millisecond),
-	}))
+	})
+	require.NoError(t, err)
 	require.Eventually(t, func() bool {
 		return shared.ProbeObserver.AlarmCount(actorID) >= 1
 	}, 20*time.Second, 100*time.Millisecond, "alarm should fire before the restart")
@@ -97,12 +99,14 @@ func (s *durability) runPersistent(t *testing.T, actorID string) {
 
 	// The persisted state survived, so a read returns the prior value and the next increment continues from it
 	var got shared.ProbeState
-	require.NoError(t, s.cluster.Service(0).GetState(ctx, shared.ProbeActorType, actorID, &got))
+	err = s.cluster.Service(0).GetState(ctx, shared.ProbeActorType, actorID, &got)
+	require.NoError(t, err)
 	assert.Equal(t, int64(1), got.N, "state should survive a host restart")
 
 	env, err := s.cluster.Service(0).Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodIncrement, nil)
 	require.NoError(t, err)
-	require.NoError(t, env.Decode(&got))
+	err = env.Decode(&got)
+	require.NoError(t, err)
 	assert.Equal(t, int64(2), got.N)
 
 	// The alarm survived too, so it fires again on the restarted host
@@ -110,7 +114,8 @@ func (s *durability) runPersistent(t *testing.T, actorID string) {
 		return shared.ProbeObserver.AlarmCount(actorID) > countAfterStop
 	}, 30*time.Second, 100*time.Millisecond, "a persisted alarm should keep firing after the restart")
 
-	require.NoError(t, s.cluster.Service(0).DeleteAlarm(ctx, shared.ProbeActorType, actorID, "a"))
+	err = s.cluster.Service(0).DeleteAlarm(ctx, shared.ProbeActorType, actorID, "a")
+	require.NoError(t, err)
 }
 
 // runEphemeral restarts the host and confirms the in-memory provider lost the actor's state

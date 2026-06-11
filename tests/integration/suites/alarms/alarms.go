@@ -85,9 +85,10 @@ func (s *alarms) Run(t *testing.T) {
 	// A non-repeating alarm fires and then stops, so its execution count settles
 	t.Run("one-shot fires once", func(t *testing.T) {
 		const actorID = "oneshot-1"
-		require.NoError(t, svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
+		err := svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
 			DueTime: time.Now(),
-		}))
+		})
+		require.NoError(t, err)
 
 		// Alarm delivery is at-least-once, so assert that it fires and then quiesces rather than asserting an exact count
 		got := settleAlarm(t, actorID)
@@ -97,10 +98,11 @@ func (s *alarms) Run(t *testing.T) {
 	// An alarm delivers its associated data to the actor
 	t.Run("carries data", func(t *testing.T) {
 		const actorID = "data-1"
-		require.NoError(t, svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
+		err := svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
 			DueTime: time.Now(),
 			Data:    "hello",
-		}))
+		})
+		require.NoError(t, err)
 
 		settleAlarm(t, actorID)
 		fires := shared.ProbeObserver.AlarmFires(actorID)
@@ -111,10 +113,11 @@ func (s *alarms) Run(t *testing.T) {
 	// A repeating alarm fires on its interval until it is removed
 	t.Run("repeating fires repeatedly", func(t *testing.T) {
 		const actorID = "repeat-1"
-		require.NoError(t, svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
+		err := svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
 			DueTime:  time.Now(),
 			Interval: shared.ISOInterval(400 * time.Millisecond),
-		}))
+		})
+		require.NoError(t, err)
 
 		// Several executions over time confirm the alarm reschedules itself
 		require.Eventually(t, func() bool {
@@ -122,7 +125,8 @@ func (s *alarms) Run(t *testing.T) {
 		}, eventuallyTimeout, eventuallyTick, "repeating alarm should fire multiple times")
 
 		// Stop further executions so the count cannot keep growing into later subtests
-		require.NoError(t, svc.DeleteAlarm(ctx, shared.ProbeActorType, actorID, "a"))
+		err = svc.DeleteAlarm(ctx, shared.ProbeActorType, actorID, "a")
+		require.NoError(t, err)
 	})
 
 	// A repeating alarm with a TTL stops repeating once the deadline passes, rather than firing forever
@@ -131,11 +135,12 @@ func (s *alarms) Run(t *testing.T) {
 
 		// The fire count is process-global, so measure this run's executions against a baseline
 		before := shared.ProbeObserver.AlarmCount(actorID)
-		require.NoError(t, svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
+		err := svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
 			DueTime:  time.Now(),
 			Interval: shared.ISOInterval(400 * time.Millisecond),
 			TTL:      time.Now().Add(2 * time.Second),
-		}))
+		})
+		require.NoError(t, err)
 
 		// settleAlarm returns only once the count stops changing, which a TTL-bounded alarm does but an unbounded repeating one would not
 		got := settleAlarm(t, actorID)
@@ -147,16 +152,18 @@ func (s *alarms) Run(t *testing.T) {
 		const actorID = "edit-1"
 
 		// The initial alarm is far in the future, so it will not fire on its own
-		require.NoError(t, svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
+		err := svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
 			DueTime: time.Now().Add(time.Hour),
 			Data:    "old",
-		}))
+		})
+		require.NoError(t, err)
 
 		// Editing it to fire now with new data should produce an execution carrying the new data, never the old one
-		require.NoError(t, svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
+		err = svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
 			DueTime: time.Now(),
 			Data:    "new",
-		}))
+		})
+		require.NoError(t, err)
 
 		got := settleAlarm(t, actorID)
 		assert.GreaterOrEqual(t, got, 1, "edited alarm should fire")
@@ -170,10 +177,12 @@ func (s *alarms) Run(t *testing.T) {
 	// Deleting an alarm before it comes due prevents it from ever executing
 	t.Run("delete before due prevents firing", func(t *testing.T) {
 		const actorID = "delete-1"
-		require.NoError(t, svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
+		err := svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
 			DueTime: time.Now().Add(800 * time.Millisecond),
-		}))
-		require.NoError(t, svc.DeleteAlarm(ctx, shared.ProbeActorType, actorID, "a"))
+		})
+		require.NoError(t, err)
+		err = svc.DeleteAlarm(ctx, shared.ProbeActorType, actorID, "a")
+		require.NoError(t, err)
 
 		// The count settling at zero, well past the original due time, confirms the alarm never ran
 		got := settleAlarm(t, actorID)
@@ -192,9 +201,10 @@ func (s *alarms) Run(t *testing.T) {
 
 		// Fail the first execution only, so a retry within the attempt budget succeeds
 		shared.ProbeObserver.SetAlarmFault(actorID, 1)
-		require.NoError(t, svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
+		err := svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
 			DueTime: time.Now(),
-		}))
+		})
+		require.NoError(t, err)
 
 		// At least two executions are expected: one failed attempt followed by a successful retry that completes the alarm
 		got := settleAlarm(t, actorID)
@@ -212,9 +222,10 @@ func (s *alarms) Run(t *testing.T) {
 
 		// Fail every execution so the alarm exhausts its attempts and is treated as fatal
 		shared.ProbeObserver.SetAlarmFault(actorID, -1)
-		require.NoError(t, svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
+		err := svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
 			DueTime: time.Now(),
-		}))
+		})
+		require.NoError(t, err)
 
 		// The count settling proves the alarm was removed once fatal, and it must have retried at least up to the attempt budget first
 		// The exact final count differs slightly between runtimes, so assert the lower bound
@@ -234,9 +245,10 @@ func (s *alarms) Run(t *testing.T) {
 		ids := make([]string, count)
 		for i := range count {
 			ids[i] = "batch-" + strconv.Itoa(i)
-			require.NoError(t, svc.SetAlarm(ctx, shared.ProbeActorType, ids[i], "a", actor.AlarmProperties{
+			err := svc.SetAlarm(ctx, shared.ProbeActorType, ids[i], "a", actor.AlarmProperties{
 				DueTime: time.Now(),
-			}))
+			})
+			require.NoError(t, err)
 		}
 
 		require.Eventually(t, func() bool {

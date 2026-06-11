@@ -92,7 +92,8 @@ func (s *hostFailover) Run(t *testing.T) {
 	env, err := s.cluster.Service(0).Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodIncrement, nil)
 	require.NoError(t, err)
 	var out shared.ProbeState
-	require.NoError(t, env.Decode(&out))
+	err = env.Decode(&out)
+	require.NoError(t, err)
 	require.Equal(t, int64(1), out.N)
 
 	placed := shared.ProbeObserver.LastInvokeHost(actorID)
@@ -156,10 +157,11 @@ func (s *alarmMigration) Run(t *testing.T) {
 	labels := labelHosts(s.cluster)
 
 	// A repeating alarm activates the actor on whichever host leases it
-	require.NoError(t, s.cluster.Service(0).SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
+	err := s.cluster.Service(0).SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
 		DueTime:  time.Now(),
 		Interval: shared.ISOInterval(300 * time.Millisecond),
-	}))
+	})
+	require.NoError(t, err)
 
 	// Wait until it is firing steadily, then learn which host is executing it
 	require.Eventually(t, func() bool {
@@ -184,5 +186,6 @@ func (s *alarmMigration) Run(t *testing.T) {
 
 	// Stop the alarm so it cannot leak into later scenarios
 	survivor := (ownerIdx + 1) % s.cluster.Len()
-	require.NoError(t, s.cluster.Service(survivor).DeleteAlarm(ctx, shared.ProbeActorType, actorID, "a"))
+	err = s.cluster.Service(survivor).DeleteAlarm(ctx, shared.ProbeActorType, actorID, "a")
+	require.NoError(t, err)
 }
