@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -394,4 +396,44 @@ func TestManagerInvokeStreamStaleLocal(t *testing.T) {
 		assert.Equal(t, 0, resolver.invalidated)
 		assert.Equal(t, 1, resolver.confirmCalls)
 	})
+}
+
+// TestGetOrCreateActorConcurrentColdStart guards the single-activation invariant: when many callers invoke the same cold actor at once, they must all receive the one instance that is stored in the map
+// Handing different callers different instances would give each its own turn-based lock and state cache, allowing concurrent execution and lost updates
+func TestGetOrCreateActorConcurrentColdStart(t *testing.T) {
+	m := newMessagingManager(t, func(_ string, _ *actor.Service) actor.Actor { return struct{}{} })
+
+	// Each round cold-starts a fresh actor from several goroutines at once, so the creation race is exercised repeatedly
+	const rounds = 500
+	const callers = 16
+	for i := range rounds {
+		r := ref.NewActorRef("testactor", strconv.Itoa(i))
+
+		got := make([]*ActiveActor, callers)
+		errs := make([]error, callers)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for c := range callers {
+			wg.Go(func() {
+				// Release all callers together to maximize the overlap on the cold start
+				<-start
+				got[c], errs[c] = m.getOrCreateActor(r)
+			})
+		}
+		close(start)
+		wg.Wait()
+
+		// All goroutines must have succeeded
+		for _, err := range errs {
+			require.NoError(t, err)
+		}
+
+		// Every caller must have received the exact same instance, which must also be the one stored in the map
+		stored, ok := m.Actors.Get(r.String())
+		require.True(t, ok)
+
+		for _, a := range got {
+			require.Same(t, stored, a, "all concurrent cold-start callers must receive the single stored instance")
+		}
+	}
 }

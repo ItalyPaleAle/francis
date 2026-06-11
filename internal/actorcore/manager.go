@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -66,6 +67,9 @@ type Manager struct {
 	Actors *haxmap.Map[string, *ActiveActor]
 	// IdleProcessor schedules actors for deactivation when they become idle
 	IdleProcessor *eventqueue.Processor[string, *ActiveActor]
+
+	// createLock serializes the creation of new active actors so concurrent cold-start invocations of the same actor produce a single instance
+	createLock sync.Mutex
 }
 
 // NewManager returns a Manager ready to register actors
@@ -219,14 +223,36 @@ func (m *Manager) lockAndInvokeActor(parentCtx context.Context, act *ActiveActor
 }
 
 func (m *Manager) getOrCreateActor(r ref.ActorRef) (*ActiveActor, error) {
+	key := r.String()
+
+	// Fast path: the actor is already active, so return it without taking the creation lock
+	// This keeps the hot path (invoking an already-active actor) lock-free
+	a, ok := m.Actors.Get(key)
+	if ok && a != nil {
+		return a, nil
+	}
+
 	// Get the factory function
 	fn, err := m.createActorFn(r)
 	if err != nil {
 		return nil, err
 	}
 
-	// Get (or create) the actor
-	a, _ := m.Actors.GetOrCompute(r.String(), fn)
+	// Serialize creation so concurrent cold-start invocations of the same actor produce a single instance
+	// We cannot rely on the map's getOrCompute here: it can hand each racing goroutine its own computed value, which would create duplicate instances with separate turn-based locks and state caches, breaking the single-activation guarantee
+	m.createLock.Lock()
+	defer m.createLock.Unlock()
+
+	// Re-check under the lock in case another goroutine created the actor while we waited
+	a, ok = m.Actors.Get(key)
+	if ok && a != nil {
+		return a, nil
+	}
+
+	// Create the actor and store it as the single active instance for this key
+	a = fn()
+	m.Actors.Set(key, a)
+
 	return a, nil
 }
 

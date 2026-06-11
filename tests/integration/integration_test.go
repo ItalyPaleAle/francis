@@ -18,8 +18,17 @@ import (
 	"github.com/italypaleale/francis/tests/integration/suite"
 
 	// Blank-import every suite package so their init() registers the cases
+	_ "github.com/italypaleale/francis/tests/integration/suites/alarminvoke"
+	_ "github.com/italypaleale/francis/tests/integration/suites/alarms"
 	_ "github.com/italypaleale/francis/tests/integration/suites/crosshost"
+	_ "github.com/italypaleale/francis/tests/integration/suites/durability"
+	_ "github.com/italypaleale/francis/tests/integration/suites/errorprop"
+	_ "github.com/italypaleale/francis/tests/integration/suites/failover"
+	_ "github.com/italypaleale/francis/tests/integration/suites/invocation"
+	_ "github.com/italypaleale/francis/tests/integration/suites/lifecycle"
+	_ "github.com/italypaleale/francis/tests/integration/suites/routing"
 	_ "github.com/italypaleale/francis/tests/integration/suites/state"
+	_ "github.com/italypaleale/francis/tests/integration/suites/streaming"
 )
 
 // TestIntegration runs every registered integration scenario as a subtest

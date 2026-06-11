@@ -9,10 +9,13 @@ import (
 	"net"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/host/local"
+	runtimepkg "github.com/italypaleale/francis/runtime"
 	"github.com/italypaleale/francis/tests/integration/framework/process"
 	frameworkhost "github.com/italypaleale/francis/tests/integration/framework/process/host"
 	"github.com/italypaleale/francis/tests/integration/framework/process/ports"
@@ -40,6 +43,10 @@ type Options struct {
 	Hosts int
 	// Actors are registered on every host before it starts
 	Actors []frameworkhost.ActorReg
+	// AlarmsPollInterval optionally tunes how frequently alarms are polled, so alarm scenarios fire quickly instead of waiting on the multi-second component defaults
+	// On the local topology it is applied to each host, and on the remote topology to the runtime that owns alarm execution, so the same value speeds up either topology
+	// Zero leaves the component default in place
+	AlarmsPollInterval time.Duration
 }
 
 // Cluster is an assembled topology, exposing its processes and host services
@@ -86,12 +93,19 @@ func New(t *testing.T, opts Options) *Cluster {
 func (c *Cluster) buildLocal(t *testing.T, opts Options) {
 	t.Helper()
 
+	// Each local host owns alarm polling, so the poll interval is applied per host
+	var hostExtra []local.HostOption
+	if opts.AlarmsPollInterval > 0 {
+		hostExtra = append(hostExtra, local.WithAlarmsPollInterval(opts.AlarmsPollInterval))
+	}
+
 	hostPorts := ports.Reserve(t, opts.Hosts)
 	for i := range opts.Hosts {
 		h := frameworkhost.NewLocal(frameworkhost.LocalOptions{
 			Address: addr(hostPorts[i]),
 			Backend: c.backend,
 			Actors:  opts.Actors,
+			Extra:   hostExtra,
 		})
 		c.hosts[i] = h
 		c.procs = append(c.procs, h)
@@ -107,9 +121,16 @@ func (c *Cluster) buildRemote(t *testing.T, opts Options) {
 	runtimeAddr := addr(p[0])
 	hostPorts := p[1:]
 
+	// On the remote topology the runtime owns alarm polling, so the poll interval is applied there instead of on the hosts
+	var runtimeExtra []runtimepkg.RuntimeOption
+	if opts.AlarmsPollInterval > 0 {
+		runtimeExtra = append(runtimeExtra, runtimepkg.WithAlarmsPollInterval(opts.AlarmsPollInterval))
+	}
+
 	c.runtime = frameworkruntime.New(frameworkruntime.Options{
 		Bind:    runtimeAddr,
 		Backend: c.backend,
+		Extra:   runtimeExtra,
 	})
 	c.procs = append(c.procs, c.runtime)
 

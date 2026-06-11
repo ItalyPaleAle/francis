@@ -33,6 +33,13 @@ type Instance interface {
 	HostID() string
 	// Address returns the peer address the host is reachable at
 	Address() string
+	// Stop gracefully shuts the host down mid-test, leaving the rest of the topology running
+	// It is idempotent with Cleanup, and the host can be brought back up by calling Run again
+	Stop(t *testing.T)
+	// Rebind moves the host to a freshly reserved port for its next Run
+	// A real host restart is a new process that frees its old port on exit, whereas an in-process restart on the same UDP port races the old socket, so a rebind models the restart cleanly
+	// See: https://github.com/quic-go/webtransport-go/issues/272
+	Rebind(t *testing.T)
 }
 
 // ActorReg describes an actor type to register on a host before it starts
