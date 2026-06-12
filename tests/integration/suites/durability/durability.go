@@ -26,7 +26,7 @@ func init() {
 	// Only the pure in-memory provider loses data on restart, since every other variant is backed by a store the host reopens
 	for _, v := range provider.All() {
 		suite.Register(&durability{
-			variant: v,
+			variant:  v,
 			persists: v != provider.StandaloneMemory,
 		})
 	}

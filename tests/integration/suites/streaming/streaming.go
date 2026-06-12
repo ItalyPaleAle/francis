@@ -89,7 +89,7 @@ func (s *localStream) Run(t *testing.T) {
 		payload := bytes.Repeat([]byte("abcdefghij"), 25_000) // 250 KB
 		respCT, got := echo(t, svc, "stream-large", "echo", "application/octet-stream", payload)
 		assert.Equal(t, shared.ProbeStreamContentType, respCT)
-		require.Equal(t, len("echo:")+len(payload), len(got))
+		require.Len(t, got, len("echo:")+len(payload))
 		assert.True(t, strings.HasPrefix(string(got), "echo:"))
 		assert.True(t, bytes.Equal([]byte(strings.TrimPrefix(string(got), "echo:")), payload), "the streamed body should round-trip unchanged")
 	})

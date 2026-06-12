@@ -258,7 +258,8 @@ func HostLabel(svc *actor.Service) string {
 	if !ok {
 		return ""
 	}
-	return v.(string)
+	vStr, _ := v.(string)
+	return vStr
 }
 
 var ProbeObserver = &probeObserver{

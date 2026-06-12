@@ -27,13 +27,13 @@ func init() {
 	for _, v := range variants {
 		for _, k := range []cluster.Kind{cluster.Local, cluster.Remote} {
 			suite.Register(&localError{
-				kind: k,
+				kind:    k,
 				variant: v,
 			})
 
 			if k == cluster.Remote || v.LocalMultiHost() {
 				suite.Register(&crossHostError{
-					kind: k,
+					kind:    k,
 					variant: v,
 				})
 			}

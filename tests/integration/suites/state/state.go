@@ -4,6 +4,7 @@
 package state
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -198,7 +199,7 @@ func (s *crud) Run(t *testing.T) {
 		require.Eventually(t, func() bool {
 			var v shared.ProbeState
 			err := svc.GetState(ctx, shared.ProbeActorType, "ttl-1", &v)
-			return err == actor.ErrStateNotFound
+			return errors.Is(err, actor.ErrStateNotFound)
 		}, 10*time.Second, 200*time.Millisecond, "state with TTL should expire")
 	})
 
