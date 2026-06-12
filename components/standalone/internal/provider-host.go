@@ -13,6 +13,11 @@ import (
 )
 
 func (p *Provider) RegisterHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {
+	// If the host wants to reattach to an existing registration, take the dedicated path
+	if req.ExistingHostID != "" {
+		return p.reattachHost(ctx, req)
+	}
+
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 
@@ -83,6 +88,177 @@ func (p *Provider) RegisterHost(ctx context.Context, req components.RegisterHost
 	}
 
 	return components.RegisterHostRes{HostID: hostID}, nil
+}
+
+// reattachHost reattaches a reconnecting host to its existing registration, identified by req.ExistingHostID
+// It refreshes the registration in place even if its health record is stale, so a host can reclaim it after a runtime failover without waiting for the previous health record to expire
+// If the registration no longer exists, a brand-new one is created instead
+func (p *Provider) reattachHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+
+	changes := NewChanges()
+	defer changes.Release()
+
+	p.Mu.RLock()
+	existing, exists := p.Hosts[req.ExistingHostID]
+
+	// Detect an address conflict with a different, healthy host
+	// Unhealthy hosts at the same address are cleaned up below, so they do not block reattachment
+	conflict := false
+	otherID, ok := p.HostsByAddress[req.Address]
+	if ok && otherID != req.ExistingHostID {
+		other, ok2 := p.Hosts[otherID]
+		if ok2 && p.IsHostHealthy(other) {
+			conflict = true
+		}
+	}
+
+	// Plan cleanup of unhealthy hosts, but never the registration we are reattaching to
+	var (
+		cleanupHostIDs   []string
+		cleanupAddresses []string
+		cleanupActors    []ActorKey
+	)
+	for id, h := range p.Hosts {
+		if id == req.ExistingHostID || p.IsHostHealthy(h) {
+			continue
+		}
+
+		cleanupHostIDs = append(cleanupHostIDs, id)
+		cleanupAddresses = append(cleanupAddresses, h.Address)
+		changes.Hosts.Delete = append(changes.Hosts.Delete, id)
+
+		for _, hat := range p.HostActorTypes[id] {
+			changes.HostActorTypes.Delete = append(changes.HostActorTypes.Delete, HostActorTypeKey{
+				HostID:    hat.HostID,
+				ActorType: hat.ActorType,
+			})
+		}
+
+		for key, actor := range p.ActiveActors {
+			if actor.HostID != id {
+				continue
+			}
+			cleanupActors = append(cleanupActors, key)
+			changes.ActiveActors.Delete = append(changes.ActiveActors.Delete, key)
+		}
+	}
+
+	// Build the reattach changes while still holding the read lock
+	var (
+		updatedHost *Host
+		oldAddress  string
+		newHats     []*HostActorType
+	)
+	if exists {
+		oldAddress = existing.Address
+		updatedHost = existing.Clone()
+		updatedHost.Address = req.Address
+		updatedHost.LastHealthCheck = p.Clock.Now()
+		changes.Hosts.Set = append(changes.Hosts.Set, HostChange{Key: req.ExistingHostID, Value: updatedHost})
+
+		// Replace the supported actor types
+		for _, hat := range p.HostActorTypes[req.ExistingHostID] {
+			changes.HostActorTypes.Delete = append(changes.HostActorTypes.Delete, HostActorTypeKey{
+				HostID:    hat.HostID,
+				ActorType: hat.ActorType,
+			})
+		}
+		newHats = buildHostActorTypes(req.ExistingHostID, req.ActorTypes, changes)
+	}
+	p.Mu.RUnlock()
+
+	if conflict {
+		return components.RegisterHostRes{}, components.ErrHostAlreadyRegistered
+	}
+
+	applyCleanup := func() {
+		for i, id := range cleanupHostIDs {
+			delete(p.Hosts, id)
+			delete(p.HostsByAddress, cleanupAddresses[i])
+			delete(p.HostActorTypes, id)
+		}
+
+		for _, key := range cleanupActors {
+			delete(p.ActiveActors, key)
+		}
+	}
+
+	// Reattach to the existing registration
+	if exists {
+		err := p.persistThenApply(ctx, &p.Mu, changes, func() {
+			applyCleanup()
+
+			if oldAddress != req.Address {
+				delete(p.HostsByAddress, oldAddress)
+			}
+
+			p.Hosts[req.ExistingHostID] = updatedHost
+			p.HostsByAddress[req.Address] = req.ExistingHostID
+
+			if len(newHats) > 0 {
+				p.HostActorTypes[req.ExistingHostID] = newHats
+			} else {
+				delete(p.HostActorTypes, req.ExistingHostID)
+			}
+		})
+		if err != nil {
+			return components.RegisterHostRes{}, err
+		}
+		return components.RegisterHostRes{HostID: req.ExistingHostID, Reattached: true}, nil
+	}
+
+	// The existing registration was not found: create a new one with a fresh host ID
+	hostIDObj, err := uuid.NewV7()
+	if err != nil {
+		return components.RegisterHostRes{}, err
+	}
+	hostID := hostIDObj.String()
+
+	h := &Host{
+		ID:              hostID,
+		Address:         req.Address,
+		LastHealthCheck: p.Clock.Now(),
+	}
+	changes.Hosts.Set = append(changes.Hosts.Set, HostChange{Key: hostID, Value: h})
+	freshHats := buildHostActorTypes(hostID, req.ActorTypes, changes)
+
+	err = p.persistThenApply(ctx, &p.Mu, changes, func() {
+		applyCleanup()
+
+		p.Hosts[hostID] = h
+		p.HostsByAddress[req.Address] = hostID
+
+		if len(freshHats) > 0 {
+			p.HostActorTypes[hostID] = freshHats
+		}
+	})
+	if err != nil {
+		return components.RegisterHostRes{}, err
+	}
+
+	return components.RegisterHostRes{HostID: hostID, Reattached: false}, nil
+}
+
+// buildHostActorTypes constructs HostActorType entries for the given host and records them as upserts in changes
+func buildHostActorTypes(hostID string, actorTypes []components.ActorHostType, changes *Changes) []*HostActorType {
+	if len(actorTypes) == 0 {
+		return nil
+	}
+
+	hats := make([]*HostActorType, len(actorTypes))
+	for i, at := range actorTypes {
+		hat := &HostActorType{
+			HostID:           hostID,
+			ActorType:        at.ActorType,
+			IdleTimeout:      at.IdleTimeout,
+			ConcurrencyLimit: at.ConcurrencyLimit,
+		}
+		hats[i] = hat
+		changes.HostActorTypes.Set = append(changes.HostActorTypes.Set, hat)
+	}
+	return hats
 }
 
 func (p *Provider) UpdateActorHost(ctx context.Context, hostID string, req components.UpdateActorHostReq) error {

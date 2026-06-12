@@ -258,6 +258,180 @@ func (s Suite) TestRegisterHost(t *testing.T) {
 		}
 		expectHosts(t, expectedHosts, expectedActorTypes)
 	})
+
+	// Reattachment: a reconnecting host can reclaim its registration by its previous host ID
+
+	const (
+		reattachHostA = "aaaaaaaa-0000-4000-8000-000000000001"
+		reattachHostB = "bbbbbbbb-0000-4000-8000-000000000002"
+		reattachHostX = "99999999-0000-4000-8000-00000000ffff"
+	)
+
+	t.Run("reattach refreshes an existing registration and preserves active actors", func(t *testing.T) {
+		require.NoError(t, s.p.Seed(t.Context(), Spec{
+			Hosts: HostSpecCollection{
+				{HostID: reattachHostA, Address: "192.168.1.110:8080", LastHealthAgo: 2 * time.Second},
+			},
+			HostActorTypes: HostActorTypeSpecCollection{
+				{HostID: reattachHostA, ActorType: "OldType", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 5},
+			},
+			ActiveActors: []ActiveActorSpec{
+				{ActorType: "OldType", ActorID: "actor-1", HostID: reattachHostA, ActorIdleTimeout: 5 * time.Minute, ActivationAgo: time.Second},
+			},
+		}))
+
+		// Reattach with the same host ID, a changed address, and a replaced actor type set
+		res, err := s.p.RegisterHost(t.Context(), components.RegisterHostReq{
+			ExistingHostID: reattachHostA,
+			Address:        "192.168.1.111:9090",
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "NewType", IdleTimeout: 3 * time.Minute, ConcurrencyLimit: 8},
+			},
+		})
+		require.NoError(t, err)
+		assert.True(t, res.Reattached, "should report a reattachment")
+		assert.Equal(t, reattachHostA, res.HostID, "should keep the same host ID")
+
+		expectedHosts := HostSpecCollection{
+			{HostID: reattachHostA, Address: "192.168.1.111:9090"},
+		}
+		expectedActorTypes := HostActorTypeSpecCollection{
+			{HostID: reattachHostA, ActorType: "NewType", ActorIdleTimeout: 3 * time.Minute, ActorConcurrencyLimit: 8},
+		}
+		expectHosts(t, expectedHosts, expectedActorTypes)
+
+		// The active actor is preserved because the host row is updated in place rather than recreated
+		spec, err := s.p.GetAllHosts(t.Context())
+		require.NoError(t, err)
+		assert.Len(t, spec.ActiveActors, 1, "active actor should survive reattachment")
+	})
+
+	t.Run("reattach refreshes a stale registration before it expires", func(t *testing.T) {
+		// Seed a host whose last health check is already older than the 1m deadline
+		require.NoError(t, s.p.Seed(t.Context(), Spec{
+			Hosts: HostSpecCollection{
+				{HostID: reattachHostA, Address: "192.168.1.112:8080", LastHealthAgo: 90 * time.Second},
+			},
+			HostActorTypes: HostActorTypeSpecCollection{
+				{HostID: reattachHostA, ActorType: "T", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 1},
+			},
+		}))
+
+		res, err := s.p.RegisterHost(t.Context(), components.RegisterHostReq{
+			ExistingHostID: reattachHostA,
+			Address:        "192.168.1.112:8080",
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "T", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 1},
+			},
+		})
+		require.NoError(t, err)
+		assert.True(t, res.Reattached, "should reattach even though the record was stale")
+		assert.Equal(t, reattachHostA, res.HostID)
+
+		// The reattached host is healthy again and holds the address, so a fresh registration at the same address must fail
+		_, err = s.p.RegisterHost(t.Context(), components.RegisterHostReq{
+			Address: "192.168.1.112:8080",
+		})
+		require.ErrorIs(t, err, components.ErrHostAlreadyRegistered)
+	})
+
+	t.Run("reattach to an unknown host creates a new registration", func(t *testing.T) {
+		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+
+		res, err := s.p.RegisterHost(t.Context(), components.RegisterHostReq{
+			ExistingHostID: reattachHostX,
+			Address:        "192.168.1.113:8080",
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "T", IdleTimeout: time.Minute, ConcurrencyLimit: 0},
+			},
+		})
+		require.NoError(t, err)
+		assert.False(t, res.Reattached, "should not report a reattachment for an unknown host")
+		assert.NotEmpty(t, res.HostID)
+		assert.NotEqual(t, reattachHostX, res.HostID, "should mint a new host ID rather than adopt the unknown one")
+
+		expectedHosts := HostSpecCollection{
+			{HostID: res.HostID, Address: "192.168.1.113:8080"},
+		}
+		expectedActorTypes := HostActorTypeSpecCollection{
+			{HostID: res.HostID, ActorType: "T", ActorIdleTimeout: time.Minute, ActorConcurrencyLimit: 0},
+		}
+		expectHosts(t, expectedHosts, expectedActorTypes)
+	})
+
+	t.Run("reattach to a garbage-collected host creates a new registration", func(t *testing.T) {
+		// Seed a stale host, then let a fresh registration garbage-collect it
+		require.NoError(t, s.p.Seed(t.Context(), Spec{
+			Hosts: HostSpecCollection{
+				{HostID: reattachHostA, Address: "192.168.1.114:8080", LastHealthAgo: 90 * time.Second},
+			},
+			HostActorTypes: HostActorTypeSpecCollection{
+				{HostID: reattachHostA, ActorType: "T", ActorIdleTimeout: time.Minute, ActorConcurrencyLimit: 0},
+			},
+		}))
+
+		// A fresh registration at a different address cleans up the unhealthy host
+		_, err := s.p.RegisterHost(t.Context(), components.RegisterHostReq{
+			Address: "192.168.1.115:8080",
+		})
+		require.NoError(t, err)
+
+		// Reattaching to the now-removed host finds nothing and creates a brand-new registration
+		res, err := s.p.RegisterHost(t.Context(), components.RegisterHostReq{
+			ExistingHostID: reattachHostA,
+			Address:        "192.168.1.114:8080",
+		})
+		require.NoError(t, err)
+		assert.False(t, res.Reattached)
+		assert.NotEqual(t, reattachHostA, res.HostID, "the previous registration was gone, so a new ID is minted")
+	})
+
+	t.Run("reattach fails when another healthy host holds the address", func(t *testing.T) {
+		require.NoError(t, s.p.Seed(t.Context(), Spec{
+			Hosts: HostSpecCollection{
+				{HostID: reattachHostA, Address: "192.168.1.116:8080", LastHealthAgo: 2 * time.Second},
+				{HostID: reattachHostB, Address: "192.168.1.117:8080", LastHealthAgo: 2 * time.Second},
+			},
+		}))
+
+		// Attempt to reattach host A onto host B's address
+		_, err := s.p.RegisterHost(t.Context(), components.RegisterHostReq{
+			ExistingHostID: reattachHostA,
+			Address:        "192.168.1.117:8080",
+		})
+		require.ErrorIs(t, err, components.ErrHostAlreadyRegistered)
+
+		// Nothing changed: both hosts keep their original addresses
+		expectedHosts := HostSpecCollection{
+			{HostID: reattachHostA, Address: "192.168.1.116:8080"},
+			{HostID: reattachHostB, Address: "192.168.1.117:8080"},
+		}
+		expectHosts(t, expectedHosts, HostActorTypeSpecCollection{})
+	})
+
+	t.Run("reattach with no actor types clears existing ones", func(t *testing.T) {
+		require.NoError(t, s.p.Seed(t.Context(), Spec{
+			Hosts: HostSpecCollection{
+				{HostID: reattachHostA, Address: "192.168.1.118:8080", LastHealthAgo: 2 * time.Second},
+			},
+			HostActorTypes: HostActorTypeSpecCollection{
+				{HostID: reattachHostA, ActorType: "T", ActorIdleTimeout: time.Minute, ActorConcurrencyLimit: 0},
+			},
+		}))
+
+		res, err := s.p.RegisterHost(t.Context(), components.RegisterHostReq{
+			ExistingHostID: reattachHostA,
+			Address:        "192.168.1.118:8080",
+			ActorTypes:     []components.ActorHostType{},
+		})
+		require.NoError(t, err)
+		assert.True(t, res.Reattached)
+
+		expectedHosts := HostSpecCollection{
+			{HostID: reattachHostA, Address: "192.168.1.118:8080"},
+		}
+		expectHosts(t, expectedHosts, HostActorTypeSpecCollection{})
+	})
 }
 
 func (s Suite) TestUpdateActorHost(t *testing.T) {

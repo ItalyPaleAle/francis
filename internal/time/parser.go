@@ -43,6 +43,19 @@ func ParseTime(val any) (t time.Time, err error) {
 	}
 }
 
+// ParseDurationDefault parses a Go duration string, returning def when the string is empty
+// If the string is non-empty but invalid, or parses to a non-positive duration, def is returned as well
+func ParseDurationDefault(s string, def time.Duration) time.Duration {
+	if s == "" {
+		return def
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return def
+	}
+	return d
+}
+
 // ParseDuration parses an input as a time duration, supporting:
 // - Duration formatted as ISO8601 strings
 // - Go duration strings

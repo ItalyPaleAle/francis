@@ -1,0 +1,6 @@
+data.db
+data.db-*
+bin/
+certs/
+supervisord.log
+supervisord.pid
