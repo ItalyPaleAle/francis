@@ -119,7 +119,8 @@ func (p *PostgresProvider) DeleteAlarm(ctx context.Context, ref ref.AlarmRef) er
 }
 
 func (p *PostgresProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req components.FetchAndLeaseUpcomingAlarmsReq) ([]*ref.AlarmLease, error) {
-	// The list of hosts is required; if there's no host, return an empty list
+	// The list of hosts is required
+	// If there's no host, return an empty list
 	if len(req.Hosts) == 0 {
 		return nil, nil
 	}

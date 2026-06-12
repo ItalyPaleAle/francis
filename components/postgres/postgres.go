@@ -257,8 +257,8 @@ func isConstraintError(err error) bool {
 		return false
 	}
 
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) {
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	if !ok {
 		return false
 	}
 

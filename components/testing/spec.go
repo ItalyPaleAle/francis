@@ -98,7 +98,7 @@ type AlarmSpec struct {
 	// Optional fields
 	Interval string
 	TTL      time.Duration // 0 means NULL
-	Data     []byte        // nil means NULL; non-nil inserted as BLOB
+	Data     []byte        // nil means NULL - non-nil inserted as BLOB
 
 	// Write only
 	LeaseTTL *time.Duration
@@ -117,7 +117,7 @@ func (s AlarmSpec) String() string {
 type ActorStateSpec struct {
 	ActorType string
 	ActorID   string
-	Data      []byte        // nil means NULL; non-nil inserted as BLOB
+	Data      []byte        // nil means NULL - non-nil inserted as BLOB
 	TTL       time.Duration // 0 means NULL
 }
 

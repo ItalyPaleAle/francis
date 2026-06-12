@@ -55,8 +55,9 @@ type ProviderOptions struct {
 	// Clock, used to pass a mock one for testing
 	Clock clock.WithTicker
 
-	// Interval at which to purge expired state from memory.
-	// Default is 5 minutes; set to a negative value to disable.
+	// Interval at which to purge expired state from memory
+	// Default is 5 minutes
+	// Set to a negative value to disable
 	CleanupInterval time.Duration
 
 	// PersistHook is called after each mutation to persist changes.

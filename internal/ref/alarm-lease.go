@@ -67,6 +67,14 @@ func (r *AlarmLease) IncreaseAttempts(dueTime time.Time) {
 	r.executionTime = time.Time{}
 }
 
+// ResetForNextExecution prepares the lease for a repeating alarm's next occurrence.
+// It advances the due time and clears the per-occurrence state so the next occurrence starts fresh.
+func (r *AlarmLease) ResetForNextExecution(dueTime time.Time) {
+	r.dueTime = dueTime
+	r.attempts = 0
+	r.executionTime = time.Time{}
+}
+
 // SetExecutionTime sets the time the alarm was executed at
 func (r *AlarmLease) SetExecutionTime(t time.Time) {
 	r.executionTime = t

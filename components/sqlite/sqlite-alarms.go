@@ -138,7 +138,7 @@ func (s *SQLiteProvider) DeleteAlarm(ctx context.Context, ref ref.AlarmRef) erro
 }
 
 func (s *SQLiteProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req components.FetchAndLeaseUpcomingAlarmsReq) ([]*ref.AlarmLease, error) {
-	// The list of hosts is required; if there's no host, return an empty list
+	// If there's no host, return an empty list
 	if len(req.Hosts) == 0 {
 		return nil, nil
 	}

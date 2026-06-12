@@ -24,8 +24,8 @@ type ActorProvider interface {
 	// If the provider is already running, returns ErrAlreadyRunning
 	Run(ctx context.Context) error
 
-	// RegisterHost registers a new actor host.
-	// If a host already exists at the same address, returns ErrHostAlreadyRegistered.
+	// RegisterHost registers a new actor host, or reattaches to an existing registration when req.ExistingHostID is set.
+	// If a different, healthy host is already registered at the same address, returns ErrHostAlreadyRegistered.
 	RegisterHost(ctx context.Context, req RegisterHostReq) (RegisterHostRes, error)
 
 	// UpdateActorHost updates the properties for an actor host
@@ -37,7 +37,8 @@ type ActorProvider interface {
 	UnregisterHost(ctx context.Context, hostID string) error
 
 	// LookupActor returns the address of the actor host for a given actor type and ID.
-	// If the actor is not currently active on any host, a new actor is created and assigned to a random host; if it's not possible to find an instance capable of hosting the given actor, ErrNoHost is returned instead.
+	// If the actor is not currently active on any host, a new actor is created and assigned to a random host
+	// If it's not possible to find an instance capable of hosting the given actor, ErrNoHost is returned instead.
 	LookupActor(ctx context.Context, ref ref.ActorRef, opts LookupActorOpts) (LookupActorRes, error)
 
 	// RemoveActor removes an actor from the collection of active actors.
@@ -105,12 +106,20 @@ type RegisterHostReq struct {
 	Address string
 	// List of supported actor types
 	ActorTypes []ActorHostType
+	// ExistingHostID, when non-empty, requests reattachment to an existing host registration with this ID
+	// This is used when a host reconnects (for example after a runtime failover) and wants to reclaim its registration rather than waiting for the previous health record to expire
+	// If a host with this ID exists, its address, supported actor types, and health check are refreshed in place, regardless of the previous record's health, and the same host ID is returned with Reattached set to true
+	// If no such host exists (for example it was already garbage-collected), a brand-new registration is created with a freshly-generated host ID and Reattached is false
+	ExistingHostID string
 }
 
 // RegisterHostRes is the response object for the RegisterHost method.
 type RegisterHostRes struct {
 	// Auto-generated ID of the actor host
 	HostID string
+	// Reattached is true if the registration reattached to an existing host (matching req.ExistingHostID)
+	// If false, a new host registration was created
+	Reattached bool
 }
 
 // UpdateActorHostReq is the request object for the UpdateActorHost method.
