@@ -19,17 +19,14 @@ type RuntimeOption func(*runtimeOptions)
 // newRuntimeOptions returns a runtimeOptions pre-populated with default values
 func newRuntimeOptions() *runtimeOptions {
 	return &runtimeOptions{
-		logger:                    slog.New(slog.DiscardHandler),
-		workloadCertTTL:           defaultWorkloadCertTTL,
-		hostHealthCheckDeadline:   20 * time.Second,
-		alarmsPollInterval:        1500 * time.Millisecond,
-		alarmsLeaseDuration:       20 * time.Second,
-		alarmsFetchAheadInterval:  2500 * time.Millisecond,
-		alarmsFetchAheadBatchSize: 25,
-		providerRequestTimeout:    15 * time.Second,
-		alarmExecutionTimeout:     60 * time.Second,
-		shutdownGracePeriod:       30 * time.Second,
-		clock:                     &clock.RealClock{},
+		logger:                  slog.New(slog.DiscardHandler),
+		workloadCertTTL:         defaultWorkloadCertTTL,
+		hostHealthCheckDeadline: 20 * time.Second,
+		alarmsPollInterval:      1500 * time.Millisecond,
+		providerRequestTimeout:  15 * time.Second,
+		alarmExecutionTimeout:   60 * time.Second,
+		shutdownGracePeriod:     30 * time.Second,
+		clock:                   &clock.RealClock{},
 	}
 }
 
@@ -45,16 +42,13 @@ type runtimeOptions struct {
 	// hostBootstrapJWT, when set, configures the cluster to bootstrap hosts with a JWT validated against a JWKS
 	hostBootstrapJWT *bootstrapauth.JWTConfig
 	// workloadCertTTL is the lifetime of issued host workload certificates
-	workloadCertTTL           time.Duration
-	logger                    *slog.Logger
-	hostHealthCheckDeadline   time.Duration
-	alarmsPollInterval        time.Duration
-	alarmsLeaseDuration       time.Duration
-	alarmsFetchAheadInterval  time.Duration
-	alarmsFetchAheadBatchSize int
-	providerRequestTimeout    time.Duration
-	alarmExecutionTimeout     time.Duration
-	shutdownGracePeriod       time.Duration
+	workloadCertTTL         time.Duration
+	logger                  *slog.Logger
+	hostHealthCheckDeadline time.Duration
+	alarmsPollInterval      time.Duration
+	providerRequestTimeout  time.Duration
+	alarmExecutionTimeout   time.Duration
+	shutdownGracePeriod     time.Duration
 
 	// Allows setting a clock for testing
 	clock clock.WithTicker
@@ -104,21 +98,6 @@ func WithHostHealthCheckDeadline(d time.Duration) RuntimeOption {
 // WithAlarmsPollInterval sets the interval for polling alarms
 func WithAlarmsPollInterval(d time.Duration) RuntimeOption {
 	return func(o *runtimeOptions) { o.alarmsPollInterval = d }
-}
-
-// WithAlarmsLeaseDuration sets the alarm lease duration
-func WithAlarmsLeaseDuration(d time.Duration) RuntimeOption {
-	return func(o *runtimeOptions) { o.alarmsLeaseDuration = d }
-}
-
-// WithAlarmsFetchAheadInterval sets the pre-fetch interval for alarms
-func WithAlarmsFetchAheadInterval(d time.Duration) RuntimeOption {
-	return func(o *runtimeOptions) { o.alarmsFetchAheadInterval = d }
-}
-
-// WithAlarmsFetchAheadBatchSize sets the batch size for pre-fetching alarms
-func WithAlarmsFetchAheadBatchSize(n int) RuntimeOption {
-	return func(o *runtimeOptions) { o.alarmsFetchAheadBatchSize = n }
 }
 
 // WithProviderRequestTimeout sets the timeout for requests to the provider
