@@ -136,7 +136,6 @@ func run(ctx context.Context, cfg *config, log *slog.Logger) error {
 		bootstrapOpt,
 		runtime.WithLogger(log.With("scope", "runtime")),
 		runtime.WithHostHealthCheckDeadline(healthCheckDeadline),
-		runtime.WithAlarmsLeaseDuration(alarmsLeaseDuration),
 		runtime.WithAlarmsPollInterval(alarmsPollInterval),
 		runtime.WithShutdownGracePeriod(shutdownGracePeriod),
 	}
