@@ -41,7 +41,7 @@ disableKinds = ["rss"]
   PlausibleAnalytics = true
 
   [params.theme]
-    scheme = "rust"
+    scheme = "francis"
     icon_light = "icon-light.svg"
     icon_dark = "icon-dark.svg"
     favicon = "icon-light.svg"
