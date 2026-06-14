@@ -3,13 +3,13 @@ title: "Alarms"
 weight: 26
 ---
 
-An **alarm** is a durable, scheduled callback attached to an actor. When an alarm fires, Francis activates the actor (if it isn't already) and calls its `Alarm` method. Alarms are stored in the database, so they survive process restarts and are delivered even if the actor was idle at the scheduled time.
+An **alarm** is a durable, scheduled callback attached to an actor. When an alarm is triggered, Francis activates the actor (if it isn't already) and calls its `Alarm` method. Alarms are stored in the database, so they survive process restarts and are delivered even if the actor was idle at the scheduled time.
 
 Alarms are how you run work later: retries, timeouts, reminders, periodic maintenance, scheduled jobs, and so on.
 
 ## Receiving alarms
 
-To receive alarms, an actor implements the `actor.ActorAlarm` interface:
+To receive alarms, an actor must implement the `actor.ActorAlarm` interface:
 
 ```go
 func (c *Cart) Alarm(ctx context.Context, name string, data actor.Envelope) error {
@@ -24,7 +24,7 @@ func (c *Cart) Alarm(ctx context.Context, name string, data actor.Envelope) erro
 ```
 
 - `name` is the alarm name you chose when scheduling it. An actor can have many alarms with different names.
-- `data` is an `actor.Envelope`; call `data.Decode(&dest)` to read the payload. It may be `nil`.
+- `data` is an `actor.Envelope`. Call `data.Decode(&dest)` to read the payload. It may be `nil`.
 - Returning an error causes the alarm execution to be retried, according to the actor type's retry settings.
 
 ## Scheduling an alarm
@@ -37,15 +37,15 @@ err := c.client.SetAlarm(ctx, "abandon-reminder", actor.AlarmProperties{
 })
 ```
 
-Setting an alarm with a name that already exists **replaces** it.
+Setting an alarm with a name that already exists replaces it.
 
 ### Alarm properties
 
-`actor.AlarmProperties` describes when and how an alarm fires:
+`actor.AlarmProperties` describes when and how an alarm is triggered:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `DueTime` | `time.Time` | When the alarm first fires (absolute time). |
+| `DueTime` | `time.Time` | When the alarm is first triggered (absolute time). |
 | `Interval` | `string` | Optional repeat interval. A Go duration (`"60s"`), an ISO 8601 duration, or a number of milliseconds. Empty means fire once. |
 | `TTL` | `time.Time` | Optional expiration for a repeating alarm: it stops repeating after this time. |
 | `Data` | `any` | Optional payload, serialized and delivered to `Alarm` as the `data` envelope. |
@@ -95,10 +95,10 @@ This is useful for scheduling work on an actor from outside it — for example, 
 
 ## Delivery semantics
 
-- **Durable** — alarms are persisted, so they survive restarts and are delivered after downtime.
-- **Leased execution** — hosts lease alarms from the data store before running them, so an alarm isn't executed by two hosts at once.
-- **Activation on fire** — when an alarm is due, Francis activates the target actor if it isn't already active, then calls `Alarm`.
-- **At-least-once with retries** — if `Alarm` returns an error, execution is retried per the actor type's `MaxAttempts` and `InitialRetryDelay`. Design alarm handlers to be idempotent.
+- **Durable**: alarms are persisted, so they survive restarts and are delivered after downtime.
+- **Leased execution**: hosts lease alarms from the data store before running them, so an alarm isn't executed by two hosts at once.
+- **Activation on trigger**: when an alarm is due, Francis activates the target actor if it isn't already active, then calls `Alarm`.
+- **At-least-once with retries**: if `Alarm` returns an error, execution is retried per the actor type's `MaxAttempts` and `InitialRetryDelay`. Design alarm handlers to be idempotent.
 
 ## A worked example
 
@@ -107,9 +107,10 @@ Here's a cart that sets a reminder when an item is added, then clears it on chec
 ```go
 func (c *Cart) Invoke(ctx context.Context, method string, data actor.Envelope) (any, error) {
 	switch method {
-	case "addItem":
+	case "add-item":
 		// ... update state ...
 		// Remind the user in 24h if they haven't checked out
+		// By replacing previous alarms with the same name, this resets the deadline
 		return nil, c.client.SetAlarm(ctx, "abandon-reminder", actor.AlarmProperties{
 			DueTime: time.Now().Add(24 * time.Hour),
 		})

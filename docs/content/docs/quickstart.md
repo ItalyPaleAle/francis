@@ -3,14 +3,13 @@ title: "Quickstart"
 weight: 23
 ---
 
-This quickstart builds a tiny app with a single actor type — a counter — running on the embedded **local** topology with a SQLite data store. No extra services are required.
+This quickstart builds a tiny app with a single actor type (a counter) running on the embedded _local_ topology with a SQLite data store. No extra services are required.
 
 By the end you'll have an actor host that you can invoke over HTTP.
 
 ## Prerequisites
 
 - Go 1.26 or newer
-- No external services: this quickstart uses an embedded SQLite database
 
 ## 1. Create the project
 
@@ -170,12 +169,12 @@ You'll see each actor track its own count:
 {"count":1}
 ```
 
-Because state is persisted to `data.db`, the counts survive a restart: stop the process, run it again, and increment `alice` once more — you'll continue from where you left off.
+Because state is persisted to `data.db`, the counts survive a restart: stop the process, run it again, and increment `alice` once more, which will continue from where you left off.
 
 ## What just happened
 
 - Each unique actor ID (`alice`, `bob`) is a separate actor with its own durable state.
-- The first call for an ID **activated** the actor (running the factory); subsequent calls reused the activation.
+- The first call for an ID **activated** the actor (running the factory). Subsequent calls reused the activation.
 - `SetState` persisted the counter to SQLite, so it outlives the actor and the process.
 
 ## Next steps

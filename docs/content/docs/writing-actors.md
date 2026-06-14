@@ -10,7 +10,7 @@ This guide covers how to implement actors in Francis: the factory, the methods a
 An actor is a Go struct plus a **factory** function. The factory is what you register with a host; Francis calls it to activate an actor on demand.
 
 ```go
-type actor.Factory func(actorID string, service *actor.Service) actor.Actor
+func(actorID string, service *actor.Service) actor.Actor
 ```
 
 `actor.Actor` is an alias for `any`, so your actor can be any type. What makes a struct an actor is the set of optional interfaces it implements.
@@ -32,13 +32,13 @@ func NewCart(actorID string, service *actor.Service) actor.Actor {
 }
 ```
 
-A fresh instance is created on every activation. Hold per-activation data on the struct (such as the typed [client](/docs/concepts#client)); hold anything that must outlive the activation in the actor's [state](/docs/state).
+A fresh instance is created on every activation. Hold per-activation data on the struct (such as the typed [client](/docs/concepts#client)). Anything that must outlive the activation should be stored in the actor's persistent [state](/docs/state).
 
 ## Actor methods
 
 An actor implements behavior by satisfying one or more of these interfaces. Implement only the ones you need.
 
-### `Invoke` — handle method calls
+### `Invoke`: handle method calls
 
 Implement `actor.ActorInvoke` to handle invocations:
 
@@ -75,12 +75,12 @@ func (c *Cart) Invoke(ctx context.Context, method string, data actor.Envelope) (
 }
 ```
 
-- `method` is an arbitrary string chosen by the caller; switch on it to dispatch.
+- `method` is an arbitrary string chosen by the caller - switch on it to dispatch.
 - `data` is an `actor.Envelope`. Call `data.Decode(&dest)` to decode the request payload into a Go value. It may be `nil` when there is no payload.
 - The return value (`any`) is serialized and returned to the caller, who decodes it from their own `Envelope`. Return `nil` for no response.
-- Returning an error fails the invocation; the caller receives the error.
+- Returning an error fails the invocation, which returns the error to the caller.
 
-### `Alarm` — handle scheduled callbacks
+### `Alarm`: handle scheduled callbacks
 
 Implement `actor.ActorAlarm` to receive [alarms](/docs/alarms):
 
@@ -95,7 +95,7 @@ func (c *Cart) Alarm(ctx context.Context, name string, data actor.Envelope) erro
 
 When an alarm fires, Francis activates the actor if needed and calls `Alarm`. See [Alarms](/docs/alarms) for scheduling.
 
-### `Deactivate` — clean up before deactivation
+### `Deactivate`: clean up before deactivation
 
 Implement `actor.ActorDeactivate` to run logic right before the actor is deactivated (because it went idle, was halted, or the host is shutting down):
 
@@ -108,13 +108,15 @@ func (c *Cart) Deactivate(ctx context.Context) error {
 
 Keep `Deactivate` quick: it runs within a deactivation timeout (5 seconds by default, configurable per actor type). Use it to flush in-memory work, not for long-running tasks.
 
+**Important:** an actor could disappear at any point because its host (or the physical node it's on) crashes. In that case, the `Deactivate` method may not be invoked. Do not wait for the `Deactivate` to persist critical data.
+
 ## Concurrency model
 
-An actor processes **one invocation at a time**. Calls to the same actor are serialized, so you never need locks to protect the actor's own fields or its state from concurrent access.
+An actor processes **one invocation at a time**. Calls to the same actor are serialized (_turn-based concurrency_), so you never need locks to protect the actor's own fields or its state from concurrent access.
 
 Different actors (different IDs, or different types) run concurrently across the cluster, so your app scales by having many actors rather than by making one actor handle parallel work.
 
-The `ctx` passed to your methods is cancelled if the invocation times out or the host is shutting down. Honor it in any blocking work.
+The context passed to your methods is cancelled if the invocation times out or the host is shutting down.
 
 ## Registering an actor
 
@@ -138,7 +140,7 @@ err := h.RegisterActor("cart", NewCart, local.RegisterActorOptions{
 
 ## Invoking actors
 
-From outside an actor — for example, an HTTP handler — use the `actor.Service` you got from `host.Service()`:
+From outside an actor, e.g. an HTTP handler, use the `actor.Service` you got from `host.Service()`:
 
 ```go
 resp, err := service.Invoke(ctx, "cart", "user-42", "addItem", map[string]any{"Item": "book"})
@@ -152,8 +154,8 @@ if resp != nil {
 }
 ```
 
-- The `data` argument is any value that serializes to JSON; it becomes the `Envelope` your actor decodes.
-- The response is an `actor.Envelope` (or `nil`); call `Decode` to read it.
+- The `data` argument is any value that serializes to JSON and it becomes the `Envelope` your actor decodes.
+- The response is an `actor.Envelope` (or `nil`), call `Decode` to read it.
 - You can invoke from **any** host: Francis routes the call to whichever host owns the actor, activating it if needed.
 
 ### Invoking only if active
@@ -166,7 +168,7 @@ resp, err := host.Invoke(ctx, "cart", "user-42", "peek", nil, actor.WithInvokeAc
 
 ### Calling another actor from an actor
 
-Because the factory hands you the `*actor.Service`, an actor can invoke other actors by calling `service.Invoke(...)`. Avoid synchronous cycles (actor A calling actor B which calls back into A in the same call chain), since each actor handles one invocation at a time.
+Because the factory hands you the `*actor.Service`, an actor can invoke other actors by calling `service.Invoke(...)`. Avoid re-entrancy (actor A calling actor B, which calls back into A in the same call chain), since each actor handles one invocation at a time.
 
 ## Streaming invocations
 
@@ -207,11 +209,11 @@ func (c *Cart) Invoke(ctx context.Context, method string, data actor.Envelope) (
 
 From outside, the service offers:
 
-- `service.Halt(actorType, actorID)` — halt a specific actor active on this host
-- `service.HaltAll()` — halt all actors active on this host
-- `service.HaltDeferred(actorType, actorID)` — non-blocking variant of `Halt`
+- `service.Halt(actorType, actorID)`: halt a specific actor active on this host
+- `service.HaltAll()`: halt all actors active on this host
+- `service.HaltDeferred(actorType, actorID)`: non-blocking variant of `Halt`
 
-A halted actor is simply deactivated; its state stays in the database, and the next invocation re-activates it.
+A halted actor is simply hybernated. Its state stays in the database, and the next invocation re-activates it.
 
 ## Common errors
 
@@ -223,8 +225,6 @@ Methods that invoke actors or manage state and alarms may return these sentinel 
 | `ErrAlarmNotFound` | The named alarm doesn't exist. |
 | `ErrActorNotActive` | `WithInvokeActiveOnly()` was used and the actor isn't active. |
 | `ErrActorNotHosted` | `Halt` targeted an actor that isn't active on the current host. |
-| `ErrActorHalted` | The actor is halted on the host where it was active; retry after a delay. |
+| `ErrActorHalted` | The actor is halted on the host where it was active, retry after a delay. |
 | `ErrActorTypeUnsupported` | No host in the cluster serves this actor type. |
 | `ErrNoHost` | No host is currently available to place the actor. |
-
-> The typed `actor.Client[T]` returned by `NewActorClient` treats a missing state as a zero value, so `client.GetState` does **not** surface `ErrStateNotFound` — it returns the zero value of `T` instead.
