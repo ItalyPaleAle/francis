@@ -41,7 +41,7 @@ sequenceDiagram
     participant App as Your app / caller
     participant H1 as Host A
     participant H2 as Host B (owns actor)
-    participant DB as Database
+    participant DB as Runtime
 
     App->>H1: Invoke(cart, user-42, "addItem")
     H1->>DB: Where is cart/user-42?
