@@ -49,10 +49,11 @@ type Options struct {
 	// Zero leaves the component default in place
 	AlarmsPollInterval time.Duration
 	// BootstrapJWT, when set, makes the remote topology authenticate joining hosts with a JWT instead of the shared host PSK
-	// It only applies to the remote topology, where hosts bootstrap against a runtime; the local topology self-issues from the runtime PSK and ignores it
+	// It only applies to the remote topology, where hosts bootstrap against a runtime (the local topology self-issues from the runtime PSK and ignores it)
 	BootstrapJWT *clustersecret.JWTBootstrap
 	// RuntimeReplicas runs more than one runtime against the same shared store on the remote topology, so a scenario can stop one and watch hosts roll over to a survivor
-	// Zero or one keeps the single-runtime default; the value is ignored on the local topology, which has no standalone runtime
+	// Zero or one keeps the single-runtime default
+	// The value is ignored on the local topology, which has no standalone runtime
 	// Replicas require a store the runtimes can share, so a variant whose provider is not shareable across processes is rejected
 	RuntimeReplicas int
 }
@@ -124,10 +125,7 @@ func (c *Cluster) buildLocal(t *testing.T, opts Options) {
 func (c *Cluster) buildRemote(t *testing.T, opts Options) {
 	t.Helper()
 
-	replicas := opts.RuntimeReplicas
-	if replicas < 1 {
-		replicas = 1
-	}
+	replicas := max(opts.RuntimeReplicas, 1)
 	if replicas > 1 {
 		require.True(t, opts.Variant.SharedStore(), "variant %q cannot back multiple runtime replicas", opts.Variant)
 	}

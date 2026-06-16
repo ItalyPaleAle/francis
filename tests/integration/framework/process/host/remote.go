@@ -66,7 +66,8 @@ func (p *Remote) Run(t *testing.T) {
 	t.Helper()
 
 	// Assemble the host options, pointing the host at the runtime replicas
-	// The host bootstraps with the shared host PSK by default, or a JWT when one is supplied; once registered it holds a workload cert and reconnects over mTLS either way
+	// The host bootstraps with the shared host PSK by default, or a JWT when one is supplied
+	// Once registered it holds a workload cert and reconnects over mTLS either way
 	hostOpts := []remote.HostOption{
 		remote.WithAddress(p.opts.Address),
 		remote.WithRuntimeAddresses(p.opts.RuntimeAddresses...),

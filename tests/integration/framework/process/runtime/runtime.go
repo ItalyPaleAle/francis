@@ -74,7 +74,8 @@ func (p *Runtime) Run(t *testing.T) {
 	// Build the provider the runtime owns from the shared backend
 	prov := p.opts.Backend.NewProvider(t, logger)
 
-	// The runtime always derives its CA from the shared runtime PSK; the host bootstrap method is either the shared host PSK or, when configured, a JWT validated against an inline JWKS
+	// The runtime always derives its CA from the shared runtime PSK
+	// The host bootstrap method is either the shared host PSK or, when configured, a JWT validated against an inline JWKS
 	rtOpts := make([]runtimepkg.RuntimeOption, 0, len(p.opts.Extra)+5)
 	rtOpts = append(rtOpts,
 		runtimepkg.WithBind(p.opts.Bind),
@@ -111,7 +112,8 @@ func (p *Runtime) Run(t *testing.T) {
 }
 
 // Stop gracefully shuts the runtime down mid-test, leaving the rest of the topology running
-// It is how replica-failover scenarios take one runtime offline so hosts roll over to a surviving replica; the end-of-test Cleanup then becomes a no-op
+// It is how replica-failover scenarios take one runtime offline so hosts roll over to a surviving replica
+// The end-of-test Cleanup then becomes a no-op
 func (p *Runtime) Stop(t *testing.T) {
 	t.Helper()
 	p.shutdown(t)

@@ -2,7 +2,7 @@
 
 // Package runtimefailover verifies that on the remote topology the cluster survives losing a runtime replica: hosts roll over to a surviving replica and actor state owned by the shared store carries across the outage
 //
-// The host failover scenarios stop hosts while the runtime keeps running; this exercises the opposite axis, where part of the control plane goes down and the hosts must continue against what remains
+// The host failover scenarios stop hosts while the runtime keeps running, while this exercises the opposite axis, where part of the control plane goes down and the hosts must continue against what remains
 package runtimefailover
 
 import (
@@ -69,7 +69,8 @@ func (s *runtimeFailover) Run(t *testing.T) {
 	require.NoError(t, env.Decode(&out))
 	require.Equal(t, int64(1), out.N)
 
-	// Take one replica offline; the surviving replica still owns the same shared store
+	// Take one replica offline
+	// The surviving replica still owns the same shared store
 	s.cluster.Runtime(0).Stop(t)
 
 	// The host keeps serving the actor: if it was using the stopped replica it rolls over to the survivor with backoff, so retry until a call lands again

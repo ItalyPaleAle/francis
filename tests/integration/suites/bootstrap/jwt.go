@@ -2,7 +2,7 @@
 
 // Package bootstrap exercises how remote hosts authenticate when they join the runtime
 //
-// The rest of the remote-topology suites bootstrap hosts with the shared pre-shared key; this one drives the JWT bootstrap path end to end, where the runtime validates a signed token against an inline JWKS before issuing the host its workload certificate
+// The rest of the remote-topology suites bootstrap hosts with the shared pre-shared key, while this one drives the JWT bootstrap path end to end, where the runtime validates a signed token against an inline JWKS before issuing the host its workload certificate
 package bootstrap
 
 import (
@@ -26,7 +26,8 @@ import (
 var variants = []provider.Variant{provider.SQLite, provider.StandaloneMemory}
 
 // Register the JWT bootstrap scenario for the representative variants
-// It is only meaningful on the remote topology, where hosts bootstrap against a runtime; local hosts self-issue from the runtime PSK and never present a bootstrap credential
+// It is only meaningful on the remote topology, where hosts bootstrap against a runtime
+// Local hosts self-issue from the runtime PSK and never present a bootstrap credential
 func init() {
 	for _, v := range variants {
 		suite.Register(&jwtBootstrap{variant: v})
@@ -45,7 +46,8 @@ func (s *jwtBootstrap) Name() string {
 }
 
 func (s *jwtBootstrap) Setup(t *testing.T) []framework.Option {
-	// A fresh JWT authority mints the signing key and JWKS; the runtime validates against the JWKS and each host presents a token the cluster signs for it
+	// A fresh JWT authority mints the signing key and JWKS
+	// The runtime validates against the JWKS and each host presents a token the cluster signs for it
 	jwtBoot, err := clustersecret.NewJWTBootstrap()
 	require.NoError(t, err, "failed to build JWT bootstrap authority")
 
