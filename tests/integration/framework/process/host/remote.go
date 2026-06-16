@@ -23,6 +23,8 @@ type RemoteOptions struct {
 	Address string
 	// RuntimeAddresses are the runtime replicas this host connects to
 	RuntimeAddresses []string
+	// BootstrapToken, when set, makes the host bootstrap with this JWT instead of the shared host PSK
+	BootstrapToken string
 	// Actors to register before the host starts
 	Actors []ActorReg
 	// Logger is optional and defaults to the host's discarding logger
@@ -64,15 +66,19 @@ func (p *Remote) Run(t *testing.T) {
 	t.Helper()
 
 	// Assemble the host options, pointing the host at the runtime replicas
+	// The host bootstraps with the shared host PSK by default, or a JWT when one is supplied
+	// Once registered it holds a workload cert and reconnects over mTLS either way
 	hostOpts := []remote.HostOption{
 		remote.WithAddress(p.opts.Address),
 		remote.WithRuntimeAddresses(p.opts.RuntimeAddresses...),
-		// The host bootstraps with the shared host PSK
-		// Once registered it holds a workload cert and reconnects over mTLS
-		remote.WithHostBootstrapPSK(clustersecret.HostBootstrapPSK),
 		// Tests trust the runtime on first connection rather than pinning its CA
 		remote.WithUnsafeNoPinnedCA(),
 		remote.WithShutdownGracePeriod(ShutdownGrace),
+	}
+	if p.opts.BootstrapToken != "" {
+		hostOpts = append(hostOpts, remote.WithHostBootstrapJWT(p.opts.BootstrapToken))
+	} else {
+		hostOpts = append(hostOpts, remote.WithHostBootstrapPSK(clustersecret.HostBootstrapPSK))
 	}
 	if p.opts.Logger != nil {
 		hostOpts = append(hostOpts, remote.WithLogger(p.opts.Logger))

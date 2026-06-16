@@ -36,6 +36,8 @@ type Options struct {
 	Backend provider.Backend
 	// Logger is optional and defaults to the runtime's discarding logger
 	Logger *slog.Logger
+	// BootstrapJWT, when set, configures the runtime to authenticate joining hosts with a JWT validated against the inline JWKS instead of the shared host PSK
+	BootstrapJWT *clustersecret.JWTBootstrap
 	// Extra runtime options applied last
 	Extra []runtimepkg.RuntimeOption
 }
@@ -72,15 +74,20 @@ func (p *Runtime) Run(t *testing.T) {
 	// Build the provider the runtime owns from the shared backend
 	prov := p.opts.Backend.NewProvider(t, logger)
 
-	// The runtime derives its CA from the shared runtime PSK and bootstraps remote hosts with the shared host PSK
+	// The runtime always derives its CA from the shared runtime PSK
+	// The host bootstrap method is either the shared host PSK or, when configured, a JWT validated against an inline JWKS
 	rtOpts := make([]runtimepkg.RuntimeOption, 0, len(p.opts.Extra)+5)
 	rtOpts = append(rtOpts,
 		runtimepkg.WithBind(p.opts.Bind),
 		runtimepkg.WithLogger(logger),
 		runtimepkg.WithShutdownGracePeriod(ShutdownGrace),
 		runtimepkg.WithRuntimePSKs(clustersecret.RuntimePSK),
-		runtimepkg.WithHostBootstrapPSK(clustersecret.HostBootstrapPSK),
 	)
+	if p.opts.BootstrapJWT != nil {
+		rtOpts = append(rtOpts, runtimepkg.WithHostBootstrapJWT(p.opts.BootstrapJWT.RuntimeConfig()))
+	} else {
+		rtOpts = append(rtOpts, runtimepkg.WithHostBootstrapPSK(clustersecret.HostBootstrapPSK))
+	}
 	rtOpts = append(rtOpts, p.opts.Extra...)
 
 	rt, err := runtimepkg.NewRuntime(prov, rtOpts...)
@@ -104,7 +111,21 @@ func (p *Runtime) Run(t *testing.T) {
 	}
 }
 
+// Stop gracefully shuts the runtime down mid-test, leaving the rest of the topology running
+// It is how replica-failover scenarios take one runtime offline so hosts roll over to a surviving replica
+// The end-of-test Cleanup then becomes a no-op
+func (p *Runtime) Stop(t *testing.T) {
+	t.Helper()
+	p.shutdown(t)
+}
+
 func (p *Runtime) Cleanup(t *testing.T) {
+	t.Helper()
+	p.shutdown(t)
+}
+
+// shutdown cancels the run context and waits for Run to return, and is idempotent across Stop and Cleanup
+func (p *Runtime) shutdown(t *testing.T) {
 	t.Helper()
 	if p.cancel == nil {
 		return

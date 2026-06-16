@@ -203,6 +203,48 @@ func (s *crud) Run(t *testing.T) {
 		}, 10*time.Second, 200*time.Millisecond, "state with TTL should expire")
 	})
 
+	// Overwriting state without a TTL clears a previously set expiry, so the value stops expiring
+	t.Run("overwrite without ttl clears expiry", func(t *testing.T) {
+		err := svc.SetState(ctx, shared.ProbeActorType, "ttl-clear-1", shared.ProbeState{N: 1}, &actor.SetStateOpts{TTL: time.Second})
+		require.NoError(t, err)
+
+		// Replace it with a TTL-less write before the first deadline passes, which upserts the row with no expiration
+		err = svc.SetState(ctx, shared.ProbeActorType, "ttl-clear-1", shared.ProbeState{N: 2}, nil)
+		require.NoError(t, err)
+
+		// Across a window that spans the original one-second deadline, the value must never read as not found
+		assert.Never(t, func() bool {
+			var v shared.ProbeState
+			return errors.Is(svc.GetState(ctx, shared.ProbeActorType, "ttl-clear-1", &v), actor.ErrStateNotFound)
+		}, 1500*time.Millisecond, 200*time.Millisecond, "clearing the TTL should stop the state from expiring")
+
+		var got shared.ProbeState
+		err = svc.GetState(ctx, shared.ProbeActorType, "ttl-clear-1", &got)
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), got.N, "the overwrite value should remain")
+	})
+
+	// Overwriting state with a fresh TTL replaces the previous one, so an extended deadline keeps the value alive past the original
+	t.Run("overwrite extends ttl", func(t *testing.T) {
+		err := svc.SetState(ctx, shared.ProbeActorType, "ttl-extend-1", shared.ProbeState{N: 1}, &actor.SetStateOpts{TTL: time.Second})
+		require.NoError(t, err)
+
+		// Re-write with a much longer TTL before the first deadline elapses
+		err = svc.SetState(ctx, shared.ProbeActorType, "ttl-extend-1", shared.ProbeState{N: 2}, &actor.SetStateOpts{TTL: 30 * time.Second})
+		require.NoError(t, err)
+
+		// The original one-second deadline must not take effect, so the value stays readable across a window that spans it
+		assert.Never(t, func() bool {
+			var v shared.ProbeState
+			return errors.Is(svc.GetState(ctx, shared.ProbeActorType, "ttl-extend-1", &v), actor.ErrStateNotFound)
+		}, 1500*time.Millisecond, 200*time.Millisecond, "a refreshed TTL should extend the expiry past the original deadline")
+
+		var got shared.ProbeState
+		err = svc.GetState(ctx, shared.ProbeActorType, "ttl-extend-1", &got)
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), got.N)
+	})
+
 	// State written through an invocation is visible to a direct service read, confirming both paths share one store
 	t.Run("invocation persists state readable via service", func(t *testing.T) {
 		env, err := svc.Invoke(ctx, shared.ProbeActorType, "inv-1", shared.ProbeMethodIncrement, nil)

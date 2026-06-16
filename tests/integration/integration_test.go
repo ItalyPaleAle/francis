@@ -20,6 +20,7 @@ import (
 	// Blank-import every suite package so their init() registers the cases
 	_ "github.com/italypaleale/francis/tests/integration/suites/alarminvoke"
 	_ "github.com/italypaleale/francis/tests/integration/suites/alarms"
+	_ "github.com/italypaleale/francis/tests/integration/suites/bootstrap"
 	_ "github.com/italypaleale/francis/tests/integration/suites/crosshost"
 	_ "github.com/italypaleale/francis/tests/integration/suites/durability"
 	_ "github.com/italypaleale/francis/tests/integration/suites/errorprop"
@@ -27,6 +28,7 @@ import (
 	_ "github.com/italypaleale/francis/tests/integration/suites/invocation"
 	_ "github.com/italypaleale/francis/tests/integration/suites/lifecycle"
 	_ "github.com/italypaleale/francis/tests/integration/suites/routing"
+	_ "github.com/italypaleale/francis/tests/integration/suites/runtimefailover"
 	_ "github.com/italypaleale/francis/tests/integration/suites/state"
 	_ "github.com/italypaleale/francis/tests/integration/suites/streaming"
 )

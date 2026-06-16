@@ -553,14 +553,15 @@ func TestPeerInvocationPinsHostIdentity(t *testing.T) {
 		Data:         []byte("secret"),
 	}
 
-	// Retry until the server is accepting connections; once it is up the identity pin fires
+	// Retry until the server is accepting connections, once it is up the identity pin fires
 	var perr *protocol.Error
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		reqCtx, reqCancel := context.WithTimeout(ctx, 2*time.Second)
 		_, perr = pc.InvokeObject(reqCtx, addr, req)
 		reqCancel()
-		// A connect failure is retryable while the server starts; a host-mismatch means we connected and the pin rejected before sending
+		// A connect failure is retryable while the server starts
+		// A host-mismatch means we connected and the pin rejected before sending
 		if perr != nil && perr.Code == protocol.ErrCodeHostMismatch {
 			break
 		}

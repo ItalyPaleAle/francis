@@ -40,6 +40,12 @@ func (v Variant) LocalMultiHost() bool {
 	return v == SQLite || v == Postgres
 }
 
+// SharedStore reports whether the backing store can be opened by more than one process at once
+// It gates running multiple runtime replicas against one store: the on-disk SQLite file and the Postgres schema qualify, while the in-memory standalone connection cannot be shared
+func (v Variant) SharedStore() bool {
+	return v == SQLite || v == Postgres
+}
+
 // Backend owns the provider-side store of a test topology
 // It is a process so its store is prepared before, and torn down after, the hosts and runtime that use it
 type Backend interface {
