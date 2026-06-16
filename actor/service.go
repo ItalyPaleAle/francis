@@ -37,14 +37,16 @@ func NewService(host Host) *Service {
 }
 
 // Invoke an actor
-func (s Service) Invoke(ctx context.Context, actorType string, actorID string, method string, data any) (Envelope, error) {
-	return s.host.Invoke(ctx, actorType, actorID, method, data)
+// Pass WithInvokeActiveOnly to invoke the actor only if it is already active, without activating it, in which case ErrActorNotActive is returned when it is not.
+func (s Service) Invoke(ctx context.Context, actorType string, actorID string, method string, data any, opts ...InvokeOption) (Envelope, error) {
+	return s.host.Invoke(ctx, actorType, actorID, method, data, opts...)
 }
 
 // InvokeStream performs a streamed invocation of an actor.
 // The request body is streamed from body, and the response body is returned as a reader that the caller must close.
-func (s Service) InvokeStream(ctx context.Context, actorType string, actorID string, method string, reqContentType string, body io.Reader) (respContentType string, resp io.ReadCloser, err error) {
-	return s.host.InvokeStream(ctx, actorType, actorID, method, reqContentType, body)
+// Pass WithInvokeActiveOnly to invoke the actor only if it is already active, without activating it, in which case ErrActorNotActive is returned when it is not.
+func (s Service) InvokeStream(ctx context.Context, actorType string, actorID string, method string, reqContentType string, body io.Reader, opts ...InvokeOption) (respContentType string, resp io.ReadCloser, err error) {
+	return s.host.InvokeStream(ctx, actorType, actorID, method, reqContentType, body, opts...)
 }
 
 // SetState saves the state for an actor.
