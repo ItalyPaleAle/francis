@@ -110,7 +110,20 @@ func (p *Runtime) Run(t *testing.T) {
 	}
 }
 
+// Stop gracefully shuts the runtime down mid-test, leaving the rest of the topology running
+// It is how replica-failover scenarios take one runtime offline so hosts roll over to a surviving replica; the end-of-test Cleanup then becomes a no-op
+func (p *Runtime) Stop(t *testing.T) {
+	t.Helper()
+	p.shutdown(t)
+}
+
 func (p *Runtime) Cleanup(t *testing.T) {
+	t.Helper()
+	p.shutdown(t)
+}
+
+// shutdown cancels the run context and waits for Run to return, and is idempotent across Stop and Cleanup
+func (p *Runtime) shutdown(t *testing.T) {
 	t.Helper()
 	if p.cancel == nil {
 		return

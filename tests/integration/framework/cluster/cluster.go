@@ -51,14 +51,18 @@ type Options struct {
 	// BootstrapJWT, when set, makes the remote topology authenticate joining hosts with a JWT instead of the shared host PSK
 	// It only applies to the remote topology, where hosts bootstrap against a runtime; the local topology self-issues from the runtime PSK and ignores it
 	BootstrapJWT *clustersecret.JWTBootstrap
+	// RuntimeReplicas runs more than one runtime against the same shared store on the remote topology, so a scenario can stop one and watch hosts roll over to a survivor
+	// Zero or one keeps the single-runtime default; the value is ignored on the local topology, which has no standalone runtime
+	// Replicas require a store the runtimes can share, so a variant whose provider is not shareable across processes is rejected
+	RuntimeReplicas int
 }
 
 // Cluster is an assembled topology, exposing its processes and host services
 type Cluster struct {
-	backend provider.Backend
-	runtime *frameworkruntime.Runtime
-	hosts   []frameworkhost.Instance
-	procs   []process.Interface
+	backend  provider.Backend
+	runtimes []*frameworkruntime.Runtime
+	hosts    []frameworkhost.Instance
+	procs    []process.Interface
 }
 
 // New assembles a cluster for the given options
@@ -116,14 +120,25 @@ func (c *Cluster) buildLocal(t *testing.T, opts Options) {
 	}
 }
 
-// buildRemote wires one runtime that owns the provider, plus stateless hosts that connect to it
+// buildRemote wires one or more runtimes that own a shared provider, plus stateless hosts that connect to them
 func (c *Cluster) buildRemote(t *testing.T, opts Options) {
 	t.Helper()
 
-	// Reserve one extra port for the runtime, ahead of the host ports
-	p := ports.Reserve(t, opts.Hosts+1)
-	runtimeAddr := addr(p[0])
-	hostPorts := p[1:]
+	replicas := opts.RuntimeReplicas
+	if replicas < 1 {
+		replicas = 1
+	}
+	if replicas > 1 {
+		require.True(t, opts.Variant.SharedStore(), "variant %q cannot back multiple runtime replicas", opts.Variant)
+	}
+
+	// Reserve a port per runtime replica, ahead of the host ports
+	p := ports.Reserve(t, opts.Hosts+replicas)
+	runtimeAddrs := make([]string, replicas)
+	for i := range replicas {
+		runtimeAddrs[i] = addr(p[i])
+	}
+	hostPorts := p[replicas:]
 
 	// On the remote topology the runtime owns alarm polling, so the poll interval is applied there instead of on the hosts
 	var runtimeExtra []runtimepkg.RuntimeOption
@@ -131,13 +146,18 @@ func (c *Cluster) buildRemote(t *testing.T, opts Options) {
 		runtimeExtra = append(runtimeExtra, runtimepkg.WithAlarmsPollInterval(opts.AlarmsPollInterval))
 	}
 
-	c.runtime = frameworkruntime.New(frameworkruntime.Options{
-		Bind:         runtimeAddr,
-		Backend:      c.backend,
-		BootstrapJWT: opts.BootstrapJWT,
-		Extra:        runtimeExtra,
-	})
-	c.procs = append(c.procs, c.runtime)
+	// Each replica owns its own provider against the shared store, so any of them can serve the hosts
+	c.runtimes = make([]*frameworkruntime.Runtime, replicas)
+	for i := range replicas {
+		rt := frameworkruntime.New(frameworkruntime.Options{
+			Bind:         runtimeAddrs[i],
+			Backend:      c.backend,
+			BootstrapJWT: opts.BootstrapJWT,
+			Extra:        runtimeExtra,
+		})
+		c.runtimes[i] = rt
+		c.procs = append(c.procs, rt)
+	}
 
 	for i := range opts.Hosts {
 		// When JWT bootstrap is configured, each host presents a token whose subject identifies it
@@ -148,9 +168,10 @@ func (c *Cluster) buildRemote(t *testing.T, opts Options) {
 			require.NoError(t, err, "failed to mint host bootstrap token")
 		}
 
+		// Hosts know every replica address and roll over to a survivor when one goes away
 		h := frameworkhost.NewRemote(frameworkhost.RemoteOptions{
 			Address:          addr(hostPorts[i]),
-			RuntimeAddresses: []string{runtimeAddr},
+			RuntimeAddresses: runtimeAddrs,
 			BootstrapToken:   token,
 			Actors:           opts.Actors,
 		})
@@ -162,6 +183,14 @@ func (c *Cluster) buildRemote(t *testing.T, opts Options) {
 // Processes returns the processes that make up the cluster, in start order
 func (c *Cluster) Processes() []process.Interface {
 	return c.procs
+}
+
+// Runtime returns the i-th runtime replica on the remote topology, or nil on the local topology where each host embeds its own provider
+func (c *Cluster) Runtime(i int) *frameworkruntime.Runtime {
+	if i < 0 || i >= len(c.runtimes) {
+		return nil
+	}
+	return c.runtimes[i]
 }
 
 // Host returns the i-th host

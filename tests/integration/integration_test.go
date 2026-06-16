@@ -28,6 +28,7 @@ import (
 	_ "github.com/italypaleale/francis/tests/integration/suites/invocation"
 	_ "github.com/italypaleale/francis/tests/integration/suites/lifecycle"
 	_ "github.com/italypaleale/francis/tests/integration/suites/routing"
+	_ "github.com/italypaleale/francis/tests/integration/suites/runtimefailover"
 	_ "github.com/italypaleale/francis/tests/integration/suites/state"
 	_ "github.com/italypaleale/francis/tests/integration/suites/streaming"
 )
