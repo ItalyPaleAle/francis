@@ -17,6 +17,7 @@ import (
 	"github.com/italypaleale/francis/host/local"
 	runtimepkg "github.com/italypaleale/francis/runtime"
 	"github.com/italypaleale/francis/tests/integration/framework/process"
+	"github.com/italypaleale/francis/tests/integration/framework/process/clustersecret"
 	frameworkhost "github.com/italypaleale/francis/tests/integration/framework/process/host"
 	"github.com/italypaleale/francis/tests/integration/framework/process/ports"
 	"github.com/italypaleale/francis/tests/integration/framework/process/provider"
@@ -47,6 +48,9 @@ type Options struct {
 	// On the local topology it is applied to each host, and on the remote topology to the runtime that owns alarm execution, so the same value speeds up either topology
 	// Zero leaves the component default in place
 	AlarmsPollInterval time.Duration
+	// BootstrapJWT, when set, makes the remote topology authenticate joining hosts with a JWT instead of the shared host PSK
+	// It only applies to the remote topology, where hosts bootstrap against a runtime; the local topology self-issues from the runtime PSK and ignores it
+	BootstrapJWT *clustersecret.JWTBootstrap
 }
 
 // Cluster is an assembled topology, exposing its processes and host services
@@ -128,16 +132,26 @@ func (c *Cluster) buildRemote(t *testing.T, opts Options) {
 	}
 
 	c.runtime = frameworkruntime.New(frameworkruntime.Options{
-		Bind:    runtimeAddr,
-		Backend: c.backend,
-		Extra:   runtimeExtra,
+		Bind:         runtimeAddr,
+		Backend:      c.backend,
+		BootstrapJWT: opts.BootstrapJWT,
+		Extra:        runtimeExtra,
 	})
 	c.procs = append(c.procs, c.runtime)
 
 	for i := range opts.Hosts {
+		// When JWT bootstrap is configured, each host presents a token whose subject identifies it
+		var token string
+		if opts.BootstrapJWT != nil {
+			var err error
+			token, err = opts.BootstrapJWT.Token("host-"+strconv.Itoa(i), time.Hour)
+			require.NoError(t, err, "failed to mint host bootstrap token")
+		}
+
 		h := frameworkhost.NewRemote(frameworkhost.RemoteOptions{
 			Address:          addr(hostPorts[i]),
 			RuntimeAddresses: []string{runtimeAddr},
+			BootstrapToken:   token,
 			Actors:           opts.Actors,
 		})
 		c.hosts[i] = h
