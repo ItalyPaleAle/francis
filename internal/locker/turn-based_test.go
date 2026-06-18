@@ -2,6 +2,7 @@ package locker
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -843,6 +844,71 @@ func TestTurnBasedLocker(t *testing.T) {
 		// Second stop should not cause issues
 		locker.Stop()
 		assert.True(t, locker.IsStopped())
+	})
+}
+
+func TestTurnBasedLocker_GrantCancelRace(t *testing.T) {
+	// If the granted-but-canceled waiter returned without releasing, the lock would be leaked and the locker would wedge forever
+	t.Run("grant racing context cancellation does not leak the lock", func(t *testing.T) {
+		// Each iteration is its own func so the deferred cancel runs per iteration
+		iteration := func() {
+			l := &TurnBasedLocker{}
+
+			// Hold the lock so the next caller has to queue
+			err := l.Lock(context.Background())
+			require.NoError(t, err)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			// The waiter queues, then releases the lock if it ends up being granted it
+			var werr error
+			waiterDone := make(chan struct{})
+			go func() {
+				werr = l.Lock(ctx)
+				if werr == nil {
+					l.Unlock()
+				}
+				close(waiterDone)
+			}()
+
+			// Wait until the waiter is parked in the queue
+			for l.QueueLength() == 0 {
+				runtime.Gosched()
+			}
+
+			// Fire the cancellation and the unlock as concurrently as possible to maximize the chance they interleave
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				<-start
+				cancel()
+			}()
+			go func() {
+				defer wg.Done()
+				<-start
+				l.Unlock()
+			}()
+			close(start)
+			wg.Wait()
+
+			<-waiterDone
+
+			// Whatever the interleaving, the lock must end up free and the queue empty
+			require.False(t, l.IsLocked(), "lock leaked after grant/cancel race")
+			require.Zero(t, l.QueueLength())
+
+			// A fresh acquisition must succeed, proving the locker is not wedged
+			acquired, tryErr := l.TryLock()
+			require.NoError(t, tryErr)
+			require.True(t, acquired, "locker wedged after grant/cancel race")
+		}
+
+		for range 2000 {
+			iteration()
+		}
 	})
 }
 

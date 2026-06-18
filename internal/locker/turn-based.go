@@ -8,11 +8,20 @@ import (
 
 var ErrStopped = errors.New("queue is stopped")
 
+// waiter represents a caller parked in the queue waiting to acquire the lock
+type waiter struct {
+	// ready is closed to wake the waiter, both when the lock is granted and when the waiter is canceled by Stop
+	ready chan struct{}
+	// granted is set under the locker mutex by Unlock when it hands the lock to this waiter
+	// It lets the woken waiter tell a grant apart from a Stop cancellation, which both close ready
+	granted bool
+}
+
 // TurnBasedLocker manages turn-based concurrency with FIFO ordering.
 type TurnBasedLocker struct {
 	mu sync.Mutex
-	// Queue of waiting channels
-	queue []chan struct{}
+	// Queue of waiting callers
+	queue []*waiter
 	// Whether the lock is currently held
 	isLocked bool
 	// Whether the queue has been stopped
@@ -36,35 +45,57 @@ func (l *TurnBasedLocker) Lock(ctx context.Context) error {
 		return nil
 	}
 
-	ready := make(chan struct{})
-	l.queue = append(l.queue, ready)
+	w := &waiter{ready: make(chan struct{})}
+	l.queue = append(l.queue, w)
 	l.mu.Unlock()
 
 	select {
-	case <-ready:
+	case <-w.ready:
 		l.mu.Lock()
 		defer l.mu.Unlock()
 
-		if l.stopped {
+		// A closed ready channel means either Unlock handed us the lock or Stop canceled us
+		// granted disambiguates the two, since Stop closes the channel without granting
+		if !w.granted {
 			return ErrStopped
 		}
-		l.isLocked = true
+
+		// We own the lock now (Unlock already set isLocked), but if the locker was stopped after the grant we release it and report stopped so it is not leaked
+		if l.stopped {
+			l.unlockLocked()
+			return ErrStopped
+		}
+
 		return nil
 	case <-ctx.Done():
 		l.mu.Lock()
 		defer l.mu.Unlock()
 
-		var j int
-		for i, ch := range l.queue {
-			if ch != ready {
-				l.queue[j] = l.queue[i]
-				j++
-			}
+		// Unlock may have raced our cancellation and already handed us the lock by closing ready and setting granted
+		// We are abandoning the call, so we must release the lock or it would stay held forever with no owner
+		if w.granted {
+			l.unlockLocked()
+			return ctx.Err()
 		}
-		l.queue = l.queue[:j]
+
+		// Otherwise we still hold a slot in the queue, so remove it before a later Unlock tries to hand us the lock
+		l.removeWaiter(w)
 
 		return ctx.Err()
 	}
+}
+
+// removeWaiter drops w from the queue if it is still present
+// The caller must hold l.mu
+func (l *TurnBasedLocker) removeWaiter(w *waiter) {
+	var j int
+	for i := range l.queue {
+		if l.queue[i] != w {
+			l.queue[j] = l.queue[i]
+			j++
+		}
+	}
+	l.queue = l.queue[:j]
 }
 
 // TryLock attempts to acquire the lock immediately if it's available and the queue isn't stopped.
@@ -92,6 +123,12 @@ func (l *TurnBasedLocker) Unlock() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	l.unlockLocked()
+}
+
+// unlockLocked releases the lock and hands it to the next waiter, if any.
+// The caller must hold l.mu.
+func (l *TurnBasedLocker) unlockLocked() {
 	if !l.isLocked {
 		// Not locked, nothing to do
 		return
@@ -114,8 +151,9 @@ func (l *TurnBasedLocker) Unlock() {
 	// Next waiter now holds the lock
 	l.isLocked = true
 
-	// Signal the next waiter
-	close(next)
+	// Mark the grant so the woken waiter does not mistake it for a Stop cancellation, then signal it
+	next.granted = true
+	close(next.ready)
 }
 
 // Stop cancels the queue: all waiting callers are canceled, and the stopped state is set.
@@ -136,9 +174,10 @@ func (l *TurnBasedLocker) doStop(wait bool) {
 	l.stopped = true
 
 	// Close all waiters and clear the queue
-	for _, ch := range l.queue {
+	// We close ready without setting granted, so each woken waiter reports ErrStopped rather than taking the lock
+	for _, w := range l.queue {
 		// Cancel waiting callers
-		close(ch)
+		close(w.ready)
 	}
 	l.queue = nil
 
