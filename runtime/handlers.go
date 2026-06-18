@@ -222,10 +222,12 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 		}
 	}
 
-	// Resolve the identity to reattach to, preferring the certificate identity on an mTLS reconnect over any claimed previous ID
-	existingID := payload.PreviousHostID
+	// Resolve the identity to reattach to
+	// Only an mTLS reconnect may reattach, because its identity is proven by the client certificate
+	existingID := ""
 	if reattachID != "" {
-		if existingID != "" && existingID != reattachID {
+		// The certificate proves who we are, so any claimed PreviousHostID must match it
+		if payload.PreviousHostID != "" && payload.PreviousHostID != reattachID {
 			return req.ErrorReply(protocol.NewError(protocol.ErrCodeUnauthorized, "previous host ID does not match the certificate identity"))
 		}
 		existingID = reattachID

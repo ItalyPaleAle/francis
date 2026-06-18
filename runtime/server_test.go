@@ -149,6 +149,88 @@ func registerOnSession(t *testing.T, ctx context.Context, session *webtransport.
 	return out
 }
 
+// pskBootstrap runs the PSK challenge-response on the session and sends a registration carrying the given previous host ID and address
+// It returns the runtime's success response, or the structured error the runtime replied with
+func pskBootstrap(t *testing.T, ctx context.Context, session *webtransport.Session, prevHostID string, address string) (protocol.RegisterHostResponse, *protocol.Error) {
+	t.Helper()
+
+	stream, err := session.OpenStreamSync(ctx)
+	require.NoError(t, err)
+	defer stream.Close()
+
+	// Run the PSK challenge-response, bound to this session's channel binding
+	psk, err := bootstrapauth.NewPSK(testHostPSK)
+	require.NoError(t, err)
+	cb, err := channelbind.Export(session)
+	require.NoError(t, err)
+	clientNonce, err := bootstrapauth.Nonce()
+	require.NoError(t, err)
+
+	begin, err := protocol.NewRequest(protocol.KindRegisterHostAuth, protocol.RegisterAuthBeginRequest{
+		Method:      bootstrapauth.MethodPSK,
+		ClientNonce: clientNonce,
+	})
+	require.NoError(t, err)
+	challengeEnv, err := protocol.RoundTrip(ctx, stream, begin)
+	require.NoError(t, err)
+	_, isErr := challengeEnv.AsError()
+	require.False(t, isErr)
+	var challenge protocol.RegisterAuthChallengeResponse
+	require.NoError(t, challengeEnv.DecodePayload(&challenge))
+	require.True(t, psk.VerifyServerProof(cb, clientNonce, challenge.ServerNonce, challenge.ServerProof))
+
+	// Generate a workload key the runtime signs into a certificate
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	proof := psk.ClientProof(cb, clientNonce, challenge.ServerNonce)
+
+	req, err := protocol.NewRequest(protocol.KindRegisterHost, protocol.RegisterHostRequest{
+		PreviousHostID: prevHostID,
+		Address:        address,
+		ActorTypes:     []protocol.ActorHostType{{ActorType: "T", IdleTimeoutMs: 60000}},
+		Auth:           protocol.RegisterAuth{Method: bootstrapauth.MethodPSK, Proof: proof},
+		WorkloadPubKey: pub,
+	})
+	require.NoError(t, err)
+
+	resp, err := protocol.RoundTrip(ctx, stream, req)
+	require.NoError(t, err)
+	perr, isErr := resp.AsError()
+	if isErr {
+		return protocol.RegisterHostResponse{}, perr
+	}
+
+	var out protocol.RegisterHostResponse
+	require.NoError(t, resp.DecodePayload(&out))
+	return out, nil
+}
+
+func TestRegisterIgnoresForgedPreviousHostIDOnBootstrap(t *testing.T) {
+	rt, _, addr := runRuntimeServer(t)
+
+	// A legitimate host bootstraps and is assigned a stable identity
+	victimSession := dialRuntime(t, t.Context(), addr)
+	victim := registerOnSession(t, t.Context(), victimSession)
+	require.NotEmpty(t, victim.HostID)
+
+	victimConn, ok := rt.hosts.Get(victim.HostID)
+	require.True(t, ok)
+
+	// An attacker presents the same cluster PSK but claims the victim's host ID and a different peer address
+	attackerSession := dialRuntime(t, t.Context(), addr)
+	attacker, perr := pskBootstrap(t, t.Context(), attackerSession, victim.HostID, "10.9.0.2:2")
+	require.Nil(t, perr, "bootstrap should still succeed, just not as the victim")
+
+	// The runtime must allocate a fresh identity rather than reattaching the bootstrap to the victim
+	require.NotEqual(t, victim.HostID, attacker.HostID, "bootstrap must not take over another host's identity via PreviousHostID")
+	require.False(t, attacker.Reattached, "a bootstrap registration must never reattach")
+
+	// The victim's session must not have been superseded by the attacker's registration
+	stillTracked, ok := rt.hosts.Get(victim.HostID)
+	require.True(t, ok, "the victim host should still be tracked")
+	require.Same(t, victimConn, stillTracked, "the victim's session must not be superseded by a forged bootstrap")
+}
+
 // unregisterOnSession sends a graceful UnregisterHost on a new stream, stamped with the host identity the runtime assigned
 func unregisterOnSession(t *testing.T, ctx context.Context, session *webtransport.Session, hostID string, sessionID string) {
 	t.Helper()
