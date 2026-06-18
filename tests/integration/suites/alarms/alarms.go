@@ -129,6 +129,30 @@ func (s *alarms) Run(t *testing.T) {
 		require.NoError(t, err)
 	})
 
+	// A repeating alarm whose interval is shorter than the poll interval must keep firing on its interval
+	// This exercises the kept-lease fast path: when the next occurrence is within one poll interval the lease is preserved and the alarm is re-enqueued in memory, rather than waiting for the next fetch
+	// A broken kept-lease path falls back to lease renewal (every AlarmsLeaseDuration-10s, i.e. ~10s here), so it could not reach this many fires within the window below
+	t.Run("sub-poll interval keeps firing on the kept lease", func(t *testing.T) {
+		// The probe observer's fire counts are process-global, so a per-scenario actor ID keeps this count isolated from the same scenario on other variants
+		actorID := "repeat-fast-" + string(s.kind) + "-" + string(s.variant)
+
+		// 100ms interval under a 250ms poll keeps the lease, so the alarm must re-arm from memory each time
+		err := svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
+			DueTime:  time.Now(),
+			Interval: shared.ISOInterval(100 * time.Millisecond),
+		})
+		require.NoError(t, err)
+
+		// Reaching this many fires in well under the ~10s renewal cadence is only possible if the kept lease re-fires the alarm in memory
+		require.Eventually(t, func() bool {
+			return shared.ProbeObserver.AlarmCount(actorID) >= 8
+		}, 7*time.Second, eventuallyTick, "a sub-poll repeating alarm should fire rapidly on its kept lease")
+
+		// Stop further executions so the count cannot keep growing into later subtests
+		err = svc.DeleteAlarm(ctx, shared.ProbeActorType, actorID, "a")
+		require.NoError(t, err)
+	})
+
 	// A repeating alarm with a TTL stops repeating once the deadline passes, rather than firing forever
 	t.Run("repeating alarm stops at its TTL deadline", func(t *testing.T) {
 		const actorID = "ttl-1"

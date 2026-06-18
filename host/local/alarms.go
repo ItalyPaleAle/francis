@@ -152,8 +152,8 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 	log.Debug("Executing alarm")
 
 	// Get and lock the actor
-	ref := lease.ActorRef()
-	statusAny, err := h.core.LockAndInvoke(ctx, ref, func(parentCtx context.Context, act *actorcore.ActiveActor) (any, error) {
+	aRef := lease.ActorRef()
+	statusAny, err := h.core.LockAndInvoke(ctx, aRef, func(parentCtx context.Context, act *actorcore.ActiveActor) (any, error) {
 		// Before we execute an alarm we need to fetch it again using the lease
 		// This is because alarms we have in-memory could have been here for a few seconds, and they may not represent the accurate
 		// state of the data in the provider. For example, it could have been edited or deleted, or the lease could have been broken.
@@ -193,7 +193,7 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		if err != nil {
 			// Consider this as a retryable condition unless we've exceeded the max attempts
 			code := executeAlarmStatusRetryable
-			maxAttempts := h.core.ActorsConfig[ref.ActorType].MaxAttempts
+			maxAttempts := h.core.ActorsConfig[aRef.ActorType].MaxAttempts
 			if lease.Attempts() > maxAttempts {
 				code = executeAlarmStatusFatal
 			}
@@ -205,6 +205,7 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 
 	// Remove from the list of active alarms upon returning
 	isRetrying := false
+	reEnqueue := false
 	defer func() {
 		h.activeAlarmsLock.Lock()
 		delete(h.activeAlarms, key)
@@ -217,6 +218,15 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		}
 
 		h.activeAlarmsLock.Unlock()
+
+		// Re-enqueue a repeating alarm whose lease we kept, only after the active flag is cleared above
+		// Otherwise enqueueAlarms would skip it as already active and the alarm would never re-fire on schedule
+		if reEnqueue {
+			enqErr := h.enqueueAlarms([]*ref.AlarmLease{lease})
+			if enqErr != nil {
+				log.Error("Error re-enqueueing leased alarm", slog.Any("error", enqErr))
+			}
+		}
 	}()
 
 	status, ok := statusAny.(executeAlarmStatus)
@@ -252,7 +262,7 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		// #nosec G404
 		jitter := rand.Float64()*0.2 + 0.9
 		multiplier := min(math.Pow(1.5, float64(lease.Attempts())), 10) * jitter
-		delay := h.core.ActorsConfig[ref.ActorType].InitialRetryDelay * time.Duration(multiplier)
+		delay := h.core.ActorsConfig[aRef.ActorType].InitialRetryDelay * time.Duration(multiplier)
 		lease.IncreaseAttempts(h.clock.Now().Add(delay))
 		err = h.alarmProcessor.Enqueue(lease)
 		if err != nil {
@@ -266,8 +276,8 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		return
 
 	case executeAlarmStatusCompleted:
-		// Complete the alarm
-		err = h.completeAlarm(ctx, lease, log)
+		// Complete the alarm, re-enqueuing it from the deferred cleanup when its lease was kept for the next occurrence
+		reEnqueue, err = h.completeAlarm(ctx, lease, log)
 		if err != nil {
 			// Log the error only - we are in background goroutine
 			log.Error("Error completing alarm", slog.Any("error", err))
@@ -280,7 +290,9 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 	}
 }
 
-func (h *Host) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, log *slog.Logger) error {
+// completeAlarm reschedules a repeating alarm or deletes a one-shot alarm after a successful execution
+// It returns true when the lease was kept for the next occurrence and must be re-enqueued by the caller once the active flag is cleared
+func (h *Host) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, log *slog.Logger) (bool, error) {
 	// First, retrieve the alarm again
 	// We do this again first to check that the alarm is repeating, and second to make sure our lease is still valid
 	// In fact, the actor itself may have modified the alarm after executing it
@@ -290,10 +302,10 @@ func (h *Host) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, l
 	if errors.Is(err, components.ErrNoAlarm) {
 		// If we get ErrNoAlarm, the alarm was modified/deleted, or the lease was canceled for other reasons
 		// Let's just return no error
-		return nil
+		return false, nil
 	} else if err != nil {
 		// Something went wrong
-		return fmt.Errorf("error retrieving alarm from provider: %w", err)
+		return false, fmt.Errorf("error retrieving alarm from provider: %w", err)
 	}
 
 	// Check if the alarm repeats
@@ -308,11 +320,11 @@ func (h *Host) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, l
 		if err != nil && !errors.Is(err, components.ErrNoAlarm) {
 			// If we get ErrNoAlarm, the alarm was modified/deleted, or the lease was canceled for other reasons
 			// We can ignore that error
-			return fmt.Errorf("error removing completed alarm in provider: %w", err)
+			return false, fmt.Errorf("error removing completed alarm in provider: %w", err)
 		}
 
 		// We're done!
-		return nil
+		return false, nil
 	}
 
 	// If we're here, the alarm repeats, so we need to update it instead
@@ -334,22 +346,21 @@ func (h *Host) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, l
 	if errors.Is(err, components.ErrNoAlarm) {
 		// If we get ErrNoAlarm, the alarm was modified/deleted, or the lease was canceled for other reasons
 		// Let's just return no error
-		return nil
+		return false, nil
 	} else if err != nil {
 		// Something went wrong
-		return fmt.Errorf("error updating alarm in provider: %w", err)
+		return false, fmt.Errorf("error updating alarm in provider: %w", err)
 	}
 
-	// If we kept the lease, re-enqueue the alarm
+	// If we kept the lease, advance the in-memory due time to the next occurrence and signal the caller to re-enqueue it
+	// The actual re-enqueue happens after the active flag is cleared, otherwise enqueueAlarms would skip it as already active
 	if updateReq.RefreshLease {
-		err = h.enqueueAlarms([]*ref.AlarmLease{lease})
-		if err != nil {
-			return fmt.Errorf("error re-enqueueing leased alarm: %w", err)
-		}
+		lease.ResetForNextExecution(next)
+		return true, nil
 	}
 
-	// All done here too
-	return nil
+	// The next occurrence is too far out to keep the lease, so a later fetch will pick it up
+	return false, nil
 }
 
 func (h *Host) runLeaseRenewal(parentCtx context.Context) (err error) {
