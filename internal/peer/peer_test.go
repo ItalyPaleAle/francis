@@ -25,7 +25,7 @@ import (
 )
 
 // peerTestPSK is the fixed runtime PSK the peer tests derive their cluster CA from
-var peerTestPSK = []byte("peer-test-psk-0123456789abcdef")
+var peerTestPSK = []byte("peer-test-psk-0123456789abcdefgh")
 
 // peerTLSPair builds matching server and client TLS configs for host-to-host mTLS, both signed by the same test CA
 func peerTLSPair(t *testing.T) (server *tls.Config, client *tls.Config) {

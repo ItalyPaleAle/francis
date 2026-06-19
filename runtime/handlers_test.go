@@ -58,7 +58,7 @@ func TestHandleRenewCert(t *testing.T) {
 
 // testRuntimePSK derives the test cluster CA, and testHostPSK is the host bootstrap key the test runtimes accept
 var (
-	testRuntimePSK = []byte("runtime-test-psk-0123456789abcd")
+	testRuntimePSK = []byte("runtime-test-psk-0123456789abcdef")
 	testHostPSK    = []byte("host-test-psk-0123456789abcdef")
 )
 
