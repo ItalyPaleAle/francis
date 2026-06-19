@@ -67,6 +67,9 @@ func (b *standaloneSQLiteBackend) Run(t *testing.T) {
 	require.NoError(t, err, "failed to open in-memory SQLite database")
 	db.SetMaxOpenConns(1)
 
+	_, err = db.ExecContext(t.Context(), "PRAGMA foreign_keys = ON")
+	require.NoError(t, err, "failed to enable foreign keys")
+
 	b.db = db
 }
 
