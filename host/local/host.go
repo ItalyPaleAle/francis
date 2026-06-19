@@ -77,7 +77,9 @@ type Host struct {
 	// Host ID for the registered host
 	hostID string
 
-	running       atomic.Bool
+	running  atomic.Bool
+	draining atomic.Bool
+
 	actorProvider components.ActorProvider
 	service       *actor.Service
 	core          *actorcore.Manager
@@ -290,6 +292,7 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 
 	// The peer server serves invocations of actors owned by this host over WebTransport
 	// It reports our host ID so it can reject invocations aimed at a stale placement, and requires a host certificate from every caller
+	// Draining is wired so callers receive a retry-later response rather than a hard reset during graceful shutdown
 	h.peerServer = peer.NewServer(peer.ServerConfig{
 		Bind:                h.bind,
 		TLSConfig:           hosttls.PeerServerTLSConfig(holder),
@@ -297,6 +300,7 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 		StreamHandler:       h.peerInvokeStream,
 		Log:                 options.Logger,
 		HostID:              h.HostID,
+		Draining:            func() bool { return h.draining.Load() },
 		MaxInFlightRequests: options.MaxInFlightRequests,
 		MaxRequestBodySize:  options.MaxRequestBodySize,
 	})
@@ -367,16 +371,16 @@ func (h *Host) Run(parentCtx context.Context) error {
 	// Closing the channel also publishes those writes to any goroutine that waits on Ready
 	h.readyOnce.Do(func() { close(h.ready) })
 
-	// Before returning, we halt all remaining actors
-	defer func() {
-		haltErr := h.HaltAll()
-		if haltErr != nil {
-			h.log.Warn("Error halting actors", slog.Any("error", haltErr))
-		}
+	// Set the draining flag as soon as the context is canceled so the peer server rejects new invocations
+	// with a retry-later error before any actors are halted, giving callers a chance to re-resolve
+	go func() {
+		<-ctx.Done()
+		h.draining.Store(true)
 	}()
 
 	// Upon returning, we unregister the host so it can be removed cleanly
 	// If the application crashes and this code isn't executed, eventually the host will be removed for not sending health checks periodically
+	// Registered first so it runs second (LIFO): actors must be halted before the host registration is removed
 	defer func() {
 		// Use a background context here as the parent one is likely canceled at this point
 		unregisterCtx, unregisterCancel := context.WithTimeout(context.Background(), h.providerRequestTimeout)
@@ -390,6 +394,15 @@ func (h *Host) Run(parentCtx context.Context) error {
 
 		h.log.InfoContext(ctx, "Unregistered actor host")
 		h.hostID = ""
+	}()
+
+	// Halt all remaining actors before the host unregisters
+	// Registered second so it runs first (LIFO): actors are halted before the provider record is removed
+	defer func() {
+		haltErr := h.HaltAll()
+		if haltErr != nil {
+			h.log.Warn("Error halting actors", slog.Any("error", haltErr))
+		}
 	}()
 
 	// Create the alarm processor here before the services start

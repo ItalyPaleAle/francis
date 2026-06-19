@@ -298,6 +298,11 @@ func (rt *Runtime) dispatchAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 	// The owning host must be connected to this runtime and not draining
 	conn, ok := rt.hosts.Get(lar.HostID)
 	if !ok || conn.IsDraining() {
+		// Proactively release the lease so another runtime replica can pick up the alarm on the next poll
+		// Without this, the lease must expire naturally (up to one full lease duration) before another replica can claim the alarm
+		releaseCtx, releaseCancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+		_ = rt.provider.ReleaseAlarmLease(releaseCtx, lease)
+		releaseCancel()
 		return executeAlarmStatusAbandoned, nil
 	}
 

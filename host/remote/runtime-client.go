@@ -501,7 +501,8 @@ func (rc *runtimeClient) runCertRenewal(ctx context.Context, notAfter time.Time)
 
 	for {
 		// Renew at the midpoint of the remaining lifetime so there is ample time to retry before expiry
-		wait := time.Until(notAfter) / 2
+		// Use the injected clock so tests with a fake clock drive renewal deterministically
+		wait := notAfter.Sub(rc.cfg.clock.Now()) / 2
 		if wait < 0 {
 			wait = 0
 		}
