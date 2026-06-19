@@ -135,8 +135,9 @@ func (m *Manager) invokeLocalObject(ctx context.Context, resolver PlacementResol
 
 	res, err := m.lockAndInvokeLocal(ctx, resolver, r, activeOnly, invoke)
 	if err != nil {
-		// An inactive actor or a placement owned elsewhere means the actor may be active on another host - re-resolve
-		retry := errors.Is(err, actor.ErrActorNotActive) || errors.Is(err, actor.ErrActorNotHosted)
+		// A halted, inactive, or elsewhere-owned actor means the actor may now be active on another host, so re-resolve and retry
+		// ErrActorHalted is included because the manager removes the actor from its map after halting, so a re-resolve activates a fresh instance
+		retry := errors.Is(err, actor.ErrActorNotActive) || errors.Is(err, actor.ErrActorNotHosted) || errors.Is(err, actor.ErrActorHalted)
 		return nil, retry, 0, err
 	}
 
