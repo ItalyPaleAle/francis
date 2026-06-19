@@ -3,5 +3,12 @@
   "ignore": [
     "github.com/italypaleale/*",
     "golang.org/x/*"
+  ],
+  "allow": [
+    {
+      "module": "github.com/quic-go/webtransport-go",
+      "version": "v0.10.0",
+      "reason": "forked"
+    }
   ]
 }
