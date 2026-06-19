@@ -42,7 +42,8 @@ func (h *Host) SetAlarm(ctx context.Context, actorType string, actorID string, n
 		return err
 	}
 
-	if err = properties.Validate(); err != nil {
+	err = properties.Validate()
+	if err != nil {
 		return err
 	}
 

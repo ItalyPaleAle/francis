@@ -305,10 +305,11 @@ func (h *Host) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, l
 	}
 
 	// Check if the alarm repeats
-	next, nextErr := alarm.NextExecution(lease.ExecutionTime())
-	if nextErr != nil {
-		// The stored interval is corrupt; keep the alarm rather than silently deleting it
-		log.Error("Failed to compute next execution time for alarm; alarm will be kept", slog.Any("error", nextErr))
+	next, err := alarm.NextExecution(lease.ExecutionTime())
+	if err != nil {
+		// The stored interval is corrupt
+		// Keep the alarm rather than silently deleting it
+		log.Error("Failed to compute next execution time for alarm; alarm will be kept", slog.Any("error", err))
 		return false, nil
 	}
 	if next.IsZero() {
@@ -426,7 +427,8 @@ func (h *Host) SetAlarm(ctx context.Context, actorType string, actorID string, n
 		return err
 	}
 
-	if err = properties.Validate(); err != nil {
+	err = properties.Validate()
+	if err != nil {
 		return err
 	}
 

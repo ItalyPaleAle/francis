@@ -64,7 +64,8 @@ func NewJWTValidator(ctx context.Context, cfg JWTConfig) (*JWTValidator, error) 
 	}
 
 	// Validate the standard claims as part of parsing so a malformed issuer, audience, or expiry is rejected centrally
-	// Expiration is validated when present but not required; tokens without exp are accepted and not eligible for join token tracking
+	// Note: Expiration is validated when present but not required
+	// Tokens without exp are accepted and not eligible for join token tracking
 	parser := jwt.NewParser(
 		jwt.WithValidMethods(jwtValidMethods),
 		jwt.WithIssuer(cfg.Issuer),
@@ -79,11 +80,11 @@ func NewJWTValidator(ctx context.Context, cfg JWTConfig) (*JWTValidator, error) 
 }
 
 // Validate checks the token's signature and standard claims and returns the subject and, when present, the join token (jti) and its expiry
-// The join token is empty and the expiry is zero when the token carries no jti or no expiry; callers must not store an empty join token
+// The join token is empty and the expiry is zero when the token carries no jti or no expiry
 func (v *JWTValidator) Validate(token string) (subject, joinToken string, expiresAt time.Time, err error) {
-	parsed, parseErr := v.parser.Parse(token, v.keyfunc)
-	if parseErr != nil {
-		return "", "", time.Time{}, fmt.Errorf("token validation failed: %w", parseErr)
+	parsed, err := v.parser.Parse(token, v.keyfunc)
+	if err != nil {
+		return "", "", time.Time{}, fmt.Errorf("token validation failed: %w", err)
 	}
 	if !parsed.Valid {
 		return "", "", time.Time{}, errors.New("token is invalid")
@@ -94,9 +95,9 @@ func (v *JWTValidator) Validate(token string) (subject, joinToken string, expire
 		return "", "", time.Time{}, errors.New("unexpected claims type")
 	}
 
-	subject, subErr := parsed.Claims.GetSubject()
-	if subErr != nil {
-		return "", "", time.Time{}, fmt.Errorf("failed to read token subject: %w", subErr)
+	subject, err = parsed.Claims.GetSubject()
+	if err != nil {
+		return "", "", time.Time{}, fmt.Errorf("failed to read token subject: %w", err)
 	}
 
 	// A missing jti means there is nothing to track for replay protection
@@ -106,8 +107,9 @@ func (v *JWTValidator) Validate(token string) (subject, joinToken string, expire
 	}
 
 	// A missing exp means we cannot bound the replay window, so we skip tracking this token
-	exp, expErr := parsed.Claims.GetExpirationTime()
-	if expErr != nil || exp == nil {
+	exp, err := parsed.Claims.GetExpirationTime()
+	if err != nil || exp == nil {
+		//nolint:nilerr
 		return subject, "", time.Time{}, nil
 	}
 

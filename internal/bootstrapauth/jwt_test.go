@@ -50,7 +50,8 @@ func TestJWTValidator(t *testing.T) {
 	assert.Equal(t, "unique-bootstrap-token-1", jt)
 	assert.False(t, jtExp.IsZero())
 
-	// A token without a jti is accepted; the returned join token is empty because there is nothing to track
+	// A token without a jti is accepted
+	// The returned join token is empty because there is nothing to track
 	sub, jt, jtExp, err = v.Validate(sign(jwt.RegisteredClaims{
 		Issuer:    "https://issuer.example",
 		Subject:   "x",

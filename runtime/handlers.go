@@ -305,7 +305,7 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 }
 
 // authenticateJWT validates a host bootstrap token, enforcing that the cluster is configured for JWT bootstrap
-// Returns the join token and its expiry when the token carries a jti and an expiry; both are zero otherwise
+// Returns the join token and its expiry when the token carries a jti and an expiry
 func (rt *Runtime) authenticateJWT(ctx context.Context, token string) (joinToken string, expiresAt time.Time, err error) {
 	if rt.bootstrapMethod != bootstrapauth.MethodJWT {
 		return "", time.Time{}, errors.New("JWT bootstrap is not enabled")
@@ -315,12 +315,13 @@ func (rt *Runtime) authenticateJWT(ctx context.Context, token string) (joinToken
 	}
 
 	// Log the real reason server-side but return a generic error to avoid leaking validation details to the caller
-	subject, jt, jtExp, valErr := rt.bootstrapJWT.Validate(token)
-	if valErr != nil {
-		rt.log.WarnContext(ctx, "JWT validation failed", slog.Any("error", valErr))
+	subject, jt, jtExp, err := rt.bootstrapJWT.Validate(token)
+	if err != nil {
+		rt.log.WarnContext(ctx, "JWT validation failed", slog.Any("error", err))
 		return "", time.Time{}, errors.New("JWT authentication failed")
 	}
 	rt.log.DebugContext(ctx, "Host authenticated via JWT", slog.String("subject", subject))
+
 	return jt, jtExp, nil
 }
 
@@ -408,6 +409,7 @@ func (rt *Runtime) handleLookupActor(parentCtx context.Context, _ *hostConn, req
 	if payload.ActorType == "" || payload.ActorID == "" {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "lookup is missing the actor type or ID"))
 	}
+
 	err = ref.ValidateComponents(payload.ActorType, payload.ActorID)
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
@@ -482,6 +484,7 @@ func (rt *Runtime) handleRemoveActor(parentCtx context.Context, _ *hostConn, req
 	if payload.ActorType == "" || payload.ActorID == "" {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "remove actor is missing the actor type or ID"))
 	}
+
 	err = ref.ValidateComponents(payload.ActorType, payload.ActorID)
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
@@ -514,6 +517,7 @@ func (rt *Runtime) handleGetAlarm(parentCtx context.Context, _ *hostConn, req *p
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode get alarm request"))
 	}
+
 	err = ref.ValidateComponents(payload.ActorType, payload.ActorID, payload.Name)
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
@@ -541,6 +545,7 @@ func (rt *Runtime) handleSetAlarm(parentCtx context.Context, _ *hostConn, req *p
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode set alarm request"))
 	}
+
 	err = ref.ValidateComponents(payload.ActorType, payload.ActorID, payload.Name)
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
@@ -566,6 +571,7 @@ func (rt *Runtime) handleDeleteAlarm(parentCtx context.Context, _ *hostConn, req
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode delete alarm request"))
 	}
+
 	err = ref.ValidateComponents(payload.ActorType, payload.ActorID, payload.Name)
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
@@ -591,6 +597,7 @@ func (rt *Runtime) handleGetState(parentCtx context.Context, _ *hostConn, req *p
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode get state request"))
 	}
+
 	err = ref.ValidateComponents(payload.ActorType, payload.ActorID)
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
@@ -616,6 +623,7 @@ func (rt *Runtime) handleSetState(parentCtx context.Context, _ *hostConn, req *p
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode set state request"))
 	}
+
 	err = ref.ValidateComponents(payload.ActorType, payload.ActorID)
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
@@ -644,6 +652,7 @@ func (rt *Runtime) handleDeleteState(parentCtx context.Context, _ *hostConn, req
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode delete state request"))
 	}
+
 	err = ref.ValidateComponents(payload.ActorType, payload.ActorID)
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))

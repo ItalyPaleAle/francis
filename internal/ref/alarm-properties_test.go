@@ -42,7 +42,7 @@ func TestAlarmProperties_NextExecution(t *testing.T) {
 	})
 
 	t.Run("corrupt interval returns error, not zero", func(t *testing.T) {
-		// Trailing garbage that the old parser would silently ignore
+		// Trailing garbage
 		a := AlarmProperties{Interval: "PT1Hgarbage"}
 		_, err := a.NextExecution(base)
 		require.Error(t, err)

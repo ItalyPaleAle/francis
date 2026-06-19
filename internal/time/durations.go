@@ -143,11 +143,10 @@ func ParseISO8601Duration(from string) (d Duration, err error) {
 			if isParsingTime || isDecimal || start == i {
 				return d, errInvalidISO8601Duration
 			}
-			tmp, err = strconv.Atoi(from[start:i])
-			if err != nil || tmp < 0 {
+			d.Years, err = strconv.Atoi(from[start:i])
+			if err != nil || d.Years < 0 {
 				return d, errInvalidISO8601Duration
 			}
-			d.Years = tmp
 			start = i + 1
 
 		case 'W':

@@ -59,7 +59,7 @@ func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.Regi
 			return zero, fmt.Errorf("error inserting host: %w", err)
 		}
 
-		// Consume the join token inside the same transaction so a failed host insertion rolls back the token consumption atomically
+		// Consume the join token inside the same transaction too
 		if req.JoinToken != "" {
 			err = p.consumeJoinToken(ctx, tx, req.JoinToken, hostID, req.JoinTokenExpiresAt)
 			if err != nil {
@@ -150,7 +150,7 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 			reattached = false
 		}
 
-		// Consume the join token inside the same transaction so a failed registration rolls back the token consumption atomically
+		// Consume the join token inside the same transaction too
 		if req.JoinToken != "" {
 			err = p.consumeJoinToken(ctx, tx, req.JoinToken, activeHostID, req.JoinTokenExpiresAt)
 			if err != nil {
@@ -361,17 +361,16 @@ func (p *PostgresProvider) RemoveActor(ctx context.Context, ref ref.ActorRef) er
 }
 
 // consumeJoinToken records a join token as consumed to prevent replay, pruning expired rows first
-// Called inside an open transaction so that a subsequent failure rolls back the consumption atomically
 func (p *PostgresProvider) consumeJoinToken(ctx context.Context, tx pgx.Tx, joinToken, hostID string, expiresAt time.Time) error {
-	// Lazily delete expired join tokens to keep the table tidy without a background job
+	// Lazily delete expired join tokens
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
-	_, err := tx.Exec(queryCtx, `DELETE FROM consumed_join_tokens WHERE expires_at < (now() AT TIME ZONE 'UTC')`)
+	_, err := tx.Exec(queryCtx, `DELETE FROM consumed_join_tokens WHERE expires_at < now()`)
 	if err != nil {
 		return fmt.Errorf("error pruning expired join tokens: %w", err)
 	}
 
-	// Insert the token; a unique-constraint violation means the same token was already used
+	// Insert the token
 	queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 	_, err = tx.Exec(queryCtx,
@@ -380,6 +379,7 @@ func (p *PostgresProvider) consumeJoinToken(ctx context.Context, tx pgx.Tx, join
 		joinToken, hostID, expiresAt,
 	)
 	if isConstraintError(err) {
+		// A unique-constraint violation means the same token was already used
 		return components.ErrJoinTokenAlreadyConsumed
 	} else if err != nil {
 		return fmt.Errorf("error consuming join token: %w", err)

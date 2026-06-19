@@ -164,7 +164,7 @@ func (s *SQLiteProvider) reattachHost(ctx context.Context, req components.Regist
 			reattached = false
 		}
 
-		// Consume the join token inside the same transaction so a failed registration rolls back the token consumption atomically
+		// Consume the join token inside the same transaction too
 		if req.JoinToken != "" {
 			err = s.consumeJoinToken(ctx, tx, req.JoinToken, activeHostID, req.JoinTokenExpiresAt)
 			if err != nil {
@@ -576,7 +576,6 @@ func buildLookupActorHostClause(hosts []string, params []any) (string, []any) {
 }
 
 // consumeJoinToken records a join token as consumed to prevent replay, pruning expired rows first
-// Called inside an open transaction so that a subsequent failure rolls back the consumption atomically
 func (s *SQLiteProvider) consumeJoinToken(ctx context.Context, tx *sql.Tx, joinToken, hostID string, expiresAt time.Time) error {
 	now := s.clock.Now().UnixMilli()
 
@@ -588,7 +587,7 @@ func (s *SQLiteProvider) consumeJoinToken(ctx context.Context, tx *sql.Tx, joinT
 		return fmt.Errorf("error pruning expired join tokens: %w", err)
 	}
 
-	// Insert the token; a unique-constraint violation means the same token was already used
+	// Insert the token
 	queryCtx, cancel = context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	_, err = tx.ExecContext(queryCtx,
@@ -597,6 +596,7 @@ func (s *SQLiteProvider) consumeJoinToken(ctx context.Context, tx *sql.Tx, joinT
 		joinToken, hostID, expiresAt.UnixMilli(),
 	)
 	if isConstraintError(err) {
+		// A unique-constraint violation means the same token was already used
 		return components.ErrJoinTokenAlreadyConsumed
 	} else if err != nil {
 		return fmt.Errorf("error consuming join token: %w", err)

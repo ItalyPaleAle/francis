@@ -346,6 +346,7 @@ func (h *Host) Halt(actorType string, actorID string) error {
 	if err != nil {
 		return err
 	}
+
 	return h.core.Halt(actorType, actorID)
 }
 
