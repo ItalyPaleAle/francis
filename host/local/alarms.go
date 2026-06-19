@@ -194,10 +194,10 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		// Invoke the actor
 		err = obj.Alarm(parentCtx, a.Name, data)
 		if err != nil {
-			// Consider this as a retryable condition unless we've exceeded the max attempts
+			// Consider this as a retryable condition unless we've exhausted the configured max attempts
 			code := executeAlarmStatusRetryable
 			maxAttempts := h.core.ActorsConfig[aRef.ActorType].MaxAttempts
-			if lease.Attempts() > maxAttempts {
+			if lease.Attempts() >= maxAttempts {
 				code = executeAlarmStatusFatal
 			}
 			return code, fmt.Errorf("error from actor (attempt %d of %d): %w", lease.Attempts(), maxAttempts, err)
