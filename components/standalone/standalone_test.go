@@ -69,6 +69,10 @@ func initSQLiteTestProvider(t *testing.T) *StandaloneSQLiteBacked {
 	db.SetMaxOpenConns(1) // Required for in-memory SQLite
 	t.Cleanup(func() { db.Close() })
 
+	// Enable foreign keys — required by the provider (with MaxOpenConns(1) this applies to the single connection)
+	_, err = db.ExecContext(t.Context(), "PRAGMA foreign_keys = ON")
+	require.NoError(t, err, "Error enabling foreign keys")
+
 	providerOpts := StandaloneSQLiteOptions{
 		DB:    db,
 		Clock: clock,

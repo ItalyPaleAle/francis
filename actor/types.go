@@ -3,6 +3,7 @@ package actor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -87,6 +88,22 @@ func (a *AlarmProperties) UnmarshalJSON(data []byte) error {
 	}
 
 	a.Data = aux.Data
+	return nil
+}
+
+// Validate checks that AlarmProperties fields are well-formed.
+// In particular it rejects a non-empty Interval that cannot be parsed or that would produce a zero repeat period.
+func (a AlarmProperties) Validate() error {
+	if a.Interval == "" {
+		return nil
+	}
+	d, err := timeutils.ParseISO8601Duration(a.Interval)
+	if err != nil {
+		return fmt.Errorf("invalid alarm interval: %w", err)
+	}
+	if d.IsZero() {
+		return errors.New("alarm interval must be greater than zero")
+	}
 	return nil
 }
 

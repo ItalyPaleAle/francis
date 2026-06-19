@@ -42,6 +42,10 @@ func (h *Host) SetAlarm(ctx context.Context, actorType string, actorID string, n
 		return err
 	}
 
+	if err = properties.Validate(); err != nil {
+		return err
+	}
+
 	// Encode the alarm properties for the wire
 	props, err := actorAlarmPropsToProtocol(properties)
 	if err != nil {

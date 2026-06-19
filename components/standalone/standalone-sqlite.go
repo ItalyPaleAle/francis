@@ -89,8 +89,14 @@ func NewStandaloneSQLiteBacked(log *slog.Logger, opts StandaloneSQLiteOptions, p
 }
 
 func (s *StandaloneSQLiteBacked) Init(ctx context.Context) error {
+	// Validate that the injected DB has the required pragma settings
+	err := s.validateConnection(ctx)
+	if err != nil {
+		return err
+	}
+
 	// Run migrations
-	err := s.runMigrations(ctx)
+	err = s.runMigrations(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to run migrations: %w", err)
 	}
@@ -101,6 +107,20 @@ func (s *StandaloneSQLiteBacked) Init(ctx context.Context) error {
 		return fmt.Errorf("failed to load data from database: %w", err)
 	}
 
+	return nil
+}
+
+func (s *StandaloneSQLiteBacked) validateConnection(ctx context.Context) error {
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	var fk bool
+	err := s.db.QueryRowContext(queryCtx, "PRAGMA foreign_keys").Scan(&fk)
+	if err != nil {
+		return fmt.Errorf("error checking pragma foreign_keys: %w", err)
+	}
+	if !fk {
+		return errors.New("SQLite is running with foreign keys disabled, which is not supported")
+	}
 	return nil
 }
 
