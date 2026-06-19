@@ -73,7 +73,8 @@ func TestJWTValidator(t *testing.T) {
 	}))
 	require.Error(t, err)
 
-	// A token with a jti but no exp is accepted; the join token is empty because we cannot bound the replay window
+	// A token with a jti but no exp is accepted
+	// The join token is empty because we cannot bound the replay window
 	_, jt, jtExp, err = v.Validate(sign(jwt.RegisteredClaims{
 		ID:       "jti-no-exp",
 		Issuer:   "https://issuer.example",
