@@ -179,7 +179,7 @@ func TestSetAlarm(t *testing.T) {
 
 		properties := actor.AlarmProperties{
 			DueTime:  dueTime,
-			Interval: "1h",
+			Interval: "PT1H",
 			Data:     "test-data",
 			TTL:      ttl,
 		}
@@ -187,7 +187,7 @@ func TestSetAlarm(t *testing.T) {
 		expectedReq := components.SetAlarmReq{
 			AlarmProperties: ref.AlarmProperties{
 				DueTime:  dueTime,
-				Interval: "1h",
+				Interval: "PT1H",
 				Data:     testData,
 				TTL:      &ttl,
 			},
@@ -215,7 +215,7 @@ func TestSetAlarm(t *testing.T) {
 
 		properties := actor.AlarmProperties{
 			DueTime:  dueTime,
-			Interval: "2h",
+			Interval: "PT2H",
 			Data:     "test-data",
 			// TTL is zero value (not set)
 		}
@@ -223,7 +223,7 @@ func TestSetAlarm(t *testing.T) {
 		expectedReq := components.SetAlarmReq{
 			AlarmProperties: ref.AlarmProperties{
 				DueTime:  dueTime,
-				Interval: "2h",
+				Interval: "PT2H",
 				Data:     testData,
 			},
 			// TTL should be nil when not set
@@ -251,14 +251,14 @@ func TestSetAlarm(t *testing.T) {
 
 		properties := actor.AlarmProperties{
 			DueTime:  dueTime,
-			Interval: "30m",
+			Interval: "PT30M",
 			Data:     nil, // No data
 		}
 
 		expectedReq := components.SetAlarmReq{
 			AlarmProperties: ref.AlarmProperties{
 				DueTime:  dueTime,
-				Interval: "30m",
+				Interval: "PT30M",
 				Data:     nil,
 			},
 		}
@@ -286,14 +286,14 @@ func TestSetAlarm(t *testing.T) {
 
 		properties := actor.AlarmProperties{
 			DueTime:  dueTime,
-			Interval: "1h",
+			Interval: "PT1H",
 			Data:     "test-data",
 		}
 
 		expectedReq := components.SetAlarmReq{
 			AlarmProperties: ref.AlarmProperties{
 				DueTime:  dueTime,
-				Interval: "1h",
+				Interval: "PT1H",
 				Data:     testData,
 			},
 		}
