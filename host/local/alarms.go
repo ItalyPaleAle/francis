@@ -400,6 +400,11 @@ func (h *Host) runLeaseRenewal(parentCtx context.Context) (err error) {
 }
 
 func (h *Host) GetAlarm(ctx context.Context, actorType string, actorID string, name string) (actor.AlarmProperties, error) {
+	err := ref.ValidateComponents(actorType, actorID, name)
+	if err != nil {
+		return actor.AlarmProperties{}, err
+	}
+
 	res, err := h.actorProvider.GetAlarm(ctx, ref.NewAlarmRef(actorType, actorID, name))
 	if errors.Is(err, components.ErrNoAlarm) {
 		return actor.AlarmProperties{}, actor.ErrAlarmNotFound
@@ -411,6 +416,11 @@ func (h *Host) GetAlarm(ctx context.Context, actorType string, actorID string, n
 }
 
 func (h *Host) SetAlarm(ctx context.Context, actorType string, actorID string, name string, properties actor.AlarmProperties) error {
+	err := ref.ValidateComponents(actorType, actorID, name)
+	if err != nil {
+		return err
+	}
+
 	req, err := alarmPropertiesToAlarmReq(properties)
 	if err != nil {
 		return err
@@ -425,7 +435,12 @@ func (h *Host) SetAlarm(ctx context.Context, actorType string, actorID string, n
 }
 
 func (h *Host) DeleteAlarm(ctx context.Context, actorType string, actorID string, name string) error {
-	err := h.actorProvider.DeleteAlarm(ctx, ref.NewAlarmRef(actorType, actorID, name))
+	err := ref.ValidateComponents(actorType, actorID, name)
+	if err != nil {
+		return err
+	}
+
+	err = h.actorProvider.DeleteAlarm(ctx, ref.NewAlarmRef(actorType, actorID, name))
 	if errors.Is(err, components.ErrNoAlarm) {
 		return actor.ErrAlarmNotFound
 	} else if err != nil {

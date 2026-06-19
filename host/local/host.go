@@ -460,6 +460,10 @@ func (h *Host) HostID() string {
 
 // Halt gracefully halts an actor that is hosted on the current host
 func (h *Host) Halt(actorType string, actorID string) error {
+	err := ref.ValidateComponents(actorType, actorID)
+	if err != nil {
+		return err
+	}
 	return h.core.Halt(actorType, actorID)
 }
 

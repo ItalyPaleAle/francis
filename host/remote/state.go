@@ -8,10 +8,16 @@ import (
 	msgpack "github.com/vmihailenco/msgpack/v5"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/protocol"
 )
 
 func (h *Host) SetState(ctx context.Context, actorType string, actorID string, state any, opts *actor.SetStateOpts) error {
+	err := ref.ValidateComponents(actorType, actorID)
+	if err != nil {
+		return err
+	}
+
 	var ttl time.Duration
 	if opts != nil {
 		ttl = opts.TTL
@@ -39,6 +45,11 @@ func (h *Host) SetState(ctx context.Context, actorType string, actorID string, s
 }
 
 func (h *Host) GetState(ctx context.Context, actorType string, actorID string, dest any) error {
+	err := ref.ValidateComponents(actorType, actorID)
+	if err != nil {
+		return err
+	}
+
 	// Retrieve the state through the runtime
 	reqCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
 	defer cancel()
@@ -62,10 +73,15 @@ func (h *Host) GetState(ctx context.Context, actorType string, actorID string, d
 }
 
 func (h *Host) DeleteState(ctx context.Context, actorType string, actorID string) error {
+	err := ref.ValidateComponents(actorType, actorID)
+	if err != nil {
+		return err
+	}
+
 	// Delete the state through the runtime
 	reqCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
 	defer cancel()
-	err := h.runtimeClient.DeleteState(reqCtx, protocol.DeleteStateRequest{
+	err = h.runtimeClient.DeleteState(reqCtx, protocol.DeleteStateRequest{
 		ActorRef: protocol.ActorRef{ActorType: actorType, ActorID: actorID},
 	})
 	if isProtocolErrorCode(err, protocol.ErrCodeStateNotFound) {

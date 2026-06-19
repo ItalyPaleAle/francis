@@ -408,6 +408,10 @@ func (rt *Runtime) handleLookupActor(parentCtx context.Context, _ *hostConn, req
 	if payload.ActorType == "" || payload.ActorID == "" {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "lookup is missing the actor type or ID"))
 	}
+	err = ref.ValidateComponents(payload.ActorType, payload.ActorID)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
+	}
 
 	aRef := ref.NewActorRef(payload.ActorType, payload.ActorID)
 	key := aRef.String()
@@ -478,6 +482,10 @@ func (rt *Runtime) handleRemoveActor(parentCtx context.Context, _ *hostConn, req
 	if payload.ActorType == "" || payload.ActorID == "" {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "remove actor is missing the actor type or ID"))
 	}
+	err = ref.ValidateComponents(payload.ActorType, payload.ActorID)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
+	}
 
 	aRef := ref.NewActorRef(payload.ActorType, payload.ActorID)
 
@@ -506,6 +514,10 @@ func (rt *Runtime) handleGetAlarm(parentCtx context.Context, _ *hostConn, req *p
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode get alarm request"))
 	}
+	err = ref.ValidateComponents(payload.ActorType, payload.ActorID, payload.Name)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
+	}
 
 	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
 	defer cancel()
@@ -529,6 +541,10 @@ func (rt *Runtime) handleSetAlarm(parentCtx context.Context, _ *hostConn, req *p
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode set alarm request"))
 	}
+	err = ref.ValidateComponents(payload.ActorType, payload.ActorID, payload.Name)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
+	}
 
 	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
 	defer cancel()
@@ -549,6 +565,10 @@ func (rt *Runtime) handleDeleteAlarm(parentCtx context.Context, _ *hostConn, req
 	err := req.DecodePayload(&payload)
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode delete alarm request"))
+	}
+	err = ref.ValidateComponents(payload.ActorType, payload.ActorID, payload.Name)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
 	}
 
 	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
@@ -571,6 +591,10 @@ func (rt *Runtime) handleGetState(parentCtx context.Context, _ *hostConn, req *p
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode get state request"))
 	}
+	err = ref.ValidateComponents(payload.ActorType, payload.ActorID)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
+	}
 
 	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
 	defer cancel()
@@ -591,6 +615,10 @@ func (rt *Runtime) handleSetState(parentCtx context.Context, _ *hostConn, req *p
 	err := req.DecodePayload(&payload)
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode set state request"))
+	}
+	err = ref.ValidateComponents(payload.ActorType, payload.ActorID)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
 	}
 
 	opts := components.SetStateOpts{}
@@ -615,6 +643,10 @@ func (rt *Runtime) handleDeleteState(parentCtx context.Context, _ *hostConn, req
 	err := req.DecodePayload(&payload)
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode delete state request"))
+	}
+	err = ref.ValidateComponents(payload.ActorType, payload.ActorID)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
 	}
 
 	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)

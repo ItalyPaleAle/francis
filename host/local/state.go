@@ -14,6 +14,11 @@ import (
 )
 
 func (h *Host) SetState(ctx context.Context, actorType string, actorID string, state any, opts *actor.SetStateOpts) error {
+	err := ref.ValidateComponents(actorType, actorID)
+	if err != nil {
+		return err
+	}
+
 	var ttl time.Duration
 	if opts != nil {
 		ttl = opts.TTL
@@ -36,6 +41,11 @@ func (h *Host) SetState(ctx context.Context, actorType string, actorID string, s
 }
 
 func (h *Host) GetState(ctx context.Context, actorType string, actorID string, dest any) error {
+	err := ref.ValidateComponents(actorType, actorID)
+	if err != nil {
+		return err
+	}
+
 	data, err := h.actorProvider.GetState(ctx, ref.NewActorRef(actorType, actorID))
 	if errors.Is(err, components.ErrNoState) {
 		return actor.ErrStateNotFound
@@ -52,7 +62,12 @@ func (h *Host) GetState(ctx context.Context, actorType string, actorID string, d
 }
 
 func (h *Host) DeleteState(ctx context.Context, actorType string, actorID string) error {
-	err := h.actorProvider.DeleteState(ctx, ref.NewActorRef(actorType, actorID))
+	err := ref.ValidateComponents(actorType, actorID)
+	if err != nil {
+		return err
+	}
+
+	err = h.actorProvider.DeleteState(ctx, ref.NewActorRef(actorType, actorID))
 	if errors.Is(err, components.ErrNoState) {
 		return actor.ErrStateNotFound
 	} else if err != nil {
