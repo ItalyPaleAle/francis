@@ -91,10 +91,9 @@ func (s *durability) runPersistent(t *testing.T, actorID string) {
 		return shared.ProbeObserver.AlarmCount(actorID) >= 1
 	}, 20*time.Second, 100*time.Millisecond, "alarm should fire before the restart")
 
-	// Restart the host: stop it, then bring it back up against the same store on a fresh port
+	// Restart the host in place: stop it, then bring it back up on the same address against the same store
 	s.cluster.Host(0).Stop(t)
 	countAfterStop := shared.ProbeObserver.AlarmCount(actorID)
-	s.cluster.Host(0).Rebind(t)
 	s.cluster.Host(0).Run(t)
 
 	// The persisted state survived, so a read returns the prior value and the next increment continues from it
@@ -122,9 +121,8 @@ func (s *durability) runPersistent(t *testing.T, actorID string) {
 func (s *durability) runEphemeral(t *testing.T, actorID string) {
 	ctx := t.Context()
 
-	// Restart the host on a fresh port, which discards the in-memory store
+	// Restart the host in place, which discards the in-memory store
 	s.cluster.Host(0).Stop(t)
-	s.cluster.Host(0).Rebind(t)
 	s.cluster.Host(0).Run(t)
 
 	// The state did not persist, so reading it reports not found

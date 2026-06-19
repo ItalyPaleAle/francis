@@ -14,7 +14,7 @@ require (
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/lmittmann/tint v1.1.3
 	github.com/mattn/go-isatty v0.0.22
-	github.com/quic-go/quic-go v0.59.1
+	github.com/quic-go/quic-go v0.60.0
 	github.com/quic-go/webtransport-go v0.10.0
 	github.com/stretchr/testify v1.11.1
 	github.com/vmihailenco/msgpack/v5 v5.4.1
@@ -49,3 +49,5 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+replace github.com/quic-go/webtransport-go => github.com/ItalyPaleAle/webtransport-go v0.0.0-20260618111824-b0a058cfcc6e
