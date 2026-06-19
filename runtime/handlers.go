@@ -197,12 +197,17 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 
 	// Authenticate the host and decide whether a fresh workload certificate must be issued
 	// A PSK challenge already authenticated the session, while JWT and mTLS reconnect are authenticated here
-	reattachID := ""
+	var (
+		joinToken          string
+		joinTokenExpiresAt time.Time
+		reattachID         string
+	)
 	issueCert := preAuthed
 	if !preAuthed {
 		switch payload.Auth.Method {
 		case bootstrapauth.MethodJWT:
-			authErr := rt.authenticateJWT(ctx, payload.Auth.Token)
+			var authErr error
+			joinToken, joinTokenExpiresAt, authErr = rt.authenticateJWT(ctx, payload.Auth.Token)
 			if authErr != nil {
 				return req.ErrorReply(protocol.NewError(protocol.ErrCodeUnauthorized, authErr.Error()))
 			}
@@ -237,11 +242,15 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 	regCtx, cancel := context.WithTimeout(ctx, rt.providerRequestTimeout)
 	defer cancel()
 	res, err := rt.provider.RegisterHost(regCtx, components.RegisterHostReq{
-		Address:        payload.Address,
-		ActorTypes:     protocolActorTypesToComponents(payload.ActorTypes),
-		ExistingHostID: existingID,
+		Address:            payload.Address,
+		ActorTypes:         protocolActorTypesToComponents(payload.ActorTypes),
+		ExistingHostID:     existingID,
+		JoinToken:          joinToken,
+		JoinTokenExpiresAt: joinTokenExpiresAt,
 	})
-	if err != nil {
+	if errors.Is(err, components.ErrJoinTokenAlreadyConsumed) {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeUnauthorized, "join token has already been used"))
+	} else if err != nil {
 		rt.log.ErrorContext(ctx, "Failed to register host", slog.Any("error", err))
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to register host"))
 	}
@@ -296,22 +305,23 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 }
 
 // authenticateJWT validates a host bootstrap token, enforcing that the cluster is configured for JWT bootstrap
-func (rt *Runtime) authenticateJWT(ctx context.Context, token string) error {
+// Returns the join token and its expiry when the token carries a jti and an expiry; both are zero otherwise
+func (rt *Runtime) authenticateJWT(ctx context.Context, token string) (joinToken string, expiresAt time.Time, err error) {
 	if rt.bootstrapMethod != bootstrapauth.MethodJWT {
-		return errors.New("JWT bootstrap is not enabled")
+		return "", time.Time{}, errors.New("JWT bootstrap is not enabled")
 	}
 	if rt.bootstrapJWT == nil {
-		return errors.New("JWT validator is not ready")
+		return "", time.Time{}, errors.New("JWT validator is not ready")
 	}
 
 	// Log the real reason server-side but return a generic error to avoid leaking validation details to the caller
-	subject, err := rt.bootstrapJWT.Validate(token)
-	if err != nil {
-		rt.log.WarnContext(ctx, "JWT validation failed", slog.Any("error", err))
-		return errors.New("JWT authentication failed")
+	subject, jt, jtExp, valErr := rt.bootstrapJWT.Validate(token)
+	if valErr != nil {
+		rt.log.WarnContext(ctx, "JWT validation failed", slog.Any("error", valErr))
+		return "", time.Time{}, errors.New("JWT authentication failed")
 	}
 	rt.log.DebugContext(ctx, "Host authenticated via JWT", slog.String("subject", subject))
-	return nil
+	return jt, jtExp, nil
 }
 
 // handleRenewCert issues a fresh workload certificate over an already authenticated session
