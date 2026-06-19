@@ -390,6 +390,12 @@ func (h *Host) Run(parentCtx context.Context) error {
 		h.hostID = ""
 	}()
 
+	// Create the alarm processor here, before the services start, so runLeaseRenewal can call enqueueAlarms without racing the field assignment that previously happened inside runAlarmFetcher
+	// The close is handled by runAlarmFetcher's defer, which intentionally leaves the field non-nil so in-flight re-enqueues receive ErrProcessorStopped instead of a nil-pointer panic
+	h.alarmProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ref.AlarmLease]{
+		ExecuteFn: h.executeAlarm,
+	})
+
 	// Run all services
 	// This blocks until the context is canceled or one of the services returns
 	return servicerunner.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/MicahParks/keyfunc/v3"
@@ -13,6 +14,9 @@ import (
 
 // jwtValidMethods is the allowlist of signing algorithms, chosen to exclude "none" and symmetric algorithms that would be unsafe with public keys
 var jwtValidMethods = []string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512", "EdDSA"}
+
+// maxJWTLifetime caps how far in the future the exp claim may be set to bound the window a captured token remains usable
+const maxJWTLifetime = time.Hour
 
 // JWTConfig configures validation of host bootstrap tokens
 // Exactly one of JWKSURL or StaticJWKS must be set, which is how the pluggable key source is selected
@@ -29,8 +33,10 @@ type JWTConfig struct {
 
 // JWTValidator validates host bootstrap tokens against a configured key source
 type JWTValidator struct {
-	parser  *jwt.Parser
-	keyfunc jwt.Keyfunc
+	parser   *jwt.Parser
+	keyfunc  jwt.Keyfunc
+	mu       sync.Mutex
+	usedJTIs map[string]time.Time // jti → expiry with leeway; guards replay across concurrent registrations
 }
 
 // NewJWTValidator builds a validator from the given config
@@ -69,7 +75,11 @@ func NewJWTValidator(ctx context.Context, cfg JWTConfig) (*JWTValidator, error) 
 		jwt.WithLeeway(time.Minute),
 	)
 
-	return &JWTValidator{parser: parser, keyfunc: kf.Keyfunc}, nil
+	return &JWTValidator{
+		parser:   parser,
+		keyfunc:  kf.Keyfunc,
+		usedJTIs: make(map[string]time.Time),
+	}, nil
 }
 
 // Validate checks the token's signature and standard claims and returns the subject, which is the host's platform identity
@@ -80,6 +90,44 @@ func (v *JWTValidator) Validate(token string) (string, error) {
 	}
 	if !parsed.Valid {
 		return "", errors.New("token is invalid")
+	}
+
+	// Require a jti claim so each token can be individually tracked to block replay
+	mapClaims, ok := parsed.Claims.(jwt.MapClaims)
+	if !ok {
+		return "", errors.New("unexpected claims type")
+	}
+	jti, _ := mapClaims["jti"].(string)
+	if jti == "" {
+		return "", errors.New("token is missing required jti claim")
+	}
+
+	// Reject tokens whose remaining lifetime exceeds the maximum to limit how long a captured token can be replayed
+	exp, expErr := parsed.Claims.GetExpirationTime()
+	if expErr != nil || exp == nil {
+		return "", errors.New("token is missing expiration")
+	}
+	if time.Until(exp.Time) > maxJWTLifetime {
+		return "", fmt.Errorf("token lifetime exceeds maximum of %v", maxJWTLifetime)
+	}
+
+	// Record the jti to prevent the same token from being accepted twice; prune expired entries on each call to avoid unbounded growth
+	v.mu.Lock()
+	_, seen := v.usedJTIs[jti]
+	if !seen {
+		now := time.Now()
+		for k, expAt := range v.usedJTIs {
+			if now.After(expAt) {
+				delete(v.usedJTIs, k)
+			}
+		}
+		// Retain the entry until the token can no longer be accepted even with the parser's leeway applied
+		v.usedJTIs[jti] = exp.Time.Add(time.Minute)
+	}
+	v.mu.Unlock()
+
+	if seen {
+		return "", errors.New("token jti has already been used")
 	}
 
 	sub, err := parsed.Claims.GetSubject()

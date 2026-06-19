@@ -10,7 +10,6 @@ import (
 	"math/rand/v2"
 	"time"
 
-	"github.com/italypaleale/go-kit/eventqueue"
 	msgpack "github.com/vmihailenco/msgpack/v5"
 
 	"github.com/italypaleale/francis/actor"
@@ -23,16 +22,13 @@ func (h *Host) runAlarmFetcher(ctx context.Context) error {
 	h.log.DebugContext(ctx, "Starting background alarm fetcher", slog.Any("interval", h.alarmsPollInterval))
 	defer h.log.Debug("Stopped background alarm fetcher")
 
-	// Start the processor
-	h.alarmProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ref.AlarmLease]{
-		ExecuteFn: h.executeAlarm,
-	})
+	// Close the processor when the fetcher exits
+	// Intentionally leave the field pointing at the closed processor rather than nil so that any in-flight alarm execution can still call Enqueue and receive ErrProcessorStopped instead of a nil-pointer panic
 	defer func() {
 		apErr := h.alarmProcessor.Close()
 		if apErr != nil {
 			h.log.Error("Failed to close alarm processor", slog.Any("error", apErr))
 		}
-		h.alarmProcessor = nil
 	}()
 
 	t := h.clock.NewTicker(h.alarmsPollInterval)
