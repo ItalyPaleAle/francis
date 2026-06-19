@@ -366,7 +366,7 @@ func (p *PostgresProvider) consumeJoinToken(ctx context.Context, tx pgx.Tx, join
 	// Lazily delete expired join tokens to keep the table tidy without a background job
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
-	_, err := tx.Exec(queryCtx, `DELETE FROM consumed_join_tokens WHERE expires_at < now()`)
+	_, err := tx.Exec(queryCtx, `DELETE FROM consumed_join_tokens WHERE expires_at < (now() AT TIME ZONE 'UTC')`)
 	if err != nil {
 		return fmt.Errorf("error pruning expired join tokens: %w", err)
 	}

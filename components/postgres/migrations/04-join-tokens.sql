@@ -4,5 +4,5 @@
 CREATE TABLE consumed_join_tokens (
     join_token text PRIMARY KEY,
     host_id    uuid        NOT NULL REFERENCES hosts(host_id) ON DELETE CASCADE,
-    expires_at timestamptz NOT NULL
+    expires_at timestamp   NOT NULL
 );
