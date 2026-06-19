@@ -22,13 +22,15 @@ func (h *Host) runAlarmFetcher(ctx context.Context) error {
 	h.log.DebugContext(ctx, "Starting background alarm fetcher", slog.Any("interval", h.alarmsPollInterval))
 	defer h.log.Debug("Stopped background alarm fetcher")
 
-	// Close the processor when the fetcher exits
-	// Intentionally leave the field pointing at the closed processor rather than nil so that any in-flight alarm execution can still call Enqueue and receive ErrProcessorStopped instead of a nil-pointer panic
+	// Close the processor when the fetcher exits, then wait for all in-flight alarm goroutines to finish
+	// The processor is intentionally left non-nil after close so in-flight re-enqueues receive ErrProcessorStopped instead of panicking
 	defer func() {
 		apErr := h.alarmProcessor.Close()
 		if apErr != nil {
 			h.log.Error("Failed to close alarm processor", slog.Any("error", apErr))
 		}
+		// Drain goroutines spawned by both the processor callback and the immediate-fire path
+		h.alarmWg.Wait()
 	}()
 
 	t := h.clock.NewTicker(h.alarmsPollInterval)
@@ -88,6 +90,7 @@ func (h *Host) enqueueAlarms(leases []*ref.AlarmLease) (err error) {
 		// If the alarm is to be executed immediately (within the next 0.1ms), skip enqueuing it and execute it right away
 		if a.DueTime().Sub(h.clock.Now()) < 100*time.Microsecond {
 			h.activeAlarms[a.Key()] = struct{}{}
+			h.alarmWg.Add(1)
 			go h.executeActiveAlarm(a)
 			continue
 		}
@@ -121,23 +124,27 @@ const (
 
 // Callback for the alarm processor
 func (h *Host) executeAlarm(lease *ref.AlarmLease) {
-	// Mark the alarm as active
+	// Mark the alarm as active before spawning the goroutine so concurrent processor firings cannot start duplicate executions
 	h.activeAlarmsLock.Lock()
 	_, active := h.activeAlarms[lease.Key()]
 	if active {
-		// Already active, so nothing to do
 		h.activeAlarmsLock.Unlock()
 		return
 	}
 	h.activeAlarms[lease.Key()] = struct{}{}
+	h.alarmWg.Add(1)
 	h.activeAlarmsLock.Unlock()
 
-	// Now we can execute the alarm
-	h.executeActiveAlarm(lease)
+	// Each execution runs on its own goroutine so the processor loop can continue without blocking
+	go h.executeActiveAlarm(lease)
 }
 
 // Executes an active alarm, that is already in the activeAlarms map
 func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
+	// Release the shutdown drain barrier when this execution finishes
+	defer h.alarmWg.Done()
+
+	// Use a background context so an in-flight execution can finish during the shutdown grace period; individual operations are bounded by providerRequestTimeout
 	ctx := context.Background()
 
 	key := lease.Key()

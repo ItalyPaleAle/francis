@@ -100,6 +100,8 @@ type Host struct {
 	holder *certholder.Holder
 
 	alarmProcessor *eventqueue.Processor[string, *ref.AlarmLease]
+	// alarmWg counts all in-flight alarm goroutines so shutdown can wait for them to finish
+	alarmWg sync.WaitGroup
 
 	// Actor placement cache
 	placementCache *ttlcache.Cache[string, *actorcore.Placement]
