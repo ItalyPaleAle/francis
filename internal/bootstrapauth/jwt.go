@@ -14,6 +14,9 @@ import (
 // jwtValidMethods is the allowlist of signing algorithms, chosen to exclude "none" and symmetric algorithms that would be unsafe with public keys
 var jwtValidMethods = []string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512", "EdDSA"}
 
+// maxJWTLifetime caps how far in the future the exp claim may be set to bound the window a captured token remains usable
+const maxJWTLifetime = time.Hour
+
 // JWTConfig configures validation of host bootstrap tokens
 // Exactly one of JWKSURL or StaticJWKS must be set, which is how the pluggable key source is selected
 type JWTConfig struct {
@@ -61,30 +64,59 @@ func NewJWTValidator(ctx context.Context, cfg JWTConfig) (*JWTValidator, error) 
 	}
 
 	// Validate the standard claims as part of parsing so a malformed issuer, audience, or expiry is rejected centrally
+	// Note: Expiration is validated when present but not required
+	// Tokens without exp are accepted and not eligible for join token tracking
 	parser := jwt.NewParser(
 		jwt.WithValidMethods(jwtValidMethods),
 		jwt.WithIssuer(cfg.Issuer),
 		jwt.WithAudience(cfg.Audience),
-		jwt.WithExpirationRequired(),
 		jwt.WithLeeway(time.Minute),
 	)
 
-	return &JWTValidator{parser: parser, keyfunc: kf.Keyfunc}, nil
+	return &JWTValidator{
+		parser:  parser,
+		keyfunc: kf.Keyfunc,
+	}, nil
 }
 
-// Validate checks the token's signature and standard claims and returns the subject, which is the host's platform identity
-func (v *JWTValidator) Validate(token string) (string, error) {
+// Validate checks the token's signature and standard claims and returns the subject and, when present, the join token (jti) and its expiry
+// The join token is empty and the expiry is zero when the token carries no jti or no expiry
+func (v *JWTValidator) Validate(token string) (subject, joinToken string, expiresAt time.Time, err error) {
 	parsed, err := v.parser.Parse(token, v.keyfunc)
 	if err != nil {
-		return "", fmt.Errorf("token validation failed: %w", err)
+		return "", "", time.Time{}, fmt.Errorf("token validation failed: %w", err)
 	}
 	if !parsed.Valid {
-		return "", errors.New("token is invalid")
+		return "", "", time.Time{}, errors.New("token is invalid")
 	}
 
-	sub, err := parsed.Claims.GetSubject()
-	if err != nil {
-		return "", fmt.Errorf("failed to read token subject: %w", err)
+	mapClaims, ok := parsed.Claims.(jwt.MapClaims)
+	if !ok {
+		return "", "", time.Time{}, errors.New("unexpected claims type")
 	}
-	return sub, nil
+
+	subject, err = parsed.Claims.GetSubject()
+	if err != nil {
+		return "", "", time.Time{}, fmt.Errorf("failed to read token subject: %w", err)
+	}
+
+	// A missing jti means there is nothing to track for replay protection
+	jti, _ := mapClaims["jti"].(string)
+	if jti == "" {
+		return subject, "", time.Time{}, nil
+	}
+
+	// A missing exp means we cannot bound the replay window, so we skip tracking this token
+	exp, err := parsed.Claims.GetExpirationTime()
+	if err != nil || exp == nil {
+		//nolint:nilerr
+		return subject, "", time.Time{}, nil
+	}
+
+	// Reject tokens whose remaining lifetime exceeds the maximum to limit how long a captured token can be replayed
+	if time.Until(exp.Time) > maxJWTLifetime {
+		return "", "", time.Time{}, fmt.Errorf("token lifetime exceeds maximum of %v", maxJWTLifetime)
+	}
+
+	return subject, jti, exp.Time, nil
 }

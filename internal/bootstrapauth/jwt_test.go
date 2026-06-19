@@ -37,8 +37,9 @@ func TestJWTValidator(t *testing.T) {
 		return signed
 	}
 
-	// A valid token validates and returns its subject
-	sub, err := v.Validate(sign(jwt.RegisteredClaims{
+	// A valid token with a jti validates and returns its subject and join token
+	sub, jt, jtExp, err := v.Validate(sign(jwt.RegisteredClaims{
+		ID:        "unique-bootstrap-token-1",
 		Issuer:    "https://issuer.example",
 		Subject:   "spiffe://platform/host/abc",
 		Audience:  jwt.ClaimStrings{"francis"},
@@ -46,9 +47,46 @@ func TestJWTValidator(t *testing.T) {
 	}))
 	require.NoError(t, err)
 	assert.Equal(t, "spiffe://platform/host/abc", sub)
+	assert.Equal(t, "unique-bootstrap-token-1", jt)
+	assert.False(t, jtExp.IsZero())
+
+	// A token without a jti is accepted
+	// The returned join token is empty because there is nothing to track
+	sub, jt, jtExp, err = v.Validate(sign(jwt.RegisteredClaims{
+		Issuer:    "https://issuer.example",
+		Subject:   "x",
+		Audience:  jwt.ClaimStrings{"francis"},
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Minute)),
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, "x", sub)
+	assert.Empty(t, jt)
+	assert.True(t, jtExp.IsZero())
+
+	// A token whose remaining lifetime exceeds the maximum is rejected
+	_, _, _, err = v.Validate(sign(jwt.RegisteredClaims{
+		ID:        "too-long-lived",
+		Issuer:    "https://issuer.example",
+		Subject:   "x",
+		Audience:  jwt.ClaimStrings{"francis"},
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(2 * time.Hour)),
+	}))
+	require.Error(t, err)
+
+	// A token with a jti but no exp is accepted
+	// The join token is empty because we cannot bound the replay window
+	_, jt, jtExp, err = v.Validate(sign(jwt.RegisteredClaims{
+		ID:       "jti-no-exp",
+		Issuer:   "https://issuer.example",
+		Subject:  "x",
+		Audience: jwt.ClaimStrings{"francis"},
+	}))
+	require.NoError(t, err)
+	assert.Empty(t, jt)
+	assert.True(t, jtExp.IsZero())
 
 	// A wrong audience is rejected
-	_, err = v.Validate(sign(jwt.RegisteredClaims{
+	_, _, _, err = v.Validate(sign(jwt.RegisteredClaims{
 		Issuer:    "https://issuer.example",
 		Subject:   "x",
 		Audience:  jwt.ClaimStrings{"other"},
@@ -57,7 +95,7 @@ func TestJWTValidator(t *testing.T) {
 	require.Error(t, err)
 
 	// A wrong issuer is rejected
-	_, err = v.Validate(sign(jwt.RegisteredClaims{
+	_, _, _, err = v.Validate(sign(jwt.RegisteredClaims{
 		Issuer:    "https://evil.example",
 		Subject:   "x",
 		Audience:  jwt.ClaimStrings{"francis"},
@@ -66,7 +104,7 @@ func TestJWTValidator(t *testing.T) {
 	require.Error(t, err)
 
 	// An expired token is rejected
-	_, err = v.Validate(sign(jwt.RegisteredClaims{
+	_, _, _, err = v.Validate(sign(jwt.RegisteredClaims{
 		Issuer:    "https://issuer.example",
 		Subject:   "x",
 		Audience:  jwt.ClaimStrings{"francis"},
@@ -86,7 +124,7 @@ func TestJWTValidator(t *testing.T) {
 	otherTok.Header["kid"] = "k1"
 	otherSigned, err := otherTok.SignedString(otherPriv)
 	require.NoError(t, err)
-	_, err = v.Validate(otherSigned)
+	_, _, _, err = v.Validate(otherSigned)
 	require.Error(t, err)
 }
 

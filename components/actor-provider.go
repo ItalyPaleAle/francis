@@ -111,6 +111,12 @@ type RegisterHostReq struct {
 	// If a host with this ID exists, its address, supported actor types, and health check are refreshed in place, regardless of the previous record's health, and the same host ID is returned with Reattached set to true
 	// If no such host exists (for example it was already garbage-collected), a brand-new registration is created with a freshly-generated host ID and Reattached is false
 	ExistingHostID string
+	// JoinToken is the jti from the JWT bootstrap token
+	// When non-empty, the provider records it to prevent replay
+	// Empty when the token carried no jti or no expiry, and for non-JWT auth paths
+	JoinToken string
+	// JoinTokenExpiresAt is the expiry time of the join token (zero when JoinToken is empty)
+	JoinTokenExpiresAt time.Time
 }
 
 // RegisterHostRes is the response object for the RegisterHost method.

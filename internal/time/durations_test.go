@@ -199,6 +199,40 @@ func TestParseDuration(t *testing.T) {
 		_, err = ParseDurationString("PTxS")
 		require.Error(t, err)
 	})
+
+	t.Run("trailing garbage is rejected", func(t *testing.T) {
+		_, err := ParseISO8601Duration("PT5X")
+		require.Error(t, err)
+
+		_, err = ParseISO8601Duration("PT1H5")
+		require.Error(t, err)
+
+		_, err = ParseISO8601Duration("P1Y2M3DT4H5M6Sgarbage")
+		require.Error(t, err)
+	})
+
+	t.Run("negative components are rejected", func(t *testing.T) {
+		_, err := ParseISO8601Duration("PT-1H")
+		require.Error(t, err)
+
+		_, err = ParseISO8601Duration("P-1Y")
+		require.Error(t, err)
+
+		_, err = ParseISO8601Duration("P-1D")
+		require.Error(t, err)
+
+		_, err = ParseISO8601Duration("PT-1M")
+		require.Error(t, err)
+
+		_, err = ParseISO8601Duration("PT-1S")
+		require.Error(t, err)
+	})
+
+	t.Run("overflowing hours are rejected", func(t *testing.T) {
+		// 2562048 hours overflows time.Duration (max is ~2562047h)
+		_, err := ParseISO8601Duration("PT2562048H")
+		require.Error(t, err)
+	})
 }
 
 func TestDuration_String(t *testing.T) {

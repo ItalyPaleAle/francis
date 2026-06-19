@@ -144,7 +144,7 @@ func ParseISO8601Duration(from string) (d Duration, err error) {
 				return d, errInvalidISO8601Duration
 			}
 			d.Years, err = strconv.Atoi(from[start:i])
-			if err != nil {
+			if err != nil || d.Years < 0 {
 				return d, errInvalidISO8601Duration
 			}
 			start = i + 1
@@ -154,7 +154,7 @@ func ParseISO8601Duration(from string) (d Duration, err error) {
 				return d, errInvalidISO8601Duration
 			}
 			tmp, err = strconv.Atoi(from[start:i])
-			if err != nil {
+			if err != nil || tmp < 0 {
 				return d, errInvalidISO8601Duration
 			}
 			d.Days += tmp * 7
@@ -165,7 +165,7 @@ func ParseISO8601Duration(from string) (d Duration, err error) {
 				return d, errInvalidISO8601Duration
 			}
 			tmp, err = strconv.Atoi(from[start:i])
-			if err != nil {
+			if err != nil || tmp < 0 {
 				return d, errInvalidISO8601Duration
 			}
 			d.Days += tmp
@@ -176,10 +176,13 @@ func ParseISO8601Duration(from string) (d Duration, err error) {
 				return d, errInvalidISO8601Duration
 			}
 			tmp, err = strconv.Atoi(from[start:i])
-			if err != nil {
+			if err != nil || tmp < 0 {
 				return d, errInvalidISO8601Duration
 			}
 			d.Time += time.Duration(tmp) * time.Hour
+			if d.Time < 0 {
+				return d, errInvalidISO8601Duration
+			}
 			start = i + 1
 
 		case 'S':
@@ -187,7 +190,7 @@ func ParseISO8601Duration(from string) (d Duration, err error) {
 				return d, errInvalidISO8601Duration
 			}
 			tmp, err = strconv.Atoi(from[start:i])
-			if err != nil {
+			if err != nil || tmp < 0 {
 				return d, errInvalidISO8601Duration
 			}
 
@@ -205,6 +208,9 @@ func ParseISO8601Duration(from string) (d Duration, err error) {
 					return d, errInvalidISO8601Duration
 				}
 			}
+			if d.Time < 0 {
+				return d, errInvalidISO8601Duration
+			}
 			start = i + 1
 
 		case 'M': // "M" can be used for both months and minutes
@@ -212,11 +218,14 @@ func ParseISO8601Duration(from string) (d Duration, err error) {
 				return d, errInvalidISO8601Duration
 			}
 			tmp, err = strconv.Atoi(from[start:i])
-			if err != nil {
+			if err != nil || tmp < 0 {
 				return d, errInvalidISO8601Duration
 			}
 			if isParsingTime {
 				d.Time += time.Duration(tmp) * time.Minute
+				if d.Time < 0 {
+					return d, errInvalidISO8601Duration
+				}
 			} else {
 				d.Months = tmp
 			}
@@ -228,16 +237,24 @@ func ParseISO8601Duration(from string) (d Duration, err error) {
 			}
 
 			tmp, err = strconv.Atoi(from[start:i])
-			if err != nil {
+			if err != nil || tmp < 0 {
 				return d, errInvalidISO8601Duration
 			}
 			d.Time += time.Duration(tmp) * time.Second
+			if d.Time < 0 {
+				return d, errInvalidISO8601Duration
+			}
 
 			isDecimal = true
 			start = i + 1
 		}
 
 		i++
+	}
+
+	// Reject trailing characters that were not consumed by a designator
+	if start != l {
+		return d, errInvalidISO8601Duration
 	}
 
 	return d, nil

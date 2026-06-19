@@ -15,6 +15,11 @@ import (
 )
 
 func (h *Host) GetAlarm(ctx context.Context, actorType string, actorID string, name string) (actor.AlarmProperties, error) {
+	err := ref.ValidateComponents(actorType, actorID, name)
+	if err != nil {
+		return actor.AlarmProperties{}, err
+	}
+
 	// Retrieve the alarm through the runtime
 	reqCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
 	defer cancel()
@@ -32,6 +37,16 @@ func (h *Host) GetAlarm(ctx context.Context, actorType string, actorID string, n
 }
 
 func (h *Host) SetAlarm(ctx context.Context, actorType string, actorID string, name string, properties actor.AlarmProperties) error {
+	err := ref.ValidateComponents(actorType, actorID, name)
+	if err != nil {
+		return err
+	}
+
+	err = properties.Validate()
+	if err != nil {
+		return err
+	}
+
 	// Encode the alarm properties for the wire
 	props, err := actorAlarmPropsToProtocol(properties)
 	if err != nil {
@@ -53,10 +68,15 @@ func (h *Host) SetAlarm(ctx context.Context, actorType string, actorID string, n
 }
 
 func (h *Host) DeleteAlarm(ctx context.Context, actorType string, actorID string, name string) error {
+	err := ref.ValidateComponents(actorType, actorID, name)
+	if err != nil {
+		return err
+	}
+
 	// Delete the alarm through the runtime
 	reqCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
 	defer cancel()
-	err := h.runtimeClient.DeleteAlarm(reqCtx, protocol.DeleteAlarmRequest{
+	err = h.runtimeClient.DeleteAlarm(reqCtx, protocol.DeleteAlarmRequest{
 		AlarmRef: protocol.AlarmRef{ActorType: actorType, ActorID: actorID, Name: name},
 	})
 	if isProtocolErrorCode(err, protocol.ErrCodeAlarmNotFound) {

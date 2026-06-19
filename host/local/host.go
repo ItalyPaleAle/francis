@@ -390,6 +390,12 @@ func (h *Host) Run(parentCtx context.Context) error {
 		h.hostID = ""
 	}()
 
+	// Create the alarm processor here before the services start
+	// The close is handled by runAlarmFetcher's defer, which intentionally leaves the field non-nil so in-flight re-enqueues receive ErrProcessorStopped instead of a nil-pointer panic
+	h.alarmProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ref.AlarmLease]{
+		ExecuteFn: h.executeAlarm,
+	})
+
 	// Run all services
 	// This blocks until the context is canceled or one of the services returns
 	return servicerunner.
@@ -454,6 +460,11 @@ func (h *Host) HostID() string {
 
 // Halt gracefully halts an actor that is hosted on the current host
 func (h *Host) Halt(actorType string, actorID string) error {
+	err := ref.ValidateComponents(actorType, actorID)
+	if err != nil {
+		return err
+	}
+
 	return h.core.Halt(actorType, actorID)
 }
 

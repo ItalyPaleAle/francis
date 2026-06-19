@@ -10,7 +10,6 @@ import (
 	"math/rand/v2"
 	"time"
 
-	"github.com/italypaleale/go-kit/eventqueue"
 	msgpack "github.com/vmihailenco/msgpack/v5"
 
 	"github.com/italypaleale/francis/actor"
@@ -23,16 +22,13 @@ func (h *Host) runAlarmFetcher(ctx context.Context) error {
 	h.log.DebugContext(ctx, "Starting background alarm fetcher", slog.Any("interval", h.alarmsPollInterval))
 	defer h.log.Debug("Stopped background alarm fetcher")
 
-	// Start the processor
-	h.alarmProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ref.AlarmLease]{
-		ExecuteFn: h.executeAlarm,
-	})
+	// Close the processor when the fetcher exits
+	// Intentionally leave the field pointing at the closed processor rather than nil so that any in-flight alarm execution can still call Enqueue and receive ErrProcessorStopped instead of a nil-pointer panic
 	defer func() {
 		apErr := h.alarmProcessor.Close()
 		if apErr != nil {
 			h.log.Error("Failed to close alarm processor", slog.Any("error", apErr))
 		}
-		h.alarmProcessor = nil
 	}()
 
 	t := h.clock.NewTicker(h.alarmsPollInterval)
@@ -309,7 +305,13 @@ func (h *Host) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, l
 	}
 
 	// Check if the alarm repeats
-	next := alarm.NextExecution(lease.ExecutionTime())
+	next, err := alarm.NextExecution(lease.ExecutionTime())
+	if err != nil {
+		// The stored interval is corrupt
+		// Keep the alarm rather than silently deleting it
+		log.Error("Failed to compute next execution time for alarm; alarm will be kept", slog.Any("error", err))
+		return false, nil
+	}
 	if next.IsZero() {
 		log.Debug("Removing completed alarm")
 
@@ -404,6 +406,11 @@ func (h *Host) runLeaseRenewal(parentCtx context.Context) (err error) {
 }
 
 func (h *Host) GetAlarm(ctx context.Context, actorType string, actorID string, name string) (actor.AlarmProperties, error) {
+	err := ref.ValidateComponents(actorType, actorID, name)
+	if err != nil {
+		return actor.AlarmProperties{}, err
+	}
+
 	res, err := h.actorProvider.GetAlarm(ctx, ref.NewAlarmRef(actorType, actorID, name))
 	if errors.Is(err, components.ErrNoAlarm) {
 		return actor.AlarmProperties{}, actor.ErrAlarmNotFound
@@ -415,6 +422,16 @@ func (h *Host) GetAlarm(ctx context.Context, actorType string, actorID string, n
 }
 
 func (h *Host) SetAlarm(ctx context.Context, actorType string, actorID string, name string, properties actor.AlarmProperties) error {
+	err := ref.ValidateComponents(actorType, actorID, name)
+	if err != nil {
+		return err
+	}
+
+	err = properties.Validate()
+	if err != nil {
+		return err
+	}
+
 	req, err := alarmPropertiesToAlarmReq(properties)
 	if err != nil {
 		return err
@@ -429,7 +446,12 @@ func (h *Host) SetAlarm(ctx context.Context, actorType string, actorID string, n
 }
 
 func (h *Host) DeleteAlarm(ctx context.Context, actorType string, actorID string, name string) error {
-	err := h.actorProvider.DeleteAlarm(ctx, ref.NewAlarmRef(actorType, actorID, name))
+	err := ref.ValidateComponents(actorType, actorID, name)
+	if err != nil {
+		return err
+	}
+
+	err = h.actorProvider.DeleteAlarm(ctx, ref.NewAlarmRef(actorType, actorID, name))
 	if errors.Is(err, components.ErrNoAlarm) {
 		return actor.ErrAlarmNotFound
 	} else if err != nil {

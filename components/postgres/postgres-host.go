@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	postgrestransactions "github.com/italypaleale/go-sql-utils/transactions/postgres"
@@ -56,6 +57,14 @@ func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.Regi
 			return zero, components.ErrHostAlreadyRegistered
 		} else if err != nil {
 			return zero, fmt.Errorf("error inserting host: %w", err)
+		}
+
+		// Consume the join token inside the same transaction too
+		if req.JoinToken != "" {
+			err = p.consumeJoinToken(ctx, tx, req.JoinToken, hostID, req.JoinTokenExpiresAt)
+			if err != nil {
+				return zero, err
+			}
 		}
 
 		// Insert all supported host types
@@ -119,39 +128,42 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 			return zero, fmt.Errorf("error updating host: %w", err)
 		}
 
+		var activeHostID string
 		if tag.RowsAffected() == 1 {
-			// Reattached: replace the supported actor types to match the new registration
-			err = p.insertHostActorTypes(ctx, tx, req.ExistingHostID, req.ActorTypes, true)
-			if err != nil {
-				return zero, fmt.Errorf("error inserting supported actor types: %w", err)
-			}
-
-			hostID = req.ExistingHostID
+			activeHostID = req.ExistingHostID
 			reattached = true
-			return zero, nil
+		} else {
+			// The existing registration was not found (already garbage-collected): create a new one
+			queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
+			defer cancel()
+			_, err = tx.Exec(queryCtx,
+				`INSERT INTO hosts (host_id, host_address, host_last_health_check)
+				VALUES ($1, $2, now())`,
+				newHostID, req.Address,
+			)
+			if isConstraintError(err) {
+				return zero, components.ErrHostAlreadyRegistered
+			} else if err != nil {
+				return zero, fmt.Errorf("error inserting host: %w", err)
+			}
+			activeHostID = newHostID
+			reattached = false
 		}
 
-		// The existing registration was not found (already garbage-collected): create a new one
-		queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
-		defer cancel()
-		_, err = tx.Exec(queryCtx,
-			`INSERT INTO hosts (host_id, host_address, host_last_health_check)
-			VALUES ($1, $2, now())`,
-			newHostID, req.Address,
-		)
-		if isConstraintError(err) {
-			return zero, components.ErrHostAlreadyRegistered
-		} else if err != nil {
-			return zero, fmt.Errorf("error inserting host: %w", err)
+		// Consume the join token inside the same transaction too
+		if req.JoinToken != "" {
+			err = p.consumeJoinToken(ctx, tx, req.JoinToken, activeHostID, req.JoinTokenExpiresAt)
+			if err != nil {
+				return zero, err
+			}
 		}
 
-		err = p.insertHostActorTypes(ctx, tx, newHostID, req.ActorTypes, false)
+		err = p.insertHostActorTypes(ctx, tx, activeHostID, req.ActorTypes, reattached)
 		if err != nil {
 			return zero, fmt.Errorf("error inserting supported actor types: %w", err)
 		}
 
-		hostID = newHostID
-		reattached = false
+		hostID = activeHostID
 		return zero, nil
 	})
 	if oErr != nil {
@@ -345,6 +357,33 @@ func (p *PostgresProvider) RemoveActor(ctx context.Context, ref ref.ActorRef) er
 		return components.ErrNoActor
 	}
 
+	return nil
+}
+
+// consumeJoinToken records a join token as consumed to prevent replay, pruning expired rows first
+func (p *PostgresProvider) consumeJoinToken(ctx context.Context, tx pgx.Tx, joinToken, hostID string, expiresAt time.Time) error {
+	// Lazily delete expired join tokens
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+	_, err := tx.Exec(queryCtx, `DELETE FROM consumed_join_tokens WHERE expires_at < now()`)
+	if err != nil {
+		return fmt.Errorf("error pruning expired join tokens: %w", err)
+	}
+
+	// Insert the token
+	queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+	_, err = tx.Exec(queryCtx,
+		`INSERT INTO consumed_join_tokens (join_token, host_id, expires_at)
+		VALUES ($1, $2, $3)`,
+		joinToken, hostID, expiresAt,
+	)
+	if isConstraintError(err) {
+		// A unique-constraint violation means the same token was already used
+		return components.ErrJoinTokenAlreadyConsumed
+	} else if err != nil {
+		return fmt.Errorf("error consuming join token: %w", err)
+	}
 	return nil
 }
 

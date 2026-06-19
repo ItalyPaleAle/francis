@@ -63,6 +63,14 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 			return zero, fmt.Errorf("error inserting host: %w", err)
 		}
 
+		// Consume the join token inside the same transaction so a failed host insertion rolls back the token consumption atomically
+		if req.JoinToken != "" {
+			err = s.consumeJoinToken(ctx, tx, req.JoinToken, hostID, req.JoinTokenExpiresAt)
+			if err != nil {
+				return zero, err
+			}
+		}
+
 		// Insert all supported host types
 		err = s.insertHostActorTypes(ctx, tx, hostID, req.ActorTypes, false)
 		if err != nil {
@@ -134,39 +142,42 @@ func (s *SQLiteProvider) reattachHost(ctx context.Context, req components.Regist
 			return zero, fmt.Errorf("error counting affected rows: %w", err)
 		}
 
+		var activeHostID string
 		if affected == 1 {
-			// Reattached: replace the supported actor types to match the new registration
-			err = s.insertHostActorTypes(ctx, tx, req.ExistingHostID, req.ActorTypes, true)
-			if err != nil {
-				return zero, fmt.Errorf("error inserting supported actor types: %w", err)
-			}
-
-			hostID = req.ExistingHostID
+			activeHostID = req.ExistingHostID
 			reattached = true
-			return zero, nil
+		} else {
+			// The existing registration was not found (already garbage-collected): create a new one
+			queryCtx, cancel = context.WithTimeout(ctx, s.timeout)
+			defer cancel()
+			_, err = tx.ExecContext(queryCtx,
+				`INSERT INTO hosts (host_id, host_address, host_last_health_check)
+				VALUES (?, ?, ?)`,
+				newHostID, req.Address, now,
+			)
+			if isConstraintError(err) {
+				return zero, components.ErrHostAlreadyRegistered
+			} else if err != nil {
+				return zero, fmt.Errorf("error inserting host: %w", err)
+			}
+			activeHostID = newHostID
+			reattached = false
 		}
 
-		// The existing registration was not found (already garbage-collected): create a new one
-		queryCtx, cancel = context.WithTimeout(ctx, s.timeout)
-		defer cancel()
-		_, err = tx.ExecContext(queryCtx,
-			`INSERT INTO hosts (host_id, host_address, host_last_health_check)
-			VALUES (?, ?, ?)`,
-			newHostID, req.Address, now,
-		)
-		if isConstraintError(err) {
-			return zero, components.ErrHostAlreadyRegistered
-		} else if err != nil {
-			return zero, fmt.Errorf("error inserting host: %w", err)
+		// Consume the join token inside the same transaction too
+		if req.JoinToken != "" {
+			err = s.consumeJoinToken(ctx, tx, req.JoinToken, activeHostID, req.JoinTokenExpiresAt)
+			if err != nil {
+				return zero, err
+			}
 		}
 
-		err = s.insertHostActorTypes(ctx, tx, newHostID, req.ActorTypes, false)
+		err = s.insertHostActorTypes(ctx, tx, activeHostID, req.ActorTypes, reattached)
 		if err != nil {
 			return zero, fmt.Errorf("error inserting supported actor types: %w", err)
 		}
 
-		hostID = newHostID
-		reattached = false
+		hostID = activeHostID
 		return zero, nil
 	})
 	if oErr != nil {
@@ -562,6 +573,35 @@ func buildLookupActorHostClause(hosts []string, params []any) (string, []any) {
 	hostClause.WriteString(")")
 
 	return hostClause.String(), params
+}
+
+// consumeJoinToken records a join token as consumed to prevent replay, pruning expired rows first
+func (s *SQLiteProvider) consumeJoinToken(ctx context.Context, tx *sql.Tx, joinToken, hostID string, expiresAt time.Time) error {
+	now := s.clock.Now().UnixMilli()
+
+	// Lazily delete expired join tokens to keep the table tidy without a background job
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	_, err := tx.ExecContext(queryCtx, `DELETE FROM consumed_join_tokens WHERE expires_at < ?`, now)
+	if err != nil {
+		return fmt.Errorf("error pruning expired join tokens: %w", err)
+	}
+
+	// Insert the token
+	queryCtx, cancel = context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	_, err = tx.ExecContext(queryCtx,
+		`INSERT INTO consumed_join_tokens (join_token, host_id, expires_at)
+		VALUES (?, ?, ?)`,
+		joinToken, hostID, expiresAt.UnixMilli(),
+	)
+	if isConstraintError(err) {
+		// A unique-constraint violation means the same token was already used
+		return components.ErrJoinTokenAlreadyConsumed
+	} else if err != nil {
+		return fmt.Errorf("error consuming join token: %w", err)
+	}
+	return nil
 }
 
 // insertHostActorTypes inserts the supported actor types for a host

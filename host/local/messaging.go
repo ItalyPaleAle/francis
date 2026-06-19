@@ -12,6 +12,11 @@ import (
 
 // Invoke performs the synchronous invocation of an actor running anywhere in the cluster.
 func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, method string, data any, optsFn ...actor.InvokeOption) (actor.Envelope, error) {
+	err := ref.ValidateComponents(actorType, actorID)
+	if err != nil {
+		return nil, err
+	}
+
 	opts := &types.InvokeOpts{}
 	for _, fn := range optsFn {
 		fn(opts)
@@ -22,6 +27,11 @@ func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, met
 
 // InvokeStream performs a streamed invocation of an actor running anywhere in the cluster.
 func (h *Host) InvokeStream(ctx context.Context, actorType string, actorID string, method string, reqContentType string, body io.Reader, optsFn ...actor.InvokeOption) (string, io.ReadCloser, error) {
+	err := ref.ValidateComponents(actorType, actorID)
+	if err != nil {
+		return "", nil, err
+	}
+
 	opts := &types.InvokeOpts{}
 	for _, fn := range optsFn {
 		fn(opts)

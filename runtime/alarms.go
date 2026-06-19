@@ -403,7 +403,13 @@ func (rt *Runtime) completeAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 	}
 
 	// A non-repeating alarm is deleted once executed
-	next := alarm.NextExecution(lease.ExecutionTime())
+	next, err := alarm.NextExecution(lease.ExecutionTime())
+	if err != nil {
+		// The stored interval is corrupt
+		// Keep the alarm rather than silently deleting it
+		log.Error("Failed to compute next execution time for alarm; alarm will be kept", slog.Any("error", err))
+		return false, nil
+	}
 	if next.IsZero() {
 		log.Debug("Removing completed alarm")
 		ctx, cancel = context.WithTimeout(parentCtx, rt.providerRequestTimeout)

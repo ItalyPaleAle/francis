@@ -8,7 +8,7 @@ require (
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
-	github.com/italypaleale/go-kit v0.0.0-20260619044847-e9e35170d5fd
+	github.com/italypaleale/go-kit v0.0.0-20260619182228-2e2ed5c9eb8d
 	github.com/italypaleale/go-sql-utils v0.2.4-0.20260619045406-d40ba2b291e8
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
 	github.com/jackc/pgx/v5 v5.9.2
