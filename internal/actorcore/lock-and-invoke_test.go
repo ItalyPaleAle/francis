@@ -261,8 +261,9 @@ func TestLockAndInvokeFn(t *testing.T) {
 		actorRef := ref.NewActorRef("testactor", "actor6")
 
 		// Create and register an active actor
+		// The idle timeout is disabled (0) so the graceful-shutdown timer is the only waiter the halt registers on the shared fake clock
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 0, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Launch LockAndInvoke in a separate goroutine
@@ -329,8 +330,12 @@ func TestLockAndInvokeFn(t *testing.T) {
 		actorRef := ref.NewActorRef("testactor", "actor6")
 
 		// Create and register an active actor
+		// The idle timeout is disabled (0) so the graceful-shutdown timer is the only waiter
+		// the halt registers on the shared fake clock. With an idle timeout set, halting also
+		// removes the actor's idle-deactivation timer, leaving the waiter count unchanged, so
+		// the wait below could never observe the new waiter.
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 0, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Launch LockAndInvoke in a separate goroutine
