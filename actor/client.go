@@ -6,6 +6,8 @@ import (
 )
 
 // Client allows interacting with the actor service, and it's pre-configured for the active actor
+// A Client is bound to a single activation and a single invocation turn: it must not be shared across goroutines and must not be reused across activations or turns.
+// GetState caches the fetched value in-memory so repeated calls within the same turn avoid redundant store reads; this cache is correct only under the single-turn guarantee.
 type Client[T any] interface {
 	// SetState saves the actor's state.
 	SetState(ctx context.Context, state T, opts *SetStateOpts) error
@@ -21,6 +23,9 @@ type Client[T any] interface {
 	Halt()
 }
 
+// client is the concrete implementation of Client.
+// hasState is set once the state has been fetched or written so subsequent GetState calls within the same turn are served from the in-memory copy.
+// This is safe because the turn-based lock guarantees no other caller modifies the actor's state while this turn is executing.
 type client[T any] struct {
 	actorID   string
 	actorType string
