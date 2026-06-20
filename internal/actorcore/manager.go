@@ -11,6 +11,7 @@ import (
 
 	"github.com/alphadose/haxmap"
 	"github.com/italypaleale/go-kit/eventqueue"
+	"golang.org/x/sync/singleflight"
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/actor"
@@ -70,6 +71,9 @@ type Manager struct {
 
 	// createLock serializes the creation of new active actors so concurrent cold-start invocations of the same actor produce a single instance
 	createLock sync.Mutex
+
+	// inflightDedup coalesces concurrent peer requests that carry the same RequestID so a retry arriving while the first execution is still in progress shares the result rather than running the actor a second time
+	inflightDedup singleflight.Group
 }
 
 // NewManager returns a Manager ready to register actors

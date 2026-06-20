@@ -8,6 +8,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/google/uuid"
 	msgpack "github.com/vmihailenco/msgpack/v5"
 
 	"github.com/italypaleale/francis/actor"
@@ -60,7 +61,10 @@ func (m *Manager) Invoke(parentCtx context.Context, resolver PlacementResolver, 
 		return nil, fmt.Errorf("failed to look up actor: %w", err)
 	}
 
-	env, retry, retryAfter, err := m.doInvokeObject(parentCtx, resolver, peer, r, ap, method, data, activeOnly)
+	// Generate a stable request ID once so both the first attempt and any retry carry the same ID, allowing the owning host to coalesce them if the first is still in flight
+	requestID := uuid.New().String()
+
+	env, retry, retryAfter, err := m.doInvokeObject(parentCtx, resolver, peer, r, ap, method, data, activeOnly, requestID)
 	if !retry {
 		return env, err
 	}
@@ -80,7 +84,7 @@ func (m *Manager) Invoke(parentCtx context.Context, resolver PlacementResolver, 
 		return nil, fmt.Errorf("failed to look up actor: %w", err)
 	}
 
-	env, _, _, err = m.doInvokeObject(parentCtx, resolver, peer, r, ap, method, data, activeOnly)
+	env, _, _, err = m.doInvokeObject(parentCtx, resolver, peer, r, ap, method, data, activeOnly, requestID)
 	return env, err
 }
 
@@ -107,11 +111,11 @@ func (m *Manager) waitRetryAfter(ctx context.Context, d time.Duration) error {
 
 // doInvokeObject dispatches a single object invocation attempt to the local actor or a peer, depending on the placement
 // The bool return is true when the attempt failed in a way that warrants re-resolving the placement and retrying, and the duration carries any retry-after hint to wait before that retry
-func (m *Manager) doInvokeObject(ctx context.Context, resolver PlacementResolver, peer PeerInvoker, r ref.ActorRef, ap *Placement, method string, data any, activeOnly bool) (actor.Envelope, bool, time.Duration, error) {
+func (m *Manager) doInvokeObject(ctx context.Context, resolver PlacementResolver, peer PeerInvoker, r ref.ActorRef, ap *Placement, method string, data any, activeOnly bool, requestID string) (actor.Envelope, bool, time.Duration, error) {
 	if resolver.IsLocal(ap) {
 		return m.invokeLocalObject(ctx, resolver, r, method, data, activeOnly)
 	}
-	return m.invokePeerObject(ctx, peer, r, ap, method, data, activeOnly)
+	return m.invokePeerObject(ctx, peer, r, ap, method, data, activeOnly, requestID)
 }
 
 // invokeLocalObject invokes an actor owned by this host
@@ -150,7 +154,7 @@ func (m *Manager) invokeLocalObject(ctx context.Context, resolver PlacementResol
 
 // invokePeerObject invokes an actor owned by a peer host over the peer transport
 // The bool return is true when the placement looks stale and the caller should re-resolve and retry, and the duration carries the peer's retry-after hint
-func (m *Manager) invokePeerObject(ctx context.Context, peer PeerInvoker, r ref.ActorRef, ap *Placement, method string, data any, activeOnly bool) (actor.Envelope, bool, time.Duration, error) {
+func (m *Manager) invokePeerObject(ctx context.Context, peer PeerInvoker, r ref.ActorRef, ap *Placement, method string, data any, activeOnly bool, requestID string) (actor.Envelope, bool, time.Duration, error) {
 	// Encode the argument as MessagePack for the request body
 	var (
 		argData []byte
@@ -164,7 +168,7 @@ func (m *Manager) invokePeerObject(ctx context.Context, peer PeerInvoker, r ref.
 		}
 	}
 
-	// Invoke the actor on the peer that owns it
+	// Invoke the actor on the peer that owns it, carrying the request ID so the peer can coalesce a concurrent retry
 	resp, perr := peer.InvokeObject(ctx, ap.Address, protocol.InvokeActorRequest{
 		TargetHostID: ap.HostID,
 		ActorType:    r.ActorType,
@@ -172,6 +176,7 @@ func (m *Manager) invokePeerObject(ctx context.Context, peer PeerInvoker, r ref.
 		Method:       method,
 		Data:         argData,
 		ActiveOnly:   activeOnly,
+		RequestID:    requestID,
 	})
 	if perr != nil {
 		// Re-resolve and retry on a stale placement, a halted actor, a transport failure, or an active-only miss that may be active elsewhere
@@ -269,6 +274,25 @@ func (m *Manager) invokePeerStream(ctx context.Context, peer PeerInvoker, r ref.
 
 // PeerInvokeObject executes an object invocation for an actor owned by this host, on behalf of a peer caller
 func (m *Manager) PeerInvokeObject(ctx context.Context, resolver PlacementResolver, req protocol.InvokeActorRequest) (protocol.InvokeActorResponse, *protocol.Error) {
+	// If the caller provided a request ID, coalesce any concurrent duplicate into the in-flight execution so the actor runs at most once even when the caller retried after losing the response
+	if req.RequestID != "" {
+		type dedupResult struct {
+			resp protocol.InvokeActorResponse
+			perr *protocol.Error
+		}
+		val, _, _ := m.inflightDedup.Do(req.RequestID, func() (any, error) {
+			resp, perr := m.peerInvokeObjectCore(ctx, resolver, req)
+			return dedupResult{resp: resp, perr: perr}, nil
+		})
+		res := val.(dedupResult)
+		return res.resp, res.perr
+	}
+
+	return m.peerInvokeObjectCore(ctx, resolver, req)
+}
+
+// peerInvokeObjectCore runs the actor invocation for PeerInvokeObject
+func (m *Manager) peerInvokeObjectCore(ctx context.Context, resolver PlacementResolver, req protocol.InvokeActorRequest) (protocol.InvokeActorResponse, *protocol.Error) {
 	r := ref.NewActorRef(req.ActorType, req.ActorID)
 
 	invoke := func(invokeCtx context.Context, act *ActiveActor) (any, error) {
