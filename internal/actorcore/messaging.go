@@ -284,7 +284,7 @@ func (m *Manager) PeerInvokeObject(ctx context.Context, resolver PlacementResolv
 			resp, perr := m.peerInvokeObjectCore(ctx, resolver, req)
 			return dedupResult{resp: resp, perr: perr}, nil
 		})
-		res := val.(dedupResult)
+		res, _ := val.(dedupResult)
 		return res.resp, res.perr
 	}
 
