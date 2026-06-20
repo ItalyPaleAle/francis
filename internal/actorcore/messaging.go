@@ -62,7 +62,11 @@ func (m *Manager) Invoke(parentCtx context.Context, resolver PlacementResolver, 
 	}
 
 	// Generate a stable request ID once so both the first attempt and any retry carry the same ID, allowing the owning host to coalesce them if the first is still in flight
-	requestID := uuid.New().String()
+	requestUUID, err := uuid.NewRandom()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate request ID: %w", err)
+	}
+	requestID := requestUUID.String()
 
 	env, retry, retryAfter, err := m.doInvokeObject(parentCtx, resolver, peer, r, ap, method, data, activeOnly, requestID)
 	if !retry {
@@ -115,6 +119,7 @@ func (m *Manager) doInvokeObject(ctx context.Context, resolver PlacementResolver
 	if resolver.IsLocal(ap) {
 		return m.invokeLocalObject(ctx, resolver, r, method, data, activeOnly)
 	}
+
 	return m.invokePeerObject(ctx, peer, r, ap, method, data, activeOnly, requestID)
 }
 
@@ -141,7 +146,9 @@ func (m *Manager) invokeLocalObject(ctx context.Context, resolver PlacementResol
 	if err != nil {
 		// A halted, inactive, or elsewhere-owned actor means the actor may now be active on another host, so re-resolve and retry
 		// ErrActorHalted is included because the manager removes the actor from its map after halting, so a re-resolve activates a fresh instance
-		retry := errors.Is(err, actor.ErrActorNotActive) || errors.Is(err, actor.ErrActorNotHosted) || errors.Is(err, actor.ErrActorHalted)
+		retry := errors.Is(err, actor.ErrActorNotActive) ||
+			errors.Is(err, actor.ErrActorNotHosted) ||
+			errors.Is(err, actor.ErrActorHalted)
 		return nil, retry, 0, err
 	}
 

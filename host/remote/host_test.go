@@ -118,8 +118,8 @@ func newRemoteHost(t *testing.T, runtimeAddr string) *Host {
 
 // testRuntimePSK derives the test cluster CA, and testHostPSK is the host bootstrap key the test runtime accepts
 var (
-	testRuntimePSK = []byte("runtime-test-psk-0123456789abcd")
-	testHostPSK    = []byte("host-test-psk-0123456789abcdef")
+	testRuntimePSK = []byte("runtime-test-psk-0123456789abcde")
+	testHostPSK    = []byte("host-test-psk-0123456789abcdefgh")
 )
 
 // TestNewHostRequiresExplicitCATrust verifies the first-connection trust decision must be made explicitly

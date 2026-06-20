@@ -501,7 +501,6 @@ func (rc *runtimeClient) runCertRenewal(ctx context.Context, notAfter time.Time)
 
 	for {
 		// Renew at the midpoint of the remaining lifetime so there is ample time to retry before expiry
-		// Use the injected clock so tests with a fake clock drive renewal deterministically
 		wait := notAfter.Sub(rc.cfg.clock.Now()) / 2
 		if wait < 0 {
 			wait = 0
@@ -591,13 +590,12 @@ func (rc *runtimeClient) runHealthChecks(ctx context.Context, session *webtransp
 }
 
 // inboundConcurrencyLimit caps the goroutines handling runtime-initiated requests in a single session
-// The runtime only sends alarm dispatch and actor-termination requests, so a small bound is sufficient;
-// a higher value would indicate a misbehaving or compromised runtime
-const inboundConcurrencyLimit = 128
+// The runtime only sends alarm dispatch and actor-termination requests, so a small bound is sufficient (a higher value would indicate a misbehaving or compromised runtime)
+const inboundConcurrencyLimit = 2 << 6
 
 // serveInbound accepts and dispatches runtime-initiated streams until the session ends
 func (rc *runtimeClient) serveInbound(ctx context.Context, session *webtransport.Session) {
-	// sem is a per-session semaphore that bounds how many inbound streams are handled concurrently
+	// Per-session semaphore that bounds how many inbound streams are handled concurrently
 	sem := make(chan struct{}, inboundConcurrencyLimit)
 	for {
 		stream, err := session.AcceptStream(ctx)
@@ -615,7 +613,12 @@ func (rc *runtimeClient) serveInbound(ctx context.Context, session *webtransport
 		}
 
 		go func() {
-			defer func() { <-sem }()
+			defer func() {
+				// Release the semaphore
+				<-sem
+			}()
+
+			// Handle the stream
 			rc.handleInbound(ctx, stream)
 		}()
 	}

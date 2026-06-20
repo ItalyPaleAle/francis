@@ -29,6 +29,7 @@ func (h *Host) runAlarmFetcher(ctx context.Context) error {
 		if apErr != nil {
 			h.log.Error("Failed to close alarm processor", slog.Any("error", apErr))
 		}
+
 		// Drain goroutines spawned by both the processor callback and the immediate-fire path
 		h.alarmWg.Wait()
 	}()
@@ -128,13 +129,16 @@ func (h *Host) executeAlarm(lease *ref.AlarmLease) {
 	h.activeAlarmsLock.Lock()
 	_, active := h.activeAlarms[lease.Key()]
 	if active {
+		// Already active, so nothing to do
 		h.activeAlarmsLock.Unlock()
 		return
 	}
+
 	h.activeAlarms[lease.Key()] = struct{}{}
 	h.alarmWg.Add(1)
 	h.activeAlarmsLock.Unlock()
 
+	// Now we can execute the alarm
 	// Each execution runs on its own goroutine so the processor loop can continue without blocking
 	go h.executeActiveAlarm(lease)
 }
@@ -144,7 +148,8 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 	// Release the shutdown drain barrier when this execution finishes
 	defer h.alarmWg.Done()
 
-	// Use a background context so an in-flight execution can finish during the shutdown grace period; individual operations are bounded by providerRequestTimeout
+	// Use a background context so an in-flight execution can finish during the shutdown grace period
+	// Individual operations are bounded by providerRequestTimeout
 	ctx := context.Background()
 
 	key := lease.Key()

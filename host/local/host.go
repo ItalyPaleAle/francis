@@ -371,8 +371,7 @@ func (h *Host) Run(parentCtx context.Context) error {
 	// Closing the channel also publishes those writes to any goroutine that waits on Ready
 	h.readyOnce.Do(func() { close(h.ready) })
 
-	// Set the draining flag as soon as the context is canceled so the peer server rejects new invocations
-	// with a retry-later error before any actors are halted, giving callers a chance to re-resolve
+	// Set the draining flag as soon as the context is canceled so the peer server rejects new invocations with a retry-later error before any actors are halted, giving callers a chance to re-resolve
 	go func() {
 		<-ctx.Done()
 		h.draining.Store(true)

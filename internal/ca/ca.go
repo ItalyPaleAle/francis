@@ -44,13 +44,12 @@ type CA struct {
 }
 
 // minPSKLen is the minimum number of bytes a runtime PSK must carry to resist offline brute-force against the public CA certificate
-// HKDF adds no work factor, so the PSK is the sole entropy source, and a short passphrase can be ground against the known-public CA key
 const minPSKLen = 32
 
 // DeriveCA derives the deterministic CA from a single runtime PSK
 func DeriveCA(psk []byte) (*CA, error) {
 	if len(psk) < minPSKLen {
-		return nil, fmt.Errorf("runtime PSK must be at least %d bytes; use a randomly generated key, not a passphrase", minPSKLen)
+		return nil, fmt.Errorf("runtime PSK must be at least %d bytes", minPSKLen)
 	}
 
 	// Derive a deterministic Ed25519 seed from the PSK so every runtime with the same PSK produces the same CA key

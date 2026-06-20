@@ -41,7 +41,7 @@ func ReadMessageWithTimeout(stream Stream, timeout time.Duration) (*Envelope, er
 // RoundTrip writes req to the stream, then reads and returns the response
 // The caller's context bounds the exchange: when it is canceled or times out, the blocking read or write is unblocked and the context error is returned
 // quic streams are not context-aware, so a watcher forces the blocking call to return by setting a past deadline
-// On any error return the stream may carry a past deadline and must be discarded; callers must not reuse a stream after RoundTrip returns an error
+// On any error return the stream may carry a past deadline and must be discarded - callers must not reuse a stream after RoundTrip returns an error
 func RoundTrip(ctx context.Context, stream Stream, req *Envelope) (*Envelope, error) {
 	stop := make(chan struct{})
 	defer close(stop)

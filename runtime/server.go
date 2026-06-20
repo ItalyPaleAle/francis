@@ -207,7 +207,7 @@ func (rt *Runtime) Run(parentCtx context.Context) error {
 
 // runtimeMaxIncomingStreamsPerSession caps the concurrent streams a single authenticated host session may open
 // Without a cap a misbehaving host can flood goroutines and exhaust database connections, one per providerRequestTimeout
-const runtimeMaxIncomingStreamsPerSession = 512
+const runtimeMaxIncomingStreamsPerSession = 2 << 8
 
 // runServer runs the WebTransport server that accepts host sessions
 func (rt *Runtime) runServer(ctx context.Context) error {

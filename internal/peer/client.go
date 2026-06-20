@@ -113,6 +113,7 @@ func (c *Client) InvokeObject(ctx context.Context, address string, req protocol.
 		case <-ctx.Done():
 			_ = stream.SetDeadline(time.Now())
 		case <-stop:
+			// Nop
 		}
 	}()
 
@@ -120,25 +121,26 @@ func (c *Client) InvokeObject(ctx context.Context, address string, req protocol.
 	err = protocol.WriteMessage(stream, env)
 	if err != nil {
 		ctxErr := ctx.Err()
-		if ctxErr != nil {
-			if errors.Is(ctxErr, context.DeadlineExceeded) {
-				return protocol.InvokeActorResponse{}, protocol.NewErrorf(protocol.ErrCodeDeadlineExceeded, "deadline exceeded before invocation reached peer %s", address)
-			}
+		if errors.Is(ctxErr, context.DeadlineExceeded) {
+			return protocol.InvokeActorResponse{}, protocol.NewErrorf(protocol.ErrCodeDeadlineExceeded, "deadline exceeded before invocation reached peer %s", address)
+		} else if ctxErr != nil {
 			return protocol.InvokeActorResponse{}, protocol.NewErrorf(protocol.ErrCodeCanceled, "canceled before invocation reached peer %s", address)
 		}
+
 		return protocol.InvokeActorResponse{}, protocol.NewErrorf(protocol.ErrCodeRetryLater, "failed to send invocation to peer %s: %v", address, err)
 	}
 
-	// Post-send: the request was delivered and the actor may have already executed; a read failure must not trigger an auto-retry to avoid double-execution of non-idempotent methods
+	// Post-send: the request was delivered and the actor may have already executed
+	// A read failure must not trigger an auto-retry to avoid double-execution of non-idempotent methods
 	respEnv, err := protocol.ReadMessage(stream)
 	if err != nil {
 		ctxErr := ctx.Err()
-		if ctxErr != nil {
-			if errors.Is(ctxErr, context.DeadlineExceeded) {
-				return protocol.InvokeActorResponse{}, protocol.NewErrorf(protocol.ErrCodeDeadlineExceeded, "deadline exceeded while waiting for response from peer %s", address)
-			}
+		if errors.Is(ctxErr, context.DeadlineExceeded) {
+			return protocol.InvokeActorResponse{}, protocol.NewErrorf(protocol.ErrCodeDeadlineExceeded, "deadline exceeded while waiting for response from peer %s", address)
+		} else if ctxErr != nil {
 			return protocol.InvokeActorResponse{}, protocol.NewErrorf(protocol.ErrCodeCanceled, "canceled while waiting for response from peer %s", address)
 		}
+
 		return protocol.InvokeActorResponse{}, protocol.NewErrorf(protocol.ErrCodeTransportFailure, "lost response from peer %s after the request was delivered: %v", address, err)
 	}
 
