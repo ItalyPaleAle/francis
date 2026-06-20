@@ -205,12 +205,18 @@ func (rt *Runtime) Run(parentCtx context.Context) error {
 		Run(ctx)
 }
 
+// runtimeMaxIncomingStreamsPerSession caps the concurrent streams a single authenticated host session may open
+// Without a cap a misbehaving host can flood goroutines and exhaust database connections, one per providerRequestTimeout
+const runtimeMaxIncomingStreamsPerSession = 2 << 8
+
 // runServer runs the WebTransport server that accepts host sessions
 func (rt *Runtime) runServer(ctx context.Context) error {
 	mux := http.NewServeMux()
 
-	// Create the WebTransport server with the shared HTTP/3 and QUIC settings
-	wtServer := wt.NewServer(rt.bind, rt.serverTLSConfig, mux)
+	// Create the WebTransport server with the shared HTTP/3 and QUIC settings, bounding streams per session
+	wtServer := wt.NewServer(rt.bind, rt.serverTLSConfig, mux,
+		wt.WithMaxIncomingStreams(runtimeMaxIncomingStreamsPerSession),
+	)
 
 	// Health endpoint for liveness probes over plain HTTP/3
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {

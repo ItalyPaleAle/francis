@@ -10,7 +10,7 @@ import (
 )
 
 func TestDeriveCADeterministic(t *testing.T) {
-	psk := []byte("runtime-psk-abcdefghijklmnop")
+	psk := []byte("runtime-psk-abcdefghijklmnopqrstuvwxyz")
 
 	// Deriving twice from the same PSK must produce a byte-identical certificate, since hosts pin this cert out-of-band
 	a, err := DeriveCA(psk)
@@ -26,7 +26,7 @@ func TestDeriveCADeterministic(t *testing.T) {
 	}
 
 	// A different PSK must produce a different CA
-	c, err := DeriveCA([]byte("a-totally-different-psk-value"))
+	c, err := DeriveCA([]byte("a-totally-different-psk-value-xyzzy"))
 	if err != nil {
 		t.Fatalf("DeriveCA: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestDeriveCADeterministic(t *testing.T) {
 }
 
 func TestIssueWorkloadCertVerifies(t *testing.T) {
-	root, err := DeriveCA([]byte("runtime-psk-abcdefghijklmnop"))
+	root, err := DeriveCA([]byte("runtime-psk-abcdefghijklmnopqrstuvwxyz"))
 	if err != nil {
 		t.Fatalf("DeriveCA: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestIssueWorkloadCertVerifies(t *testing.T) {
 }
 
 func TestHostIDFromCert(t *testing.T) {
-	root, err := DeriveCA([]byte("runtime-psk-abcdefghijklmnop"))
+	root, err := DeriveCA([]byte("runtime-psk-abcdefghijklmnopqrstuvwxyz"))
 	if err != nil {
 		t.Fatalf("DeriveCA: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestHostIDFromCert(t *testing.T) {
 }
 
 func TestVerifyPeerSPIFFE(t *testing.T) {
-	root, err := DeriveCA([]byte("runtime-psk-abcdefghijklmnop"))
+	root, err := DeriveCA([]byte("runtime-psk-abcdefghijklmnopqrstuvwxyz"))
 	if err != nil {
 		t.Fatalf("DeriveCA: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestVerifyPeerSPIFFE(t *testing.T) {
 	}
 
 	// Reject a cert signed by an untrusted CA
-	other, err := DeriveCA([]byte("a-totally-different-psk-value"))
+	other, err := DeriveCA([]byte("a-totally-different-psk-value-xyzzy"))
 	if err != nil {
 		t.Fatalf("DeriveCA: %v", err)
 	}

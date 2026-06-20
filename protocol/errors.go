@@ -54,6 +54,9 @@ const (
 	ErrCodeStateNotFound ErrorCode = "state_not_found"
 	// ErrCodeAlarmNotFound indicates the requested alarm does not exist
 	ErrCodeAlarmNotFound ErrorCode = "alarm_not_found"
+	// ErrCodeTransportFailure indicates the request was delivered to the peer but the response was not received
+	// The peer actor may have executed the request, so the caller must not auto-retry without an idempotency mechanism to avoid double-execution
+	ErrCodeTransportFailure ErrorCode = "transport_failure"
 )
 
 // MetadataRetryAfterMs is a metadata key carrying a retry-after hint in milliseconds

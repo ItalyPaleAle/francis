@@ -33,6 +33,10 @@ type InvokeActorRequest struct {
 	// ContentType is the content type of the streamed request and expected response bodies
 	// It is only meaningful for stream invocation
 	ContentType string `msgpack:"contentType,omitempty"`
+	// RequestID is a caller-generated opaque identifier for this logical invocation
+	// The owning host uses it to coalesce a concurrent retry into the in-flight execution, so the actor runs at most once even when the first response was lost in transit
+	// An empty ID disables in-flight deduplication
+	RequestID string `msgpack:"reqId,omitempty"`
 }
 
 // InvokeActorResponse is the metadata frame for the response to an InvokeActorRequest
