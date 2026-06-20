@@ -117,7 +117,7 @@ func (m *Manager) waitRetryAfter(ctx context.Context, d time.Duration) error {
 // The bool return is true when the attempt failed in a way that warrants re-resolving the placement and retrying, and the duration carries any retry-after hint to wait before that retry
 func (m *Manager) doInvokeObject(ctx context.Context, resolver PlacementResolver, peer PeerInvoker, r ref.ActorRef, ap *Placement, method string, data any, activeOnly bool, requestID string) (actor.Envelope, bool, time.Duration, error) {
 	if resolver.IsLocal(ap) {
-		return m.invokeLocalObject(ctx, resolver, r, method, data, activeOnly)
+		return m.invokeLocalObject(ctx, resolver, r, method, data, activeOnly, requestID)
 	}
 
 	return m.invokePeerObject(ctx, peer, r, ap, method, data, activeOnly, requestID)
@@ -126,13 +126,16 @@ func (m *Manager) doInvokeObject(ctx context.Context, resolver PlacementResolver
 // invokeLocalObject invokes an actor owned by this host
 // The bool return is true when the placement looks stale (the actor is inactive or owned elsewhere) so the caller can re-resolve
 // A local miss carries no retry-after hint
-func (m *Manager) invokeLocalObject(ctx context.Context, resolver PlacementResolver, r ref.ActorRef, method string, data any, activeOnly bool) (actor.Envelope, bool, time.Duration, error) {
+func (m *Manager) invokeLocalObject(ctx context.Context, resolver PlacementResolver, r ref.ActorRef, method string, data any, activeOnly bool, requestID string) (actor.Envelope, bool, time.Duration, error) {
 	invoke := func(invokeCtx context.Context, act *ActiveActor) (any, error) {
 		// The actor must implement the Invoke method to be called this way
 		obj, ok := act.Instance.(actor.ActorInvoke)
 		if !ok {
 			return nil, ErrActorMethodUnsupported
 		}
+
+		// Stamp the request ID into the context so the actor can detect duplicates
+		invokeCtx = actor.WithRequestID(invokeCtx, requestID)
 
 		// Invoke the actor, wrapping the data in an envelope as the receiver expects
 		res, err := obj.Invoke(invokeCtx, method, NewObjectEnvelope(data))
@@ -317,6 +320,9 @@ func (m *Manager) peerInvokeObjectCore(ctx context.Context, resolver PlacementRe
 			defer msgpack.PutDecoder(dec)
 			data = dec
 		}
+
+		// Stamp the request ID into the context so the actor can detect duplicates
+		invokeCtx = actor.WithRequestID(invokeCtx, req.RequestID)
 
 		// Invoke the actor
 		res, invokeErr := obj.Invoke(invokeCtx, req.Method, data)

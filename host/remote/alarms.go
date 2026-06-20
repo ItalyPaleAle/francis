@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 
 	msgpack "github.com/vmihailenco/msgpack/v5"
 
@@ -115,6 +116,9 @@ func (h *Host) executeAlarm(ctx context.Context, req protocol.ExecuteAlarmReques
 			data = dec
 		}
 
+		// Stamp a per-occurrence key (alarm ID + due-time ms) into the context so the actor can detect duplicate deliveries of the same occurrence without confusing them with legitimate subsequent firings of a repeating alarm (which have a different due time)
+		invokeCtx = actor.WithRequestID(invokeCtx, alarmRequestID(req))
+
 		// Record the execution time, then invoke the alarm
 		executionTime = h.clock.Now().UnixMilli()
 		alarmErr := obj.Alarm(invokeCtx, req.Name, data)
@@ -142,4 +146,8 @@ func (h *Host) terminateActor(_ context.Context, req protocol.TerminateActorRequ
 	}
 
 	return nil
+}
+
+func alarmRequestID(req protocol.ExecuteAlarmRequest) string {
+	return req.AlarmID + "|" + strconv.FormatInt(req.DueTimeUnixMs, 10)
 }

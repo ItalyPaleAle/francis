@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math"
 	"math/rand/v2"
+	"strconv"
 	"time"
 
 	msgpack "github.com/vmihailenco/msgpack/v5"
@@ -196,8 +197,13 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		// Mark the alarm as executed now
 		lease.SetExecutionTime(h.clock.Now())
 
+		// Stamp a per-occurrence key (alarm ID + due-time ms) into the context so the actor can detect
+		// duplicate deliveries of the same occurrence without confusing them with legitimate subsequent
+		// firings of a repeating alarm (which have a different due time)
+		alarmCtx := actor.WithRequestID(parentCtx, alarmRequestID(lease))
+
 		// Invoke the actor
-		err = obj.Alarm(parentCtx, a.Name, data)
+		err = obj.Alarm(alarmCtx, a.Name, data)
 		if err != nil {
 			// Consider this as a retryable condition unless we've exhausted the configured max attempts
 			code := executeAlarmStatusRetryable
@@ -523,4 +529,8 @@ func alarmPropertiesToAlarmReq(o actor.AlarmProperties) (components.SetAlarmReq,
 	}
 
 	return req, nil
+}
+
+func alarmRequestID(lease *ref.AlarmLease) string {
+	return lease.Key() + "|" + strconv.FormatInt(lease.DueTime().UnixMilli(), 10)
 }
