@@ -218,6 +218,12 @@ func (s *Server) handleStream(ctx context.Context, stream *webtransport.Stream, 
 		return
 	}
 
+	// Reject an unknown invocation mode at the boundary so a malformed or zero mode is a bad request rather than falling through to the dispatch default
+	if !payload.Mode.IsValid() {
+		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeBadRequest, "invalid invocation mode %d", payload.Mode)))
+		return
+	}
+
 	// Reject invocations meant for a different host, which indicate the caller's placement is stale
 	if payload.TargetHostID != "" && payload.TargetHostID != s.cfg.HostID() {
 		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeHostMismatch, "invocation is for a different host")))

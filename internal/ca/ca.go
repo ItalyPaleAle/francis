@@ -46,6 +46,11 @@ type CA struct {
 // minPSKLen is the minimum number of bytes a runtime PSK must carry to resist offline brute-force against the public CA certificate
 const minPSKLen = 32
 
+// maxWorkloadCertTTL caps the lifetime of an issued leaf certificate
+// The CA publishes no CRL or OCSP, so the system relies on short lifetimes as the de-facto revocation mechanism, and this ceiling bounds how long a leaked key stays usable
+// It is generous enough for the long-lived runtime-server and local-mode certificates while rejecting absurd values
+const maxWorkloadCertTTL = 365 * 24 * time.Hour
+
 // DeriveCA derives the deterministic CA from a single runtime PSK
 func DeriveCA(psk []byte) (*CA, error) {
 	if len(psk) < minPSKLen {
@@ -131,17 +136,23 @@ func (c *CA) IssueWorkloadCert(spiffeURI *url.URL, pub ed25519.PublicKey, ttl ti
 		return nil, errors.New("certificate TTL must be positive")
 	}
 
+	// Bound the lifetime so a leaked leaf key cannot stay valid indefinitely, since there is no revocation
+	if ttl > maxWorkloadCertTTL {
+		return nil, fmt.Errorf("certificate TTL must not exceed %v", maxWorkloadCertTTL)
+	}
+
 	// Generate a random serial because issuance is distributed across runtimes and the certificates are never persisted, so a counter could collide
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate serial number: %w", err)
 	}
 
+	// Widen the validity window by clockSkew on both ends so a verifier whose clock is slightly behind or ahead still accepts a freshly issued leaf
 	now := time.Now()
 	tpl := &x509.Certificate{
 		SerialNumber:          serial,
 		NotBefore:             now.Add(-clockSkew),
-		NotAfter:              now.Add(ttl),
+		NotAfter:              now.Add(ttl).Add(clockSkew),
 		KeyUsage:              x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		BasicConstraintsValid: true,

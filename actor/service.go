@@ -22,6 +22,8 @@ var (
 	ErrActorTypeUnsupported = errors.New("actor type is not supported in the cluster")
 	// ErrNoHost is returned by methods that perform invocation when no host is currently available to place the actor
 	ErrNoHost = errors.New("no host is available to place the actor")
+	// ErrServiceNotInitialized is returned by Service methods when the Service was not created via NewService and therefore has no host to delegate to
+	ErrServiceNotInitialized = errors.New("actor service is not initialized; use NewService")
 )
 
 // Service allows interacting with the actor host, to invoke actors and perform operations on state and alarms.
@@ -36,60 +38,97 @@ func NewService(host Host) *Service {
 	}
 }
 
+// ready reports whether the Service has a host to delegate to
+// A zero-value or nil Service was never wired to a host, so calling through it would panic; callers use this to surface ErrServiceNotInitialized instead
+func (s *Service) ready() bool {
+	return s != nil && s.host != nil
+}
+
 // Invoke an actor
 // Pass WithInvokeActiveOnly to invoke the actor only if it is already active, without activating it, in which case ErrActorNotActive is returned when it is not
-func (s Service) Invoke(ctx context.Context, actorType string, actorID string, method string, data any, opts ...InvokeOption) (Envelope, error) {
+func (s *Service) Invoke(ctx context.Context, actorType string, actorID string, method string, data any, opts ...InvokeOption) (Envelope, error) {
+	if !s.ready() {
+		return nil, ErrServiceNotInitialized
+	}
 	return s.host.Invoke(ctx, actorType, actorID, method, data, opts...)
 }
 
 // InvokeStream performs a streamed invocation of an actor.
 // The request body is streamed from body, and the response body is returned as a reader that the caller must close.
 // Pass WithInvokeActiveOnly to invoke the actor only if it is already active, without activating it, in which case ErrActorNotActive is returned when it is not
-func (s Service) InvokeStream(ctx context.Context, actorType string, actorID string, method string, reqContentType string, body io.Reader, opts ...InvokeOption) (respContentType string, resp io.ReadCloser, err error) {
+func (s *Service) InvokeStream(ctx context.Context, actorType string, actorID string, method string, reqContentType string, body io.Reader, opts ...InvokeOption) (respContentType string, resp io.ReadCloser, err error) {
+	if !s.ready() {
+		return "", nil, ErrServiceNotInitialized
+	}
 	return s.host.InvokeStream(ctx, actorType, actorID, method, reqContentType, body, opts...)
 }
 
 // SetState saves the state for an actor.
-func (s Service) SetState(ctx context.Context, actorType string, actorID string, state any, opts *SetStateOpts) error {
+func (s *Service) SetState(ctx context.Context, actorType string, actorID string, state any, opts *SetStateOpts) error {
+	if !s.ready() {
+		return ErrServiceNotInitialized
+	}
 	return s.host.SetState(ctx, actorType, actorID, state, opts)
 }
 
 // GetState retrieves the state for an actor.
 // The state is JSON-decoded into dest.
 // Returns ErrStateNotFound if the state cannot be found.
-func (s Service) GetState(ctx context.Context, actorType string, actorID string, dest any) error {
+func (s *Service) GetState(ctx context.Context, actorType string, actorID string, dest any) error {
+	if !s.ready() {
+		return ErrServiceNotInitialized
+	}
 	return s.host.GetState(ctx, actorType, actorID, dest)
 }
 
 // DeleteState deletes the state for an actor.
 // Returns ErrStateNotFound if the state cannot be found.
-func (s Service) DeleteState(ctx context.Context, actorType string, actorID string) error {
+func (s *Service) DeleteState(ctx context.Context, actorType string, actorID string) error {
+	if !s.ready() {
+		return ErrServiceNotInitialized
+	}
 	return s.host.DeleteState(ctx, actorType, actorID)
 }
 
 // SetAlarm creates or replaces an alarm for an actor.
-func (s Service) SetAlarm(ctx context.Context, actorType string, actorID string, alarmName string, properties AlarmProperties) error {
+func (s *Service) SetAlarm(ctx context.Context, actorType string, actorID string, alarmName string, properties AlarmProperties) error {
+	if !s.ready() {
+		return ErrServiceNotInitialized
+	}
 	return s.host.SetAlarm(ctx, actorType, actorID, alarmName, properties)
 }
 
 // DeleteAlarm deletes an alarm for an actor.
 // Returns ErrAlarmNotFound if the alarm cannot be found.
-func (s Service) DeleteAlarm(ctx context.Context, actorType string, actorID string, alarmName string) error {
+func (s *Service) DeleteAlarm(ctx context.Context, actorType string, actorID string, alarmName string) error {
+	if !s.ready() {
+		return ErrServiceNotInitialized
+	}
 	return s.host.DeleteAlarm(ctx, actorType, actorID, alarmName)
 }
 
 // HaltAll halts all actors currently active on the host.
-func (s Service) HaltAll() error {
+func (s *Service) HaltAll() error {
+	if !s.ready() {
+		return ErrServiceNotInitialized
+	}
 	return s.host.HaltAll()
 }
 
 // Halt halts one actor currently active on the host.
-func (s Service) Halt(actorType string, actorID string) error {
+func (s *Service) Halt(actorType string, actorID string) error {
+	if !s.ready() {
+		return ErrServiceNotInitialized
+	}
 	return s.host.Halt(actorType, actorID)
 }
 
 // HaltDeferred halts an actor currently active on the host.
 // This is a non-blocking variant of the Halt method, which runs in background
-func (s Service) HaltDeferred(actorType string, actorID string) {
+// It is a no-op on an uninitialized Service, since there is no host to halt against and the method has no way to report an error
+func (s *Service) HaltDeferred(actorType string, actorID string) {
+	if !s.ready() {
+		return
+	}
 	s.host.HaltDeferred(actorType, actorID)
 }

@@ -56,6 +56,8 @@ func (d Duration) IsZero() bool {
 }
 
 // String returns the ISO8601-formatted representation of the duration
+// The time portion is emitted at millisecond granularity, so any sub-millisecond remainder is truncated
+// Durations are not representable when negative; a duration with no positive component renders as the zero duration rather than an invalid bare "P"
 func (d Duration) String() string {
 	if d.IsZero() {
 		return zeroDuration
@@ -109,7 +111,14 @@ func (d Duration) String() string {
 		}
 	}
 
-	return b.String()
+	// A duration whose only components are negative writes nothing after the leading "P", which is not valid ISO8601
+	// Fall back to the zero duration rather than returning a bare "P"
+	out := b.String()
+	if out == "P" {
+		return zeroDuration
+	}
+
+	return out
 }
 
 func ParseISO8601Duration(from string) (d Duration, err error) {
@@ -274,6 +283,11 @@ func ParseDurationString(from string) (Duration, error) {
 
 	d.Time, err = time.ParseDuration(from)
 	if err == nil {
+		// The Go duration format accepts negative values, but a negative duration is not representable here and would render as an invalid ISO8601 string
+		if d.Time < 0 {
+			d.Reset()
+			return d, errors.New("duration cannot be negative")
+		}
 		return d, nil
 	}
 

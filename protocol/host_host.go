@@ -13,6 +13,17 @@ const (
 	InvocationModeStream InvocationMode = 2
 )
 
+// IsValid reports whether the invocation mode is one of the defined modes
+// The zero value and any unknown mode are invalid, so callers can reject them at the decode boundary rather than relying on a dispatch default
+func (m InvocationMode) IsValid() bool {
+	switch m {
+	case InvocationModeObject, InvocationModeStream:
+		return true
+	default:
+		return false
+	}
+}
+
 // InvokeActorRequest is the metadata frame for a host-to-host actor invocation
 // For object invocation the MessagePack-encoded argument travels in Data, and the result comes back in InvokeActorResponse.Data
 // For stream invocation this frame is sent first, then the request body streams as raw bytes

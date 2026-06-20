@@ -72,6 +72,44 @@ func TestIssueWorkloadCertVerifies(t *testing.T) {
 	}
 }
 
+func TestIssueWorkloadCertTTLBounds(t *testing.T) {
+	root, err := DeriveCA([]byte("runtime-psk-abcdefghijklmnopqrstuvwxyz"))
+	if err != nil {
+		t.Fatalf("DeriveCA: %v", err)
+	}
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+
+	// A TTL above the ceiling is rejected so a leaked leaf key cannot stay valid indefinitely
+	_, err = root.IssueWorkloadCert(HostURI("host-1"), pub, maxWorkloadCertTTL+time.Hour)
+	if err == nil {
+		t.Fatal("expected an error for a TTL above the maximum")
+	}
+
+	// A TTL at the ceiling is accepted, since the long-lived runtime-server and local-mode certs rely on it
+	_, err = root.IssueWorkloadCert(HostURI("host-1"), pub, maxWorkloadCertTTL)
+	if err != nil {
+		t.Fatalf("IssueWorkloadCert at max TTL: %v", err)
+	}
+
+	// NotAfter is widened by clockSkew on top of the TTL, mirroring NotBefore, so a verifier whose clock is slightly ahead still accepts the leaf
+	der, err := root.IssueWorkloadCert(HostURI("host-1"), pub, time.Hour)
+	if err != nil {
+		t.Fatalf("IssueWorkloadCert: %v", err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+	window := leaf.NotAfter.Sub(leaf.NotBefore)
+	wantMin := time.Hour + 2*clockSkew
+	if window < wantMin {
+		t.Fatalf("validity window %v is shorter than the expected %v", window, wantMin)
+	}
+}
+
 func TestHostIDFromCert(t *testing.T) {
 	root, err := DeriveCA([]byte("runtime-psk-abcdefghijklmnopqrstuvwxyz"))
 	if err != nil {
