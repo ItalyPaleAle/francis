@@ -271,3 +271,14 @@ func TestInvokeActorRoundTrip(t *testing.T) {
 	require.NoError(t, Unmarshal(b, &out))
 	assert.Equal(t, in, out)
 }
+
+func TestInvocationModeIsValid(t *testing.T) {
+	// The two defined modes are valid
+	assert.True(t, InvocationModeObject.IsValid())
+	assert.True(t, InvocationModeStream.IsValid())
+
+	// The zero value and any unknown mode are invalid, so the decode boundary can reject them
+	assert.False(t, InvocationMode(0).IsValid())
+	assert.False(t, InvocationMode(3).IsValid())
+	assert.False(t, InvocationMode(255).IsValid())
+}

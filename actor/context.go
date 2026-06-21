@@ -16,7 +16,8 @@ func RequestIDFromContext(ctx context.Context) string {
 }
 
 // WithRequestID returns a context carrying the given request ID.
-// This is called by the framework before invoking actor methods; actor implementations should use RequestIDFromContext to read it.
+// This is called by the framework before invoking actor methods.
+// Actor implementations should use RequestIDFromContext to read it.
 func WithRequestID(ctx context.Context, requestID string) context.Context {
 	return context.WithValue(ctx, requestIDKey, requestID)
 }

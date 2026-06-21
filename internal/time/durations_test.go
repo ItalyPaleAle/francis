@@ -177,6 +177,15 @@ func TestParseDuration(t *testing.T) {
 		require.Error(t, err)
 	})
 
+	t.Run("negative Go duration is rejected", func(t *testing.T) {
+		// The Go duration format accepts negatives, but they are not representable here
+		_, err := ParseDurationString("-5s")
+		require.Error(t, err)
+
+		_, err = ParseDurationString("-1h30m")
+		require.Error(t, err)
+	})
+
 	t.Run("parse empty string", func(t *testing.T) {
 		_, err := ParseDurationString("")
 		require.Error(t, err)
@@ -253,6 +262,8 @@ func TestDuration_String(t *testing.T) {
 		{"days and less than 1ms has no time", Duration{Time: 1 * time.Nanosecond, Days: 1}, "P1D"},
 		{"hours minutes seconds nanoseconds", Duration{Time: 1*time.Hour + 2*time.Minute + 3*time.Second + 9*time.Nanosecond}, "PT1H2M3S"},
 		{"full string", Duration{Years: 1, Months: 2, Days: 3, Time: 4*time.Hour + 5*time.Minute + 6*time.Second + 7*time.Millisecond}, "P1Y2M3DT4H5M6.007S"},
+		{"negative-only renders as zero, not a bare P", Duration{Years: -1}, "PT0S"},
+		{"negative time renders as zero", Duration{Time: -5 * time.Second}, "PT0S"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
