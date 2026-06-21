@@ -1,5 +1,5 @@
-github.com/ItalyPaleAle/webtransport-go v0.0.0-20260618111824-b0a058cfcc6e h1:vj6KH8A8imNjORaSvbz6OY8iemJX3TXMkqtDCK8GryI=
-github.com/ItalyPaleAle/webtransport-go v0.0.0-20260618111824-b0a058cfcc6e/go.mod h1:SHgEzUFVyj+9WUSuGB1P6Zd351Pww2leWV3SwlTovkA=
+github.com/ItalyPaleAle/webtransport-go v0.0.0-20260620195534-6ac675f75ff1 h1:UYpoUzRMzHHTX++pLFf+uIkMP5BwdizrwPh9LM8lLXA=
+github.com/ItalyPaleAle/webtransport-go v0.0.0-20260620195534-6ac675f75ff1/go.mod h1:SHgEzUFVyj+9WUSuGB1P6Zd351Pww2leWV3SwlTovkA=
 github.com/MicahParks/jwkset v0.11.0 h1:yc0zG+jCvZpWgFDFmvs8/8jqqVBG9oyIbmBtmjOhoyQ=
 github.com/MicahParks/jwkset v0.11.0/go.mod h1:U2oRhRaLgDCLjtpGL2GseNKGmZtLs/3O7p+OZaL5vo0=
 github.com/MicahParks/keyfunc/v3 v3.8.0 h1:Hx2dgIjAXGk9slakM6rV9BOeaWDPEXXZ4Us8guNBfds=
