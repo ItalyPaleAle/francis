@@ -49,3 +49,5 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+replace github.com/quic-go/webtransport-go => github.com/ItalyPaleAle/webtransport-go v0.0.0-20260621112534-576dfd744600
