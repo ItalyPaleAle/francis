@@ -28,15 +28,21 @@ const (
 	eventuallyTick    = 100 * time.Millisecond
 )
 
-// variants is the representative set: SQLite and Postgres each have their own alarm SQL, and the standalone providers share one in-memory path that StandaloneMemory stands in for
-var variants = []provider.Variant{provider.SQLite, provider.Postgres, provider.StandaloneMemory}
+// matrix is the representative set of topology/provider combinations the alarm-invocation scenarios run against
+// Alarm execution has two distinct drivers — per-host polling on the local topology and runtime-owned polling on the remote topology — and three provider implementations: the SQLite alarm SQL, the Postgres alarm SQL, and the in-memory standalone path
+var matrix = []struct {
+	kind    cluster.Kind
+	variant provider.Variant
+}{
+	{cluster.Local, provider.SQLite},
+	{cluster.Local, provider.StandaloneMemory},
+	{cluster.Remote, provider.Postgres},
+}
 
-// Register the alarm-invocation scenario across the representative variants on both runtimes
+// Register the alarm-invocation scenario across the representative matrix
 func init() {
-	for _, v := range variants {
-		for _, k := range []cluster.Kind{cluster.Local, cluster.Remote} {
-			suite.Register(&alarmInvoke{kind: k, variant: v})
-		}
+	for _, m := range matrix {
+		suite.Register(&alarmInvoke{kind: m.kind, variant: m.variant})
 	}
 }
 
@@ -85,8 +91,8 @@ func (s *alarmInvoke) Run(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		// Drive a sustained stream of holding invocations for long enough to span several alarm firings
-		deadline := time.Now().Add(3 * time.Second)
+		// Drive a sustained stream of holding invocations for long enough to span several alarm firings (~10 at the 200ms interval)
+		deadline := time.Now().Add(2 * time.Second)
 		for time.Now().Before(deadline) {
 			_, err = svc.Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodHold, nil)
 			require.NoError(t, err)

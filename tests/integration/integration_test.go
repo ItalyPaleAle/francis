@@ -35,6 +35,8 @@ import (
 
 // TestIntegration runs every registered integration scenario as a subtest
 func TestIntegration(t *testing.T) {
+	t.Log("Starting Integration tests")
+
 	for name, c := range suite.All() {
 		t.Run(name, func(t *testing.T) {
 			opts := c.Setup(t)

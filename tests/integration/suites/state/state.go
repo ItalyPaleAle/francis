@@ -21,13 +21,21 @@ import (
 	"github.com/italypaleale/francis/tests/integration/suites/shared"
 )
 
-// Register all single-host scenarios for every provider variant on both runtimes
+// Register all single-host scenarios
 func init() {
-	for _, v := range provider.All() {
+	for i, v := range provider.All() {
+		// The basic round-trip is cheap, so it runs across the full provider × topology matrix as a broad smoke test
 		for _, k := range []cluster.Kind{cluster.Local, cluster.Remote} {
 			suite.Register(&roundTrip{kind: k, variant: v})
-			suite.Register(&crud{kind: k, variant: v})
 		}
+
+		// The CRUD scenario spends real time on second-granular TTL-expiry waits, so it runs each provider on a single topology rather than the full cross product
+		// Every variant is a distinct storage backend that must be covered: local vs remote only changes whether state goes direct to the embedded provider or over the runtime RPC, so alternating the topology per variant exercises both paths without doubling this slower suite
+		k := cluster.Local
+		if i%2 == 1 {
+			k = cluster.Remote
+		}
+		suite.Register(&crud{kind: k, variant: v})
 	}
 }
 

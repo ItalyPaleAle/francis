@@ -32,20 +32,26 @@ const (
 	// eventuallyTimeout is generous so the assertions tolerate scheduling and provider latency
 	eventuallyTimeout = 20 * time.Second
 	eventuallyTick    = 100 * time.Millisecond
-	// stabilizeWindow is long enough to span several poll cycles, so a "stays at N" assertion would catch an unexpected re-fire
-	stabilizeWindow = 2 * time.Second
+	// stabilizeWindow is how long a count must hold steady to count as settled
+	// At a 250ms poll it spans four poll cycles, enough to catch an unexpected re-fire while keeping the many settleAlarm calls cheap
+	stabilizeWindow = pollInterval * 4
 )
 
-// variants is the representative set the alarm scenarios run against
-// Alarm scheduling has three distinct provider implementations: the SQLite path, the Postgres path, and the in-memory standalone path that StandaloneMemory stands in for, so one variant each is enough
-var variants = []provider.Variant{provider.SQLite, provider.Postgres, provider.StandaloneMemory}
+// matrix is the representative set of topology/provider combinations the alarm scenarios run against
+// Alarm execution has two distinct drivers — per-host polling on the local topology and runtime-owned polling on the remote topology — and three provider implementations: the SQLite alarm SQL, the Postgres alarm SQL, and the in-memory standalone path
+var matrix = []struct {
+	kind    cluster.Kind
+	variant provider.Variant
+}{
+	{cluster.Local, provider.SQLite},
+	{cluster.Local, provider.StandaloneMemory},
+	{cluster.Remote, provider.Postgres},
+}
 
-// Register the alarm scenario across the representative variants on both runtimes
+// Register the alarm scenario across the representative matrix
 func init() {
-	for _, v := range variants {
-		for _, k := range []cluster.Kind{cluster.Local, cluster.Remote} {
-			suite.Register(&alarms{kind: k, variant: v})
-		}
+	for _, m := range matrix {
+		suite.Register(&alarms{kind: m.kind, variant: m.variant})
 	}
 }
 
@@ -202,7 +208,7 @@ func (s *alarms) Run(t *testing.T) {
 	t.Run("delete before due prevents firing", func(t *testing.T) {
 		const actorID = "delete-1"
 		err := svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "a", actor.AlarmProperties{
-			DueTime: time.Now().Add(800 * time.Millisecond),
+			DueTime: time.Now().Add(400 * time.Millisecond),
 		})
 		require.NoError(t, err)
 		err = svc.DeleteAlarm(ctx, shared.ProbeActorType, actorID, "a")
