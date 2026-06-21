@@ -1,6 +1,6 @@
 module github.com/italypaleale/francis
 
-go 1.26.3
+go 1.26.4
 
 require (
 	github.com/MicahParks/keyfunc/v3 v3.8.0
@@ -11,7 +11,7 @@ require (
 	github.com/italypaleale/go-kit v0.0.0-20260620130522-3cb485fabbc9
 	github.com/italypaleale/go-sql-utils v0.2.4-0.20260619045406-d40ba2b291e8
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
-	github.com/jackc/pgx/v5 v5.9.2
+	github.com/jackc/pgx/v5 v5.10.0
 	github.com/lmittmann/tint v1.1.3
 	github.com/mattn/go-isatty v0.0.22
 	github.com/quic-go/quic-go v0.60.0
@@ -19,10 +19,10 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	go.uber.org/goleak v1.3.0
-	golang.org/x/sync v0.20.0
+	golang.org/x/sync v0.21.0
 	gopkg.in/yaml.v3 v3.0.1
-	k8s.io/utils v0.0.0-20260507154919-ff6756f316d2
-	modernc.org/sqlite v1.50.1
+	k8s.io/utils v0.0.0-20260617174310-a95e086a2553
+	modernc.org/sqlite v1.52.0
 )
 
 require (
@@ -49,5 +49,3 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-replace github.com/quic-go/webtransport-go => github.com/ItalyPaleAle/webtransport-go v0.0.0-20260621112534-576dfd744600

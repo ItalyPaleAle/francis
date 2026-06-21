@@ -9,6 +9,10 @@
       "module": "github.com/quic-go/webtransport-go",
       "version": "v0.10.0",
       "reason": "forked"
+    },
+    {
+      "module": "k8s.io/utils",
+      "version": "v0.0.0-20260617174310-a95e086a2553"
     }
   ]
 }
