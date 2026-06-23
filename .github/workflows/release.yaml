@@ -1,0 +1,297 @@
+name: Build and release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      # Push to tags matching v*
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      build_all_platforms:
+        description: Build binaries and container images for all supported platforms
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+  attestations: write
+  id-token: write
+
+jobs:
+
+  build:
+    name: Build and release
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Check out code
+        uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          # Do not cache in release workflows
+          cache: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          # Do not cache in release workflows
+          cache-binary: false
+
+      # Lowercase REPO_OWNER which is required for containers
+      - name: Set lowercase REPO_OWNER
+        run: |
+          REPO_OWNER=${{ github.repository_owner }}
+          echo "REPO_OWNER=${REPO_OWNER,,}" >>${GITHUB_ENV}
+
+      - name: Generate Container tags and labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ env.REPO_OWNER }}/francis
+          tags: |
+            type=edge,branch=main
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+
+      - name: Set variables
+        run: |
+          BUILD_ID=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
+          BUILD_VERSION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
+          BUILD_DATE=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
+          COMMIT_HASH=$(echo "${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.revision'] }}" | head -c 7)
+
+          echo "BUILD_ID=$BUILD_ID" >> $GITHUB_ENV
+          echo "BUILD_VERSION=$BUILD_VERSION" >> $GITHUB_ENV
+          echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
+          echo "COMMIT_HASH=$COMMIT_HASH" >> $GITHUB_ENV
+
+          echo "BUILD_ID: '$BUILD_ID'"
+          echo "BUILD_VERSION: '$BUILD_VERSION'"
+          echo "BUILD_DATE: '$BUILD_DATE'"
+          echo "COMMIT_HASH: '$COMMIT_HASH'"
+
+          BUILDINFO_PKG="github.com/italypaleale/francis/internal/buildinfo"
+          BUILD_LDFLAGS="-X ${BUILDINFO_PKG}.Production=1 -X ${BUILDINFO_PKG}.AppVersion=${BUILD_VERSION} -X ${BUILDINFO_PKG}.BuildId=${BUILD_ID} -X ${BUILDINFO_PKG}.BuildDate=${BUILD_DATE} -X ${BUILDINFO_PKG}.CommitHash=${COMMIT_HASH} -buildid=${BUILD_ID}"
+
+          echo "BUILD_LDFLAGS=$BUILD_LDFLAGS" >> $GITHUB_ENV
+
+          echo "BUILD_LDFLAGS: '$BUILD_LDFLAGS'"
+
+      - name: Select build platforms
+        env:
+          INPUT_BUILD_ALL_PLATFORMS: ${{ inputs.build_all_platforms }}
+        run: |
+          build_all_platforms=false
+          container_platforms='linux/amd64,linux/arm64/v8'
+
+          if [[ "${GITHUB_REF}" =~ ^refs/tags/v ]]; then
+            build_all_platforms=true
+            container_platforms='linux/amd64,linux/arm64/v8,linux/arm/v7'
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${INPUT_BUILD_ALL_PLATFORMS}" == 'true' ]]; then
+            build_all_platforms=true
+            container_platforms='linux/amd64,linux/arm64/v8,linux/arm/v7'
+          fi
+
+          echo "BUILD_ALL_PLATFORMS=$build_all_platforms" >> "$GITHUB_ENV"
+          echo "CONTAINER_PLATFORMS=$container_platforms" >> "$GITHUB_ENV"
+
+          echo "BUILD_ALL_PLATFORMS: '$build_all_platforms'"
+          echo "CONTAINER_PLATFORMS: '$container_platforms'"
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build binaries
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p .bin .out
+
+          echo -e "\n###\nBuilding linux/amd64\n"
+          mkdir .bin/francis-${{ env.BUILD_ID }}-linux-amd64
+          GOOS=linux GOARCH=amd64 \
+            go build \
+              -ldflags "${BUILD_LDFLAGS}" \
+              -o .bin/francis-${{ env.BUILD_ID }}-linux-amd64/francis \
+              -trimpath \
+              ./cmd/runtime
+          cp LICENSE.md .bin/francis-${{ env.BUILD_ID }}-linux-amd64
+          cp -r README.md .bin/francis-${{ env.BUILD_ID }}-linux-amd64
+          (cd .bin && tar -czvf ../.out/francis-${{ env.BUILD_ID }}-linux-amd64.tar.gz francis-${{ env.BUILD_ID }}-linux-amd64)
+
+          echo -e "\n###\nBuilding linux/arm64\n"
+          mkdir .bin/francis-${{ env.BUILD_ID }}-linux-arm64
+          GOOS=linux GOARCH=arm64 \
+            go build \
+              -ldflags "${BUILD_LDFLAGS}" \
+              -o .bin/francis-${{ env.BUILD_ID }}-linux-arm64/francis \
+              -trimpath \
+              ./cmd/runtime
+          cp LICENSE.md .bin/francis-${{ env.BUILD_ID }}-linux-arm64
+          cp -r README.md .bin/francis-${{ env.BUILD_ID }}-linux-arm64
+          (cd .bin && tar -czvf ../.out/francis-${{ env.BUILD_ID }}-linux-arm64.tar.gz francis-${{ env.BUILD_ID }}-linux-arm64)
+
+          if [[ "${BUILD_ALL_PLATFORMS}" == 'true' ]]; then
+            echo -e "\n###\nBuilding linux/armv7\n"
+            mkdir .bin/francis-${{ env.BUILD_ID }}-linux-armv7
+            GOOS=linux GOARCH=arm GOARM=7 \
+              go build \
+                -ldflags "${BUILD_LDFLAGS}" \
+                -o .bin/francis-${{ env.BUILD_ID }}-linux-armv7/francis \
+                -trimpath \
+                ./cmd/runtime
+            cp LICENSE.md .bin/francis-${{ env.BUILD_ID }}-linux-armv7
+            cp -r README.md .bin/francis-${{ env.BUILD_ID }}-linux-armv7
+            (cd .bin && tar -czvf ../.out/francis-${{ env.BUILD_ID }}-linux-armv7.tar.gz francis-${{ env.BUILD_ID }}-linux-armv7)
+
+            echo -e "\n###\nBuilding darwin/arm64\n"
+            mkdir .bin/francis-${{ env.BUILD_ID }}-macos-arm64
+            GOOS=darwin GOARCH=arm64 \
+              go build \
+                -ldflags "${BUILD_LDFLAGS}" \
+                -o .bin/francis-${{ env.BUILD_ID }}-macos-arm64/francis \
+                -trimpath \
+                ./cmd/runtime
+            cp LICENSE.md .bin/francis-${{ env.BUILD_ID }}-macos-arm64
+            cp -r README.md .bin/francis-${{ env.BUILD_ID }}-macos-arm64
+            (cd .bin && tar -czvf ../.out/francis-${{ env.BUILD_ID }}-macos-arm64.tar.gz francis-${{ env.BUILD_ID }}-macos-arm64)
+
+            echo -e "\n###\nBuilding freebsd/amd64\n"
+            mkdir .bin/francis-${{ env.BUILD_ID }}-freebsd-amd64
+            GOOS=freebsd GOARCH=amd64 \
+              go build \
+                -ldflags "${BUILD_LDFLAGS}" \
+                -o .bin/francis-${{ env.BUILD_ID }}-freebsd-amd64/francis \
+                -trimpath \
+                ./cmd/runtime
+            cp LICENSE.md .bin/francis-${{ env.BUILD_ID }}-freebsd-amd64
+            cp -r README.md .bin/francis-${{ env.BUILD_ID }}-freebsd-amd64
+            (cd .bin && tar -czvf ../.out/francis-${{ env.BUILD_ID }}-freebsd-amd64.tar.gz francis-${{ env.BUILD_ID }}-freebsd-amd64)
+
+            echo -e "\n###\nBuilding freebsd/arm64\n"
+            mkdir .bin/francis-${{ env.BUILD_ID }}-freebsd-arm64
+            GOOS=freebsd GOARCH=arm64 \
+              go build \
+                -ldflags "${BUILD_LDFLAGS}" \
+                -o .bin/francis-${{ env.BUILD_ID }}-freebsd-arm64/francis \
+                -trimpath \
+                ./cmd/runtime
+            cp LICENSE.md .bin/francis-${{ env.BUILD_ID }}-freebsd-arm64
+            cp -r README.md .bin/francis-${{ env.BUILD_ID }}-freebsd-arm64
+            (cd .bin && tar -czvf ../.out/francis-${{ env.BUILD_ID }}-freebsd-arm64.tar.gz francis-${{ env.BUILD_ID }}-freebsd-arm64)
+          else
+            echo -e "\n###\nSkipping non-default platforms for this run\n"
+          fi
+
+          echo -e "\n###\nLinks for Docker buildx\n"
+          (
+            cd .bin && \
+            ln -v -s francis-${{ env.BUILD_ID }}-linux-amd64 linux-amd64 && \
+            ln -v -s francis-${{ env.BUILD_ID }}-linux-arm64 linux-arm64
+          )
+
+          if [[ "${BUILD_ALL_PLATFORMS}" == 'true' ]]; then
+            (
+              cd .bin && \
+              ln -v -s francis-${{ env.BUILD_ID }}-linux-armv7 linux-arm
+            )
+          fi
+
+          echo -e "\n###\nCompilation done\n"
+          echo ".bin:"
+          ls -al .bin
+          echo ".out:"
+          ls -al .out
+
+      - name: Publish binaries as Actions Artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifacts
+          path: .out
+          include-hidden-files: true
+          compression-level: 0
+
+      - name: Build and push Container images
+        uses: docker/build-push-action@v7
+        id: docker-build-push
+        with:
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: ${{ env.CONTAINER_PLATFORMS }}
+          context: .
+          file: Dockerfile
+          push: true
+
+      - name: Binary attestation linux-amd64
+        uses: actions/attest-build-provenance@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          subject-name: linux-amd64/francis
+          subject-path: |
+            .bin/francis-*-linux-amd64/francis
+            .bin/francis-*-linux-amd64/francis-cli
+
+      - name: Binary attestation linux-arm64
+        uses: actions/attest-build-provenance@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          subject-name: linux-arm64/francis
+          subject-path: |
+            .bin/francis-*-linux-arm64/francis
+            .bin/francis-*-linux-arm64/francis-cli
+
+      - name: Binary attestation linux-armv7
+        uses: actions/attest-build-provenance@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          subject-name: linux-armv7/francis
+          subject-path: |
+            .bin/francis-*-linux-armv7/francis
+            .bin/francis-*-linux-armv7/francis-cli
+
+      - name: Binary attestation macos-arm64
+        uses: actions/attest-build-provenance@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          subject-name: macos-arm64/francis
+          subject-path: |
+            .bin/francis-*-macos-arm64/francis
+            .bin/francis-*-macos-arm64/francis-cli
+
+      - name: Binary attestation freebsd-amd64
+        uses: actions/attest-build-provenance@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          subject-name: freebsd-amd64/francis
+          subject-path: |
+            .bin/francis-*-freebsd-amd64/francis
+            .bin/francis-*-freebsd-amd64/francis-cli
+
+      - name: Binary attestation freebsd-arm64
+        uses: actions/attest-build-provenance@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          subject-name: freebsd-arm64/francis
+          subject-path: |
+            .bin/francis-*-freebsd-arm64/francis
+            .bin/francis-*-freebsd-arm64/francis-cli
+
+      - name: Container image attestation
+        uses: actions/attest-build-provenance@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          subject-name: 'ghcr.io/${{ env.REPO_OWNER }}/francis'
+          subject-digest: ${{ steps.docker-build-push.outputs.digest }}
+          push-to-registry: true
