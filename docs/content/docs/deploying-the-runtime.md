@@ -9,16 +9,17 @@ If you're using the [local topology](/docs/topologies#local-topology), you don't
 
 ## Getting the runtime
 
-The recommended way to run the runtime is the published container image. Pre-compiled binaries are also available, or you can build from source.
+The recommended way to run the runtime is the published container image. Pre-compiled binaries are also available.
 
-> The runtime's WebTransport server runs over HTTP/3 (QUIC), which uses **UDP**. Whenever you publish the runtime's port — in `docker run`, Compose, a firewall rule, or a load balancer — make sure it's the UDP port, not TCP.
+> **Use UDP for port forwarding**  
+> The runtime's WebTransport server runs over HTTP/3 (QUIC), which is based on UDP. Whenever you publish the runtime's port (in `docker run`, Compose, a firewall rule, or a load balancer) make sure it's the UDP port, not TCP.
 
 ### Container image (Docker or Podman)
 
 The runtime is published to the GitHub Container Registry as `ghcr.io/italypaleale/francis`. Images are multi-arch (`linux/amd64`, `linux/arm64`, and `linux/arm/v7`). The available tags are:
 
-- `edge` — the latest build from the `main` branch.
-- A full version, e.g. `1.2.3`, plus the floating `1.2` and `1` tags that track the latest patch/minor.
+- A full version, e.g. `1.2.3`.
+- Floating `1.2` and `1` tags that track the latest patch/minor.
 
 Mount your configuration file into the container and pass it with `-config`. The example below also mounts a named volume for the SQLite data store and publishes the UDP port:
 
@@ -32,7 +33,7 @@ docker run \
   -config /config.yaml
 ```
 
-[Podman](https://podman.io/) is a drop-in replacement — substitute `podman` for `docker`:
+Or, with [Podman](https://podman.io/):
 
 ```sh
 podman run \
@@ -44,7 +45,7 @@ podman run \
   -config /config.yaml
 ```
 
-> The image is built on a distroless base and runs as a **non-root** user (UID 65532). When you persist the SQLite store on a volume, the data directory must be writable by that user; point `provider.connectionString` at the mounted volume (for example `/data/data.db`). PostgreSQL avoids the question entirely since no local files are written.
+> The image is built on a distroless base and runs as a **non-root** user (UID 65532). When using SQLite, persist the SQLite store on a volume, then point `provider.connectionString` at the mounted volume (for example `/data/data.db`). The data directory must be writable by that user.
 
 The image ships with a `HEALTHCHECK` that probes the locally-running runtime, so `docker ps` and orchestrators report container health automatically.
 
@@ -58,7 +59,6 @@ services:
     image: ghcr.io/italypaleale/francis:1
     command: ["-config", "/config.yaml"]
     ports:
-      # WebTransport runs over UDP
       - "7400:7400/udp"
     volumes:
       - ./config.yaml:/config.yaml:ro
@@ -83,18 +83,11 @@ Download the archive for your platform, extract it, and run the `francis` binary
 
 ```sh
 # Replace VERSION and the platform suffix to match the release you want
-curl -LO https://github.com/ItalyPaleAle/francis/releases/download/vVERSION/francis-VERSION-linux-amd64.tar.gz
-tar -xzf francis-VERSION-linux-amd64.tar.gz
+VERSION=1.2.3
+curl -LO https://github.com/ItalyPaleAle/francis/releases/download/v${VERSION}/francis-${VERSION}-linux-amd64.tar.gz
+tar -xzf francis-${VERSION}-linux-amd64.tar.gz
 
-./francis-VERSION-linux-amd64/francis -config config.yaml
-```
-
-### Building from source
-
-If you have a Go toolchain and want to build the runtime yourself, it's the `cmd/runtime` package in the Francis repository:
-
-```sh
-go build -o bin/francis github.com/italypaleale/francis/cmd/runtime
+./francis-${VERSION}-linux-amd64/francis -config config.yaml
 ```
 
 ## Configuration
@@ -108,11 +101,12 @@ francis -config config.yaml
 A minimal configuration:
 
 ```yaml
-# Address and port the runtime's WebTransport server listens on
+# Address and port the runtime's WebTransport server listens on (using UDP)
 bind: "0.0.0.0:7400"
 
 # The runtime PSKs derive the cluster CA
-# Every runtime sharing these keys is the same certificate issuer — keep them secret
+# Every runtime sharing these keys is the same certificate issuer
+# Keep them secret
 runtimePSKs:
   - "change-me-runtime-psk"
 
@@ -144,7 +138,7 @@ log:
 | `provider.connectionString` | Connection string or file path for the provider. |
 | `workloadCertTTL` | Lifetime of the workload certificates issued to hosts. Default `1h`. |
 | `healthCheckDeadline` | Maximum interval between host health pings. Default `20s`. |
-| `alarmsPollInterval` | How often the runtime polls for due alarms. Default `1.5s`. |
+| `alarmsPollInterval` | How often the runtime polls for due alarms. Default `1500ms`. |
 | `alarmsLeaseDuration` | How long an alarm lease is held while executing. Default `20s`. |
 | `shutdownGracePeriod` | Grace period for a clean shutdown. Default `30s`. |
 | `log.level` | `debug`, `info`, `warn`, or `error`. |
@@ -227,5 +221,5 @@ For availability, you can run multiple runtime replicas that share the same `run
 The runtime stores all state and alarms in its configured provider:
 
 - **PostgreSQL** (`provider.type: postgres`) is recommended for production. Use a standard connection string, e.g. `postgres://user:pass@host:5432/dbname`.
-- **SQLite** (`provider.type: sqlite`) works well when a single runtime owns the database. Do **not** place the SQLite file on a networked filesystem (NFS/SMB).
+- **SQLite** (`provider.type: sqlite`) works well when a single runtime owns the database. Do **not** place the SQLite file on a networked filesystem like NFS/SMB.
 - **In-memory** (`provider.type: memory`) is non-durable and intended for testing only.
