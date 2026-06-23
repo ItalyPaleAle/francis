@@ -3,16 +3,91 @@ title: "Deploying the runtime"
 weight: 28
 ---
 
-In the [remote topology](/docs/topologies#remote-topology), the **runtime** is a standalone control plane: it owns the data store and coordinates placement, state, and alarms for a fleet of stateless worker hosts. This page covers building, configuring, and running the runtime.
+In the [remote topology](/docs/topologies#remote-topology), the **runtime** is a standalone control plane: it owns the data store and coordinates placement, state, and alarms for a fleet of stateless worker hosts. This page covers obtaining, configuring, and running the runtime.
 
 If you're using the [local topology](/docs/topologies#local-topology), you don't need the runtime — skip this page.
 
-## Building the runtime
+## Getting the runtime
 
-The runtime is the `cmd/runtime` binary in the Francis repository:
+The recommended way to run the runtime is the published container image. Pre-compiled binaries are also available.
+
+> **Use UDP for port forwarding**  
+> The runtime's WebTransport server runs over HTTP/3 (QUIC), which is based on UDP. Whenever you publish the runtime's port (in `docker run`, Compose, a firewall rule, or a load balancer) make sure it's the UDP port, not TCP.
+
+### Container image (Docker or Podman)
+
+The runtime is published to the GitHub Container Registry as `ghcr.io/italypaleale/francis`. Images are multi-arch (`linux/amd64`, `linux/arm64`, and `linux/arm/v7`). The available tags are:
+
+- A full version, e.g. `1.2.3`.
+- Floating `1.2` and `1` tags that track the latest patch/minor.
+
+Mount your configuration file into the container and pass it with `-config`. The example below also mounts a named volume for the SQLite data store and publishes the UDP port:
 
 ```sh
-go build -o bin/runtime github.com/italypaleale/francis/cmd/runtime
+docker run \
+  --name francis-runtime \
+  -p 7400:7400/udp \
+  -v "$(pwd)/config.yaml:/config.yaml:ro" \
+  -v francis-data:/data \
+  ghcr.io/italypaleale/francis:1 \
+  -config /config.yaml
+```
+
+Or, with [Podman](https://podman.io/):
+
+```sh
+podman run \
+  --name francis-runtime \
+  -p 7400:7400/udp \
+  -v "$(pwd)/config.yaml:/config.yaml:ro" \
+  -v francis-data:/data \
+  ghcr.io/italypaleale/francis:1 \
+  -config /config.yaml
+```
+
+> The image is built on a distroless base and runs as a **non-root** user (UID 65532). When using SQLite, persist the SQLite store on a volume, then point `provider.connectionString` at the mounted volume (for example `/data/data.db`). The data directory must be writable by that user.
+
+The image ships with a `HEALTHCHECK` that probes the locally-running runtime, so `docker ps` and orchestrators report container health automatically.
+
+### Docker Compose
+
+To run the runtime under Docker Compose, drop this into a `docker-compose.yaml` next to your `config.yaml`:
+
+```yaml
+services:
+  runtime:
+    image: ghcr.io/italypaleale/francis:1
+    command: ["-config", "/config.yaml"]
+    ports:
+      - "7400:7400/udp"
+    volumes:
+      - ./config.yaml:/config.yaml:ro
+      - francis-data:/data
+    restart: unless-stopped
+
+volumes:
+  francis-data:
+```
+
+Then start it in the background:
+
+```sh
+docker compose up -d
+```
+
+### Pre-compiled binaries
+
+Pre-compiled binaries are attached to every release on the [releases page](https://github.com/ItalyPaleAle/francis/releases). Builds are published for Linux (`amd64`, `arm64`, `armv7`), macOS (`arm64`), and FreeBSD (`amd64`, `arm64`).
+
+Download the archive for your platform, extract it, and run the `francis` binary inside:
+
+```sh
+# Replace VERSION and the platform suffix to match the release you want
+VERSION=1.2.3
+curl -LO https://github.com/ItalyPaleAle/francis/releases/download/v${VERSION}/francis-${VERSION}-linux-amd64.tar.gz
+tar -xzf francis-${VERSION}-linux-amd64.tar.gz
+
+./francis-${VERSION}-linux-amd64/francis -config config.yaml
 ```
 
 ## Configuration
@@ -20,17 +95,18 @@ go build -o bin/runtime github.com/italypaleale/francis/cmd/runtime
 The runtime is configured with a YAML file, passed via `-config`:
 
 ```sh
-bin/runtime -config config.yaml
+francis -config config.yaml
 ```
 
 A minimal configuration:
 
 ```yaml
-# Address and port the runtime's WebTransport server listens on
+# Address and port the runtime's WebTransport server listens on (using UDP)
 bind: "0.0.0.0:7400"
 
 # The runtime PSKs derive the cluster CA
-# Every runtime sharing these keys is the same certificate issuer — keep them secret
+# Every runtime sharing these keys is the same certificate issuer
+# Keep them secret
 runtimePSKs:
   - "change-me-runtime-psk"
 
@@ -62,7 +138,7 @@ log:
 | `provider.connectionString` | Connection string or file path for the provider. |
 | `workloadCertTTL` | Lifetime of the workload certificates issued to hosts. Default `1h`. |
 | `healthCheckDeadline` | Maximum interval between host health pings. Default `20s`. |
-| `alarmsPollInterval` | How often the runtime polls for due alarms. Default `1.5s`. |
+| `alarmsPollInterval` | How often the runtime polls for due alarms. Default `1500ms`. |
 | `alarmsLeaseDuration` | How long an alarm lease is held while executing. Default `20s`. |
 | `shutdownGracePeriod` | Grace period for a clean shutdown. Default `30s`. |
 | `log.level` | `debug`, `info`, `warn`, or `error`. |
@@ -107,7 +183,16 @@ After a successful bootstrap, the runtime issues the host a short-lived workload
 To close the trust gap on a host's very first connection, print the cluster CA and pin it on your workers:
 
 ```sh
-bin/runtime print-ca -config config.yaml
+francis print-ca -config config.yaml
+```
+
+When running from a container, invoke the same subcommand inside it — for example with the config mounted as above:
+
+```sh
+docker run --rm \
+  -v "$(pwd)/config.yaml:/config.yaml:ro" \
+  ghcr.io/italypaleale/francis:1 \
+  print-ca -config /config.yaml
 ```
 
 Pass the PEM output to the worker via `remote.WithPinnedCA(caPEM)`. Pinning is strongly recommended — especially with JWT bootstrap, where a bearer token would otherwise be exposed to a meddler-in-the-middle on the first connection. Only use `remote.WithUnsafeNoPinnedCA()` for local testing.
@@ -136,5 +221,5 @@ For availability, you can run multiple runtime replicas that share the same `run
 The runtime stores all state and alarms in its configured provider:
 
 - **PostgreSQL** (`provider.type: postgres`) is recommended for production. Use a standard connection string, e.g. `postgres://user:pass@host:5432/dbname`.
-- **SQLite** (`provider.type: sqlite`) works well when a single runtime owns the database. Do **not** place the SQLite file on a networked filesystem (NFS/SMB).
+- **SQLite** (`provider.type: sqlite`) works well when a single runtime owns the database. Do **not** place the SQLite file on a networked filesystem like NFS/SMB.
 - **In-memory** (`provider.type: memory`) is non-durable and intended for testing only.
