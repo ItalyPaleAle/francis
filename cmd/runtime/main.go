@@ -21,6 +21,7 @@ import (
 	"github.com/italypaleale/francis/components/sqlite"
 	"github.com/italypaleale/francis/components/standalone"
 	"github.com/italypaleale/francis/internal/bootstrapauth"
+	"github.com/italypaleale/francis/internal/buildinfo"
 	timeutils "github.com/italypaleale/francis/internal/time"
 	"github.com/italypaleale/francis/runtime"
 )
@@ -70,10 +71,22 @@ type logConfig struct {
 }
 
 func main() {
-	// The print-ca subcommand derives and prints the cluster CA so operators can pin it out-of-band
-	if len(os.Args) > 1 && os.Args[1] == "print-ca" {
-		retCode := runPrintCA(os.Args[2:])
-		os.Exit(retCode)
+	// Check if there's a subcommand
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "healthcheck":
+			// Probes the locally-running runtime over WebTransport, for use as the Docker HEALTHCHECK
+			retCode := runHealthcheck(os.Args[2:])
+			os.Exit(retCode)
+		case "print-ca":
+			// Drives and prints the cluster CA so operators can pin it out-of-band
+			retCode := runPrintCA(os.Args[2:])
+			os.Exit(retCode)
+		case "version":
+			// Prints out the application version
+			runVersion()
+			os.Exit(0)
+		}
 	}
 
 	var configPath string
@@ -258,5 +271,9 @@ func initLogger(level slog.Level) *slog.Logger {
 			Level: level,
 		})
 	}
-	return slog.New(handler)
+
+	log := slog.New(handler).
+		With(slog.String("app", buildinfo.AppName)).
+		With(slog.String("version", buildinfo.AppVersion))
+	return log
 }
