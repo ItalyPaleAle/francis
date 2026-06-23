@@ -60,7 +60,7 @@ Workload certificates are short-lived, so they roll over quickly once the primar
 
 ## Operational guidance
 
-- **Keep PSKs secret and injected at deploy time** — environment variables or a secret manager, not source control. The runtime config expands environment references like `"${FRANCIS_RUNTIME_PSK}"`.
+- **Keep PSKs secret and injected at deploy time** — mount the runtime's config file from a secret manager or orchestrator secret, not source control.
 - **Always pin the CA in production** (`WithPinnedCA`), especially with JWT bootstrap.
 - **Prefer JWT bootstrap** where your platform already issues workload identities; it avoids distributing a long-lived shared host secret.
 - **Bind to addresses deliberately** — the peer address you advertise (`WithAddress`) must be reachable by other hosts for invocation forwarding to work.

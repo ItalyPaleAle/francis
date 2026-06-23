@@ -141,7 +141,7 @@ func buildHealthcheckTLSConfig(cfg *config, insecureSkipVerify bool) (*tls.Confi
 
 	roots := func() *x509.CertPool { return pool }
 
-	// #nosec G402 -- VerifyPeerCertificate verifies the runtime cert against the CA derived from the runtime PSKs
+	// #nosec G402 G123 -- VerifyPeerCertificate verifies the runtime cert against the CA derived from the runtime PSKs. The probe makes a single fresh dial with no session resumption, and the QUIC transport is the session boundary.
 	tlsConfig.VerifyPeerCertificate = ca.VerifyPeerSPIFFE(roots, ca.RuntimePrefix, nil)
 
 	return tlsConfig, nil

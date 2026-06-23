@@ -154,7 +154,7 @@ func TestLoopbackBindAddr(t *testing.T) {
 
 	// Missing port and unparseable addresses are rejected
 	_, err := loopbackBindAddr("bad")
-	assert.Error(t, err)
+	require.Error(t, err)
 	_, err = loopbackBindAddr(":")
-	assert.Error(t, err)
+	require.Error(t, err)
 }

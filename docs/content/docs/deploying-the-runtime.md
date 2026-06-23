@@ -31,7 +31,6 @@ bind: "0.0.0.0:7400"
 
 # The runtime PSKs derive the cluster CA
 # Every runtime sharing these keys is the same certificate issuer — keep them secret
-# You can inject them from the environment, e.g. "${FRANCIS_RUNTIME_PSK}"
 runtimePSKs:
   - "change-me-runtime-psk"
 
@@ -55,7 +54,7 @@ log:
 |-----|-------------|
 | `bind` | Address and port the runtime listens on. Default `:8443`. |
 | `runtimeId` | Optional identifier for this runtime, used in its server certificate. |
-| `runtimePSKs` | List of runtime pre-shared keys from which the cluster CA is derived. **Required.** Environment variables are expanded, so you can use `"${VAR}"`. |
+| `runtimePSKs` | List of runtime pre-shared keys from which the cluster CA is derived. **Required.** |
 | `bootstrap.method` | How hosts authenticate when joining: `psk` or `jwt`. **Required.** |
 | `bootstrap.hostPSK` | The shared host bootstrap secret, for `method: psk`. |
 | `bootstrap.jwt.issuer` / `audience` / `jwksURL` / `staticJWKS` | JWT validation settings, for `method: jwt`. |
@@ -81,7 +80,7 @@ The simplest method: the worker proves knowledge of a shared secret via a channe
 ```yaml
 bootstrap:
   method: psk
-  hostPSK: "${FRANCIS_HOST_BOOTSTRAP_PSK}"
+  hostPSK: "change-me-host-bootstrap-psk"
 ```
 
 The worker must be configured with the matching key using `remote.WithHostBootstrapPSK([]byte(...))`.

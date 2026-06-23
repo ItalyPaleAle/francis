@@ -32,7 +32,6 @@ The runtime is configured by `config.yaml` (create it next to `supervisord.conf`
 bind: "127.0.0.1:7400"
 
 # The runtime PSKs derive the cluster CA: every runtime sharing these keys is the same issuer
-# Iin production inject them from the environment, e.g. "${FRANCIS_RUNTIME_PSK}".
 # Keep them secret
 runtimePSKs:
   - "example-runtime-psk-change-me"

@@ -164,7 +164,7 @@ func run(ctx context.Context, cfg *config, log *slog.Logger) error {
 	return rt.Run(ctx)
 }
 
-// parsePSKs resolves the configured runtime PSK strings, expanding environment variables so secrets can be injected at deploy time
+// parsePSKs resolves the configured runtime PSK strings
 func parsePSKs(in []string) ([][]byte, error) {
 	if len(in) == 0 {
 		return nil, errors.New("at least one runtime PSK is required (runtimePSKs)")
@@ -172,11 +172,10 @@ func parsePSKs(in []string) ([][]byte, error) {
 
 	out := make([][]byte, len(in))
 	for i, s := range in {
-		v := os.ExpandEnv(s)
-		if v == "" {
+		if s == "" {
 			return nil, fmt.Errorf("runtime PSK at index %d is empty", i)
 		}
-		out[i] = []byte(v)
+		out[i] = []byte(s)
 	}
 	return out, nil
 }
@@ -185,11 +184,10 @@ func parsePSKs(in []string) ([][]byte, error) {
 func bootstrapOption(cfg bootstrapConfig) (runtime.RuntimeOption, error) {
 	switch strings.ToLower(cfg.Method) {
 	case "psk":
-		psk := os.ExpandEnv(cfg.HostPSK)
-		if psk == "" {
+		if cfg.HostPSK == "" {
 			return nil, errors.New("bootstrap.hostPSK is required for PSK bootstrap")
 		}
-		return runtime.WithHostBootstrapPSK([]byte(psk)), nil
+		return runtime.WithHostBootstrapPSK([]byte(cfg.HostPSK)), nil
 	case "jwt":
 		jcfg := bootstrapauth.JWTConfig{
 			Issuer:   cfg.JWT.Issuer,
