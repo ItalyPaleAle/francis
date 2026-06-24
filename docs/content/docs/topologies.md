@@ -95,11 +95,13 @@ Because the runtime persists state to its database, actor state survives both a 
 
 Both topologies persist state and alarms through a **provider**. The available providers are:
 
-| Provider | Local option | Runtime config (`provider.type`) | Notes |
+| Provider | Local option | Runtime config (`provider.connectionString`) | Notes |
 |----------|--------------|-----------------------------------|-------|
-| SQLite | `WithSQLiteProvider` | `sqlite` | Best for single-node and development. Must not live on a networked filesystem (NFS/SMB). |
-| PostgreSQL | `WithPostgresProvider` | `postgres` | For multi-node clusters that share one database. |
+| SQLite | `WithSQLiteProvider` | a file path, e.g. `data.db` | Best for single-node and development. Must not live on a networked filesystem (NFS/SMB). |
+| PostgreSQL | `WithPostgresProvider` | `postgres://…` | For multi-node clusters that share one database. |
 | In-memory | `WithStandaloneMemoryProvider` | `memory` | Non-durable, for tests and single-node ephemeral setups. State is lost on restart. |
+
+The runtime infers the backend from the `provider.connectionString` scheme: `postgres://` (or `postgresql://`) for PostgreSQL, `memory` for in-memory, and anything else as a SQLite file path or DSN.
 
 The local host also offers standalone provider variants (`WithStandaloneSQLiteProvider`, `WithStandalonePostgresProvider`) that wrap an existing database connection you supply.
 

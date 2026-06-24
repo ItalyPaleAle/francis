@@ -43,13 +43,15 @@ bootstrap:
   method: psk
   hostPSK: "example-host-bootstrap-psk-change-me"
 
+# Use a SQLite backend
 provider:
-  type: sqlite
   connectionString: "data.db"
 
 log:
   level: debug
 ```
+
+The runtime discovers `config.yaml` from its working directory, so the commands below run from this example's directory without any flag. (You can also point it at any path with the `FRANCIS_CONFIG` environment variable.)
 
 Once a host bootstraps, the runtime issues it a short-lived workload certificate and all
 later connections (to the runtime and between peer hosts) use mTLS. To close the
@@ -57,7 +59,7 @@ first-connection trust gap, print the CA and pin it on the workers:
 
 ```sh
 # the worker can pass the output to remote.WithPinnedCA
-bin/runtime print-ca -config config.yaml
+bin/runtime print-ca
 ```
 
 ## How to run (with supervisord)
@@ -87,10 +89,10 @@ supervisorctl -c supervisord.conf restart runtime
 
 ## How to run (manually, without supervisord)
 
-Start the runtime in one terminal:
+Start the runtime in one terminal (it loads `config.yaml` from the current directory):
 
 ```sh
-go run ../../cmd/runtime -config config.yaml
+go run ../../cmd/runtime
 ```
 
 Then start two workers in separate terminals:

@@ -4,14 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/italypaleale/go-kit/signals"
+	"github.com/italypaleale/go-kit/utils"
 	"github.com/lmittmann/tint"
 	"github.com/mattn/go-isatty"
 	"gopkg.in/yaml.v3"
@@ -61,8 +62,8 @@ type jwtConfig struct {
 }
 
 type providerConfig struct {
-	// Type is one of: sqlite, postgres, memory
-	Type             string `yaml:"type"`
+	// ConnectionString selects and configures the data store
+	// The backend is inferred from the connection string scheme: "postgres://" or "postgresql://" for PostgreSQL, "memory" (or "memory://") for the non-durable in-memory store, and anything else is treated as a SQLite file path or DSN
 	ConnectionString string `yaml:"connectionString"`
 }
 
@@ -89,9 +90,12 @@ func main() {
 		}
 	}
 
-	var configPath string
-	flag.StringVar(&configPath, "config", "config.yaml", "Path to the configuration file")
-	flag.Parse()
+	// Resolve the config file from the FRANCIS_CONFIG env var or the well-known paths
+	configPath, err := resolveConfigPath()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
+		os.Exit(1)
+	}
 
 	cfg, err := loadConfig(configPath)
 	if err != nil {
@@ -125,7 +129,7 @@ func run(ctx context.Context, cfg *config, log *slog.Logger) error {
 		AlarmsFetchAheadBatchSize: components.DefaultAlarmsFetchAheadBatch,
 	}
 
-	provider, err := buildProvider(cfg.Provider, providerCfg, log)
+	provider, err := buildProvider(cfg.Provider.ConnectionString, providerCfg, log)
 	if err != nil {
 		return fmt.Errorf("failed to build provider: %w", err)
 	}
@@ -207,24 +211,114 @@ func bootstrapOption(cfg bootstrapConfig) (runtime.RuntimeOption, error) {
 	}
 }
 
-// buildProvider constructs the actor provider selected in the configuration
-func buildProvider(cfg providerConfig, providerCfg components.ProviderConfig, log *slog.Logger) (components.ActorProvider, error) {
-	switch cfg.Type {
-	case "sqlite":
-		return sqlite.NewSQLiteProvider(log, sqlite.SQLiteProviderOptions{
-			ConnectionString: cfg.ConnectionString,
-		}, providerCfg)
-	case "postgres":
-		return postgres.NewPostgresProvider(log, postgres.PostgresProviderOptions{
-			ConnectionString: cfg.ConnectionString,
-		}, providerCfg)
-	case "memory":
-		return standalone.NewStandaloneMemory(log, standalone.StandaloneMemoryOptions{}, providerCfg)
-	case "":
-		return nil, errors.New("provider type is required")
-	default:
-		return nil, fmt.Errorf("unsupported provider type %q", cfg.Type)
+// buildProvider constructs the actor provider, inferring the backend from the connection string scheme
+// The original connection string is passed to the provider,
+func buildProvider(connString string, providerCfg components.ProviderConfig, log *slog.Logger) (components.ActorProvider, error) {
+	connString = strings.TrimSpace(connString)
+	if connString == "" {
+		return nil, errors.New("provider.connectionString is required")
 	}
+
+	connStringLC := strings.ToLower(connString)
+	switch {
+	// Postgres connection strings begin with "postgres://" or "postgresql://"
+	case strings.HasPrefix(connStringLC, "postgres://"), strings.HasPrefix(connStringLC, "postgresql://"):
+		return postgres.NewPostgresProvider(log, postgres.PostgresProviderOptions{
+			ConnectionString: connString,
+		}, providerCfg)
+
+	// The non-durable in-memory store is selected with the literal "memory" or the "memory://" scheme
+	case connStringLC == "memory", strings.HasPrefix(connStringLC, "memory://"):
+		return standalone.NewStandaloneMemory(log, standalone.StandaloneMemoryOptions{}, providerCfg)
+
+	// Anything else is treated as a SQLite file path or DSN
+	default:
+		return sqlite.NewSQLiteProvider(log, sqlite.SQLiteProviderOptions{
+			ConnectionString: connString,
+		}, providerCfg)
+	}
+}
+
+// configEnvVar is the environment variable that points to the config file
+var configEnvVar = buildinfo.ConfigEnvPrefix + "CONFIG"
+
+// configSearchPaths are the well-known directories searched for a config file when the env var is not set, in order of precedence
+var configSearchPaths = []string{".", "~/." + buildinfo.AppName, "/etc/" + buildinfo.AppName}
+
+// configFileNames are the config file names searched for in each well-known path, in order of precedence
+// We accept ".yml" and ".json" too, but always load them as YAML (YAML is a superset of JSON)
+var configFileNames = []string{"config.yaml", "config.yml", "config.json"}
+
+// resolveConfigPath determines the path to the config file
+// It first honors the FRANCIS_CONFIG env var, then falls back to searching the well-known paths
+func resolveConfigPath() (string, error) {
+	// First, try with the FRANCIS_CONFIG env var
+	configFile := os.Getenv(configEnvVar)
+	if configFile != "" {
+		exists, _ := utils.FileExists(configFile)
+		if !exists {
+			return "", fmt.Errorf("environment variable %s points to a file that does not exist: %q", configEnvVar, configFile)
+		}
+		return configFile, nil
+	}
+
+	// Otherwise, look in the well-known paths
+	configFile = findConfigFiles(configFileNames, configSearchPaths)
+	if configFile == "" {
+		return "", fmt.Errorf("no configuration file found: set %s or place a config file in one of %s", configEnvVar, strings.Join(configSearchPaths, ", "))
+	}
+
+	return configFile, nil
+}
+
+// findConfigFiles returns the first existing file among fileNames across all searchPaths, preferring earlier file names
+func findConfigFiles(fileNames []string, searchPaths []string) string {
+	for _, name := range fileNames {
+		path := findConfigFile(name, searchPaths)
+		if path != "" {
+			return path
+		}
+	}
+
+	return ""
+}
+
+// findConfigFile returns the first searchPath that contains fileName, or an empty string if none does
+func findConfigFile(fileName string, searchPaths []string) string {
+	for _, path := range searchPaths {
+		if path == "" {
+			continue
+		}
+
+		// Expand a leading "~" to the user's home directory
+		path = expandHome(path)
+
+		search := filepath.Join(path, fileName)
+		exists, _ := utils.FileExists(search)
+		if exists {
+			return search
+		}
+	}
+
+	return ""
+}
+
+// expandHome expands a leading "~" in path to the current user's home directory, leaving the path unchanged if it can't be resolved
+func expandHome(path string) string {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+
+	if path == "~" {
+		return home
+	}
+
+	return filepath.Join(home, path[len("~/"):])
 }
 
 func loadConfig(path string) (*config, error) {

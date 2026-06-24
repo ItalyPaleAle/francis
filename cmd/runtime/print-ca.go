@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 
@@ -9,11 +8,13 @@ import (
 )
 
 // runPrintCA derives the cluster CA from the configured runtime PSKs and writes the PEM-encoded certificates to stdout
-func runPrintCA(args []string) int {
-	fs := flag.NewFlagSet("print-ca", flag.ExitOnError)
-	var configPath string
-	fs.StringVar(&configPath, "config", "config.yaml", "Path to the configuration file")
-	_ = fs.Parse(args)
+func runPrintCA(_ []string) int {
+	// Resolve the config file from the FRANCIS_CONFIG env var or the well-known paths
+	configPath, err := resolveConfigPath()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
+		return 1
+	}
 
 	cfg, err := loadConfig(configPath)
 	if err != nil {

@@ -12,6 +12,9 @@ var (
 	CommitHash string
 	BuildDate  string
 	Production string
+
+	// ConfigEnvPrefix is the prefix for environment variables, including the one that points to the config file (FRANCIS_CONFIG)
+	ConfigEnvPrefix string = "FRANCIS_"
 )
 
 // BuildDescription is the build description

@@ -35,7 +35,7 @@ On a worker's **very first** connection to the runtime, it hasn't yet received a
 
 ```sh
 # Print the cluster CA derived from the runtime PSKs
-runtime print-ca -config config.yaml
+runtime print-ca
 ```
 
 Pass the PEM to the worker with `remote.WithPinnedCA(caPEM)`. The worker then verifies the runtime from the first byte.

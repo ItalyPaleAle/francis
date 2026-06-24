@@ -29,13 +29,11 @@ func runHealthcheck(args []string) int {
 	fs := flag.NewFlagSet("healthcheck", flag.ExitOnError)
 
 	var (
-		configPath         string
 		addr               string
 		insecureSkipVerify bool
 		timeout            time.Duration
 		verbose            bool
 	)
-	fs.StringVar(&configPath, "config", "config.yaml", "Path to the configuration file used to resolve the runtime bind address and CA")
 	fs.StringVar(&addr, "addr", "", "Runtime address (host:port) to healthcheck; defaults to 127.0.0.1 on the configured bind port")
 	fs.BoolVar(&insecureSkipVerify, "insecure-skip-verify", false, "Skip TLS certificate verification against the cluster CA")
 	fs.DurationVar(&timeout, "timeout", defaultHealthcheckTimeout, "Maximum time to wait for the healthcheck to complete")
@@ -49,7 +47,13 @@ func runHealthcheck(args []string) int {
 	// The config resolves the bind address (unless -addr is set) and the CA used to verify the runtime (unless -insecure-skip-verify is set)
 	var cfg *config
 	if addr == "" || !insecureSkipVerify {
-		var err error
+		// Resolve the config file from the FRANCIS_CONFIG env var or the well-known paths
+		configPath, err := resolveConfigPath()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
+			return 1
+		}
+
 		cfg, err = loadConfig(configPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)

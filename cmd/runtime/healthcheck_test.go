@@ -96,11 +96,13 @@ func TestRunHealthcheckSucceedsVerifyingAgainstDerivedCA(t *testing.T) {
 	addr, psk := startHealthcheckRuntime(t)
 	configPath := writeHealthcheckConfig(t, addr, psk)
 
+	// The healthcheck resolves its config from the FRANCIS_CONFIG env var
+	t.Setenv("FRANCIS_CONFIG", configPath)
+
 	// The runtime starts listening asynchronously, so retry until the probe observes it
 	// By default the probe verifies the runtime's SPIFFE certificate against the CA derived from the configured PSKs
 	require.Eventually(t, func() bool {
 		return runHealthcheck([]string{
-			"-config", configPath,
 			"-addr", addr,
 			"-timeout", "2s",
 		}) == 0

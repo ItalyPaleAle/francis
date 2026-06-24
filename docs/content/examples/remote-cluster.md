@@ -30,8 +30,8 @@ bootstrap:
   method: psk
   hostPSK: "example-host-bootstrap-psk-change-me"
 
+# Use SQLite as database
 provider:
-  type: sqlite
   connectionString: "data.db"
 
 log:
@@ -44,7 +44,8 @@ Build the runtime binary and print the cluster CA so the workers can pin it:
 go build -o bin/runtime github.com/italypaleale/francis/cmd/runtime
 
 # Print the CA so workers can verify the runtime on first connection
-bin/runtime print-ca -config config.yaml
+# Loads config.yaml in the current directory
+bin/runtime print-ca
 ```
 
 ## Creating a remote worker
@@ -96,7 +97,7 @@ Start the runtime, then two workers:
 
 ```sh
 # Terminal 1 — the runtime
-go run github.com/italypaleale/francis/cmd/runtime -config config.yaml
+go run github.com/italypaleale/francis/cmd/runtime
 
 # Terminal 2 — worker 1
 go run /path/to/remote-worker -worker-address 127.0.0.1:8081 -actor-host-address 127.0.0.1:7571 -runtime-address 127.0.0.1:7400

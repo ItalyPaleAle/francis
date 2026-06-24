@@ -21,16 +21,15 @@ The runtime is published to the GitHub Container Registry as `ghcr.io/italypalea
 - A full version, e.g. `1.2.3`.
 - Floating `1.2` and `1` tags that track the latest patch/minor.
 
-Mount your configuration file into the container and pass it with `-config`. The example below also mounts a named volume for the SQLite data store and publishes the UDP port:
+Mount your configuration file into the container at a [well-known path](#config-file-location) so the runtime discovers it automatically. The example below mounts the config at `/etc/francis/config.yaml`, mounts a named volume for the SQLite data store, and publishes the UDP port:
 
 ```sh
 docker run \
   --name francis-runtime \
   -p 7400:7400/udp \
-  -v "$(pwd)/config.yaml:/config.yaml:ro" \
+  -v "$(pwd)/config.yaml:/etc/francis/config.yaml:ro" \
   -v francis-data:/data \
-  ghcr.io/italypaleale/francis:1 \
-  -config /config.yaml
+  ghcr.io/italypaleale/francis:1
 ```
 
 Or, with [Podman](https://podman.io/):
@@ -39,10 +38,9 @@ Or, with [Podman](https://podman.io/):
 podman run \
   --name francis-runtime \
   -p 7400:7400/udp \
-  -v "$(pwd)/config.yaml:/config.yaml:ro" \
+  -v "$(pwd)/config.yaml:/etc/francis/config.yaml:ro" \
   -v francis-data:/data \
-  ghcr.io/italypaleale/francis:1 \
-  -config /config.yaml
+  ghcr.io/italypaleale/francis:1
 ```
 
 > The image is built on a distroless base and runs as a **non-root** user (UID 65532). When using SQLite, persist the SQLite store on a volume, then point `provider.connectionString` at the mounted volume (for example `/data/data.db`). The data directory must be writable by that user.
@@ -57,11 +55,10 @@ To run the runtime under Docker Compose, drop this into a `docker-compose.yaml` 
 services:
   runtime:
     image: ghcr.io/italypaleale/francis:1
-    command: ["-config", "/config.yaml"]
     ports:
       - "7400:7400/udp"
     volumes:
-      - ./config.yaml:/config.yaml:ro
+      - ./config.yaml:/etc/francis/config.yaml:ro
       - francis-data:/data
     restart: unless-stopped
 
@@ -87,16 +84,13 @@ VERSION=1.2.3
 curl -LO https://github.com/ItalyPaleAle/francis/releases/download/v${VERSION}/francis-${VERSION}-linux-amd64.tar.gz
 tar -xzf francis-${VERSION}-linux-amd64.tar.gz
 
-./francis-${VERSION}-linux-amd64/francis -config config.yaml
+# Loads a config.yaml in the current directory
+./francis-${VERSION}-linux-amd64/francis
 ```
 
 ## Configuration
 
-The runtime is configured with a YAML file, passed via `-config`:
-
-```sh
-francis -config config.yaml
-```
+The runtime is configured with a YAML file.
 
 A minimal configuration:
 
@@ -116,13 +110,25 @@ bootstrap:
   hostPSK: "change-me-host-bootstrap-psk"
 
 # Where state and alarms are stored
+# The backend is inferred from the connection string
 provider:
-  type: sqlite
   connectionString: "data.db"
 
 log:
   level: info
 ```
+
+### Config file location
+
+The runtime looks for its configuration in this order:
+
+1. The path in the `FRANCIS_CONFIG` environment variable, if set.
+2. Otherwise, the first `config.yaml`, `config.yml`, or `config.json` found in one of these directories:
+   - The current directory (`.`)
+   - `~/.francis`
+   - `/etc/francis`
+
+Subcommands (including `print-ca` and `healthcheck`) resolve the config the same way.
 
 ### Configuration reference
 
@@ -134,8 +140,7 @@ log:
 | `bootstrap.method` | How hosts authenticate when joining: `psk` or `jwt`. **Required.** |
 | `bootstrap.hostPSK` | The shared host bootstrap secret, for `method: psk`. |
 | `bootstrap.jwt.issuer` / `audience` / `jwksURL` / `staticJWKS` | JWT validation settings, for `method: jwt`. |
-| `provider.type` | Data store: `sqlite`, `postgres`, or `memory`. **Required.** |
-| `provider.connectionString` | Connection string or file path for the provider. |
+| `provider.connectionString` | Connection string for the data store; the backend is inferred from its scheme. `postgres://…` or `postgresql://…` for PostgreSQL, `memory` for the non-durable in-memory store, anything else is a SQLite file path or DSN. **Required.** |
 | `workloadCertTTL` | Lifetime of the workload certificates issued to hosts. Default `1h`. |
 | `healthCheckDeadline` | Maximum interval between host health pings. Default `20s`. |
 | `alarmsPollInterval` | How often the runtime polls for due alarms. Default `1500ms`. |
@@ -183,16 +188,16 @@ After a successful bootstrap, the runtime issues the host a short-lived workload
 To close the trust gap on a host's very first connection, print the cluster CA and pin it on your workers:
 
 ```sh
-francis print-ca -config config.yaml
+francis print-ca
 ```
 
-When running from a container, invoke the same subcommand inside it — for example with the config mounted as above:
+When running from a container, invoke the same subcommand inside it — for example with the config mounted at the well-known path as above:
 
 ```sh
 docker run --rm \
-  -v "$(pwd)/config.yaml:/config.yaml:ro" \
+  -v "$(pwd)/config.yaml:/etc/francis/config.yaml:ro" \
   ghcr.io/italypaleale/francis:1 \
-  print-ca -config /config.yaml
+  print-ca
 ```
 
 Pass the PEM output to the worker via `remote.WithPinnedCA(caPEM)`. Pinning is strongly recommended — especially with JWT bootstrap, where a bearer token would otherwise be exposed to a meddler-in-the-middle on the first connection. Only use `remote.WithUnsafeNoPinnedCA()` for local testing.
@@ -218,8 +223,9 @@ For availability, you can run multiple runtime replicas that share the same `run
 
 ## Database
 
-The runtime stores all state and alarms in its configured provider:
+The runtime stores all state and alarms in its configured provider, selected by the `provider.connectionString` scheme:
 
-- **PostgreSQL** (`provider.type: postgres`) is recommended for production. Use a standard connection string, e.g. `postgres://user:pass@host:5432/dbname`.
-- **SQLite** (`provider.type: sqlite`) works well when a single runtime owns the database. Do **not** place the SQLite file on a networked filesystem like NFS/SMB.
-- **In-memory** (`provider.type: memory`) is non-durable and intended for testing only.
+- **PostgreSQL** is recommended for production. Use a standard connection string, e.g. `connectionString: postgres://user:pass@host:5432/dbname`.
+- **SQLite** works well when a single runtime owns the database. Set `connectionString` to a file path, e.g. `data.db`.  
+  Do **not** place the SQLite file on a networked filesystem like NFS/SMB.
+- **In-memory** is non-durable and intended for testing only. Set `connectionString: memory`.
