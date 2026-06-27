@@ -22,7 +22,7 @@
             ]
         },
         {
-            "source": "/docs/img/(.*?)",
+            "source": "/img/(.*?)",
             "headers": [
                 { "key": "Cache-Control", "value": "public, max-age=1200000" }
             ]
@@ -34,7 +34,7 @@
             ]
         },
         {
-            "source": "/(.*?).svg",
+            "source": "/(.*?).(svg|png)",
             "headers": [
                 { "key": "Cache-Control", "value": "public, max-age=1200000" }
             ]

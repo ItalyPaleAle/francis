@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./logo.png" alt="Francis logo" width="200" height="200" />
+  <img src="./docs/static/logo-light.png" alt="Francis logo" width="200" height="200" />
 </p>
 
 # Francis: the simple & low-maintenance Go distributed actor framework

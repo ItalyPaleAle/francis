@@ -7,7 +7,7 @@ source_path: "README.md"
 
 Francis is a framework and runtime for **Distributed Actors** (also known as _Durable Objects_) for Go apps.
 
-![Francis logo](/docs/img/logo.svg)
+<img src="/logo-transparent.svg" alt="Francis logo" width="300" height="300" />
 
 With Francis, you can build **highly-available** apps that **scale horizontally** and/or use **microservices**. Unlike other actor frameworks, Francis is designed to be simpler to add to your solution and lower-maintenance: it only requires a relational database (PostgreSQL or SQLite) and can optionally run embedded in your apps too, without a separate control plane service.
 
