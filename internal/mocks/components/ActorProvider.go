@@ -281,6 +281,72 @@ func (_c *MockActorProvider_FetchAndLeaseUpcomingAlarms_Call) RunAndReturn(run f
 	return _c
 }
 
+// ListHosts provides a mock function for the type MockActorProvider
+func (_mock *MockActorProvider) ListHosts(ctx context.Context) ([]components.HostInfo, error) {
+	ret := _mock.Called(ctx)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListHosts")
+	}
+
+	var r0 []components.HostInfo
+	var r1 error
+	returnFunc1, ok := ret.Get(0).(func(context.Context) ([]components.HostInfo, error))
+	if ok {
+		return returnFunc1(ctx)
+	}
+
+	returnFunc2, ok := ret.Get(0).(func(context.Context) []components.HostInfo)
+	if ok {
+		r0 = returnFunc2(ctx)
+	} else if ret.Get(0) != nil {
+		r0 = ret.Get(0).([]components.HostInfo)
+	}
+
+	returnFunc3, ok := ret.Get(1).(func(context.Context) error)
+	if ok {
+		r1 = returnFunc3(ctx)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// MockActorProvider_ListHosts_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListHosts'
+type MockActorProvider_ListHosts_Call struct {
+	*mock.Call
+}
+
+// ListHosts is a helper method to define mock.On call
+//   - ctx context.Context
+func (_e *MockActorProvider_Expecter) ListHosts(ctx interface{}) *MockActorProvider_ListHosts_Call {
+	return &MockActorProvider_ListHosts_Call{Call: _e.mock.On("ListHosts", ctx)}
+}
+
+func (_c *MockActorProvider_ListHosts_Call) Run(run func(ctx context.Context)) *MockActorProvider_ListHosts_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockActorProvider_ListHosts_Call) Return(hostInfos []components.HostInfo, err error) *MockActorProvider_ListHosts_Call {
+	_c.Call.Return(hostInfos, err)
+	return _c
+}
+
+func (_c *MockActorProvider_ListHosts_Call) RunAndReturn(run func(ctx context.Context) ([]components.HostInfo, error)) *MockActorProvider_ListHosts_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetAlarm provides a mock function for the type MockActorProvider
 func (_mock *MockActorProvider) GetAlarm(ctx context.Context, ref1 ref.AlarmRef) (components.GetAlarmRes, error) {
 	ret := _mock.Called(ctx, ref1)

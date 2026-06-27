@@ -36,6 +36,9 @@ type ActorProvider interface {
 	// If the host doesn't exist, returns ErrHostUnregistered.
 	UnregisterHost(ctx context.Context, hostID string) error
 
+	// ListHosts returns all actor hosts that are currently registered and healthy
+	ListHosts(ctx context.Context) ([]HostInfo, error)
+
 	// LookupActor returns the address of the actor host for a given actor type and ID.
 	// If the actor is not currently active on any host, a new actor is created and assigned to a random host
 	// If it's not possible to find an instance capable of hosting the given actor, ErrNoHost is returned instead.
@@ -154,6 +157,16 @@ type ActorHostType struct {
 	MaxAttempts int
 	// Initial retry delay after failed invocation attempts
 	InitialRetryDelay time.Duration
+}
+
+// HostInfo describes a registered, healthy actor host returned by ListHosts
+type HostInfo struct {
+	// Host ID
+	HostID string
+	// Host address (including port)
+	Address string
+	// Time of the host's last health check
+	LastHealthCheck time.Time
 }
 
 // LookupActorOpts contains options for LookupActor.

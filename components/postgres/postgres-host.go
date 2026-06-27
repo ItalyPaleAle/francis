@@ -295,6 +295,41 @@ func (p *PostgresProvider) UnregisterHost(ctx context.Context, hostID string) er
 	return nil
 }
 
+func (p *PostgresProvider) ListHosts(ctx context.Context) ([]components.HostInfo, error) {
+	// Select only hosts whose last health check is within the deadline, so unhealthy hosts that have not been garbage-collected yet are excluded
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+	rows, err := p.db.Query(queryCtx,
+		`SELECT host_id, host_address, host_last_health_check
+		FROM hosts
+		WHERE host_last_health_check >= (now() - $1::interval)`,
+		p.cfg.HostHealthCheckDeadline,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("error querying hosts: %w", err)
+	}
+	defer rows.Close()
+
+	// Read each host row into the result slice
+	hosts := make([]components.HostInfo, 0)
+	for rows.Next() {
+		var h components.HostInfo
+		err = rows.Scan(&h.HostID, &h.Address, &h.LastHealthCheck)
+		if err != nil {
+			return nil, fmt.Errorf("error scanning host row: %w", err)
+		}
+		hosts = append(hosts, h)
+	}
+
+	// Surface any error encountered while iterating the result set
+	err = rows.Err()
+	if err != nil {
+		return nil, fmt.Errorf("error reading host rows: %w", err)
+	}
+
+	return hosts, nil
+}
+
 func (p *PostgresProvider) LookupActor(ctx context.Context, ref ref.ActorRef, opts components.LookupActorOpts) (components.LookupActorRes, error) {
 	var res components.LookupActorRes
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
