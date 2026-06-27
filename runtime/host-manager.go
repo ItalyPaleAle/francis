@@ -23,8 +23,8 @@ func NewHostManager(provider components.ActorProvider) *HostManager {
 	}
 }
 
-// ListHosts returns all actor hosts currently registered and healthy in the provider.
-// Unlike ConnectedHostIDs, which reflects only the hosts connected to this runtime replica, this returns the cluster-wide view from the provider.
+// ListHosts returns all actor hosts currently registered and healthy in the provider
+// Unlike ConnectedHostIDs, which reflects only the hosts connected to this runtime replica, this returns the cluster-wide view from the provider
 func (m *HostManager) ListHosts(ctx context.Context) ([]components.HostInfo, error) {
 	return m.provider.ListHosts(ctx)
 }

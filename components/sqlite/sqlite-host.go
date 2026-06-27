@@ -319,11 +319,12 @@ func (s *SQLiteProvider) UnregisterHost(ctx context.Context, hostID string) erro
 }
 
 func (s *SQLiteProvider) ListHosts(ctx context.Context) ([]components.HostInfo, error) {
+	// Compute the health check cutoff from the (possibly mocked) clock, since timestamps are stored as Unix milliseconds
 	now := s.clock.Now().UnixMilli()
 
+	// Select only hosts whose last health check is within the deadline, so unhealthy hosts that have not been garbage-collected yet are excluded
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-
 	rows, err := s.db.QueryContext(queryCtx,
 		`SELECT host_id, host_address, host_last_health_check
 		FROM hosts
@@ -335,6 +336,7 @@ func (s *SQLiteProvider) ListHosts(ctx context.Context) ([]components.HostInfo, 
 	}
 	defer rows.Close()
 
+	// Read each host row, converting the stored Unix-milliseconds timestamp back to a time.Time
 	hosts := make([]components.HostInfo, 0)
 	for rows.Next() {
 		var (
@@ -348,7 +350,10 @@ func (s *SQLiteProvider) ListHosts(ctx context.Context) ([]components.HostInfo, 
 		h.LastHealthCheck = time.UnixMilli(healthCheckMs)
 		hosts = append(hosts, h)
 	}
-	if err = rows.Err(); err != nil {
+
+	// Surface any error encountered while iterating the result set
+	err = rows.Err()
+	if err != nil {
 		return nil, fmt.Errorf("error reading host rows: %w", err)
 	}
 

@@ -296,9 +296,9 @@ func (p *PostgresProvider) UnregisterHost(ctx context.Context, hostID string) er
 }
 
 func (p *PostgresProvider) ListHosts(ctx context.Context) ([]components.HostInfo, error) {
+	// Select only hosts whose last health check is within the deadline, so unhealthy hosts that have not been garbage-collected yet are excluded
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
-
 	rows, err := p.db.Query(queryCtx,
 		`SELECT host_id, host_address, host_last_health_check
 		FROM hosts
@@ -310,6 +310,7 @@ func (p *PostgresProvider) ListHosts(ctx context.Context) ([]components.HostInfo
 	}
 	defer rows.Close()
 
+	// Read each host row into the result slice
 	hosts := make([]components.HostInfo, 0)
 	for rows.Next() {
 		var h components.HostInfo
@@ -319,7 +320,10 @@ func (p *PostgresProvider) ListHosts(ctx context.Context) ([]components.HostInfo
 		}
 		hosts = append(hosts, h)
 	}
-	if err = rows.Err(); err != nil {
+
+	// Surface any error encountered while iterating the result set
+	err = rows.Err()
+	if err != nil {
 		return nil, fmt.Errorf("error reading host rows: %w", err)
 	}
 
