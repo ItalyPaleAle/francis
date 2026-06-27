@@ -391,6 +391,26 @@ func (p *Provider) UnregisterHost(ctx context.Context, hostID string) error {
 	return nil
 }
 
+// ListHosts returns all hosts that are currently registered and healthy.
+func (p *Provider) ListHosts(ctx context.Context) ([]components.HostInfo, error) {
+	p.Mu.RLock()
+	defer p.Mu.RUnlock()
+
+	hosts := make([]components.HostInfo, 0, len(p.Hosts))
+	for _, h := range p.Hosts {
+		if !p.IsHostHealthy(h) {
+			continue
+		}
+		hosts = append(hosts, components.HostInfo{
+			HostID:          h.ID,
+			Address:         h.Address,
+			LastHealthCheck: h.LastHealthCheck,
+		})
+	}
+
+	return hosts, nil
+}
+
 func (p *Provider) LookupActor(ctx context.Context, r ref.ActorRef, opts components.LookupActorOpts) (components.LookupActorRes, error) {
 	key := NewActorKey(r.ActorType, r.ActorID)
 

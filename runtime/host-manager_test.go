@@ -1,15 +1,20 @@
 package runtime
 
 import (
+	"errors"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/italypaleale/francis/components"
+	components_mocks "github.com/italypaleale/francis/internal/mocks/components"
 )
 
 func TestHostManagerRegisterAndGet(t *testing.T) {
-	m := NewHostManager()
+	m := NewHostManager(nil)
 
 	c := &hostConn{hostID: "h1", sessionID: "s1", address: "1.2.3.4:443"}
 	superseded := m.Register(c)
@@ -22,7 +27,7 @@ func TestHostManagerRegisterAndGet(t *testing.T) {
 }
 
 func TestHostManagerRegisterSupersedesOldSession(t *testing.T) {
-	m := NewHostManager()
+	m := NewHostManager(nil)
 
 	old := &hostConn{hostID: "h1", sessionID: "s1"}
 	require.Nil(t, m.Register(old))
@@ -41,7 +46,7 @@ func TestHostManagerRegisterSupersedesOldSession(t *testing.T) {
 }
 
 func TestHostManagerRegisterSameSessionDoesNotSupersede(t *testing.T) {
-	m := NewHostManager()
+	m := NewHostManager(nil)
 
 	c1 := &hostConn{hostID: "h1", sessionID: "s1"}
 	require.Nil(t, m.Register(c1))
@@ -52,7 +57,7 @@ func TestHostManagerRegisterSameSessionDoesNotSupersede(t *testing.T) {
 }
 
 func TestHostManagerRemoveOnlyMatchingSession(t *testing.T) {
-	m := NewHostManager()
+	m := NewHostManager(nil)
 
 	fresh := &hostConn{hostID: "h1", sessionID: "s2"}
 	m.Register(fresh)
@@ -72,12 +77,12 @@ func TestHostManagerRemoveOnlyMatchingSession(t *testing.T) {
 }
 
 func TestHostManagerRemoveUnknownHost(t *testing.T) {
-	m := NewHostManager()
+	m := NewHostManager(nil)
 	assert.False(t, m.Remove("nope", "s1"))
 }
 
 func TestHostManagerConnectedHostIDsExcludesDraining(t *testing.T) {
-	m := NewHostManager()
+	m := NewHostManager(nil)
 
 	active := &hostConn{hostID: "h1", sessionID: "s1"}
 	draining := &hostConn{hostID: "h2", sessionID: "s2"}
@@ -93,4 +98,40 @@ func TestHostManagerConnectedHostIDsExcludesDraining(t *testing.T) {
 
 	// Both are still counted as connected
 	assert.Equal(t, 2, m.Count())
+}
+
+func TestHostManagerListHosts(t *testing.T) {
+	t.Run("returns hosts from the provider", func(t *testing.T) {
+		now := time.Now()
+		expected := []components.HostInfo{
+			{HostID: "h1", Address: "1.2.3.4:443", LastHealthCheck: now.Add(-2 * time.Second)},
+			{HostID: "h2", Address: "5.6.7.8:443", LastHealthCheck: now.Add(-5 * time.Second)},
+		}
+
+		provider := components_mocks.NewMockActorProvider(t)
+		provider.EXPECT().
+			ListHosts(t.Context()).
+			Return(expected, nil).
+			Once()
+
+		m := NewHostManager(provider)
+		hosts, err := m.ListHosts(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, expected, hosts)
+	})
+
+	t.Run("propagates the provider error", func(t *testing.T) {
+		sentinel := errors.New("provider failed")
+
+		provider := components_mocks.NewMockActorProvider(t)
+		provider.EXPECT().
+			ListHosts(t.Context()).
+			Return(nil, sentinel).
+			Once()
+
+		m := NewHostManager(provider)
+		hosts, err := m.ListHosts(t.Context())
+		require.ErrorIs(t, err, sentinel)
+		assert.Nil(t, hosts)
+	})
 }

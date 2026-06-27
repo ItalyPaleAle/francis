@@ -29,6 +29,7 @@ func (s Suite) RunTests(t *testing.T) {
 	t.Run("register host", s.TestRegisterHost)
 	t.Run("update actor host", s.TestUpdateActorHost)
 	t.Run("unregister host", s.TestUnregisterHost)
+	t.Run("list hosts", s.TestListHosts)
 
 	t.Run("lookup actor", s.TestLookupActor)
 	t.Run("remove actor", s.TestRemoveActor)
@@ -802,6 +803,172 @@ func (s Suite) TestUnregisterHost(t *testing.T) {
 			{HostID: res2.HostID, ActorType: "TypeB", ActorIdleTimeout: 3 * time.Minute, ActorConcurrencyLimit: 2},
 		}
 		expectHosts(t, expectedHosts, expectedActorTypes)
+	})
+}
+
+func (s Suite) TestListHosts(t *testing.T) {
+	// hostIDs returns the set of host IDs in the result
+	hostIDs := func(hosts []components.HostInfo) []string {
+		ids := make([]string, len(hosts))
+		for i, h := range hosts {
+			ids[i] = h.HostID
+		}
+		return ids
+	}
+
+	t.Run("returns empty slice when no hosts are registered", func(t *testing.T) {
+		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+
+		hosts, err := s.p.ListHosts(t.Context())
+		require.NoError(t, err)
+		assert.Empty(t, hosts)
+	})
+
+	t.Run("returns only registered and healthy hosts", func(t *testing.T) {
+		require.NoError(t, s.p.Seed(t.Context(), GetSpec()))
+
+		hosts, err := s.p.ListHosts(t.Context())
+		require.NoError(t, err)
+
+		// From GetSpec: H1, H2, H3, H4, H7, H8 are healthy; H5, H6, H9 are unhealthy
+		got := hostIDs(hosts)
+		expected := []string{SpecHostH1, SpecHostH2, SpecHostH3, SpecHostH4, SpecHostH7, SpecHostH8}
+		assert.ElementsMatch(t, expected, got, "should return exactly the healthy hosts")
+
+		// Unhealthy hosts must never be reported
+		assert.NotContains(t, got, SpecHostH5)
+		assert.NotContains(t, got, SpecHostH6)
+		assert.NotContains(t, got, SpecHostH9)
+	})
+
+	t.Run("includes host ID, address, and last health check for each host", func(t *testing.T) {
+		require.NoError(t, s.p.Seed(t.Context(), GetSpec()))
+
+		hosts, err := s.p.ListHosts(t.Context())
+		require.NoError(t, err)
+
+		byID := make(map[string]components.HostInfo, len(hosts))
+		for _, h := range hosts {
+			byID[h.HostID] = h
+		}
+
+		expectedAddrs := map[string]string{
+			SpecHostH1: "127.0.0.1:4001",
+			SpecHostH2: "127.0.0.1:4002",
+			SpecHostH3: "127.0.0.1:4003",
+			SpecHostH4: "127.0.0.1:4004",
+			SpecHostH7: "127.0.0.1:4007",
+			SpecHostH8: "127.0.0.1:4008",
+		}
+
+		now := s.p.Now()
+		deadline := GetProviderConfig().HostHealthCheckDeadline
+		for id, addr := range expectedAddrs {
+			h, ok := byID[id]
+			require.True(t, ok, "host %s should be present", id)
+			assert.Equal(t, id, h.HostID)
+			assert.Equal(t, addr, h.Address)
+
+			// The last health check must be set, in the past, and recent enough that the host is healthy
+			assert.False(t, h.LastHealthCheck.IsZero(), "last health check should be set for host %s", id)
+			assert.False(t, h.LastHealthCheck.After(now), "last health check for host %s should not be in the future", id)
+			assert.WithinDuration(t, now, h.LastHealthCheck, deadline, "last health check for host %s should be within the health deadline", id)
+		}
+	})
+
+	t.Run("reflects a newly registered host", func(t *testing.T) {
+		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+		ctx := t.Context()
+
+		res, err := s.p.RegisterHost(ctx, components.RegisterHostReq{
+			Address: "192.168.60.1:8080",
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "TestActor", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 1},
+			},
+		})
+		require.NoError(t, err)
+
+		hosts, err := s.p.ListHosts(ctx)
+		require.NoError(t, err)
+		require.Len(t, hosts, 1)
+		assert.Equal(t, res.HostID, hosts[0].HostID)
+		assert.Equal(t, "192.168.60.1:8080", hosts[0].Address)
+	})
+
+	t.Run("returns all healthy hosts when multiple are registered", func(t *testing.T) {
+		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+		ctx := t.Context()
+
+		addrs := []string{"192.168.61.1:8080", "192.168.61.2:8080", "192.168.61.3:8080"}
+		ids := make([]string, len(addrs))
+		for i, addr := range addrs {
+			res, err := s.p.RegisterHost(ctx, components.RegisterHostReq{Address: addr})
+			require.NoError(t, err)
+			ids[i] = res.HostID
+		}
+
+		hosts, err := s.p.ListHosts(ctx)
+		require.NoError(t, err)
+		assert.ElementsMatch(t, ids, hostIDs(hosts))
+	})
+
+	t.Run("excludes a host once it becomes unhealthy", func(t *testing.T) {
+		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+		ctx := t.Context()
+
+		_, err := s.p.RegisterHost(ctx, components.RegisterHostReq{Address: "192.168.62.1:8080"})
+		require.NoError(t, err)
+
+		// The host is healthy right after registration
+		hosts, err := s.p.ListHosts(ctx)
+		require.NoError(t, err)
+		require.Len(t, hosts, 1)
+
+		// Advance the clock beyond the health check deadline (1 minute)
+		_ = s.p.AdvanceClock(2 * time.Minute) //nolint:errcheck
+
+		hosts, err = s.p.ListHosts(ctx)
+		require.NoError(t, err)
+		assert.Empty(t, hosts, "an unhealthy host should not be listed")
+	})
+
+	t.Run("excludes an unregistered host", func(t *testing.T) {
+		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+		ctx := t.Context()
+
+		res1, err := s.p.RegisterHost(ctx, components.RegisterHostReq{Address: "192.168.63.1:8080"})
+		require.NoError(t, err)
+		res2, err := s.p.RegisterHost(ctx, components.RegisterHostReq{Address: "192.168.63.2:8080"})
+		require.NoError(t, err)
+
+		err = s.p.UnregisterHost(ctx, res1.HostID)
+		require.NoError(t, err)
+
+		hosts, err := s.p.ListHosts(ctx)
+		require.NoError(t, err)
+		require.Len(t, hosts, 1)
+		assert.Equal(t, res2.HostID, hosts[0].HostID)
+	})
+
+	t.Run("keeps a host listed after its health check is refreshed", func(t *testing.T) {
+		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+		ctx := t.Context()
+
+		res, err := s.p.RegisterHost(ctx, components.RegisterHostReq{Address: "192.168.64.1:8080"})
+		require.NoError(t, err)
+
+		// Advance partway, then refresh the health check before the deadline
+		_ = s.p.AdvanceClock(40 * time.Second) //nolint:errcheck
+		err = s.p.UpdateActorHost(ctx, res.HostID, components.UpdateActorHostReq{UpdateLastHealthCheck: true})
+		require.NoError(t, err)
+
+		// Advance again, but the total since the refresh is still under the deadline
+		_ = s.p.AdvanceClock(40 * time.Second) //nolint:errcheck
+
+		hosts, err := s.p.ListHosts(ctx)
+		require.NoError(t, err)
+		require.Len(t, hosts, 1)
+		assert.Equal(t, res.HostID, hosts[0].HostID)
 	})
 }
 

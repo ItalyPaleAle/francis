@@ -318,6 +318,43 @@ func (s *SQLiteProvider) UnregisterHost(ctx context.Context, hostID string) erro
 	return nil
 }
 
+func (s *SQLiteProvider) ListHosts(ctx context.Context) ([]components.HostInfo, error) {
+	now := s.clock.Now().UnixMilli()
+
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+
+	rows, err := s.db.QueryContext(queryCtx,
+		`SELECT host_id, host_address, host_last_health_check
+		FROM hosts
+		WHERE host_last_health_check >= ?`,
+		now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("error querying hosts: %w", err)
+	}
+	defer rows.Close()
+
+	hosts := make([]components.HostInfo, 0)
+	for rows.Next() {
+		var (
+			h             components.HostInfo
+			healthCheckMs int64
+		)
+		err = rows.Scan(&h.HostID, &h.Address, &healthCheckMs)
+		if err != nil {
+			return nil, fmt.Errorf("error scanning host row: %w", err)
+		}
+		h.LastHealthCheck = time.UnixMilli(healthCheckMs)
+		hosts = append(hosts, h)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error reading host rows: %w", err)
+	}
+
+	return hosts, nil
+}
+
 func (s *SQLiteProvider) lookupActiveActor(ctx context.Context, ref ref.ActorRef, hosts []string) (components.LookupActorRes, error) {
 	now := s.clock.Now().UnixMilli()
 

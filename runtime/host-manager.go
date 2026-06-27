@@ -1,21 +1,32 @@
 package runtime
 
 import (
+	"context"
 	"sync"
+
+	"github.com/italypaleale/francis/components"
 )
 
 // HostManager tracks the hosts currently connected to this runtime replica, keyed by host ID
 // It is the in-memory source of truth for which hosts this runtime owns sessions for
 type HostManager struct {
-	mu    sync.RWMutex
-	hosts map[string]*hostConn
+	provider components.ActorProvider
+	mu       sync.RWMutex
+	hosts    map[string]*hostConn
 }
 
-// NewHostManager returns an empty HostManager
-func NewHostManager() *HostManager {
+// NewHostManager returns an empty HostManager backed by the given actor provider
+func NewHostManager(provider components.ActorProvider) *HostManager {
 	return &HostManager{
-		hosts: make(map[string]*hostConn),
+		provider: provider,
+		hosts:    make(map[string]*hostConn),
 	}
+}
+
+// ListHosts returns all actor hosts currently registered and healthy in the provider.
+// Unlike ConnectedHostIDs, which reflects only the hosts connected to this runtime replica, this returns the cluster-wide view from the provider.
+func (m *HostManager) ListHosts(ctx context.Context) ([]components.HostInfo, error) {
+	return m.provider.ListHosts(ctx)
 }
 
 // Register adds a connected host, superseding any existing session for the same host ID

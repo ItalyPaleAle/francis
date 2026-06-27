@@ -129,7 +129,7 @@ func NewRuntime(provider components.ActorProvider, opts ...RuntimeOption) (*Runt
 
 	rt := &Runtime{
 		provider:                provider,
-		hosts:                   NewHostManager(),
+		hosts:                   NewHostManager(provider),
 		bind:                    options.bind,
 		serverTLSConfig:         serverTLSConfig,
 		cas:                     cas,
