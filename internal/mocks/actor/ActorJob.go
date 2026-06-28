@@ -66,7 +66,7 @@ type MockActorJob_Job_Call struct {
 //   - ctx context.Context
 //   - method string
 //   - data actor.Envelope
-func (_e *MockActorJob_Expecter) Job(ctx interface{}, method interface{}, data interface{}) *MockActorJob_Job_Call {
+func (_e *MockActorJob_Expecter) Job(ctx any, method any, data any) *MockActorJob_Job_Call {
 	return &MockActorJob_Job_Call{Call: _e.mock.On("Job", ctx, method, data)}
 }
 

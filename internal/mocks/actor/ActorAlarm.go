@@ -66,7 +66,7 @@ type MockActorAlarm_Alarm_Call struct {
 //   - ctx context.Context
 //   - name string
 //   - data actor.Envelope
-func (_e *MockActorAlarm_Expecter) Alarm(ctx interface{}, name interface{}, data interface{}) *MockActorAlarm_Alarm_Call {
+func (_e *MockActorAlarm_Expecter) Alarm(ctx any, name any, data any) *MockActorAlarm_Alarm_Call {
 	return &MockActorAlarm_Alarm_Call{Call: _e.mock.On("Alarm", ctx, name, data)}
 }
 

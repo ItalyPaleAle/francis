@@ -50,7 +50,7 @@ type MockStreamResponseWriter_SetContentType_Call struct {
 
 // SetContentType is a helper method to define mock.On call
 //   - contentType string
-func (_e *MockStreamResponseWriter_Expecter) SetContentType(contentType interface{}) *MockStreamResponseWriter_SetContentType_Call {
+func (_e *MockStreamResponseWriter_Expecter) SetContentType(contentType any) *MockStreamResponseWriter_SetContentType_Call {
 	return &MockStreamResponseWriter_SetContentType_Call{Call: _e.mock.On("SetContentType", contentType)}
 }
 
@@ -110,7 +110,7 @@ type MockStreamResponseWriter_Write_Call struct {
 
 // Write is a helper method to define mock.On call
 //   - p []byte
-func (_e *MockStreamResponseWriter_Expecter) Write(p interface{}) *MockStreamResponseWriter_Write_Call {
+func (_e *MockStreamResponseWriter_Expecter) Write(p any) *MockStreamResponseWriter_Write_Call {
 	return &MockStreamResponseWriter_Write_Call{Call: _e.mock.On("Write", p)}
 }
 

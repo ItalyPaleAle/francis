@@ -68,7 +68,7 @@ type MockActorJobFailed_JobFailed_Call struct {
 //   - method string
 //   - data actor.Envelope
 //   - jobErr error
-func (_e *MockActorJobFailed_Expecter) JobFailed(ctx interface{}, jobID interface{}, method interface{}, data interface{}, jobErr interface{}) *MockActorJobFailed_JobFailed_Call {
+func (_e *MockActorJobFailed_Expecter) JobFailed(ctx any, jobID any, method any, data any, jobErr any) *MockActorJobFailed_JobFailed_Call {
 	return &MockActorJobFailed_JobFailed_Call{Call: _e.mock.On("JobFailed", ctx, jobID, method, data, jobErr)}
 }
 

@@ -69,7 +69,7 @@ type MockActorProvider_CancelJob_Call struct {
 //   - actorType string
 //   - actorID string
 //   - jobID string
-func (_e *MockActorProvider_Expecter) CancelJob(ctx interface{}, actorType interface{}, actorID interface{}, jobID interface{}) *MockActorProvider_CancelJob_Call {
+func (_e *MockActorProvider_Expecter) CancelJob(ctx any, actorType any, actorID any, jobID any) *MockActorProvider_CancelJob_Call {
 	return &MockActorProvider_CancelJob_Call{Call: _e.mock.On("CancelJob", ctx, actorType, actorID, jobID)}
 }
 
@@ -137,7 +137,7 @@ type MockActorProvider_DeadLetterAlarm_Call struct {
 //   - ctx context.Context
 //   - lease *ref.AlarmLease
 //   - req components.DeadLetterAlarmReq
-func (_e *MockActorProvider_Expecter) DeadLetterAlarm(ctx interface{}, lease interface{}, req interface{}) *MockActorProvider_DeadLetterAlarm_Call {
+func (_e *MockActorProvider_Expecter) DeadLetterAlarm(ctx any, lease any, req any) *MockActorProvider_DeadLetterAlarm_Call {
 	return &MockActorProvider_DeadLetterAlarm_Call{Call: _e.mock.On("DeadLetterAlarm", ctx, lease, req)}
 }
 
@@ -199,7 +199,7 @@ type MockActorProvider_DeleteAlarm_Call struct {
 // DeleteAlarm is a helper method to define mock.On call
 //   - ctx context.Context
 //   - ref1 ref.AlarmRef
-func (_e *MockActorProvider_Expecter) DeleteAlarm(ctx interface{}, ref1 interface{}) *MockActorProvider_DeleteAlarm_Call {
+func (_e *MockActorProvider_Expecter) DeleteAlarm(ctx any, ref1 any) *MockActorProvider_DeleteAlarm_Call {
 	return &MockActorProvider_DeleteAlarm_Call{Call: _e.mock.On("DeleteAlarm", ctx, ref1)}
 }
 
@@ -256,7 +256,7 @@ type MockActorProvider_DeleteDeadJob_Call struct {
 // DeleteDeadJob is a helper method to define mock.On call
 //   - ctx context.Context
 //   - jobID string
-func (_e *MockActorProvider_Expecter) DeleteDeadJob(ctx interface{}, jobID interface{}) *MockActorProvider_DeleteDeadJob_Call {
+func (_e *MockActorProvider_Expecter) DeleteDeadJob(ctx any, jobID any) *MockActorProvider_DeleteDeadJob_Call {
 	return &MockActorProvider_DeleteDeadJob_Call{Call: _e.mock.On("DeleteDeadJob", ctx, jobID)}
 }
 
@@ -313,7 +313,7 @@ type MockActorProvider_DeleteLeasedAlarm_Call struct {
 // DeleteLeasedAlarm is a helper method to define mock.On call
 //   - ctx context.Context
 //   - lease *ref.AlarmLease
-func (_e *MockActorProvider_Expecter) DeleteLeasedAlarm(ctx interface{}, lease interface{}) *MockActorProvider_DeleteLeasedAlarm_Call {
+func (_e *MockActorProvider_Expecter) DeleteLeasedAlarm(ctx any, lease any) *MockActorProvider_DeleteLeasedAlarm_Call {
 	return &MockActorProvider_DeleteLeasedAlarm_Call{Call: _e.mock.On("DeleteLeasedAlarm", ctx, lease)}
 }
 
@@ -370,7 +370,7 @@ type MockActorProvider_DeleteState_Call struct {
 // DeleteState is a helper method to define mock.On call
 //   - ctx context.Context
 //   - ref1 ref.ActorRef
-func (_e *MockActorProvider_Expecter) DeleteState(ctx interface{}, ref1 interface{}) *MockActorProvider_DeleteState_Call {
+func (_e *MockActorProvider_Expecter) DeleteState(ctx any, ref1 any) *MockActorProvider_DeleteState_Call {
 	return &MockActorProvider_DeleteState_Call{Call: _e.mock.On("DeleteState", ctx, ref1)}
 }
 
@@ -437,7 +437,7 @@ type MockActorProvider_DispatchJob_Call struct {
 //   - ctx context.Context
 //   - ref1 ref.AlarmRef
 //   - req components.SetAlarmReq
-func (_e *MockActorProvider_Expecter) DispatchJob(ctx interface{}, ref1 interface{}, req interface{}) *MockActorProvider_DispatchJob_Call {
+func (_e *MockActorProvider_Expecter) DispatchJob(ctx any, ref1 any, req any) *MockActorProvider_DispatchJob_Call {
 	return &MockActorProvider_DispatchJob_Call{Call: _e.mock.On("DispatchJob", ctx, ref1, req)}
 }
 
@@ -510,7 +510,7 @@ type MockActorProvider_FetchAndLeaseUpcomingAlarms_Call struct {
 // FetchAndLeaseUpcomingAlarms is a helper method to define mock.On call
 //   - ctx context.Context
 //   - req components.FetchAndLeaseUpcomingAlarmsReq
-func (_e *MockActorProvider_Expecter) FetchAndLeaseUpcomingAlarms(ctx interface{}, req interface{}) *MockActorProvider_FetchAndLeaseUpcomingAlarms_Call {
+func (_e *MockActorProvider_Expecter) FetchAndLeaseUpcomingAlarms(ctx any, req any) *MockActorProvider_FetchAndLeaseUpcomingAlarms_Call {
 	return &MockActorProvider_FetchAndLeaseUpcomingAlarms_Call{Call: _e.mock.On("FetchAndLeaseUpcomingAlarms", ctx, req)}
 }
 
@@ -576,7 +576,7 @@ type MockActorProvider_GetAlarm_Call struct {
 // GetAlarm is a helper method to define mock.On call
 //   - ctx context.Context
 //   - ref1 ref.AlarmRef
-func (_e *MockActorProvider_Expecter) GetAlarm(ctx interface{}, ref1 interface{}) *MockActorProvider_GetAlarm_Call {
+func (_e *MockActorProvider_Expecter) GetAlarm(ctx any, ref1 any) *MockActorProvider_GetAlarm_Call {
 	return &MockActorProvider_GetAlarm_Call{Call: _e.mock.On("GetAlarm", ctx, ref1)}
 }
 
@@ -642,7 +642,7 @@ type MockActorProvider_GetDeadJob_Call struct {
 // GetDeadJob is a helper method to define mock.On call
 //   - ctx context.Context
 //   - jobID string
-func (_e *MockActorProvider_Expecter) GetDeadJob(ctx interface{}, jobID interface{}) *MockActorProvider_GetDeadJob_Call {
+func (_e *MockActorProvider_Expecter) GetDeadJob(ctx any, jobID any) *MockActorProvider_GetDeadJob_Call {
 	return &MockActorProvider_GetDeadJob_Call{Call: _e.mock.On("GetDeadJob", ctx, jobID)}
 }
 
@@ -708,7 +708,7 @@ type MockActorProvider_GetJob_Call struct {
 // GetJob is a helper method to define mock.On call
 //   - ctx context.Context
 //   - jobID string
-func (_e *MockActorProvider_Expecter) GetJob(ctx interface{}, jobID interface{}) *MockActorProvider_GetJob_Call {
+func (_e *MockActorProvider_Expecter) GetJob(ctx any, jobID any) *MockActorProvider_GetJob_Call {
 	return &MockActorProvider_GetJob_Call{Call: _e.mock.On("GetJob", ctx, jobID)}
 }
 
@@ -774,7 +774,7 @@ type MockActorProvider_GetLeasedAlarm_Call struct {
 // GetLeasedAlarm is a helper method to define mock.On call
 //   - ctx context.Context
 //   - lease *ref.AlarmLease
-func (_e *MockActorProvider_Expecter) GetLeasedAlarm(ctx interface{}, lease interface{}) *MockActorProvider_GetLeasedAlarm_Call {
+func (_e *MockActorProvider_Expecter) GetLeasedAlarm(ctx any, lease any) *MockActorProvider_GetLeasedAlarm_Call {
 	return &MockActorProvider_GetLeasedAlarm_Call{Call: _e.mock.On("GetLeasedAlarm", ctx, lease)}
 }
 
@@ -842,7 +842,7 @@ type MockActorProvider_GetState_Call struct {
 // GetState is a helper method to define mock.On call
 //   - ctx context.Context
 //   - ref1 ref.ActorRef
-func (_e *MockActorProvider_Expecter) GetState(ctx interface{}, ref1 interface{}) *MockActorProvider_GetState_Call {
+func (_e *MockActorProvider_Expecter) GetState(ctx any, ref1 any) *MockActorProvider_GetState_Call {
 	return &MockActorProvider_GetState_Call{Call: _e.mock.On("GetState", ctx, ref1)}
 }
 
@@ -942,7 +942,7 @@ type MockActorProvider_Init_Call struct {
 
 // Init is a helper method to define mock.On call
 //   - ctx context.Context
-func (_e *MockActorProvider_Expecter) Init(ctx interface{}) *MockActorProvider_Init_Call {
+func (_e *MockActorProvider_Expecter) Init(ctx any) *MockActorProvider_Init_Call {
 	return &MockActorProvider_Init_Call{Call: _e.mock.On("Init", ctx)}
 }
 
@@ -1004,7 +1004,7 @@ type MockActorProvider_ListHosts_Call struct {
 
 // ListHosts is a helper method to define mock.On call
 //   - ctx context.Context
-func (_e *MockActorProvider_Expecter) ListHosts(ctx interface{}) *MockActorProvider_ListHosts_Call {
+func (_e *MockActorProvider_Expecter) ListHosts(ctx any) *MockActorProvider_ListHosts_Call {
 	return &MockActorProvider_ListHosts_Call{Call: _e.mock.On("ListHosts", ctx)}
 }
 
@@ -1068,7 +1068,7 @@ type MockActorProvider_ListJobs_Call struct {
 //   - ctx context.Context
 //   - actorType string
 //   - actorID string
-func (_e *MockActorProvider_Expecter) ListJobs(ctx interface{}, actorType interface{}, actorID interface{}) *MockActorProvider_ListJobs_Call {
+func (_e *MockActorProvider_Expecter) ListJobs(ctx any, actorType any, actorID any) *MockActorProvider_ListJobs_Call {
 	return &MockActorProvider_ListJobs_Call{Call: _e.mock.On("ListJobs", ctx, actorType, actorID)}
 }
 
@@ -1140,7 +1140,7 @@ type MockActorProvider_LookupActor_Call struct {
 //   - ctx context.Context
 //   - ref1 ref.ActorRef
 //   - opts components.LookupActorOpts
-func (_e *MockActorProvider_Expecter) LookupActor(ctx interface{}, ref1 interface{}, opts interface{}) *MockActorProvider_LookupActor_Call {
+func (_e *MockActorProvider_Expecter) LookupActor(ctx any, ref1 any, opts any) *MockActorProvider_LookupActor_Call {
 	return &MockActorProvider_LookupActor_Call{Call: _e.mock.On("LookupActor", ctx, ref1, opts)}
 }
 
@@ -1211,7 +1211,7 @@ type MockActorProvider_RegisterHost_Call struct {
 // RegisterHost is a helper method to define mock.On call
 //   - ctx context.Context
 //   - req components.RegisterHostReq
-func (_e *MockActorProvider_Expecter) RegisterHost(ctx interface{}, req interface{}) *MockActorProvider_RegisterHost_Call {
+func (_e *MockActorProvider_Expecter) RegisterHost(ctx any, req any) *MockActorProvider_RegisterHost_Call {
 	return &MockActorProvider_RegisterHost_Call{Call: _e.mock.On("RegisterHost", ctx, req)}
 }
 
@@ -1268,7 +1268,7 @@ type MockActorProvider_ReleaseAlarmLease_Call struct {
 // ReleaseAlarmLease is a helper method to define mock.On call
 //   - ctx context.Context
 //   - lease *ref.AlarmLease
-func (_e *MockActorProvider_Expecter) ReleaseAlarmLease(ctx interface{}, lease interface{}) *MockActorProvider_ReleaseAlarmLease_Call {
+func (_e *MockActorProvider_Expecter) ReleaseAlarmLease(ctx any, lease any) *MockActorProvider_ReleaseAlarmLease_Call {
 	return &MockActorProvider_ReleaseAlarmLease_Call{Call: _e.mock.On("ReleaseAlarmLease", ctx, lease)}
 }
 
@@ -1325,7 +1325,7 @@ type MockActorProvider_RemoveActor_Call struct {
 // RemoveActor is a helper method to define mock.On call
 //   - ctx context.Context
 //   - ref1 ref.ActorRef
-func (_e *MockActorProvider_Expecter) RemoveActor(ctx interface{}, ref1 interface{}) *MockActorProvider_RemoveActor_Call {
+func (_e *MockActorProvider_Expecter) RemoveActor(ctx any, ref1 any) *MockActorProvider_RemoveActor_Call {
 	return &MockActorProvider_RemoveActor_Call{Call: _e.mock.On("RemoveActor", ctx, ref1)}
 }
 
@@ -1391,7 +1391,7 @@ type MockActorProvider_RenewAlarmLeases_Call struct {
 // RenewAlarmLeases is a helper method to define mock.On call
 //   - ctx context.Context
 //   - req components.RenewAlarmLeasesReq
-func (_e *MockActorProvider_Expecter) RenewAlarmLeases(ctx interface{}, req interface{}) *MockActorProvider_RenewAlarmLeases_Call {
+func (_e *MockActorProvider_Expecter) RenewAlarmLeases(ctx any, req any) *MockActorProvider_RenewAlarmLeases_Call {
 	return &MockActorProvider_RenewAlarmLeases_Call{Call: _e.mock.On("RenewAlarmLeases", ctx, req)}
 }
 
@@ -1501,7 +1501,7 @@ type MockActorProvider_RetryDeadJob_Call struct {
 // RetryDeadJob is a helper method to define mock.On call
 //   - ctx context.Context
 //   - jobID string
-func (_e *MockActorProvider_Expecter) RetryDeadJob(ctx interface{}, jobID interface{}) *MockActorProvider_RetryDeadJob_Call {
+func (_e *MockActorProvider_Expecter) RetryDeadJob(ctx any, jobID any) *MockActorProvider_RetryDeadJob_Call {
 	return &MockActorProvider_RetryDeadJob_Call{Call: _e.mock.On("RetryDeadJob", ctx, jobID)}
 }
 
@@ -1557,7 +1557,7 @@ type MockActorProvider_Run_Call struct {
 
 // Run is a helper method to define mock.On call
 //   - ctx context.Context
-func (_e *MockActorProvider_Expecter) Run(ctx interface{}) *MockActorProvider_Run_Call {
+func (_e *MockActorProvider_Expecter) Run(ctx any) *MockActorProvider_Run_Call {
 	return &MockActorProvider_Run_Call{Call: _e.mock.On("Run", ctx)}
 }
 
@@ -1610,7 +1610,7 @@ type MockActorProvider_SetAlarm_Call struct {
 //   - ctx context.Context
 //   - ref1 ref.AlarmRef
 //   - req components.SetAlarmReq
-func (_e *MockActorProvider_Expecter) SetAlarm(ctx interface{}, ref1 interface{}, req interface{}) *MockActorProvider_SetAlarm_Call {
+func (_e *MockActorProvider_Expecter) SetAlarm(ctx any, ref1 any, req any) *MockActorProvider_SetAlarm_Call {
 	return &MockActorProvider_SetAlarm_Call{Call: _e.mock.On("SetAlarm", ctx, ref1, req)}
 }
 
@@ -1674,7 +1674,7 @@ type MockActorProvider_SetState_Call struct {
 //   - ref1 ref.ActorRef
 //   - data []byte
 //   - opts components.SetStateOpts
-func (_e *MockActorProvider_Expecter) SetState(ctx interface{}, ref1 interface{}, data interface{}, opts interface{}) *MockActorProvider_SetState_Call {
+func (_e *MockActorProvider_Expecter) SetState(ctx any, ref1 any, data any, opts any) *MockActorProvider_SetState_Call {
 	return &MockActorProvider_SetState_Call{Call: _e.mock.On("SetState", ctx, ref1, data, opts)}
 }
 
@@ -1741,7 +1741,7 @@ type MockActorProvider_UnregisterHost_Call struct {
 // UnregisterHost is a helper method to define mock.On call
 //   - ctx context.Context
 //   - hostID string
-func (_e *MockActorProvider_Expecter) UnregisterHost(ctx interface{}, hostID interface{}) *MockActorProvider_UnregisterHost_Call {
+func (_e *MockActorProvider_Expecter) UnregisterHost(ctx any, hostID any) *MockActorProvider_UnregisterHost_Call {
 	return &MockActorProvider_UnregisterHost_Call{Call: _e.mock.On("UnregisterHost", ctx, hostID)}
 }
 
@@ -1799,7 +1799,7 @@ type MockActorProvider_UpdateActorHost_Call struct {
 //   - ctx context.Context
 //   - hostID string
 //   - req components.UpdateActorHostReq
-func (_e *MockActorProvider_Expecter) UpdateActorHost(ctx interface{}, hostID interface{}, req interface{}) *MockActorProvider_UpdateActorHost_Call {
+func (_e *MockActorProvider_Expecter) UpdateActorHost(ctx any, hostID any, req any) *MockActorProvider_UpdateActorHost_Call {
 	return &MockActorProvider_UpdateActorHost_Call{Call: _e.mock.On("UpdateActorHost", ctx, hostID, req)}
 }
 
@@ -1862,7 +1862,7 @@ type MockActorProvider_UpdateLeasedAlarm_Call struct {
 //   - ctx context.Context
 //   - lease *ref.AlarmLease
 //   - req components.UpdateLeasedAlarmReq
-func (_e *MockActorProvider_Expecter) UpdateLeasedAlarm(ctx interface{}, lease interface{}, req interface{}) *MockActorProvider_UpdateLeasedAlarm_Call {
+func (_e *MockActorProvider_Expecter) UpdateLeasedAlarm(ctx any, lease any, req any) *MockActorProvider_UpdateLeasedAlarm_Call {
 	return &MockActorProvider_UpdateLeasedAlarm_Call{Call: _e.mock.On("UpdateLeasedAlarm", ctx, lease, req)}
 }
 

@@ -77,7 +77,7 @@ type MockActorInvoke_Invoke_Call struct {
 //   - ctx context.Context
 //   - method string
 //   - data actor.Envelope
-func (_e *MockActorInvoke_Expecter) Invoke(ctx interface{}, method interface{}, data interface{}) *MockActorInvoke_Invoke_Call {
+func (_e *MockActorInvoke_Expecter) Invoke(ctx any, method any, data any) *MockActorInvoke_Invoke_Call {
 	return &MockActorInvoke_Invoke_Call{Call: _e.mock.On("Invoke", ctx, method, data)}
 }
 

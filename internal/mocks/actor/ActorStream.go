@@ -69,7 +69,7 @@ type MockActorStream_InvokeStream_Call struct {
 //   - reqContentType string
 //   - body io.Reader
 //   - w actor.StreamResponseWriter
-func (_e *MockActorStream_Expecter) InvokeStream(ctx interface{}, method interface{}, reqContentType interface{}, body interface{}, w interface{}) *MockActorStream_InvokeStream_Call {
+func (_e *MockActorStream_Expecter) InvokeStream(ctx any, method any, reqContentType any, body any, w any) *MockActorStream_InvokeStream_Call {
 	return &MockActorStream_InvokeStream_Call{Call: _e.mock.On("InvokeStream", ctx, method, reqContentType, body, w)}
 }
 

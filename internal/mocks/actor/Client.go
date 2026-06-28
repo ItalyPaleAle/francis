@@ -65,7 +65,7 @@ type MockClient_CancelJob_Call[T any] struct {
 // CancelJob is a helper method to define mock.On call
 //   - ctx context.Context
 //   - jobID string
-func (_e *MockClient_Expecter[T]) CancelJob(ctx interface{}, jobID interface{}) *MockClient_CancelJob_Call[T] {
+func (_e *MockClient_Expecter[T]) CancelJob(ctx any, jobID any) *MockClient_CancelJob_Call[T] {
 	return &MockClient_CancelJob_Call[T]{Call: _e.mock.On("CancelJob", ctx, jobID)}
 }
 
@@ -122,7 +122,7 @@ type MockClient_DeleteAlarm_Call[T any] struct {
 // DeleteAlarm is a helper method to define mock.On call
 //   - ctx context.Context
 //   - alarmName string
-func (_e *MockClient_Expecter[T]) DeleteAlarm(ctx interface{}, alarmName interface{}) *MockClient_DeleteAlarm_Call[T] {
+func (_e *MockClient_Expecter[T]) DeleteAlarm(ctx any, alarmName any) *MockClient_DeleteAlarm_Call[T] {
 	return &MockClient_DeleteAlarm_Call[T]{Call: _e.mock.On("DeleteAlarm", ctx, alarmName)}
 }
 
@@ -178,7 +178,7 @@ type MockClient_DeleteState_Call[T any] struct {
 
 // DeleteState is a helper method to define mock.On call
 //   - ctx context.Context
-func (_e *MockClient_Expecter[T]) DeleteState(ctx interface{}) *MockClient_DeleteState_Call[T] {
+func (_e *MockClient_Expecter[T]) DeleteState(ctx any) *MockClient_DeleteState_Call[T] {
 	return &MockClient_DeleteState_Call[T]{Call: _e.mock.On("DeleteState", ctx)}
 }
 
@@ -208,11 +208,11 @@ func (_c *MockClient_DeleteState_Call[T]) RunAndReturn(run func(ctx context.Cont
 // Dispatch provides a mock function for the type MockClient
 func (_mock *MockClient[T]) Dispatch(ctx context.Context, method string, input any, opts ...actor.JobOption) (string, error) {
 	// actor.JobOption
-	_va := make([]interface{}, len(opts))
+	_va := make([]any, len(opts))
 	for _i := range opts {
 		_va[_i] = opts[_i]
 	}
-	var _ca []interface{}
+	var _ca []any
 	_ca = append(_ca, ctx, method, input)
 	_ca = append(_ca, _va...)
 	ret := _mock.Called(_ca...)
@@ -249,9 +249,9 @@ type MockClient_Dispatch_Call[T any] struct {
 //   - method string
 //   - input any
 //   - opts ...actor.JobOption
-func (_e *MockClient_Expecter[T]) Dispatch(ctx interface{}, method interface{}, input interface{}, opts ...interface{}) *MockClient_Dispatch_Call[T] {
+func (_e *MockClient_Expecter[T]) Dispatch(ctx any, method any, input any, opts ...any) *MockClient_Dispatch_Call[T] {
 	return &MockClient_Dispatch_Call[T]{Call: _e.mock.On("Dispatch",
-		append([]interface{}{ctx, method, input}, opts...)...)}
+		append([]any{ctx, method, input}, opts...)...)}
 }
 
 func (_c *MockClient_Dispatch_Call[T]) Run(run func(ctx context.Context, method string, input any, opts ...actor.JobOption)) *MockClient_Dispatch_Call[T] {
@@ -330,7 +330,7 @@ type MockClient_GetJob_Call[T any] struct {
 // GetJob is a helper method to define mock.On call
 //   - ctx context.Context
 //   - jobID string
-func (_e *MockClient_Expecter[T]) GetJob(ctx interface{}, jobID interface{}) *MockClient_GetJob_Call[T] {
+func (_e *MockClient_Expecter[T]) GetJob(ctx any, jobID any) *MockClient_GetJob_Call[T] {
 	return &MockClient_GetJob_Call[T]{Call: _e.mock.On("GetJob", ctx, jobID)}
 }
 
@@ -397,7 +397,7 @@ type MockClient_GetState_Call[T any] struct {
 
 // GetState is a helper method to define mock.On call
 //   - ctx context.Context
-func (_e *MockClient_Expecter[T]) GetState(ctx interface{}) *MockClient_GetState_Call[T] {
+func (_e *MockClient_Expecter[T]) GetState(ctx any) *MockClient_GetState_Call[T] {
 	return &MockClient_GetState_Call[T]{Call: _e.mock.On("GetState", ctx)}
 }
 
@@ -492,7 +492,7 @@ type MockClient_ListJobs_Call[T any] struct {
 
 // ListJobs is a helper method to define mock.On call
 //   - ctx context.Context
-func (_e *MockClient_Expecter[T]) ListJobs(ctx interface{}) *MockClient_ListJobs_Call[T] {
+func (_e *MockClient_Expecter[T]) ListJobs(ctx any) *MockClient_ListJobs_Call[T] {
 	return &MockClient_ListJobs_Call[T]{Call: _e.mock.On("ListJobs", ctx)}
 }
 
@@ -553,7 +553,7 @@ type MockClient_RetryJob_Call[T any] struct {
 // RetryJob is a helper method to define mock.On call
 //   - ctx context.Context
 //   - jobID string
-func (_e *MockClient_Expecter[T]) RetryJob(ctx interface{}, jobID interface{}) *MockClient_RetryJob_Call[T] {
+func (_e *MockClient_Expecter[T]) RetryJob(ctx any, jobID any) *MockClient_RetryJob_Call[T] {
 	return &MockClient_RetryJob_Call[T]{Call: _e.mock.On("RetryJob", ctx, jobID)}
 }
 
@@ -611,7 +611,7 @@ type MockClient_SetAlarm_Call[T any] struct {
 //   - ctx context.Context
 //   - alarmName string
 //   - properties actor.AlarmProperties
-func (_e *MockClient_Expecter[T]) SetAlarm(ctx interface{}, alarmName interface{}, properties interface{}) *MockClient_SetAlarm_Call[T] {
+func (_e *MockClient_Expecter[T]) SetAlarm(ctx any, alarmName any, properties any) *MockClient_SetAlarm_Call[T] {
 	return &MockClient_SetAlarm_Call[T]{Call: _e.mock.On("SetAlarm", ctx, alarmName, properties)}
 }
 
@@ -674,7 +674,7 @@ type MockClient_SetState_Call[T any] struct {
 //   - ctx context.Context
 //   - state T
 //   - opts *actor.SetStateOpts
-func (_e *MockClient_Expecter[T]) SetState(ctx interface{}, state interface{}, opts interface{}) *MockClient_SetState_Call[T] {
+func (_e *MockClient_Expecter[T]) SetState(ctx any, state any, opts any) *MockClient_SetState_Call[T] {
 	return &MockClient_SetState_Call[T]{Call: _e.mock.On("SetState", ctx, state, opts)}
 }
 

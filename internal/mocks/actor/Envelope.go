@@ -61,7 +61,7 @@ type MockEnvelope_Decode_Call struct {
 
 // Decode is a helper method to define mock.On call
 //   - into any
-func (_e *MockEnvelope_Expecter) Decode(into interface{}) *MockEnvelope_Decode_Call {
+func (_e *MockEnvelope_Expecter) Decode(into any) *MockEnvelope_Decode_Call {
 	return &MockEnvelope_Decode_Call{Call: _e.mock.On("Decode", into)}
 }
 

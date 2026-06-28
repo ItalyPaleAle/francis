@@ -63,7 +63,7 @@ type MockActorDeactivate_Deactivate_Call struct {
 
 // Deactivate is a helper method to define mock.On call
 //   - ctx context.Context
-func (_e *MockActorDeactivate_Expecter) Deactivate(ctx interface{}) *MockActorDeactivate_Deactivate_Call {
+func (_e *MockActorDeactivate_Expecter) Deactivate(ctx any) *MockActorDeactivate_Deactivate_Call {
 	return &MockActorDeactivate_Deactivate_Call{Call: _e.mock.On("Deactivate", ctx)}
 }
 

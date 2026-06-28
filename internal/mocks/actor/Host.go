@@ -68,7 +68,7 @@ type MockHost_CancelJob_Call struct {
 //   - actorType string
 //   - actorID string
 //   - jobID string
-func (_e *MockHost_Expecter) CancelJob(ctx interface{}, actorType interface{}, actorID interface{}, jobID interface{}) *MockHost_CancelJob_Call {
+func (_e *MockHost_Expecter) CancelJob(ctx any, actorType any, actorID any, jobID any) *MockHost_CancelJob_Call {
 	return &MockHost_CancelJob_Call{Call: _e.mock.On("CancelJob", ctx, actorType, actorID, jobID)}
 }
 
@@ -137,7 +137,7 @@ type MockHost_DeleteAlarm_Call struct {
 //   - actorType string
 //   - actorID string
 //   - name string
-func (_e *MockHost_Expecter) DeleteAlarm(ctx interface{}, actorType interface{}, actorID interface{}, name interface{}) *MockHost_DeleteAlarm_Call {
+func (_e *MockHost_Expecter) DeleteAlarm(ctx any, actorType any, actorID any, name any) *MockHost_DeleteAlarm_Call {
 	return &MockHost_DeleteAlarm_Call{Call: _e.mock.On("DeleteAlarm", ctx, actorType, actorID, name)}
 }
 
@@ -205,7 +205,7 @@ type MockHost_DeleteState_Call struct {
 //   - ctx context.Context
 //   - actorType string
 //   - actorID string
-func (_e *MockHost_Expecter) DeleteState(ctx interface{}, actorType interface{}, actorID interface{}) *MockHost_DeleteState_Call {
+func (_e *MockHost_Expecter) DeleteState(ctx any, actorType any, actorID any) *MockHost_DeleteState_Call {
 	return &MockHost_DeleteState_Call{Call: _e.mock.On("DeleteState", ctx, actorType, actorID)}
 }
 
@@ -280,7 +280,7 @@ type MockHost_Dispatch_Call struct {
 //   - method string
 //   - data any
 //   - properties actor.JobProperties
-func (_e *MockHost_Expecter) Dispatch(ctx interface{}, actorType interface{}, actorID interface{}, method interface{}, data interface{}, properties interface{}) *MockHost_Dispatch_Call {
+func (_e *MockHost_Expecter) Dispatch(ctx any, actorType any, actorID any, method any, data any, properties any) *MockHost_Dispatch_Call {
 	return &MockHost_Dispatch_Call{Call: _e.mock.On("Dispatch", ctx, actorType, actorID, method, data, properties)}
 }
 
@@ -368,7 +368,7 @@ type MockHost_GetAlarm_Call struct {
 //   - actorType string
 //   - actorID string
 //   - name string
-func (_e *MockHost_Expecter) GetAlarm(ctx interface{}, actorType interface{}, actorID interface{}, name interface{}) *MockHost_GetAlarm_Call {
+func (_e *MockHost_Expecter) GetAlarm(ctx any, actorType any, actorID any, name any) *MockHost_GetAlarm_Call {
 	return &MockHost_GetAlarm_Call{Call: _e.mock.On("GetAlarm", ctx, actorType, actorID, name)}
 }
 
@@ -444,7 +444,7 @@ type MockHost_GetJob_Call struct {
 // GetJob is a helper method to define mock.On call
 //   - ctx context.Context
 //   - jobID string
-func (_e *MockHost_Expecter) GetJob(ctx interface{}, jobID interface{}) *MockHost_GetJob_Call {
+func (_e *MockHost_Expecter) GetJob(ctx any, jobID any) *MockHost_GetJob_Call {
 	return &MockHost_GetJob_Call{Call: _e.mock.On("GetJob", ctx, jobID)}
 }
 
@@ -503,7 +503,7 @@ type MockHost_GetState_Call struct {
 //   - actorType string
 //   - actorID string
 //   - dest any
-func (_e *MockHost_Expecter) GetState(ctx interface{}, actorType interface{}, actorID interface{}, dest interface{}) *MockHost_GetState_Call {
+func (_e *MockHost_Expecter) GetState(ctx any, actorType any, actorID any, dest any) *MockHost_GetState_Call {
 	return &MockHost_GetState_Call{Call: _e.mock.On("GetState", ctx, actorType, actorID, dest)}
 }
 
@@ -570,7 +570,7 @@ type MockHost_Halt_Call struct {
 // Halt is a helper method to define mock.On call
 //   - actorType string
 //   - actorID string
-func (_e *MockHost_Expecter) Halt(actorType interface{}, actorID interface{}) *MockHost_Halt_Call {
+func (_e *MockHost_Expecter) Halt(actorType any, actorID any) *MockHost_Halt_Call {
 	return &MockHost_Halt_Call{Call: _e.mock.On("Halt", actorType, actorID)}
 }
 
@@ -660,7 +660,7 @@ type MockHost_HaltDeferred_Call struct {
 // HaltDeferred is a helper method to define mock.On call
 //   - actorType string
 //   - actorID string
-func (_e *MockHost_Expecter) HaltDeferred(actorType interface{}, actorID interface{}) *MockHost_HaltDeferred_Call {
+func (_e *MockHost_Expecter) HaltDeferred(actorType any, actorID any) *MockHost_HaltDeferred_Call {
 	return &MockHost_HaltDeferred_Call{Call: _e.mock.On("HaltDeferred", actorType, actorID)}
 }
 
@@ -695,11 +695,11 @@ func (_c *MockHost_HaltDeferred_Call) RunAndReturn(run func(actorType string, ac
 // Invoke provides a mock function for the type MockHost
 func (_mock *MockHost) Invoke(ctx context.Context, actorType string, actorID string, method string, data any, opts ...actor.InvokeOption) (actor.Envelope, error) {
 	// actor.InvokeOption
-	_va := make([]interface{}, len(opts))
+	_va := make([]any, len(opts))
 	for _i := range opts {
 		_va[_i] = opts[_i]
 	}
-	var _ca []interface{}
+	var _ca []any
 	_ca = append(_ca, ctx, actorType, actorID, method, data)
 	_ca = append(_ca, _va...)
 	ret := _mock.Called(_ca...)
@@ -740,9 +740,9 @@ type MockHost_Invoke_Call struct {
 //   - method string
 //   - data any
 //   - opts ...actor.InvokeOption
-func (_e *MockHost_Expecter) Invoke(ctx interface{}, actorType interface{}, actorID interface{}, method interface{}, data interface{}, opts ...interface{}) *MockHost_Invoke_Call {
+func (_e *MockHost_Expecter) Invoke(ctx any, actorType any, actorID any, method any, data any, opts ...any) *MockHost_Invoke_Call {
 	return &MockHost_Invoke_Call{Call: _e.mock.On("Invoke",
-		append([]interface{}{ctx, actorType, actorID, method, data}, opts...)...)}
+		append([]any{ctx, actorType, actorID, method, data}, opts...)...)}
 }
 
 func (_c *MockHost_Invoke_Call) Run(run func(ctx context.Context, actorType string, actorID string, method string, data any, opts ...actor.InvokeOption)) *MockHost_Invoke_Call {
@@ -800,11 +800,11 @@ func (_c *MockHost_Invoke_Call) RunAndReturn(run func(ctx context.Context, actor
 // InvokeStream provides a mock function for the type MockHost
 func (_mock *MockHost) InvokeStream(ctx context.Context, actorType string, actorID string, method string, reqContentType string, body io.Reader, opts ...actor.InvokeOption) (string, io.ReadCloser, error) {
 	// actor.InvokeOption
-	_va := make([]interface{}, len(opts))
+	_va := make([]any, len(opts))
 	for _i := range opts {
 		_va[_i] = opts[_i]
 	}
-	var _ca []interface{}
+	var _ca []any
 	_ca = append(_ca, ctx, actorType, actorID, method, reqContentType, body)
 	_ca = append(_ca, _va...)
 	ret := _mock.Called(_ca...)
@@ -852,9 +852,9 @@ type MockHost_InvokeStream_Call struct {
 //   - reqContentType string
 //   - body io.Reader
 //   - opts ...actor.InvokeOption
-func (_e *MockHost_Expecter) InvokeStream(ctx interface{}, actorType interface{}, actorID interface{}, method interface{}, reqContentType interface{}, body interface{}, opts ...interface{}) *MockHost_InvokeStream_Call {
+func (_e *MockHost_Expecter) InvokeStream(ctx any, actorType any, actorID any, method any, reqContentType any, body any, opts ...any) *MockHost_InvokeStream_Call {
 	return &MockHost_InvokeStream_Call{Call: _e.mock.On("InvokeStream",
-		append([]interface{}{ctx, actorType, actorID, method, reqContentType, body}, opts...)...)}
+		append([]any{ctx, actorType, actorID, method, reqContentType, body}, opts...)...)}
 }
 
 func (_c *MockHost_InvokeStream_Call) Run(run func(ctx context.Context, actorType string, actorID string, method string, reqContentType string, body io.Reader, opts ...actor.InvokeOption)) *MockHost_InvokeStream_Call {
@@ -951,7 +951,7 @@ type MockHost_ListJobs_Call struct {
 //   - ctx context.Context
 //   - actorType string
 //   - actorID string
-func (_e *MockHost_Expecter) ListJobs(ctx interface{}, actorType interface{}, actorID interface{}) *MockHost_ListJobs_Call {
+func (_e *MockHost_Expecter) ListJobs(ctx any, actorType any, actorID any) *MockHost_ListJobs_Call {
 	return &MockHost_ListJobs_Call{Call: _e.mock.On("ListJobs", ctx, actorType, actorID)}
 }
 
@@ -1022,7 +1022,7 @@ type MockHost_RetryJob_Call struct {
 // RetryJob is a helper method to define mock.On call
 //   - ctx context.Context
 //   - jobID string
-func (_e *MockHost_Expecter) RetryJob(ctx interface{}, jobID interface{}) *MockHost_RetryJob_Call {
+func (_e *MockHost_Expecter) RetryJob(ctx any, jobID any) *MockHost_RetryJob_Call {
 	return &MockHost_RetryJob_Call{Call: _e.mock.On("RetryJob", ctx, jobID)}
 }
 
@@ -1082,7 +1082,7 @@ type MockHost_SetAlarm_Call struct {
 //   - actorID string
 //   - name string
 //   - properties actor.AlarmProperties
-func (_e *MockHost_Expecter) SetAlarm(ctx interface{}, actorType interface{}, actorID interface{}, name interface{}, properties interface{}) *MockHost_SetAlarm_Call {
+func (_e *MockHost_Expecter) SetAlarm(ctx any, actorType any, actorID any, name any, properties any) *MockHost_SetAlarm_Call {
 	return &MockHost_SetAlarm_Call{Call: _e.mock.On("SetAlarm", ctx, actorType, actorID, name, properties)}
 }
 
@@ -1157,7 +1157,7 @@ type MockHost_SetState_Call struct {
 //   - actorID string
 //   - state any
 //   - opts *actor.SetStateOpts
-func (_e *MockHost_Expecter) SetState(ctx interface{}, actorType interface{}, actorID interface{}, state interface{}, opts interface{}) *MockHost_SetState_Call {
+func (_e *MockHost_Expecter) SetState(ctx any, actorType any, actorID any, state any, opts any) *MockHost_SetState_Call {
 	return &MockHost_SetState_Call{Call: _e.mock.On("SetState", ctx, actorType, actorID, state, opts)}
 }
 
