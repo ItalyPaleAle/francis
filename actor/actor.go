@@ -22,6 +22,21 @@ type ActorAlarm interface {
 	Alarm(ctx context.Context, name string, data Envelope) error
 }
 
+// ActorJob can be implemented by actors that receive dispatched jobs.
+type ActorJob interface {
+	// Job is invoked upon execution of a dispatched job.
+	// The parameter "method" identifies the job handler, and "data" is an envelope that allows decoding the associated input into a custom object.
+	// Returning ErrJobPermanentFailure skips the remaining retries and dead-letters the job immediately.
+	Job(ctx context.Context, method string, data Envelope) error
+}
+
+// ActorJobFailed can be implemented by actors that want a reaction after one of their jobs is dead-lettered.
+type ActorJobFailed interface {
+	// JobFailed is called best-effort after a job is recorded in the dead-letter store.
+	// It is never itself dead-lettered: the dead-letter record is the source of truth, and an error here is only logged.
+	JobFailed(ctx context.Context, jobID string, method string, data Envelope, jobErr error) error
+}
+
 // ActorDeactivate can be implemented by actors that offer the Deactivate method.
 type ActorDeactivate interface {
 	// Deactivate is invoked upon actor deactivation

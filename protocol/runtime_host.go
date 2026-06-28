@@ -20,6 +20,11 @@ type ExecuteAlarmRequest struct {
 	Attempts int `msgpack:"attempts,omitempty"`
 	// Data is the opaque data associated with the alarm
 	Data []byte `msgpack:"data,omitempty"`
+	// Kind discriminates a plain alarm from a job, telling the host whether to call Alarm or Job
+	// Empty means a plain alarm
+	Kind string `msgpack:"kind,omitempty"`
+	// JobMethod is the job handler method, set only for jobs
+	JobMethod string `msgpack:"jobMethod,omitempty"`
 }
 
 // ExecuteAlarmResponse is the host's response to ExecuteAlarmRequest
@@ -33,4 +38,17 @@ type ExecuteAlarmResponse struct {
 type TerminateActorRequest struct {
 	ActorType string `msgpack:"type"`
 	ActorID   string `msgpack:"id"`
+}
+
+// JobFailedRequest asks a host to run an actor's optional JobFailed hook after the runtime has dead-lettered a job
+// It is best-effort: the dead-letter record is already the source of truth, so the host acknowledges regardless of the hook's outcome
+type JobFailedRequest struct {
+	ActorType string `msgpack:"type"`
+	ActorID   string `msgpack:"id"`
+	JobID     string `msgpack:"jobId"`
+	Method    string `msgpack:"method"`
+	// Data is the opaque, MessagePack-encoded job input
+	Data []byte `msgpack:"data,omitempty"`
+	// ErrorMessage is the failure that caused the dead-lettering
+	ErrorMessage string `msgpack:"errorMessage,omitempty"`
 }

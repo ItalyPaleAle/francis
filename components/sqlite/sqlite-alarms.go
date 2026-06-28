@@ -22,14 +22,17 @@ func (s *SQLiteProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res co
 	defer cancel()
 
 	var (
-		dueTime  int64
-		interval *string
-		ttlTime  *int64
+		dueTime   int64
+		interval  *string
+		cron      *string
+		jobMethod *string
+		kind      string
+		ttlTime   *int64
 	)
 	err = s.db.
 		QueryRowContext(queryCtx, `
 			SELECT
-				alarm_due_time, alarm_interval, alarm_data, alarm_ttl_time
+				alarm_due_time, alarm_interval, alarm_cron, alarm_data, alarm_ttl_time, alarm_kind, job_method
 			FROM alarms
 			WHERE
 				actor_type = ?
@@ -37,7 +40,7 @@ func (s *SQLiteProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res co
 				AND alarm_name = ?`,
 			req.ActorType, req.ActorID, req.Name,
 		).
-		Scan(&dueTime, &interval, &res.Data, &ttlTime)
+		Scan(&dueTime, &interval, &cron, &res.Data, &ttlTime, &kind, &jobMethod)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		return res, components.ErrNoAlarm
@@ -48,6 +51,13 @@ func (s *SQLiteProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res co
 	res.DueTime = time.UnixMilli(dueTime)
 	if interval != nil {
 		res.Interval = *interval
+	}
+	if cron != nil {
+		res.Cron = *cron
+	}
+	res.Kind = components.AlarmKind(kind)
+	if jobMethod != nil {
+		res.JobMethod = *jobMethod
 	}
 	if ttlTime != nil {
 		res.TTL = new(time.UnixMilli(*ttlTime))
@@ -160,15 +170,18 @@ func (s *SQLiteProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmLea
 	defer cancel()
 
 	var (
-		dueTime  int64
-		interval *string
-		ttlTime  *int64
+		dueTime   int64
+		interval  *string
+		cron      *string
+		jobMethod *string
+		kind      string
+		ttlTime   *int64
 	)
 	err = s.db.
 		QueryRowContext(queryCtx, `
 			SELECT
 				actor_type, actor_id, alarm_name, alarm_data,
-				alarm_due_time, alarm_interval, alarm_ttl_time
+				alarm_due_time, alarm_interval, alarm_cron, alarm_ttl_time, alarm_kind, job_method
 			FROM alarms
 			WHERE
 				alarm_id = ?
@@ -179,7 +192,7 @@ func (s *SQLiteProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmLea
 		).
 		Scan(
 			&res.ActorType, &res.ActorID, &res.Name, &res.Data,
-			&dueTime, &interval, &ttlTime,
+			&dueTime, &interval, &cron, &ttlTime, &kind, &jobMethod,
 		)
 
 	if errors.Is(err, sql.ErrNoRows) {
@@ -191,6 +204,13 @@ func (s *SQLiteProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmLea
 	res.DueTime = time.UnixMilli(dueTime)
 	if interval != nil {
 		res.Interval = *interval
+	}
+	if cron != nil {
+		res.Cron = *cron
+	}
+	res.Kind = components.AlarmKind(kind)
+	if jobMethod != nil {
+		res.JobMethod = *jobMethod
 	}
 	if ttlTime != nil {
 		res.TTL = new(time.UnixMilli(*ttlTime))

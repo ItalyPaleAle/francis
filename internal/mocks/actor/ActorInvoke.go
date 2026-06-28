@@ -9,6 +9,7 @@ package actor_mocks
 import (
 	"context"
 
+	"github.com/italypaleale/francis/actor"
 	mock "github.com/stretchr/testify/mock"
 )
 
@@ -40,7 +41,7 @@ func (_m *MockActorInvoke) EXPECT() *MockActorInvoke_Expecter {
 }
 
 // Invoke provides a mock function for the type MockActorInvoke
-func (_mock *MockActorInvoke) Invoke(ctx context.Context, method string, data any) (any, error) {
+func (_mock *MockActorInvoke) Invoke(ctx context.Context, method string, data actor.Envelope) (any, error) {
 	ret := _mock.Called(ctx, method, data)
 
 	if len(ret) == 0 {
@@ -49,17 +50,17 @@ func (_mock *MockActorInvoke) Invoke(ctx context.Context, method string, data an
 
 	var r0 any
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string, any) (any, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, actor.Envelope) (any, error)); ok {
 		return returnFunc(ctx, method, data)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string, any) any); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, actor.Envelope) any); ok {
 		r0 = returnFunc(ctx, method, data)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(any)
 		}
 	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, string, any) error); ok {
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, actor.Envelope) error); ok {
 		r1 = returnFunc(ctx, method, data)
 	} else {
 		r1 = ret.Error(1)
@@ -75,12 +76,12 @@ type MockActorInvoke_Invoke_Call struct {
 // Invoke is a helper method to define mock.On call
 //   - ctx context.Context
 //   - method string
-//   - data any
+//   - data actor.Envelope
 func (_e *MockActorInvoke_Expecter) Invoke(ctx interface{}, method interface{}, data interface{}) *MockActorInvoke_Invoke_Call {
 	return &MockActorInvoke_Invoke_Call{Call: _e.mock.On("Invoke", ctx, method, data)}
 }
 
-func (_c *MockActorInvoke_Invoke_Call) Run(run func(ctx context.Context, method string, data any)) *MockActorInvoke_Invoke_Call {
+func (_c *MockActorInvoke_Invoke_Call) Run(run func(ctx context.Context, method string, data actor.Envelope)) *MockActorInvoke_Invoke_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -90,9 +91,9 @@ func (_c *MockActorInvoke_Invoke_Call) Run(run func(ctx context.Context, method 
 		if args[1] != nil {
 			arg1 = args[1].(string)
 		}
-		var arg2 any
+		var arg2 actor.Envelope
 		if args[2] != nil {
-			arg2 = args[2].(any)
+			arg2 = args[2].(actor.Envelope)
 		}
 		run(
 			arg0,
@@ -108,7 +109,7 @@ func (_c *MockActorInvoke_Invoke_Call) Return(v any, err error) *MockActorInvoke
 	return _c
 }
 
-func (_c *MockActorInvoke_Invoke_Call) RunAndReturn(run func(ctx context.Context, method string, data any) (any, error)) *MockActorInvoke_Invoke_Call {
+func (_c *MockActorInvoke_Invoke_Call) RunAndReturn(run func(ctx context.Context, method string, data actor.Envelope) (any, error)) *MockActorInvoke_Invoke_Call {
 	_c.Call.Return(run)
 	return _c
 }

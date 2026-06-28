@@ -40,6 +40,63 @@ func (_m *MockClient[T]) EXPECT() *MockClient_Expecter[T] {
 	return &MockClient_Expecter[T]{mock: &_m.Mock}
 }
 
+// CancelJob provides a mock function for the type MockClient
+func (_mock *MockClient[T]) CancelJob(ctx context.Context, jobID string) error {
+	ret := _mock.Called(ctx, jobID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CancelJob")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) error); ok {
+		r0 = returnFunc(ctx, jobID)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockClient_CancelJob_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CancelJob'
+type MockClient_CancelJob_Call[T any] struct {
+	*mock.Call
+}
+
+// CancelJob is a helper method to define mock.On call
+//   - ctx context.Context
+//   - jobID string
+func (_e *MockClient_Expecter[T]) CancelJob(ctx interface{}, jobID interface{}) *MockClient_CancelJob_Call[T] {
+	return &MockClient_CancelJob_Call[T]{Call: _e.mock.On("CancelJob", ctx, jobID)}
+}
+
+func (_c *MockClient_CancelJob_Call[T]) Run(run func(ctx context.Context, jobID string)) *MockClient_CancelJob_Call[T] {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockClient_CancelJob_Call[T]) Return(err error) *MockClient_CancelJob_Call[T] {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockClient_CancelJob_Call[T]) RunAndReturn(run func(ctx context.Context, jobID string) error) *MockClient_CancelJob_Call[T] {
+	_c.Call.Return(run)
+	return _c
+}
+
 // DeleteAlarm provides a mock function for the type MockClient
 func (_mock *MockClient[T]) DeleteAlarm(ctx context.Context, alarmName string) error {
 	ret := _mock.Called(ctx, alarmName)
@@ -148,6 +205,163 @@ func (_c *MockClient_DeleteState_Call[T]) RunAndReturn(run func(ctx context.Cont
 	return _c
 }
 
+// Dispatch provides a mock function for the type MockClient
+func (_mock *MockClient[T]) Dispatch(ctx context.Context, method string, input any, opts ...actor.JobOption) (string, error) {
+	// actor.JobOption
+	_va := make([]interface{}, len(opts))
+	for _i := range opts {
+		_va[_i] = opts[_i]
+	}
+	var _ca []interface{}
+	_ca = append(_ca, ctx, method, input)
+	_ca = append(_ca, _va...)
+	ret := _mock.Called(_ca...)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Dispatch")
+	}
+
+	var r0 string
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, any, ...actor.JobOption) (string, error)); ok {
+		return returnFunc(ctx, method, input, opts...)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, any, ...actor.JobOption) string); ok {
+		r0 = returnFunc(ctx, method, input, opts...)
+	} else {
+		r0 = ret.Get(0).(string)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, any, ...actor.JobOption) error); ok {
+		r1 = returnFunc(ctx, method, input, opts...)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockClient_Dispatch_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Dispatch'
+type MockClient_Dispatch_Call[T any] struct {
+	*mock.Call
+}
+
+// Dispatch is a helper method to define mock.On call
+//   - ctx context.Context
+//   - method string
+//   - input any
+//   - opts ...actor.JobOption
+func (_e *MockClient_Expecter[T]) Dispatch(ctx interface{}, method interface{}, input interface{}, opts ...interface{}) *MockClient_Dispatch_Call[T] {
+	return &MockClient_Dispatch_Call[T]{Call: _e.mock.On("Dispatch",
+		append([]interface{}{ctx, method, input}, opts...)...)}
+}
+
+func (_c *MockClient_Dispatch_Call[T]) Run(run func(ctx context.Context, method string, input any, opts ...actor.JobOption)) *MockClient_Dispatch_Call[T] {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		var arg2 any
+		if args[2] != nil {
+			arg2 = args[2].(any)
+		}
+		var arg3 []actor.JobOption
+		variadicArgs := make([]actor.JobOption, len(args)-3)
+		for i, a := range args[3:] {
+			if a != nil {
+				variadicArgs[i] = a.(actor.JobOption)
+			}
+		}
+		arg3 = variadicArgs
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3...,
+		)
+	})
+	return _c
+}
+
+func (_c *MockClient_Dispatch_Call[T]) Return(jobID string, err error) *MockClient_Dispatch_Call[T] {
+	_c.Call.Return(jobID, err)
+	return _c
+}
+
+func (_c *MockClient_Dispatch_Call[T]) RunAndReturn(run func(ctx context.Context, method string, input any, opts ...actor.JobOption) (string, error)) *MockClient_Dispatch_Call[T] {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetJob provides a mock function for the type MockClient
+func (_mock *MockClient[T]) GetJob(ctx context.Context, jobID string) (actor.JobInfo, error) {
+	ret := _mock.Called(ctx, jobID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetJob")
+	}
+
+	var r0 actor.JobInfo
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) (actor.JobInfo, error)); ok {
+		return returnFunc(ctx, jobID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) actor.JobInfo); ok {
+		r0 = returnFunc(ctx, jobID)
+	} else {
+		r0 = ret.Get(0).(actor.JobInfo)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = returnFunc(ctx, jobID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockClient_GetJob_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetJob'
+type MockClient_GetJob_Call[T any] struct {
+	*mock.Call
+}
+
+// GetJob is a helper method to define mock.On call
+//   - ctx context.Context
+//   - jobID string
+func (_e *MockClient_Expecter[T]) GetJob(ctx interface{}, jobID interface{}) *MockClient_GetJob_Call[T] {
+	return &MockClient_GetJob_Call[T]{Call: _e.mock.On("GetJob", ctx, jobID)}
+}
+
+func (_c *MockClient_GetJob_Call[T]) Run(run func(ctx context.Context, jobID string)) *MockClient_GetJob_Call[T] {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockClient_GetJob_Call[T]) Return(jobInfo actor.JobInfo, err error) *MockClient_GetJob_Call[T] {
+	_c.Call.Return(jobInfo, err)
+	return _c
+}
+
+func (_c *MockClient_GetJob_Call[T]) RunAndReturn(run func(ctx context.Context, jobID string) (actor.JobInfo, error)) *MockClient_GetJob_Call[T] {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetState provides a mock function for the type MockClient
 func (_mock *MockClient[T]) GetState(ctx context.Context) (T, error) {
 	ret := _mock.Called(ctx)
@@ -206,6 +420,167 @@ func (_c *MockClient_GetState_Call[T]) Return(state T, err error) *MockClient_Ge
 }
 
 func (_c *MockClient_GetState_Call[T]) RunAndReturn(run func(ctx context.Context) (T, error)) *MockClient_GetState_Call[T] {
+	_c.Call.Return(run)
+	return _c
+}
+
+// Halt provides a mock function for the type MockClient
+func (_mock *MockClient[T]) Halt() {
+	_mock.Called()
+	return
+}
+
+// MockClient_Halt_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Halt'
+type MockClient_Halt_Call[T any] struct {
+	*mock.Call
+}
+
+// Halt is a helper method to define mock.On call
+func (_e *MockClient_Expecter[T]) Halt() *MockClient_Halt_Call[T] {
+	return &MockClient_Halt_Call[T]{Call: _e.mock.On("Halt")}
+}
+
+func (_c *MockClient_Halt_Call[T]) Run(run func()) *MockClient_Halt_Call[T] {
+	_c.Call.Run(func(args mock.Arguments) {
+		run()
+	})
+	return _c
+}
+
+func (_c *MockClient_Halt_Call[T]) Return() *MockClient_Halt_Call[T] {
+	_c.Call.Return()
+	return _c
+}
+
+func (_c *MockClient_Halt_Call[T]) RunAndReturn(run func()) *MockClient_Halt_Call[T] {
+	_c.Run(run)
+	return _c
+}
+
+// ListJobs provides a mock function for the type MockClient
+func (_mock *MockClient[T]) ListJobs(ctx context.Context) ([]actor.JobInfo, error) {
+	ret := _mock.Called(ctx)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListJobs")
+	}
+
+	var r0 []actor.JobInfo
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context) ([]actor.JobInfo, error)); ok {
+		return returnFunc(ctx)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context) []actor.JobInfo); ok {
+		r0 = returnFunc(ctx)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]actor.JobInfo)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context) error); ok {
+		r1 = returnFunc(ctx)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockClient_ListJobs_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListJobs'
+type MockClient_ListJobs_Call[T any] struct {
+	*mock.Call
+}
+
+// ListJobs is a helper method to define mock.On call
+//   - ctx context.Context
+func (_e *MockClient_Expecter[T]) ListJobs(ctx interface{}) *MockClient_ListJobs_Call[T] {
+	return &MockClient_ListJobs_Call[T]{Call: _e.mock.On("ListJobs", ctx)}
+}
+
+func (_c *MockClient_ListJobs_Call[T]) Run(run func(ctx context.Context)) *MockClient_ListJobs_Call[T] {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockClient_ListJobs_Call[T]) Return(jobInfos []actor.JobInfo, err error) *MockClient_ListJobs_Call[T] {
+	_c.Call.Return(jobInfos, err)
+	return _c
+}
+
+func (_c *MockClient_ListJobs_Call[T]) RunAndReturn(run func(ctx context.Context) ([]actor.JobInfo, error)) *MockClient_ListJobs_Call[T] {
+	_c.Call.Return(run)
+	return _c
+}
+
+// RetryJob provides a mock function for the type MockClient
+func (_mock *MockClient[T]) RetryJob(ctx context.Context, jobID string) (string, error) {
+	ret := _mock.Called(ctx, jobID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for RetryJob")
+	}
+
+	var r0 string
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) (string, error)); ok {
+		return returnFunc(ctx, jobID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) string); ok {
+		r0 = returnFunc(ctx, jobID)
+	} else {
+		r0 = ret.Get(0).(string)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = returnFunc(ctx, jobID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockClient_RetryJob_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'RetryJob'
+type MockClient_RetryJob_Call[T any] struct {
+	*mock.Call
+}
+
+// RetryJob is a helper method to define mock.On call
+//   - ctx context.Context
+//   - jobID string
+func (_e *MockClient_Expecter[T]) RetryJob(ctx interface{}, jobID interface{}) *MockClient_RetryJob_Call[T] {
+	return &MockClient_RetryJob_Call[T]{Call: _e.mock.On("RetryJob", ctx, jobID)}
+}
+
+func (_c *MockClient_RetryJob_Call[T]) Run(run func(ctx context.Context, jobID string)) *MockClient_RetryJob_Call[T] {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockClient_RetryJob_Call[T]) Return(newJobID string, err error) *MockClient_RetryJob_Call[T] {
+	_c.Call.Return(newJobID, err)
+	return _c
+}
+
+func (_c *MockClient_RetryJob_Call[T]) RunAndReturn(run func(ctx context.Context, jobID string) (string, error)) *MockClient_RetryJob_Call[T] {
 	_c.Call.Return(run)
 	return _c
 }
@@ -274,16 +649,16 @@ func (_c *MockClient_SetAlarm_Call[T]) RunAndReturn(run func(ctx context.Context
 }
 
 // SetState provides a mock function for the type MockClient
-func (_mock *MockClient[T]) SetState(ctx context.Context, state T) error {
-	ret := _mock.Called(ctx, state)
+func (_mock *MockClient[T]) SetState(ctx context.Context, state T, opts *actor.SetStateOpts) error {
+	ret := _mock.Called(ctx, state, opts)
 
 	if len(ret) == 0 {
 		panic("no return value specified for SetState")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, T) error); ok {
-		r0 = returnFunc(ctx, state)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, T, *actor.SetStateOpts) error); ok {
+		r0 = returnFunc(ctx, state, opts)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -298,11 +673,12 @@ type MockClient_SetState_Call[T any] struct {
 // SetState is a helper method to define mock.On call
 //   - ctx context.Context
 //   - state T
-func (_e *MockClient_Expecter[T]) SetState(ctx interface{}, state interface{}) *MockClient_SetState_Call[T] {
-	return &MockClient_SetState_Call[T]{Call: _e.mock.On("SetState", ctx, state)}
+//   - opts *actor.SetStateOpts
+func (_e *MockClient_Expecter[T]) SetState(ctx interface{}, state interface{}, opts interface{}) *MockClient_SetState_Call[T] {
+	return &MockClient_SetState_Call[T]{Call: _e.mock.On("SetState", ctx, state, opts)}
 }
 
-func (_c *MockClient_SetState_Call[T]) Run(run func(ctx context.Context, state T)) *MockClient_SetState_Call[T] {
+func (_c *MockClient_SetState_Call[T]) Run(run func(ctx context.Context, state T, opts *actor.SetStateOpts)) *MockClient_SetState_Call[T] {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -312,9 +688,14 @@ func (_c *MockClient_SetState_Call[T]) Run(run func(ctx context.Context, state T
 		if args[1] != nil {
 			arg1 = args[1].(T)
 		}
+		var arg2 *actor.SetStateOpts
+		if args[2] != nil {
+			arg2 = args[2].(*actor.SetStateOpts)
+		}
 		run(
 			arg0,
 			arg1,
+			arg2,
 		)
 	})
 	return _c
@@ -325,7 +706,7 @@ func (_c *MockClient_SetState_Call[T]) Return(err error) *MockClient_SetState_Ca
 	return _c
 }
 
-func (_c *MockClient_SetState_Call[T]) RunAndReturn(run func(ctx context.Context, state T) error) *MockClient_SetState_Call[T] {
+func (_c *MockClient_SetState_Call[T]) RunAndReturn(run func(ctx context.Context, state T, opts *actor.SetStateOpts) error) *MockClient_SetState_Call[T] {
 	_c.Call.Return(run)
 	return _c
 }

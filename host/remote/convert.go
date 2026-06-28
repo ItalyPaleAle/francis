@@ -60,6 +60,63 @@ func protocolAlarmPropsToActor(p protocol.AlarmProperties) (actor.AlarmPropertie
 	return o, nil
 }
 
+// actorJobPropsToProtocol converts the public job properties into the wire DTO, resolving the due time against the given clock and encoding the input as MessagePack
+func actorJobPropsToProtocol(p actor.JobProperties, input any, now time.Time) (protocol.JobProperties, error) {
+	out := protocol.JobProperties{
+		DueTimeUnixMs: p.EffectiveDueTime(now).UnixMilli(),
+		Interval:      p.Interval,
+		Cron:          p.Cron,
+	}
+
+	if input != nil {
+		data, err := msgpack.Marshal(input)
+		if err != nil {
+			return protocol.JobProperties{}, fmt.Errorf("failed to serialize data using msgpack: %w", err)
+		}
+		out.Data = data
+	}
+
+	if !p.TTL.IsZero() {
+		out.TTLUnixMs = p.TTL.UnixMilli()
+	}
+
+	return out, nil
+}
+
+// protocolJobStatusToActor maps the wire integer status to the public actor job status
+func protocolJobStatusToActor(s int) actor.JobStatus {
+	switch s {
+	case 1:
+		return actor.JobStatusActive
+	case 2:
+		return actor.JobStatusDeadLettered
+	default:
+		return actor.JobStatusPending
+	}
+}
+
+// protocolJobInfoToActor converts a wire JobInfo DTO to the public actor JobInfo
+func protocolJobInfoToActor(j protocol.JobInfo) actor.JobInfo {
+	out := actor.JobInfo{
+		JobID:     j.JobID,
+		ActorType: j.ActorType,
+		ActorID:   j.ActorID,
+		Method:    j.Method,
+		Status:    protocolJobStatusToActor(j.Status),
+		Interval:  j.Interval,
+		Cron:      j.Cron,
+		Attempts:  j.Attempts,
+		LastError: j.LastError,
+	}
+	if j.DueTimeUnixMs > 0 {
+		out.DueTime = time.UnixMilli(j.DueTimeUnixMs)
+	}
+	if j.CreatedAtUnixMs > 0 {
+		out.CreatedAt = time.UnixMilli(j.CreatedAtUnixMs)
+	}
+	return out
+}
+
 // actorAlarmPropsToProtocol converts the public actor properties into the wire DTO sent to the runtime
 func actorAlarmPropsToProtocol(o actor.AlarmProperties) (protocol.AlarmProperties, error) {
 	p := protocol.AlarmProperties{

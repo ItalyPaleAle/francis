@@ -5,7 +5,7 @@ weight: 26
 
 An **alarm** is a durable, scheduled callback attached to an actor. When an alarm is triggered, Francis activates the actor (if it isn't already) and calls its `Alarm` method. Alarms are stored in the database, so they survive process restarts and are delivered even if the actor was idle at the scheduled time.
 
-Alarms are how you run work later: retries, timeouts, reminders, periodic maintenance, scheduled jobs, and so on.
+Alarms are how you run work later: retries, timeouts, reminders, periodic maintenance, and so on.
 
 ## Receiving alarms
 

@@ -42,6 +42,7 @@ type Provider struct {
 	ActiveActors   map[ActorKey]*ActiveActor   // actor_type/actor_id -> active actor
 	Alarms         map[AlarmKey]*Alarm         // actor_type/actor_id/alarm_name -> alarm
 	AlarmsByID     map[string]*Alarm           // alarm_id -> alarm
+	DeadJobs       map[string]*DeadJob         // job_id -> dead job
 	ActorState     map[ActorKey]*StateEntry    // actor_type/actor_id -> state
 }
 
@@ -98,6 +99,7 @@ func NewProvider(log *slog.Logger, opts ProviderOptions, providerConfig componen
 		ActiveActors:   make(map[ActorKey]*ActiveActor),
 		Alarms:         make(map[AlarmKey]*Alarm),
 		AlarmsByID:     make(map[string]*Alarm),
+		DeadJobs:       make(map[string]*DeadJob),
 		ActorState:     make(map[ActorKey]*StateEntry),
 	}
 

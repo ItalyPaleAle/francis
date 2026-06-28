@@ -64,7 +64,7 @@ func TestDispatchAlarmCompleted(t *testing.T) {
 		return env.ReplyWith(protocol.KindExecuteAlarmResponse, protocol.ExecuteAlarmResponse{ExecutionTimeUnixMs: time.Now().UnixMilli()})
 	}
 
-	status, err := rt.dispatchAlarm(t.Context(), lease)
+	status, err := rt.dispatchAlarm(t.Context(), lease, &jobExecInfo{})
 	require.NoError(t, err)
 	assert.Equal(t, executeAlarmStatusCompleted, status)
 	assert.Equal(t, "T", gotReq.ActorType)
@@ -85,12 +85,12 @@ func TestDispatchAlarmRetryableThenFatal(t *testing.T) {
 	}
 
 	// First failures are retryable while attempts are below the max
-	status, _ := rt.dispatchAlarm(t.Context(), lease)
+	status, _ := rt.dispatchAlarm(t.Context(), lease, &jobExecInfo{})
 	assert.Equal(t, executeAlarmStatusRetryable, status)
 
 	// Once attempts reach the max, the same error becomes fatal
 	lease.IncreaseAttempts(time.Now())
-	status, _ = rt.dispatchAlarm(t.Context(), lease)
+	status, _ = rt.dispatchAlarm(t.Context(), lease, &jobExecInfo{})
 	assert.Equal(t, executeAlarmStatusFatal, status)
 }
 
@@ -106,7 +106,7 @@ func TestDispatchAlarmFatalUnsupportedType(t *testing.T) {
 	}
 
 	// An unsupported actor type can never succeed, so it is fatal regardless of remaining attempts
-	status, _ := rt.dispatchAlarm(t.Context(), lease)
+	status, _ := rt.dispatchAlarm(t.Context(), lease, &jobExecInfo{})
 	assert.Equal(t, executeAlarmStatusFatal, status)
 }
 
@@ -121,7 +121,7 @@ func TestDispatchAlarmTransportErrorIsRetryable(t *testing.T) {
 		return nil, errors.New("stream broke")
 	}
 
-	status, err := rt.dispatchAlarm(t.Context(), lease)
+	status, err := rt.dispatchAlarm(t.Context(), lease, &jobExecInfo{})
 	require.Error(t, err)
 	assert.Equal(t, executeAlarmStatusRetryable, status)
 }
@@ -142,7 +142,7 @@ func TestDispatchAlarmAbandonedWhenHostNotConnected(t *testing.T) {
 		return nil, nil
 	}
 
-	status, err := rt.dispatchAlarm(t.Context(), lease)
+	status, err := rt.dispatchAlarm(t.Context(), lease, &jobExecInfo{})
 	require.NoError(t, err)
 	assert.Equal(t, executeAlarmStatusAbandoned, status)
 	assert.False(t, called, "must not dispatch to a host that is no longer connected")
@@ -158,7 +158,7 @@ func TestDispatchAlarmAbandonedWhenActorNotActive(t *testing.T) {
 	// The actor is no longer active, so an active-only lookup finds nothing
 	require.NoError(t, prov.RemoveActor(t.Context(), ref.NewActorRef("T", "a1")))
 
-	status, err := rt.dispatchAlarm(t.Context(), lease)
+	status, err := rt.dispatchAlarm(t.Context(), lease, &jobExecInfo{})
 	require.NoError(t, err)
 	assert.Equal(t, executeAlarmStatusAbandoned, status)
 }
@@ -180,7 +180,7 @@ func TestDispatchAlarmAbandonedWhenHostDraining(t *testing.T) {
 		return nil, nil
 	}
 
-	status, err := rt.dispatchAlarm(t.Context(), lease)
+	status, err := rt.dispatchAlarm(t.Context(), lease, &jobExecInfo{})
 	require.NoError(t, err)
 	assert.Equal(t, executeAlarmStatusAbandoned, status)
 	assert.False(t, called, "an alarm must not be dispatched to a draining host")
@@ -462,7 +462,7 @@ func TestDispatchAlarmHostTimeoutRetryable(t *testing.T) {
 	}
 
 	start := time.Now()
-	status, err := rt.dispatchAlarm(t.Context(), lease)
+	status, err := rt.dispatchAlarm(t.Context(), lease, &jobExecInfo{})
 	elapsed := time.Since(start)
 	require.Error(t, err)
 	assert.Equal(t, executeAlarmStatusRetryable, status)

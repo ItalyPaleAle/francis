@@ -220,6 +220,7 @@ func newHost(options *newHostOptions) (*Host, error) {
 		handlers: runtimeHandlers{
 			executeAlarm:   h.executeAlarm,
 			terminateActor: h.terminateActor,
+			jobFailed:      h.jobFailed,
 		},
 	})
 

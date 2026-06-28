@@ -13,3 +13,12 @@ test-integration:
 .PHONY: lint
 lint:
 	golangci-lint run
+
+# Keep this in sync with the version recorded in .mockery.yml
+MOCKERY_VERSION ?= v3.5.4
+
+# Regenerate the mocks in internal/mocks from the interfaces listed in .mockery.yml
+# Run this after changing any mocked interface (for example actor.Host or components.ActorProvider)
+.PHONY: mocks
+mocks:
+	go run github.com/vektra/mockery/v3@$(MOCKERY_VERSION)

@@ -19,6 +19,16 @@ type Client[T any] interface {
 	SetAlarm(ctx context.Context, alarmName string, properties AlarmProperties) error
 	// DeleteAlarm deletes an alarm.
 	DeleteAlarm(ctx context.Context, alarmName string) error
+	// Dispatch sends a durable, fire-and-forget job to the current actor.
+	Dispatch(ctx context.Context, method string, input any, opts ...JobOption) (jobID string, err error)
+	// GetJob returns the information for a job by its ID, spanning both live and dead-lettered jobs.
+	GetJob(ctx context.Context, jobID string) (JobInfo, error)
+	// ListJobs returns all live and dead-lettered jobs for the current actor.
+	ListJobs(ctx context.Context) ([]JobInfo, error)
+	// CancelJob cancels a live job for the current actor.
+	CancelJob(ctx context.Context, jobID string) error
+	// RetryJob re-dispatches a dead-lettered job and returns the new job ID.
+	RetryJob(ctx context.Context, jobID string) (newJobID string, err error)
 	// Halt the current actor upon returning.
 	Halt()
 }
@@ -96,6 +106,31 @@ func (c *client[T]) SetAlarm(ctx context.Context, alarmName string, properties A
 // DeleteAlarm deletes an alarm.
 func (c *client[T]) DeleteAlarm(ctx context.Context, alarmName string) error {
 	return c.service.DeleteAlarm(ctx, c.actorType, c.actorID, alarmName)
+}
+
+// Dispatch sends a durable, fire-and-forget job to the current actor.
+func (c *client[T]) Dispatch(ctx context.Context, method string, input any, opts ...JobOption) (jobID string, err error) {
+	return c.service.Dispatch(ctx, c.actorType, c.actorID, method, input, opts...)
+}
+
+// GetJob returns the information for a job by its ID, spanning both live and dead-lettered jobs.
+func (c *client[T]) GetJob(ctx context.Context, jobID string) (JobInfo, error) {
+	return c.service.GetJob(ctx, jobID)
+}
+
+// ListJobs returns all live and dead-lettered jobs for the current actor.
+func (c *client[T]) ListJobs(ctx context.Context) ([]JobInfo, error) {
+	return c.service.ListJobs(ctx, c.actorType, c.actorID)
+}
+
+// CancelJob cancels a live job for the current actor.
+func (c *client[T]) CancelJob(ctx context.Context, jobID string) error {
+	return c.service.CancelJob(ctx, c.actorType, c.actorID, jobID)
+}
+
+// RetryJob re-dispatches a dead-lettered job and returns the new job ID.
+func (c *client[T]) RetryJob(ctx context.Context, jobID string) (newJobID string, err error) {
+	return c.service.RetryJob(ctx, jobID)
 }
 
 // Halt the current actor upon returning.

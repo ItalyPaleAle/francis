@@ -200,6 +200,88 @@ type DeleteAlarmRequest struct {
 	AlarmRef
 }
 
+// JobProperties carries the resolved scheduling properties of a dispatched job
+type JobProperties struct {
+	// DueTimeUnixMs is the absolute first-run time in Unix milliseconds
+	DueTimeUnixMs int64 `msgpack:"due,omitempty"`
+	// Interval is the repetition interval as an ISO8601-formatted duration string
+	Interval string `msgpack:"interval,omitempty"`
+	// TTLUnixMs is the absolute deadline for repeating jobs in Unix milliseconds
+	TTLUnixMs int64 `msgpack:"ttl,omitempty"`
+	// Cron is a standard cron expression for repeating jobs
+	Cron string `msgpack:"cron,omitempty"`
+	// Data is the opaque, MessagePack-encoded job input
+	Data []byte `msgpack:"data,omitempty"`
+}
+
+// JobInfo carries the properties of a job over the wire
+type JobInfo struct {
+	JobID     string `msgpack:"jobId"`
+	ActorType string `msgpack:"type"`
+	ActorID   string `msgpack:"id"`
+	Method    string `msgpack:"method"`
+	// Status is the job lifecycle stage: 0 pending, 1 active, 2 dead-lettered
+	Status          int    `msgpack:"status"`
+	DueTimeUnixMs   int64  `msgpack:"due,omitempty"`
+	Interval        string `msgpack:"interval,omitempty"`
+	Cron            string `msgpack:"cron,omitempty"`
+	Attempts        int    `msgpack:"attempts,omitempty"`
+	LastError       string `msgpack:"lastError,omitempty"`
+	CreatedAtUnixMs int64  `msgpack:"createdAt,omitempty"`
+}
+
+// DispatchJobRequest creates a job, with the alarm name resolved by the host (idempotency key or a random name)
+type DispatchJobRequest struct {
+	JobProperties
+
+	ActorType string `msgpack:"type"`
+	ActorID   string `msgpack:"id"`
+	Method    string `msgpack:"method"`
+	Name      string `msgpack:"name"`
+}
+
+// DispatchJobResponse carries the server-issued job ID
+type DispatchJobResponse struct {
+	JobID string `msgpack:"jobId"`
+}
+
+// GetJobRequest retrieves a job by ID
+type GetJobRequest struct {
+	JobID string `msgpack:"jobId"`
+}
+
+// GetJobResponse carries a retrieved job
+type GetJobResponse struct {
+	JobInfo
+}
+
+// ListJobsRequest lists the jobs for an actor
+type ListJobsRequest struct {
+	ActorRef
+}
+
+// ListJobsResponse carries the jobs for an actor
+type ListJobsResponse struct {
+	Jobs []JobInfo `msgpack:"jobs,omitempty"`
+}
+
+// CancelJobRequest cancels a live job for an actor
+type CancelJobRequest struct {
+	ActorType string `msgpack:"type"`
+	ActorID   string `msgpack:"id"`
+	JobID     string `msgpack:"jobId"`
+}
+
+// RetryJobRequest re-dispatches a dead-lettered job
+type RetryJobRequest struct {
+	JobID string `msgpack:"jobId"`
+}
+
+// RetryJobResponse carries the ID of the newly dispatched job
+type RetryJobResponse struct {
+	JobID string `msgpack:"jobId"`
+}
+
 // GetStateRequest retrieves the persistent state of an actor
 type GetStateRequest struct {
 	ActorRef

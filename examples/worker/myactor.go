@@ -72,6 +72,16 @@ func (m *MyActor) Invoke(ctx context.Context, method string, data actor.Envelope
 		state.Counter++
 	case "reset":
 		state.Counter = 0
+	case "schedule-job":
+		// Demonstrate self-dispatch: the actor enqueues a durable background job to itself
+		// The job runs immediately on whatever host serves this actor, delivered to the Job method below
+		jobID, err := m.client.Dispatch(ctx, "report", map[string]any{
+			"counter": state.Counter,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to dispatch job: %w", err)
+		}
+		m.log.InfoContext(ctx, "Dispatched background job to self", slog.String("jobID", jobID))
 	}
 
 	err = m.client.SetState(ctx, state, nil)
@@ -102,6 +112,32 @@ func (m *MyActor) Alarm(ctx context.Context, name string, data actor.Envelope) e
 
 	m.log.InfoContext(ctx, "Actor received alarm", slog.String("name", name), slog.String("data.hello", d.Hello))
 
+	return nil
+}
+
+func (m *MyActor) Job(ctx context.Context, method string, data actor.Envelope) error {
+	var d struct {
+		Counter int64
+	}
+	if data != nil {
+		err := data.Decode(&d)
+		if err != nil {
+			return fmt.Errorf("failed to decode data: %w", err)
+		}
+	}
+
+	m.log.InfoContext(ctx, "Actor ran background job", slog.String("method", method), slog.Int64("data.counter", d.Counter))
+
+	return nil
+}
+
+// JobFailed is the optional reaction hook, called best-effort after one of this actor's jobs is dead-lettered.
+func (m *MyActor) JobFailed(ctx context.Context, jobID string, method string, data actor.Envelope, jobErr error) error {
+	m.log.WarnContext(ctx, "Background job was dead-lettered",
+		slog.String("jobID", jobID),
+		slog.String("method", method),
+		slog.Any("error", jobErr),
+	)
 	return nil
 }
 

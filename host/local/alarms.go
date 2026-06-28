@@ -172,6 +172,14 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 	)
 	log.Debug("Executing alarm")
 
+	// Job-specific state captured inside the closure so the terminal-failure path can dead-letter the job and fire its JobFailed hook
+	var (
+		isJob     bool
+		jobMethod string
+		jobData   []byte
+		jobProps  ref.AlarmProperties
+	)
+
 	// Get and lock the actor
 	aRef := lease.ActorRef()
 	statusAny, err := h.core.LockAndInvoke(ctx, aRef, func(parentCtx context.Context, act *actorcore.ActiveActor) (any, error) {
@@ -189,6 +197,11 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		} else if err != nil {
 			// This is a retryable error, possibly something transient with the component, and it could be retried later
 			return executeAlarmStatusRetryable, fmt.Errorf("error retrieving alarm from provider: %w", err)
+		}
+
+		// Jobs ride on the alarm engine but differ in delivery (Job vs Alarm) and terminal-failure handling (dead-letter vs delete)
+		if a.Kind == components.AlarmKindJob {
+			return h.executeJob(parentCtx, lease, act, a, &isJob, &jobMethod, &jobData, &jobProps)
 		}
 
 		// Ensure the actor implements the Alarm method
@@ -269,6 +282,12 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		return
 
 	case executeAlarmStatusFatal:
+		// For jobs, a terminal failure dead-letters the occurrence rather than silently dropping it
+		if isJob {
+			h.deadLetterJob(ctx, lease, jobProps, jobMethod, jobData, err, log)
+			return
+		}
+
 		// Fatal error - we delete the alarm
 		log.Error("Fatal error executing alarm - alarm will be removed", slog.Any("error", err))
 		err = h.actorProvider.DeleteLeasedAlarm(ctx, lease)
@@ -313,6 +332,119 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 	default:
 		// Indicates a development-time error
 		panic(fmt.Errorf("unknown alarm completion status: %v", statusAny))
+	}
+}
+
+// executeJob delivers a job occurrence to the actor's Job method, classifying the outcome like an alarm execution
+// It records the job's method, data, and schedule into the caller's variables so the terminal-failure path can dead-letter the occurrence and fire the JobFailed hook
+func (h *Host) executeJob(parentCtx context.Context, lease *ref.AlarmLease, act *actorcore.ActiveActor, a components.GetLeasedAlarmRes, isJob *bool, jobMethod *string, jobData *[]byte, jobProps *ref.AlarmProperties) (executeAlarmStatus, error) {
+	aRef := lease.ActorRef()
+
+	// Capture the job details for the terminal-failure path, which runs after this closure returns
+	*isJob = true
+	*jobMethod = a.JobMethod
+	*jobData = a.Data
+	*jobProps = a.AlarmProperties
+
+	// Mark the occurrence as executed now, so the dead-letter path can compute the next occurrence even on a hard failure
+	lease.SetExecutionTime(h.clock.Now())
+
+	// The actor must implement the Job method to receive jobs
+	obj, ok := act.Instance.(actor.ActorJob)
+	if !ok {
+		// A hard-fatal error: the actor type can never service this job, so it is dead-lettered immediately
+		return executeAlarmStatusFatal, fmt.Errorf("actor of type '%s' does not implement the Job method", act.ActorType())
+	}
+
+	var data actor.Envelope
+	if len(a.Data) > 0 {
+		dec := msgpack.GetDecoder()
+		dec.Reset(bytes.NewReader(a.Data))
+		defer msgpack.PutDecoder(dec)
+		data = dec
+	}
+
+	// Stamp a per-occurrence key (job ID + due-time ms) so the actor can detect duplicate deliveries of the same occurrence
+	ctx := actor.WithRequestID(parentCtx, alarmRequestID(lease))
+
+	// Invoke the actor's Job method
+	err := obj.Job(ctx, a.JobMethod, data)
+	if err != nil {
+		// ErrJobPermanentFailure skips the remaining retries and dead-letters the job immediately
+		if errors.Is(err, actor.ErrJobPermanentFailure) {
+			return executeAlarmStatusFatal, fmt.Errorf("job failed permanently: %w", err)
+		}
+
+		// Otherwise retry until the actor type's max attempts are exhausted, then dead-letter
+		code := executeAlarmStatusRetryable
+		maxAttempts := h.core.ActorsConfig[aRef.ActorType].MaxAttempts
+		if lease.Attempts() >= maxAttempts {
+			code = executeAlarmStatusFatal
+		}
+
+		return code, fmt.Errorf("error from actor job (attempt %d of %d): %w", lease.Attempts(), maxAttempts, err)
+	}
+
+	return executeAlarmStatusCompleted, nil
+}
+
+// deadLetterJob moves a terminally-failed job occurrence to the dead-letter store, then fires the optional JobFailed hook best-effort
+// For a repeating job the recurrence is rescheduled in the same provider transaction, so a single failed occurrence does not stop the recurrence
+func (h *Host) deadLetterJob(ctx context.Context, lease *ref.AlarmLease, props ref.AlarmProperties, method string, data []byte, jobErr error, log *slog.Logger) {
+	req := components.DeadLetterAlarmReq{
+		Reason:   jobErr.Error(),
+		Attempts: lease.Attempts(),
+	}
+
+	// Keep a repeating job's recurrence alive by rescheduling its next occurrence as part of the dead-letter move
+	next, err := props.NextExecution(lease.ExecutionTime())
+	if err != nil {
+		log.Error("Failed to compute next execution for repeating job; recurrence will not continue", slog.Any("error", err))
+	} else if !next.IsZero() {
+		req.Reschedule = true
+		req.NextDueTime = next
+	}
+
+	log.Error("Job failed permanently - dead-lettering", slog.Any("error", jobErr))
+	err = h.actorProvider.DeadLetterAlarm(ctx, lease, req)
+	if errors.Is(err, components.ErrNoAlarm) {
+		// The lease was lost or the occurrence was already moved, so there is nothing else to do
+		return
+	} else if err != nil {
+		// Log the error only - we are in a background goroutine
+		log.Error("Error dead-lettering job", slog.Any("error", err))
+		return
+	}
+
+	// The dead-letter record is now the source of truth, so the JobFailed hook is best-effort
+	h.fireJobFailed(ctx, lease, method, data, jobErr)
+}
+
+// fireJobFailed delivers the optional JobFailed reaction hook on the actor's turn-based lock, best-effort
+// It is never itself dead-lettered: an error here is only logged, leaving the dead_jobs record in place
+func (h *Host) fireJobFailed(parentCtx context.Context, lease *ref.AlarmLease, method string, data []byte, jobErr error) {
+	aRef := lease.ActorRef()
+	jobID := lease.Key()
+
+	_, err := h.core.LockAndInvoke(parentCtx, aRef, func(ctx context.Context, act *actorcore.ActiveActor) (any, error) {
+		// The hook is optional, so an actor that does not implement it is a no-op
+		obj, ok := act.Instance.(actor.ActorJobFailed)
+		if !ok {
+			return nil, nil
+		}
+
+		var env actor.Envelope
+		if len(data) > 0 {
+			dec := msgpack.GetDecoder()
+			dec.Reset(bytes.NewReader(data))
+			defer msgpack.PutDecoder(dec)
+			env = dec
+		}
+
+		return nil, obj.JobFailed(ctx, jobID, method, env, jobErr)
+	})
+	if err != nil {
+		h.log.Warn("JobFailed hook returned an error; dead-letter record is kept", slog.String("jobId", jobID), slog.Any("error", err))
 	}
 }
 

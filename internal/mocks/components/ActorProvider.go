@@ -42,6 +42,138 @@ func (_m *MockActorProvider) EXPECT() *MockActorProvider_Expecter {
 	return &MockActorProvider_Expecter{mock: &_m.Mock}
 }
 
+// CancelJob provides a mock function for the type MockActorProvider
+func (_mock *MockActorProvider) CancelJob(ctx context.Context, actorType string, actorID string, jobID string) error {
+	ret := _mock.Called(ctx, actorType, actorID, jobID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CancelJob")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string) error); ok {
+		r0 = returnFunc(ctx, actorType, actorID, jobID)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockActorProvider_CancelJob_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CancelJob'
+type MockActorProvider_CancelJob_Call struct {
+	*mock.Call
+}
+
+// CancelJob is a helper method to define mock.On call
+//   - ctx context.Context
+//   - actorType string
+//   - actorID string
+//   - jobID string
+func (_e *MockActorProvider_Expecter) CancelJob(ctx interface{}, actorType interface{}, actorID interface{}, jobID interface{}) *MockActorProvider_CancelJob_Call {
+	return &MockActorProvider_CancelJob_Call{Call: _e.mock.On("CancelJob", ctx, actorType, actorID, jobID)}
+}
+
+func (_c *MockActorProvider_CancelJob_Call) Run(run func(ctx context.Context, actorType string, actorID string, jobID string)) *MockActorProvider_CancelJob_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		var arg2 string
+		if args[2] != nil {
+			arg2 = args[2].(string)
+		}
+		var arg3 string
+		if args[3] != nil {
+			arg3 = args[3].(string)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+		)
+	})
+	return _c
+}
+
+func (_c *MockActorProvider_CancelJob_Call) Return(err error) *MockActorProvider_CancelJob_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockActorProvider_CancelJob_Call) RunAndReturn(run func(ctx context.Context, actorType string, actorID string, jobID string) error) *MockActorProvider_CancelJob_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeadLetterAlarm provides a mock function for the type MockActorProvider
+func (_mock *MockActorProvider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLease, req components.DeadLetterAlarmReq) error {
+	ret := _mock.Called(ctx, lease, req)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeadLetterAlarm")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, *ref.AlarmLease, components.DeadLetterAlarmReq) error); ok {
+		r0 = returnFunc(ctx, lease, req)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockActorProvider_DeadLetterAlarm_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeadLetterAlarm'
+type MockActorProvider_DeadLetterAlarm_Call struct {
+	*mock.Call
+}
+
+// DeadLetterAlarm is a helper method to define mock.On call
+//   - ctx context.Context
+//   - lease *ref.AlarmLease
+//   - req components.DeadLetterAlarmReq
+func (_e *MockActorProvider_Expecter) DeadLetterAlarm(ctx interface{}, lease interface{}, req interface{}) *MockActorProvider_DeadLetterAlarm_Call {
+	return &MockActorProvider_DeadLetterAlarm_Call{Call: _e.mock.On("DeadLetterAlarm", ctx, lease, req)}
+}
+
+func (_c *MockActorProvider_DeadLetterAlarm_Call) Run(run func(ctx context.Context, lease *ref.AlarmLease, req components.DeadLetterAlarmReq)) *MockActorProvider_DeadLetterAlarm_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 *ref.AlarmLease
+		if args[1] != nil {
+			arg1 = args[1].(*ref.AlarmLease)
+		}
+		var arg2 components.DeadLetterAlarmReq
+		if args[2] != nil {
+			arg2 = args[2].(components.DeadLetterAlarmReq)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockActorProvider_DeadLetterAlarm_Call) Return(err error) *MockActorProvider_DeadLetterAlarm_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockActorProvider_DeadLetterAlarm_Call) RunAndReturn(run func(ctx context.Context, lease *ref.AlarmLease, req components.DeadLetterAlarmReq) error) *MockActorProvider_DeadLetterAlarm_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // DeleteAlarm provides a mock function for the type MockActorProvider
 func (_mock *MockActorProvider) DeleteAlarm(ctx context.Context, ref1 ref.AlarmRef) error {
 	ret := _mock.Called(ctx, ref1)
@@ -95,6 +227,63 @@ func (_c *MockActorProvider_DeleteAlarm_Call) Return(err error) *MockActorProvid
 }
 
 func (_c *MockActorProvider_DeleteAlarm_Call) RunAndReturn(run func(ctx context.Context, ref1 ref.AlarmRef) error) *MockActorProvider_DeleteAlarm_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeleteDeadJob provides a mock function for the type MockActorProvider
+func (_mock *MockActorProvider) DeleteDeadJob(ctx context.Context, jobID string) error {
+	ret := _mock.Called(ctx, jobID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteDeadJob")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) error); ok {
+		r0 = returnFunc(ctx, jobID)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockActorProvider_DeleteDeadJob_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteDeadJob'
+type MockActorProvider_DeleteDeadJob_Call struct {
+	*mock.Call
+}
+
+// DeleteDeadJob is a helper method to define mock.On call
+//   - ctx context.Context
+//   - jobID string
+func (_e *MockActorProvider_Expecter) DeleteDeadJob(ctx interface{}, jobID interface{}) *MockActorProvider_DeleteDeadJob_Call {
+	return &MockActorProvider_DeleteDeadJob_Call{Call: _e.mock.On("DeleteDeadJob", ctx, jobID)}
+}
+
+func (_c *MockActorProvider_DeleteDeadJob_Call) Run(run func(ctx context.Context, jobID string)) *MockActorProvider_DeleteDeadJob_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockActorProvider_DeleteDeadJob_Call) Return(err error) *MockActorProvider_DeleteDeadJob_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockActorProvider_DeleteDeadJob_Call) RunAndReturn(run func(ctx context.Context, jobID string) error) *MockActorProvider_DeleteDeadJob_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -213,6 +402,78 @@ func (_c *MockActorProvider_DeleteState_Call) RunAndReturn(run func(ctx context.
 	return _c
 }
 
+// DispatchJob provides a mock function for the type MockActorProvider
+func (_mock *MockActorProvider) DispatchJob(ctx context.Context, ref1 ref.AlarmRef, req components.SetAlarmReq) (string, error) {
+	ret := _mock.Called(ctx, ref1, req)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DispatchJob")
+	}
+
+	var r0 string
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, ref.AlarmRef, components.SetAlarmReq) (string, error)); ok {
+		return returnFunc(ctx, ref1, req)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, ref.AlarmRef, components.SetAlarmReq) string); ok {
+		r0 = returnFunc(ctx, ref1, req)
+	} else {
+		r0 = ret.Get(0).(string)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, ref.AlarmRef, components.SetAlarmReq) error); ok {
+		r1 = returnFunc(ctx, ref1, req)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockActorProvider_DispatchJob_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DispatchJob'
+type MockActorProvider_DispatchJob_Call struct {
+	*mock.Call
+}
+
+// DispatchJob is a helper method to define mock.On call
+//   - ctx context.Context
+//   - ref1 ref.AlarmRef
+//   - req components.SetAlarmReq
+func (_e *MockActorProvider_Expecter) DispatchJob(ctx interface{}, ref1 interface{}, req interface{}) *MockActorProvider_DispatchJob_Call {
+	return &MockActorProvider_DispatchJob_Call{Call: _e.mock.On("DispatchJob", ctx, ref1, req)}
+}
+
+func (_c *MockActorProvider_DispatchJob_Call) Run(run func(ctx context.Context, ref1 ref.AlarmRef, req components.SetAlarmReq)) *MockActorProvider_DispatchJob_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 ref.AlarmRef
+		if args[1] != nil {
+			arg1 = args[1].(ref.AlarmRef)
+		}
+		var arg2 components.SetAlarmReq
+		if args[2] != nil {
+			arg2 = args[2].(components.SetAlarmReq)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockActorProvider_DispatchJob_Call) Return(jobID string, err error) *MockActorProvider_DispatchJob_Call {
+	_c.Call.Return(jobID, err)
+	return _c
+}
+
+func (_c *MockActorProvider_DispatchJob_Call) RunAndReturn(run func(ctx context.Context, ref1 ref.AlarmRef, req components.SetAlarmReq) (string, error)) *MockActorProvider_DispatchJob_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // FetchAndLeaseUpcomingAlarms provides a mock function for the type MockActorProvider
 func (_mock *MockActorProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req components.FetchAndLeaseUpcomingAlarmsReq) ([]*ref.AlarmLease, error) {
 	ret := _mock.Called(ctx, req)
@@ -281,72 +542,6 @@ func (_c *MockActorProvider_FetchAndLeaseUpcomingAlarms_Call) RunAndReturn(run f
 	return _c
 }
 
-// ListHosts provides a mock function for the type MockActorProvider
-func (_mock *MockActorProvider) ListHosts(ctx context.Context) ([]components.HostInfo, error) {
-	ret := _mock.Called(ctx)
-
-	if len(ret) == 0 {
-		panic("no return value specified for ListHosts")
-	}
-
-	var r0 []components.HostInfo
-	var r1 error
-	returnFunc1, ok := ret.Get(0).(func(context.Context) ([]components.HostInfo, error))
-	if ok {
-		return returnFunc1(ctx)
-	}
-
-	returnFunc2, ok := ret.Get(0).(func(context.Context) []components.HostInfo)
-	if ok {
-		r0 = returnFunc2(ctx)
-	} else if ret.Get(0) != nil {
-		r0 = ret.Get(0).([]components.HostInfo)
-	}
-
-	returnFunc3, ok := ret.Get(1).(func(context.Context) error)
-	if ok {
-		r1 = returnFunc3(ctx)
-	} else {
-		r1 = ret.Error(1)
-	}
-
-	return r0, r1
-}
-
-// MockActorProvider_ListHosts_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListHosts'
-type MockActorProvider_ListHosts_Call struct {
-	*mock.Call
-}
-
-// ListHosts is a helper method to define mock.On call
-//   - ctx context.Context
-func (_e *MockActorProvider_Expecter) ListHosts(ctx interface{}) *MockActorProvider_ListHosts_Call {
-	return &MockActorProvider_ListHosts_Call{Call: _e.mock.On("ListHosts", ctx)}
-}
-
-func (_c *MockActorProvider_ListHosts_Call) Run(run func(ctx context.Context)) *MockActorProvider_ListHosts_Call {
-	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 context.Context
-		if args[0] != nil {
-			arg0 = args[0].(context.Context)
-		}
-		run(
-			arg0,
-		)
-	})
-	return _c
-}
-
-func (_c *MockActorProvider_ListHosts_Call) Return(hostInfos []components.HostInfo, err error) *MockActorProvider_ListHosts_Call {
-	_c.Call.Return(hostInfos, err)
-	return _c
-}
-
-func (_c *MockActorProvider_ListHosts_Call) RunAndReturn(run func(ctx context.Context) ([]components.HostInfo, error)) *MockActorProvider_ListHosts_Call {
-	_c.Call.Return(run)
-	return _c
-}
-
 // GetAlarm provides a mock function for the type MockActorProvider
 func (_mock *MockActorProvider) GetAlarm(ctx context.Context, ref1 ref.AlarmRef) (components.GetAlarmRes, error) {
 	ret := _mock.Called(ctx, ref1)
@@ -409,6 +604,138 @@ func (_c *MockActorProvider_GetAlarm_Call) Return(getAlarmRes components.GetAlar
 }
 
 func (_c *MockActorProvider_GetAlarm_Call) RunAndReturn(run func(ctx context.Context, ref1 ref.AlarmRef) (components.GetAlarmRes, error)) *MockActorProvider_GetAlarm_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetDeadJob provides a mock function for the type MockActorProvider
+func (_mock *MockActorProvider) GetDeadJob(ctx context.Context, jobID string) (components.GetDeadJobRes, error) {
+	ret := _mock.Called(ctx, jobID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetDeadJob")
+	}
+
+	var r0 components.GetDeadJobRes
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) (components.GetDeadJobRes, error)); ok {
+		return returnFunc(ctx, jobID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) components.GetDeadJobRes); ok {
+		r0 = returnFunc(ctx, jobID)
+	} else {
+		r0 = ret.Get(0).(components.GetDeadJobRes)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = returnFunc(ctx, jobID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockActorProvider_GetDeadJob_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetDeadJob'
+type MockActorProvider_GetDeadJob_Call struct {
+	*mock.Call
+}
+
+// GetDeadJob is a helper method to define mock.On call
+//   - ctx context.Context
+//   - jobID string
+func (_e *MockActorProvider_Expecter) GetDeadJob(ctx interface{}, jobID interface{}) *MockActorProvider_GetDeadJob_Call {
+	return &MockActorProvider_GetDeadJob_Call{Call: _e.mock.On("GetDeadJob", ctx, jobID)}
+}
+
+func (_c *MockActorProvider_GetDeadJob_Call) Run(run func(ctx context.Context, jobID string)) *MockActorProvider_GetDeadJob_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockActorProvider_GetDeadJob_Call) Return(getDeadJobRes components.GetDeadJobRes, err error) *MockActorProvider_GetDeadJob_Call {
+	_c.Call.Return(getDeadJobRes, err)
+	return _c
+}
+
+func (_c *MockActorProvider_GetDeadJob_Call) RunAndReturn(run func(ctx context.Context, jobID string) (components.GetDeadJobRes, error)) *MockActorProvider_GetDeadJob_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetJob provides a mock function for the type MockActorProvider
+func (_mock *MockActorProvider) GetJob(ctx context.Context, jobID string) (components.JobInfo, error) {
+	ret := _mock.Called(ctx, jobID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetJob")
+	}
+
+	var r0 components.JobInfo
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) (components.JobInfo, error)); ok {
+		return returnFunc(ctx, jobID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) components.JobInfo); ok {
+		r0 = returnFunc(ctx, jobID)
+	} else {
+		r0 = ret.Get(0).(components.JobInfo)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = returnFunc(ctx, jobID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockActorProvider_GetJob_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetJob'
+type MockActorProvider_GetJob_Call struct {
+	*mock.Call
+}
+
+// GetJob is a helper method to define mock.On call
+//   - ctx context.Context
+//   - jobID string
+func (_e *MockActorProvider_Expecter) GetJob(ctx interface{}, jobID interface{}) *MockActorProvider_GetJob_Call {
+	return &MockActorProvider_GetJob_Call{Call: _e.mock.On("GetJob", ctx, jobID)}
+}
+
+func (_c *MockActorProvider_GetJob_Call) Run(run func(ctx context.Context, jobID string)) *MockActorProvider_GetJob_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockActorProvider_GetJob_Call) Return(jobInfo components.JobInfo, err error) *MockActorProvider_GetJob_Call {
+	_c.Call.Return(jobInfo, err)
+	return _c
+}
+
+func (_c *MockActorProvider_GetJob_Call) RunAndReturn(run func(ctx context.Context, jobID string) (components.JobInfo, error)) *MockActorProvider_GetJob_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -638,6 +965,142 @@ func (_c *MockActorProvider_Init_Call) Return(err error) *MockActorProvider_Init
 }
 
 func (_c *MockActorProvider_Init_Call) RunAndReturn(run func(ctx context.Context) error) *MockActorProvider_Init_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// ListHosts provides a mock function for the type MockActorProvider
+func (_mock *MockActorProvider) ListHosts(ctx context.Context) ([]components.HostInfo, error) {
+	ret := _mock.Called(ctx)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListHosts")
+	}
+
+	var r0 []components.HostInfo
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context) ([]components.HostInfo, error)); ok {
+		return returnFunc(ctx)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context) []components.HostInfo); ok {
+		r0 = returnFunc(ctx)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]components.HostInfo)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context) error); ok {
+		r1 = returnFunc(ctx)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockActorProvider_ListHosts_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListHosts'
+type MockActorProvider_ListHosts_Call struct {
+	*mock.Call
+}
+
+// ListHosts is a helper method to define mock.On call
+//   - ctx context.Context
+func (_e *MockActorProvider_Expecter) ListHosts(ctx interface{}) *MockActorProvider_ListHosts_Call {
+	return &MockActorProvider_ListHosts_Call{Call: _e.mock.On("ListHosts", ctx)}
+}
+
+func (_c *MockActorProvider_ListHosts_Call) Run(run func(ctx context.Context)) *MockActorProvider_ListHosts_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *MockActorProvider_ListHosts_Call) Return(hostInfos []components.HostInfo, err error) *MockActorProvider_ListHosts_Call {
+	_c.Call.Return(hostInfos, err)
+	return _c
+}
+
+func (_c *MockActorProvider_ListHosts_Call) RunAndReturn(run func(ctx context.Context) ([]components.HostInfo, error)) *MockActorProvider_ListHosts_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// ListJobs provides a mock function for the type MockActorProvider
+func (_mock *MockActorProvider) ListJobs(ctx context.Context, actorType string, actorID string) ([]components.JobInfo, error) {
+	ret := _mock.Called(ctx, actorType, actorID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListJobs")
+	}
+
+	var r0 []components.JobInfo
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string) ([]components.JobInfo, error)); ok {
+		return returnFunc(ctx, actorType, actorID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string) []components.JobInfo); ok {
+		r0 = returnFunc(ctx, actorType, actorID)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]components.JobInfo)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, string) error); ok {
+		r1 = returnFunc(ctx, actorType, actorID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockActorProvider_ListJobs_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListJobs'
+type MockActorProvider_ListJobs_Call struct {
+	*mock.Call
+}
+
+// ListJobs is a helper method to define mock.On call
+//   - ctx context.Context
+//   - actorType string
+//   - actorID string
+func (_e *MockActorProvider_Expecter) ListJobs(ctx interface{}, actorType interface{}, actorID interface{}) *MockActorProvider_ListJobs_Call {
+	return &MockActorProvider_ListJobs_Call{Call: _e.mock.On("ListJobs", ctx, actorType, actorID)}
+}
+
+func (_c *MockActorProvider_ListJobs_Call) Run(run func(ctx context.Context, actorType string, actorID string)) *MockActorProvider_ListJobs_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		var arg2 string
+		if args[2] != nil {
+			arg2 = args[2].(string)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockActorProvider_ListJobs_Call) Return(jobInfos []components.JobInfo, err error) *MockActorProvider_ListJobs_Call {
+	_c.Call.Return(jobInfos, err)
+	return _c
+}
+
+func (_c *MockActorProvider_ListJobs_Call) RunAndReturn(run func(ctx context.Context, actorType string, actorID string) ([]components.JobInfo, error)) *MockActorProvider_ListJobs_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -1000,6 +1463,72 @@ func (_c *MockActorProvider_RenewLeaseInterval_Call) Return(duration time.Durati
 }
 
 func (_c *MockActorProvider_RenewLeaseInterval_Call) RunAndReturn(run func() time.Duration) *MockActorProvider_RenewLeaseInterval_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// RetryDeadJob provides a mock function for the type MockActorProvider
+func (_mock *MockActorProvider) RetryDeadJob(ctx context.Context, jobID string) (string, error) {
+	ret := _mock.Called(ctx, jobID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for RetryDeadJob")
+	}
+
+	var r0 string
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) (string, error)); ok {
+		return returnFunc(ctx, jobID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) string); ok {
+		r0 = returnFunc(ctx, jobID)
+	} else {
+		r0 = ret.Get(0).(string)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = returnFunc(ctx, jobID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockActorProvider_RetryDeadJob_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'RetryDeadJob'
+type MockActorProvider_RetryDeadJob_Call struct {
+	*mock.Call
+}
+
+// RetryDeadJob is a helper method to define mock.On call
+//   - ctx context.Context
+//   - jobID string
+func (_e *MockActorProvider_Expecter) RetryDeadJob(ctx interface{}, jobID interface{}) *MockActorProvider_RetryDeadJob_Call {
+	return &MockActorProvider_RetryDeadJob_Call{Call: _e.mock.On("RetryDeadJob", ctx, jobID)}
+}
+
+func (_c *MockActorProvider_RetryDeadJob_Call) Run(run func(ctx context.Context, jobID string)) *MockActorProvider_RetryDeadJob_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockActorProvider_RetryDeadJob_Call) Return(newJobID string, err error) *MockActorProvider_RetryDeadJob_Call {
+	_c.Call.Return(newJobID, err)
+	return _c
+}
+
+func (_c *MockActorProvider_RetryDeadJob_Call) RunAndReturn(run func(ctx context.Context, jobID string) (string, error)) *MockActorProvider_RetryDeadJob_Call {
 	_c.Call.Return(run)
 	return _c
 }

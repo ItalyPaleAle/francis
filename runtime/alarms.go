@@ -217,7 +217,9 @@ func (rt *Runtime) executeActiveAlarm(lease *ref.AlarmLease) {
 	)
 	log.Debug("Dispatching alarm")
 
-	status, err := rt.dispatchAlarm(ctx, lease)
+	// Job-specific state captured during dispatch so the terminal-failure path can dead-letter the job and fire its JobFailed hook
+	var jobInfo jobExecInfo
+	status, err := rt.dispatchAlarm(ctx, lease, &jobInfo)
 
 	// Remove from the active set on return
 	// We track retrying alarms so lease renewal does not reset their attempts
@@ -250,6 +252,12 @@ func (rt *Runtime) executeActiveAlarm(lease *ref.AlarmLease) {
 		return
 
 	case executeAlarmStatusFatal:
+		// For jobs, a terminal failure dead-letters the occurrence rather than silently dropping it
+		if jobInfo.isJob {
+			rt.deadLetterJob(ctx, lease, jobInfo, err, log)
+			return
+		}
+
 		log.Error("Fatal error executing alarm - alarm will be removed", slog.Any("error", err))
 		delErr := rt.provider.DeleteLeasedAlarm(ctx, lease)
 		if delErr != nil && !errors.Is(delErr, components.ErrNoAlarm) {
@@ -293,8 +301,16 @@ func (rt *Runtime) executeActiveAlarm(lease *ref.AlarmLease) {
 	}
 }
 
+// jobExecInfo carries the job details captured during dispatch, used by the terminal-failure path to dead-letter the job and fire its JobFailed hook
+type jobExecInfo struct {
+	isJob  bool
+	method string
+	data   []byte
+	props  ref.AlarmProperties
+}
+
 // dispatchAlarm resolves the owning host, rechecks the lease, sends ExecuteAlarm, and classifies the response
-func (rt *Runtime) dispatchAlarm(parentCtx context.Context, lease *ref.AlarmLease) (executeAlarmStatus, error) {
+func (rt *Runtime) dispatchAlarm(parentCtx context.Context, lease *ref.AlarmLease, jobInfo *jobExecInfo) (executeAlarmStatus, error) {
 	aRef := lease.ActorRef()
 
 	// Find the host the actor is active on
@@ -332,6 +348,14 @@ func (rt *Runtime) dispatchAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 	// Record the execution time before dispatch,  a successful response may refine it
 	lease.SetExecutionTime(rt.clock.Now())
 
+	// Capture the job details so the terminal-failure path can dead-letter the job
+	if alarm.Kind == components.AlarmKindJob {
+		jobInfo.isJob = true
+		jobInfo.method = alarm.JobMethod
+		jobInfo.data = alarm.Data
+		jobInfo.props = alarm.AlarmProperties
+	}
+
 	req, err := protocol.NewRequest(protocol.KindExecuteAlarm, protocol.ExecuteAlarmRequest{
 		ActorType:     aRef.ActorType,
 		ActorID:       aRef.ActorID,
@@ -340,6 +364,8 @@ func (rt *Runtime) dispatchAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 		DueTimeUnixMs: lease.DueTime().UnixMilli(),
 		Attempts:      lease.Attempts(),
 		Data:          alarm.Data,
+		Kind:          string(alarm.Kind),
+		JobMethod:     alarm.JobMethod,
 	})
 	if err != nil {
 		return executeAlarmStatusRetryable, fmt.Errorf("error encoding execute alarm request: %w", err)
@@ -374,8 +400,9 @@ func (rt *Runtime) dispatchAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 // classifyAlarmError decides whether a host's alarm error should be retried or is fatal
 func (rt *Runtime) classifyAlarmError(conn *hostConn, actorType string, lease *ref.AlarmLease, perr *protocol.Error) executeAlarmStatus {
 	switch perr.Code {
-	case protocol.ErrCodeActorTypeUnsupported, protocol.ErrCodeInvokeModeUnsupported:
+	case protocol.ErrCodeActorTypeUnsupported, protocol.ErrCodeInvokeModeUnsupported, protocol.ErrCodeJobPermanentFailure:
 		// These errors can never succeed on retry
+		// For jobs, a permanent-failure also skips the remaining retries
 		return executeAlarmStatusFatal
 	default:
 		// Otherwise retry until the actor type's max attempts are exhausted
@@ -388,6 +415,82 @@ func (rt *Runtime) classifyAlarmError(conn *hostConn, actorType string, lease *r
 			return executeAlarmStatusFatal
 		}
 		return executeAlarmStatusRetryable
+	}
+}
+
+// deadLetterJob moves a terminally-failed job occurrence to the dead-letter store, then asks the owning host to run its JobFailed hook best-effort
+// For a repeating job the recurrence is rescheduled in the same provider transaction, so a single failed occurrence does not stop the recurrence
+func (rt *Runtime) deadLetterJob(parentCtx context.Context, lease *ref.AlarmLease, info jobExecInfo, jobErr error, log *slog.Logger) {
+	req := components.DeadLetterAlarmReq{
+		Reason:   jobErr.Error(),
+		Attempts: lease.Attempts(),
+	}
+
+	// Keep a repeating job's recurrence alive by rescheduling its next occurrence as part of the dead-letter move
+	next, err := info.props.NextExecution(lease.ExecutionTime())
+	if err != nil {
+		log.Error("Failed to compute next execution for repeating job; recurrence will not continue", slog.Any("error", err))
+	} else if !next.IsZero() {
+		req.Reschedule = true
+		req.NextDueTime = next
+	}
+
+	log.Error("Job failed permanently - dead-lettering", slog.Any("error", jobErr))
+	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+	err = rt.provider.DeadLetterAlarm(ctx, lease, req)
+	cancel()
+	if errors.Is(err, components.ErrNoAlarm) {
+		// The lease was lost or the occurrence was already moved, so there is nothing else to do
+		return
+	} else if err != nil {
+		log.Error("Error dead-lettering job", slog.Any("error", err))
+		return
+	}
+
+	// The dead-letter record is now the source of truth, so the JobFailed hook is best-effort
+	rt.pushJobFailed(parentCtx, lease, info, jobErr, log)
+}
+
+// pushJobFailed asks the host currently owning the actor to run the actor's JobFailed hook, best-effort
+func (rt *Runtime) pushJobFailed(parentCtx context.Context, lease *ref.AlarmLease, info jobExecInfo, jobErr error, log *slog.Logger) {
+	aRef := lease.ActorRef()
+
+	// Resolve the host the actor is active on, without activating it
+	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+	lar, err := rt.provider.LookupActor(ctx, aRef, components.LookupActorOpts{
+		ActiveOnly: true,
+	})
+	cancel()
+	if err != nil {
+		// The actor is no longer active, so there is no host to run the hook
+		log.Debug("Skipping JobFailed hook: actor is not active", slog.Any("error", err))
+		return
+	}
+
+	conn, ok := rt.hosts.Get(lar.HostID)
+	if !ok || conn.IsDraining() {
+		return
+	}
+
+	// Create the request
+	req, err := protocol.NewRequest(protocol.KindJobFailed, protocol.JobFailedRequest{
+		ActorType:    aRef.ActorType,
+		ActorID:      aRef.ActorID,
+		JobID:        lease.Key(),
+		Method:       info.method,
+		Data:         info.data,
+		ErrorMessage: jobErr.Error(),
+	})
+	if err != nil {
+		return
+	}
+
+	// Send to the actor host
+	ctx, cancel = context.WithTimeout(parentCtx, rt.alarmExecutionTimeout)
+	_, err = rt.sendToHost(ctx, conn, req)
+	cancel()
+	if err != nil {
+		log.Warn("Failed to deliver JobFailed hook to host", slog.Any("error", err))
 	}
 }
 

@@ -30,6 +30,12 @@ type AlarmChange struct {
 	Value *Alarm
 }
 
+// DeadJobChange represents a dead job to be set (upserted).
+type DeadJobChange struct {
+	Key   string // job_id
+	Value *DeadJob
+}
+
 // ActorStateChange represents actor state to be set (upserted).
 type ActorStateChange struct {
 	Key   ActorKey
@@ -56,6 +62,10 @@ type Changes struct {
 		Set    []AlarmChange // Upsert alarms
 		Delete []string      // alarm_ids to delete
 	}
+	DeadJobs struct {
+		Set    []DeadJobChange // Upsert dead jobs
+		Delete []string        // job_ids to delete
+	}
 	ActorState struct {
 		Set    []ActorStateChange // Upsert actor state
 		Delete []ActorKey
@@ -81,6 +91,8 @@ func (c *Changes) Release() {
 	c.ActiveActors.Delete = c.ActiveActors.Delete[:0]
 	c.Alarms.Set = c.Alarms.Set[:0]
 	c.Alarms.Delete = c.Alarms.Delete[:0]
+	c.DeadJobs.Set = c.DeadJobs.Set[:0]
+	c.DeadJobs.Delete = c.DeadJobs.Delete[:0]
 	c.ActorState.Set = c.ActorState.Set[:0]
 	c.ActorState.Delete = c.ActorState.Delete[:0]
 
@@ -97,6 +109,8 @@ func (c *Changes) IsEmpty() bool {
 		len(c.ActiveActors.Delete) == 0 &&
 		len(c.Alarms.Set) == 0 &&
 		len(c.Alarms.Delete) == 0 &&
+		len(c.DeadJobs.Set) == 0 &&
+		len(c.DeadJobs.Delete) == 0 &&
 		len(c.ActorState.Set) == 0 &&
 		len(c.ActorState.Delete) == 0
 }
@@ -151,6 +165,18 @@ func (c *Changes) Clone() *Changes {
 	if len(c.Alarms.Delete) > 0 {
 		clone.Alarms.Delete = make([]string, len(c.Alarms.Delete))
 		copy(clone.Alarms.Delete, c.Alarms.Delete)
+	}
+
+	// Clone DeadJobs
+	if len(c.DeadJobs.Set) > 0 {
+		clone.DeadJobs.Set = make([]DeadJobChange, len(c.DeadJobs.Set))
+		for i, dc := range c.DeadJobs.Set {
+			clone.DeadJobs.Set[i] = DeadJobChange{Key: dc.Key, Value: dc.Value.Clone()}
+		}
+	}
+	if len(c.DeadJobs.Delete) > 0 {
+		clone.DeadJobs.Delete = make([]string, len(c.DeadJobs.Delete))
+		copy(clone.DeadJobs.Delete, c.DeadJobs.Delete)
 	}
 
 	// Clone ActorState

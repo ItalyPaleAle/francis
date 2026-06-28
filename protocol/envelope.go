@@ -41,6 +41,11 @@ const (
 	KindGetAlarm         = "host.alarm.get"
 	KindSetAlarm         = "host.alarm.set"
 	KindDeleteAlarm      = "host.alarm.delete"
+	KindDispatchJob      = "host.job.dispatch"
+	KindGetJob           = "host.job.get"
+	KindListJobs         = "host.job.list"
+	KindCancelJob        = "host.job.cancel"
+	KindRetryJob         = "host.job.retry"
 	KindGetState         = "host.state.get"
 	KindSetState         = "host.state.set"
 	KindDeleteState      = "host.state.delete"
@@ -57,6 +62,11 @@ const (
 	KindGetAlarmResponse          = "host.alarm.get.response"
 	KindSetAlarmResponse          = "host.alarm.set.response"
 	KindDeleteAlarmResponse       = "host.alarm.delete.response"
+	KindDispatchJobResponse       = "host.job.dispatch.response"
+	KindGetJobResponse            = "host.job.get.response"
+	KindListJobsResponse          = "host.job.list.response"
+	KindCancelJobResponse         = "host.job.cancel.response"
+	KindRetryJobResponse          = "host.job.retry.response"
 	KindGetStateResponse          = "host.state.get.response"
 	KindSetStateResponse          = "host.state.set.response"
 	KindDeleteStateResponse       = "host.state.delete.response"
@@ -65,11 +75,13 @@ const (
 
 	KindExecuteAlarm   = "runtime.alarm.execute"
 	KindTerminateActor = "runtime.actor.terminate"
+	KindJobFailed      = "runtime.job.failed"
 
 	// Runtime -> Host responses
 
 	KindExecuteAlarmResponse   = "runtime.alarm.execute.response"
 	KindTerminateActorResponse = "runtime.actor.terminate.response"
+	KindJobFailedResponse      = "runtime.job.failed.response"
 
 	// Host -> Host
 

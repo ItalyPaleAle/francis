@@ -18,11 +18,16 @@ func (p *PostgresProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res 
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
-	var interval *string
+	var (
+		interval  *string
+		cron      *string
+		jobMethod *string
+		kind      string
+	)
 	err = p.db.
 		QueryRow(queryCtx, `
 			SELECT
-				alarm_due_time, alarm_interval, alarm_data, alarm_ttl_time
+				alarm_due_time, alarm_interval, alarm_cron, alarm_data, alarm_ttl_time, alarm_kind, job_method
 			FROM alarms
 			WHERE
 				actor_type = $1
@@ -30,7 +35,7 @@ func (p *PostgresProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res 
 				AND alarm_name = $3`,
 			req.ActorType, req.ActorID, req.Name,
 		).
-		Scan(&res.DueTime, &interval, &res.Data, &res.TTL)
+		Scan(&res.DueTime, &interval, &cron, &res.Data, &res.TTL, &kind, &jobMethod)
 
 	if errors.Is(err, pgx.ErrNoRows) {
 		return res, components.ErrNoAlarm
@@ -40,6 +45,13 @@ func (p *PostgresProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res 
 
 	if interval != nil {
 		res.Interval = *interval
+	}
+	if cron != nil {
+		res.Cron = *cron
+	}
+	res.Kind = components.AlarmKind(kind)
+	if jobMethod != nil {
+		res.JobMethod = *jobMethod
 	}
 	return res, nil
 }
@@ -191,12 +203,17 @@ func (p *PostgresProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmL
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
-	var interval *string
+	var (
+		interval  *string
+		cron      *string
+		jobMethod *string
+		kind      string
+	)
 	err = p.db.
 		QueryRow(queryCtx, `
 			SELECT
 				actor_type, actor_id, alarm_name, alarm_data,
-				alarm_due_time, alarm_interval, alarm_ttl_time
+				alarm_due_time, alarm_interval, alarm_cron, alarm_ttl_time, alarm_kind, job_method
 			FROM alarms
 			WHERE
 				alarm_id = $1
@@ -207,7 +224,7 @@ func (p *PostgresProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmL
 		).
 		Scan(
 			&res.ActorType, &res.ActorID, &res.Name, &res.Data,
-			&res.DueTime, &interval, &res.TTL,
+			&res.DueTime, &interval, &cron, &res.TTL, &kind, &jobMethod,
 		)
 
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -218,6 +235,13 @@ func (p *PostgresProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmL
 
 	if interval != nil {
 		res.Interval = *interval
+	}
+	if cron != nil {
+		res.Cron = *cron
+	}
+	res.Kind = components.AlarmKind(kind)
+	if jobMethod != nil {
+		res.JobMethod = *jobMethod
 	}
 
 	return res, nil

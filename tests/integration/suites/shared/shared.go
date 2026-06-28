@@ -6,6 +6,7 @@ package shared
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"time"
@@ -194,6 +195,31 @@ func (a *ProbeActor) Alarm(_ context.Context, name string, data actor.Envelope) 
 	return nil
 }
 
+// Job records the execution into the observer and fails when the actor has a job fault configured, so job retry, dead-letter, and permanent-failure handling can be exercised end to end
+func (a *ProbeActor) Job(_ context.Context, method string, data actor.Envelope) error {
+	// Decode any associated data so the observer can record what the job carried
+	var payload string
+	if data != nil {
+		_ = data.Decode(&payload)
+	}
+
+	// Recording decides whether this execution should fail, and whether it should fail permanently
+	fail, permanent := ProbeObserver.recordJob(a.actorID, method, payload)
+	if permanent {
+		// Wrap the sentinel so the engine dead-letters the job immediately, skipping the remaining retries
+		return fmt.Errorf("induced permanent job failure: %w", actor.ErrJobPermanentFailure)
+	} else if fail {
+		return errors.New("induced job failure")
+	}
+	return nil
+}
+
+// JobFailed records that a job was dead-lettered, so dead-letter scenarios can observe the reaction hook
+func (a *ProbeActor) JobFailed(_ context.Context, jobID string, method string, _ actor.Envelope, _ error) error {
+	ProbeObserver.recordJobFailed(a.actorID, jobID, method)
+	return nil
+}
+
 // Deactivate records that the actor was deactivated, so lifecycle scenarios can observe idle and halt-driven deactivation
 func (a *ProbeActor) Deactivate(_ context.Context) error {
 	ProbeObserver.recordDeactivate(a.actorID)
@@ -271,6 +297,20 @@ var ProbeObserver = &probeObserver{
 	invokeHost:    map[string]string{},
 	alarmHost:     map[string]string{},
 	deactivations: map[string]int{},
+	jobFires:      map[string][]JobFire{},
+	jobFaults:     map[string]int{},
+	jobPermanent:  map[string]bool{},
+	jobFailed:     map[string]int{},
+}
+
+// JobFire is a single recorded execution of a probe actor's job
+type JobFire struct {
+	// Method is the job method passed to the Job method
+	Method string
+	// Data is the decoded string payload, empty when the job carried no data
+	Data string
+	// Failed reports whether this execution returned an induced failure
+	Failed bool
 }
 
 type probeObserver struct {
@@ -292,6 +332,89 @@ type probeObserver struct {
 	alarmHost  map[string]string
 	// deactivations counts how many times an actor's Deactivate hook has run, keyed by actor ID
 	deactivations map[string]int
+	// jobFires records every job execution keyed by actor ID, in order
+	jobFires map[string][]JobFire
+	// jobFaults holds the remaining induced job failures keyed by actor ID: positive fails that many more executions, negative fails every execution
+	jobFaults map[string]int
+	// jobPermanent marks actors whose next job execution returns ErrJobPermanentFailure, consumed once
+	jobPermanent map[string]bool
+	// jobFailed counts how many times an actor's JobFailed hook has run, keyed by actor ID
+	jobFailed map[string]int
+}
+
+// SetJobFault configures induced job failures for an actor before its job runs
+// A positive count fails that many executions before succeeding, modelling a transient fault, while a negative count fails every execution, modelling a persistent fault
+func (o *probeObserver) SetJobFault(actorID string, count int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.jobFaults[actorID] = count
+}
+
+// SetJobPermanentFailure marks an actor so its next job execution returns ErrJobPermanentFailure, dead-lettering it immediately
+func (o *probeObserver) SetJobPermanentFailure(actorID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.jobPermanent[actorID] = true
+}
+
+// recordJob appends an execution for the actor and reports whether it should fail and whether that failure is permanent
+func (o *probeObserver) recordJob(actorID string, method string, data string) (fail bool, permanent bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	// A permanent failure is consumed once and skips the transient fault logic
+	if o.jobPermanent[actorID] {
+		permanent = true
+		delete(o.jobPermanent, actorID)
+	} else {
+		remaining, ok := o.jobFaults[actorID]
+		switch {
+		case ok && remaining < 0:
+			// Persistent fault: always fail
+			fail = true
+		case ok && remaining > 0:
+			// Transient fault: fail and consume one
+			fail = true
+			o.jobFaults[actorID] = remaining - 1
+		}
+	}
+
+	o.jobFires[actorID] = append(o.jobFires[actorID], JobFire{
+		Method: method,
+		Data:   data,
+		Failed: fail || permanent,
+	})
+	return fail, permanent
+}
+
+// JobFires returns a copy of the recorded job executions for an actor
+func (o *probeObserver) JobFires(actorID string) []JobFire {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	out := make([]JobFire, len(o.jobFires[actorID]))
+	copy(out, o.jobFires[actorID])
+	return out
+}
+
+// JobCount returns how many times an actor's job has executed
+func (o *probeObserver) JobCount(actorID string) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return len(o.jobFires[actorID])
+}
+
+// recordJobFailed notes that an actor's JobFailed hook ran
+func (o *probeObserver) recordJobFailed(actorID string, _ string, _ string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.jobFailed[actorID]++
+}
+
+// JobFailedCount returns how many times an actor's JobFailed hook has run
+func (o *probeObserver) JobFailedCount(actorID string) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.jobFailed[actorID]
 }
 
 // recordDeactivate notes that an actor's Deactivate hook ran

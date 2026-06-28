@@ -89,10 +89,17 @@ type Alarm struct {
 	Name            string
 	DueTime         time.Time
 	Interval        string
+	Cron            string
 	TTL             *time.Time
 	Data            []byte
 	LeaseID         *string
 	LeaseExpiration *time.Time
+
+	// Kind discriminates a plain alarm ("alarm") from a dispatched job ("job")
+	// An empty value is treated as a plain alarm
+	Kind string
+	// JobMethod is the job handler method, set only for jobs
+	JobMethod string
 }
 
 func (a *Alarm) GetActorKey() ActorKey {
@@ -131,6 +138,9 @@ func (a *Alarm) Clone() *Alarm {
 		Name:      a.Name,
 		DueTime:   a.DueTime,
 		Interval:  a.Interval,
+		Cron:      a.Cron,
+		Kind:      a.Kind,
+		JobMethod: a.JobMethod,
 	}
 	if a.TTL != nil {
 		clone.TTL = a.TTL
@@ -144,6 +154,49 @@ func (a *Alarm) Clone() *Alarm {
 	}
 	if a.LeaseExpiration != nil {
 		clone.LeaseExpiration = a.LeaseExpiration
+	}
+	return clone
+}
+
+// DeadJob is a job that exhausted its retries or failed permanently.
+type DeadJob struct {
+	JobID       string
+	ActorType   string
+	ActorID     string
+	Method      string
+	Data        []byte
+	Attempts    int
+	LastError   string
+	FailedAt    time.Time
+	OriginalDue time.Time
+	Interval    string
+	Cron        string
+}
+
+func (d *DeadJob) GetActorKey() ActorKey {
+	return ActorKey{
+		ActorType: d.ActorType,
+		ActorID:   d.ActorID,
+	}
+}
+
+// Clone creates a deep copy of the DeadJob.
+func (d *DeadJob) Clone() *DeadJob {
+	clone := &DeadJob{
+		JobID:       d.JobID,
+		ActorType:   d.ActorType,
+		ActorID:     d.ActorID,
+		Method:      d.Method,
+		Attempts:    d.Attempts,
+		LastError:   d.LastError,
+		FailedAt:    d.FailedAt,
+		OriginalDue: d.OriginalDue,
+		Interval:    d.Interval,
+		Cron:        d.Cron,
+	}
+	if d.Data != nil {
+		clone.Data = make([]byte, len(d.Data))
+		copy(clone.Data, d.Data)
 	}
 	return clone
 }

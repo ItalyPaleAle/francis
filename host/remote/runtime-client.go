@@ -48,6 +48,8 @@ type runtimeHandlers struct {
 	executeAlarm func(ctx context.Context, req protocol.ExecuteAlarmRequest) (protocol.ExecuteAlarmResponse, *protocol.Error)
 	// terminateActor halts an actor active on this host
 	terminateActor func(ctx context.Context, req protocol.TerminateActorRequest) *protocol.Error
+	// jobFailed runs an actor's optional JobFailed hook after the runtime has dead-lettered a job
+	jobFailed func(ctx context.Context, req protocol.JobFailedRequest) *protocol.Error
 }
 
 // runtimeClientConfig configures a runtimeClient
@@ -655,6 +657,8 @@ func (rc *runtimeClient) dispatchInbound(ctx context.Context, req *protocol.Enve
 		return rc.handleExecuteAlarm(ctx, req)
 	case protocol.KindTerminateActor:
 		return rc.handleTerminateActor(ctx, req)
+	case protocol.KindJobFailed:
+		return rc.handleJobFailed(ctx, req)
 	default:
 		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeBadRequest, "unknown message kind %q", req.Kind))
 	}
@@ -686,6 +690,28 @@ func (rc *runtimeClient) handleExecuteAlarm(ctx context.Context, req *protocol.E
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to encode execute alarm response"))
 	}
 	return resp
+}
+
+func (rc *runtimeClient) handleJobFailed(ctx context.Context, req *protocol.Envelope) *protocol.Envelope {
+	// A host that registered no JobFailed handler simply acknowledges, since the hook is best-effort
+	if rc.cfg.handlers.jobFailed == nil {
+		return req.Reply(protocol.KindJobFailedResponse, nil)
+	}
+
+	// Decode the dead-lettered job
+	var payload protocol.JobFailedRequest
+	err := req.DecodePayload(&payload)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode job failed request"))
+	}
+
+	// Run the hook locally, relaying any structured failure for the runtime to log
+	perr := rc.cfg.handlers.jobFailed(ctx, payload)
+	if perr != nil {
+		return req.ErrorReply(perr)
+	}
+
+	return req.Reply(protocol.KindJobFailedResponse, nil)
 }
 
 func (rc *runtimeClient) handleTerminateActor(ctx context.Context, req *protocol.Envelope) *protocol.Envelope {
@@ -833,6 +859,39 @@ func (rc *runtimeClient) SetAlarm(ctx context.Context, req protocol.SetAlarmRequ
 // DeleteAlarm removes an alarm through the runtime
 func (rc *runtimeClient) DeleteAlarm(ctx context.Context, req protocol.DeleteAlarmRequest) error {
 	return rc.doRequest(ctx, protocol.KindDeleteAlarm, req, nil)
+}
+
+// DispatchJob creates a job through the runtime
+func (rc *runtimeClient) DispatchJob(ctx context.Context, req protocol.DispatchJobRequest) (protocol.DispatchJobResponse, error) {
+	var out protocol.DispatchJobResponse
+	err := rc.doRequest(ctx, protocol.KindDispatchJob, req, &out)
+	return out, err
+}
+
+// GetJob retrieves a job through the runtime
+func (rc *runtimeClient) GetJob(ctx context.Context, req protocol.GetJobRequest) (protocol.GetJobResponse, error) {
+	var out protocol.GetJobResponse
+	err := rc.doRequest(ctx, protocol.KindGetJob, req, &out)
+	return out, err
+}
+
+// ListJobs lists the jobs for an actor through the runtime
+func (rc *runtimeClient) ListJobs(ctx context.Context, req protocol.ListJobsRequest) (protocol.ListJobsResponse, error) {
+	var out protocol.ListJobsResponse
+	err := rc.doRequest(ctx, protocol.KindListJobs, req, &out)
+	return out, err
+}
+
+// CancelJob cancels a live job through the runtime
+func (rc *runtimeClient) CancelJob(ctx context.Context, req protocol.CancelJobRequest) error {
+	return rc.doRequest(ctx, protocol.KindCancelJob, req, nil)
+}
+
+// RetryJob re-dispatches a dead-lettered job through the runtime
+func (rc *runtimeClient) RetryJob(ctx context.Context, req protocol.RetryJobRequest) (protocol.RetryJobResponse, error) {
+	var out protocol.RetryJobResponse
+	err := rc.doRequest(ctx, protocol.KindRetryJob, req, &out)
+	return out, err
 }
 
 // setSession records the active session and its negotiated identity

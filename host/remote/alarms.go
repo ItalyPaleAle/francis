@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/tracing"
@@ -112,15 +113,9 @@ func (h *Host) executeAlarm(ctx context.Context, req protocol.ExecuteAlarmReques
 	// Track when the alarm executed so the runtime can record it on the lease
 	var executionTime int64
 
-	// Acquire the actor's turn-based lock and run its Alarm method
+	// Acquire the actor's turn-based lock and run its Alarm or Job method
 	_, err := h.core.LockAndInvoke(ctx, aRef, func(invokeCtx context.Context, act *actorcore.ActiveActor) (any, error) {
-		// The actor must implement the Alarm method to receive alarms
-		obj, ok := act.Instance.(actor.ActorAlarm)
-		if !ok {
-			return nil, actorcore.ErrActorMethodUnsupported
-		}
-
-		// Wrap the alarm data so the actor can decode it into a custom object
+		// Wrap the occurrence data so the actor can decode it into a custom object
 		var data actor.Envelope
 		if len(req.Data) > 0 {
 			dec := msgpack.GetDecoder()
@@ -129,20 +124,45 @@ func (h *Host) executeAlarm(ctx context.Context, req protocol.ExecuteAlarmReques
 			data = dec
 		}
 
-		// Stamp a per-occurrence key (alarm ID + due-time ms) into the context so the actor can detect duplicate deliveries of the same occurrence without confusing them with legitimate subsequent firings of a repeating alarm (which have a different due time)
+		// Stamp a per-occurrence key (ID + due-time ms) into the context so the actor can detect duplicate deliveries of the same occurrence without confusing them with legitimate subsequent firings of a repeating occurrence (which have a different due time)
 		invokeCtx = actor.WithRequestID(invokeCtx, alarmRequestID(req))
 
-		// Record the execution time, then invoke the alarm
+		// Record the execution time before invoking the actor
 		executionTime = h.clock.Now().UnixMilli()
-		alarmErr := obj.Alarm(invokeCtx, req.Name, data)
-		if alarmErr != nil {
-			return nil, fmt.Errorf("error from actor: %w", alarmErr)
+
+		// Jobs are delivered to the Job method, plain alarms to the Alarm method
+		if req.Kind == string(components.AlarmKindJob) {
+			obj, ok := act.Instance.(actor.ActorJob)
+			if !ok {
+				return nil, actorcore.ErrActorMethodUnsupported
+			}
+			rErr := obj.Job(invokeCtx, req.JobMethod, data)
+			if rErr != nil {
+				return nil, rErr
+			}
+			return nil, nil
+		}
+
+		// The actor must implement the Alarm method to receive alarms
+		obj, ok := act.Instance.(actor.ActorAlarm)
+		if !ok {
+			return nil, actorcore.ErrActorMethodUnsupported
+		}
+		rErr := obj.Alarm(invokeCtx, req.Name, data)
+		if rErr != nil {
+			return nil, fmt.Errorf("error from actor: %w", rErr)
 		}
 
 		return nil, nil
 	})
 	if err != nil {
 		tracing.Fail(ctx, err.Error())
+
+		// A permanent job failure is signaled with a distinct code so the runtime dead-letters it immediately instead of retrying
+		if errors.Is(err, actor.ErrJobPermanentFailure) {
+			return protocol.ExecuteAlarmResponse{}, protocol.NewError(protocol.ErrCodeJobPermanentFailure, err.Error())
+		}
+
 		return protocol.ExecuteAlarmResponse{}, actorcore.InvokeErrorToProtocol(err)
 	}
 

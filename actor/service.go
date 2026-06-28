@@ -24,6 +24,10 @@ var (
 	ErrNoHost = errors.New("no host is available to place the actor")
 	// ErrServiceNotInitialized is returned by Service methods when the Service was not created via NewService and therefore has no host to delegate to
 	ErrServiceNotInitialized = errors.New("actor service is not initialized; use NewService")
+	// ErrJobPermanentFailure is returned from an actor's Job method to skip the remaining retries and dead-letter the job immediately.
+	ErrJobPermanentFailure = errors.New("job failed permanently")
+	// ErrJobNotFound is returned by job methods when the job cannot be found.
+	ErrJobNotFound = errors.New("job not found")
 )
 
 // Service allows interacting with the actor host, to invoke actors and perform operations on state and alarms.
@@ -112,6 +116,62 @@ func (s *Service) DeleteAlarm(ctx context.Context, actorType string, actorID str
 	}
 
 	return s.host.DeleteAlarm(ctx, actorType, actorID, alarmName)
+}
+
+// Dispatch sends a durable, fire-and-forget job to a specific actor.
+// The job is delivered to the actor's Job method on whatever host serves the actor type, and is retried automatically and dead-lettered on permanent failure.
+// It returns the server-issued job ID.
+func (s *Service) Dispatch(ctx context.Context, actorType string, actorID string, method string, input any, opts ...JobOption) (jobID string, err error) {
+	if !s.ready() {
+		return "", ErrServiceNotInitialized
+	}
+
+	properties, err := newJobProperties(opts...)
+	if err != nil {
+		return "", err
+	}
+
+	return s.host.Dispatch(ctx, actorType, actorID, method, input, properties)
+}
+
+// GetJob returns the information for a job by its ID, spanning both live and dead-lettered jobs.
+// Returns ErrJobNotFound if the job cannot be found.
+func (s *Service) GetJob(ctx context.Context, jobID string) (JobInfo, error) {
+	if !s.ready() {
+		return JobInfo{}, ErrServiceNotInitialized
+	}
+
+	return s.host.GetJob(ctx, jobID)
+}
+
+// ListJobs returns all live and dead-lettered jobs for an actor.
+func (s *Service) ListJobs(ctx context.Context, actorType string, actorID string) ([]JobInfo, error) {
+	if !s.ready() {
+		return nil, ErrServiceNotInitialized
+	}
+
+	return s.host.ListJobs(ctx, actorType, actorID)
+}
+
+// CancelJob cancels a live (pending or active) job for an actor.
+// Returns ErrJobNotFound if the job cannot be found among live jobs.
+func (s *Service) CancelJob(ctx context.Context, actorType string, actorID string, jobID string) error {
+	if !s.ready() {
+		return ErrServiceNotInitialized
+	}
+
+	return s.host.CancelJob(ctx, actorType, actorID, jobID)
+}
+
+// RetryJob re-dispatches a dead-lettered job, scheduled to run as soon as possible.
+// It returns the ID of the newly dispatched job and removes the dead-letter record.
+// Returns ErrJobNotFound if the dead job cannot be found.
+func (s *Service) RetryJob(ctx context.Context, jobID string) (newJobID string, err error) {
+	if !s.ready() {
+		return "", ErrServiceNotInitialized
+	}
+
+	return s.host.RetryJob(ctx, jobID)
 }
 
 // HaltAll halts all actors currently active on the host.

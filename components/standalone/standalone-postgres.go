@@ -184,6 +184,12 @@ func (s *StandalonePostgresBacked) loadFromDB(ctx context.Context) error {
 		return fmt.Errorf("failed to load alarms: %w", err)
 	}
 
+	// Load dead jobs
+	err = s.loadDeadJobs(queryCtx)
+	if err != nil {
+		return fmt.Errorf("failed to load dead jobs: %w", err)
+	}
+
 	// Load actor state
 	err = s.loadActorState(queryCtx)
 	if err != nil {
@@ -267,8 +273,8 @@ func (s *StandalonePostgresBacked) loadAlarms(ctx context.Context) error {
 	rows, err := s.db.Query(ctx, `
 		SELECT
 			alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
-			alarm_interval, alarm_ttl_time, alarm_data,
-			alarm_lease_id, alarm_lease_expiration_time
+			alarm_interval, alarm_cron, alarm_ttl_time, alarm_data,
+			alarm_lease_id, alarm_lease_expiration_time, alarm_kind, job_method
 		FROM alarms
 	`)
 	if err != nil {
@@ -278,17 +284,20 @@ func (s *StandalonePostgresBacked) loadAlarms(ctx context.Context) error {
 
 	for rows.Next() {
 		var (
-			a        internal.Alarm
-			interval *string
-			ttl      *time.Time
-			data     []byte
-			leaseID  *string
-			leaseExp *time.Time
+			a         internal.Alarm
+			interval  *string
+			cron      *string
+			ttl       *time.Time
+			data      []byte
+			leaseID   *string
+			leaseExp  *time.Time
+			kind      *string
+			jobMethod *string
 		)
 
 		err := rows.Scan(
 			&a.ID, &a.ActorType, &a.ActorID, &a.Name, &a.DueTime,
-			&interval, &ttl, &data, &leaseID, &leaseExp,
+			&interval, &cron, &ttl, &data, &leaseID, &leaseExp, &kind, &jobMethod,
 		)
 		if err != nil {
 			return err
@@ -296,6 +305,9 @@ func (s *StandalonePostgresBacked) loadAlarms(ctx context.Context) error {
 
 		if interval != nil {
 			a.Interval = *interval
+		}
+		if cron != nil {
+			a.Cron = *cron
 		}
 		if ttl != nil {
 			a.TTL = ttl
@@ -309,10 +321,64 @@ func (s *StandalonePostgresBacked) loadAlarms(ctx context.Context) error {
 		if leaseExp != nil {
 			a.LeaseExpiration = leaseExp
 		}
+		if kind != nil {
+			a.Kind = *kind
+		}
+		if jobMethod != nil {
+			a.JobMethod = *jobMethod
+		}
 
 		key := internal.NewAlarmKey(a.ActorType, a.ActorID, a.Name)
 		s.Alarms[key] = &a
 		s.AlarmsByID[a.ID] = &a
+	}
+
+	return rows.Err()
+}
+
+func (s *StandalonePostgresBacked) loadDeadJobs(ctx context.Context) error {
+	rows, err := s.db.Query(ctx, `
+		SELECT
+			job_id, actor_type, actor_id, job_method, job_data,
+			attempts, last_error, failed_at, original_due, job_interval, job_cron
+		FROM dead_jobs
+	`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			d         internal.DeadJob
+			data      []byte
+			lastError *string
+			interval  *string
+			cron      *string
+		)
+
+		err := rows.Scan(
+			&d.JobID, &d.ActorType, &d.ActorID, &d.Method, &data,
+			&d.Attempts, &lastError, &d.FailedAt, &d.OriginalDue, &interval, &cron,
+		)
+		if err != nil {
+			return err
+		}
+
+		if len(data) > 0 {
+			d.Data = data
+		}
+		if lastError != nil {
+			d.LastError = *lastError
+		}
+		if interval != nil {
+			d.Interval = *interval
+		}
+		if cron != nil {
+			d.Cron = *cron
+		}
+
+		s.DeadJobs[d.JobID] = &d
 	}
 
 	return rows.Err()
@@ -395,6 +461,12 @@ func (s *StandalonePostgresBacked) PersistChanges(ctx context.Context, changes *
 
 	// Process alarm changes
 	err = s.persistAlarmChanges(queryCtx, tx, changes)
+	if err != nil {
+		return err
+	}
+
+	// Process dead job changes
+	err = s.persistDeadJobChanges(queryCtx, tx, changes)
 	if err != nil {
 		return err
 	}
@@ -519,10 +591,14 @@ func (s *StandalonePostgresBacked) persistAlarmChanges(ctx context.Context, tx p
 		var (
 			intervalVal, leaseIDVal any
 			ttlVal, leaseExpVal     any
+			cronVal, jobMethodVal   any
 		)
 
 		if a.Interval != "" {
 			intervalVal = a.Interval
+		}
+		if a.Cron != "" {
+			cronVal = a.Cron
 		}
 		if a.TTL != nil {
 			ttlVal = a.TTL.UTC()
@@ -533,28 +609,91 @@ func (s *StandalonePostgresBacked) persistAlarmChanges(ctx context.Context, tx p
 		if a.LeaseExpiration != nil {
 			leaseExpVal = a.LeaseExpiration.UTC()
 		}
+		kind := a.Kind
+		if kind == "" {
+			kind = "alarm"
+		}
+		if a.JobMethod != "" {
+			jobMethodVal = a.JobMethod
+		}
 
 		_, err := tx.Exec(ctx,
 			`INSERT INTO alarms (
 				alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
-			    alarm_interval, alarm_ttl_time, alarm_data,
-			    alarm_lease_id, alarm_lease_expiration_time)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			    alarm_interval, alarm_cron, alarm_ttl_time, alarm_data,
+			    alarm_lease_id, alarm_lease_expiration_time, alarm_kind, job_method)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 			ON CONFLICT(alarm_id) DO UPDATE SET
 				actor_type = EXCLUDED.actor_type,
 				actor_id = EXCLUDED.actor_id,
 				alarm_name = EXCLUDED.alarm_name,
 				alarm_due_time = EXCLUDED.alarm_due_time,
 			    alarm_interval = EXCLUDED.alarm_interval,
+				alarm_cron = EXCLUDED.alarm_cron,
 				alarm_ttl_time = EXCLUDED.alarm_ttl_time,
 				alarm_data = EXCLUDED.alarm_data,
 			    alarm_lease_id = EXCLUDED.alarm_lease_id,
-				alarm_lease_expiration_time = EXCLUDED.alarm_lease_expiration_time`,
+				alarm_lease_expiration_time = EXCLUDED.alarm_lease_expiration_time,
+				alarm_kind = EXCLUDED.alarm_kind,
+				job_method = EXCLUDED.job_method`,
 			a.ID, a.ActorType, a.ActorID, a.Name, a.DueTime.UTC(),
-			intervalVal, ttlVal, a.Data, leaseIDVal, leaseExpVal,
+			intervalVal, cronVal, ttlVal, a.Data, leaseIDVal, leaseExpVal, kind, jobMethodVal,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to upsert alarm %s: %w", a.ID, err)
+		}
+	}
+
+	return nil
+}
+
+func (s *StandalonePostgresBacked) persistDeadJobChanges(ctx context.Context, tx pgx.Tx, changes *internal.Changes) error {
+	// Deletes
+	for _, jobID := range changes.DeadJobs.Delete {
+		_, err := tx.Exec(ctx, "DELETE FROM dead_jobs WHERE job_id = $1", jobID)
+		if err != nil {
+			return fmt.Errorf("failed to delete dead job %s: %w", jobID, err)
+		}
+	}
+
+	// Upserts
+	for _, dc := range changes.DeadJobs.Set {
+		d := dc.Value
+		var (
+			lastErrorVal         any
+			intervalVal, cronVal any
+		)
+		if d.LastError != "" {
+			lastErrorVal = d.LastError
+		}
+		if d.Interval != "" {
+			intervalVal = d.Interval
+		}
+		if d.Cron != "" {
+			cronVal = d.Cron
+		}
+
+		_, err := tx.Exec(ctx,
+			`INSERT INTO dead_jobs (
+				job_id, actor_type, actor_id, job_method, job_data,
+				attempts, last_error, failed_at, original_due, job_interval, job_cron)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			ON CONFLICT(job_id) DO UPDATE SET
+				actor_type = EXCLUDED.actor_type,
+				actor_id = EXCLUDED.actor_id,
+				job_method = EXCLUDED.job_method,
+				job_data = EXCLUDED.job_data,
+				attempts = EXCLUDED.attempts,
+				last_error = EXCLUDED.last_error,
+				failed_at = EXCLUDED.failed_at,
+				original_due = EXCLUDED.original_due,
+				job_interval = EXCLUDED.job_interval,
+				job_cron = EXCLUDED.job_cron`,
+			d.JobID, d.ActorType, d.ActorID, d.Method, d.Data,
+			d.Attempts, lastErrorVal, d.FailedAt.UTC(), d.OriginalDue.UTC(), intervalVal, cronVal,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to upsert dead job %s: %w", d.JobID, err)
 		}
 	}
 

@@ -195,6 +195,16 @@ func (rt *Runtime) route(ctx context.Context, c *hostConn, req *protocol.Envelop
 		return rt.handleSetAlarm(ctx, c, req)
 	case protocol.KindDeleteAlarm:
 		return rt.handleDeleteAlarm(ctx, c, req)
+	case protocol.KindDispatchJob:
+		return rt.handleDispatchJob(ctx, c, req)
+	case protocol.KindGetJob:
+		return rt.handleGetJob(ctx, c, req)
+	case protocol.KindListJobs:
+		return rt.handleListJobs(ctx, c, req)
+	case protocol.KindCancelJob:
+		return rt.handleCancelJob(ctx, c, req)
+	case protocol.KindRetryJob:
+		return rt.handleRetryJob(ctx, c, req)
 	case protocol.KindGetState:
 		return rt.handleGetState(ctx, c, req)
 	case protocol.KindSetState:
@@ -620,6 +630,155 @@ func (rt *Runtime) handleDeleteAlarm(parentCtx context.Context, _ *hostConn, req
 	}
 
 	return req.Reply(protocol.KindDeleteAlarmResponse, nil)
+}
+
+// handleDispatchJob creates a job, with its name resolved by the dispatching host
+func (rt *Runtime) handleDispatchJob(parentCtx context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
+	var payload protocol.DispatchJobRequest
+	err := req.DecodePayload(&payload)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode dispatch job request"))
+	}
+
+	// The dispatching host already resolved the name (idempotency key or a random one), so all three components must be valid ref parts
+	err = ref.ValidateComponents(payload.ActorType, payload.ActorID, payload.Name)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
+	}
+
+	// Translate the wire properties into a job alarm row, with the Kind discriminator that drives delivery and dead-lettering
+	setReq := components.SetAlarmReq{
+		AlarmProperties: ref.AlarmProperties{
+			DueTime:  time.UnixMilli(payload.DueTimeUnixMs),
+			Interval: payload.Interval,
+			Cron:     payload.Cron,
+			Data:     payload.Data,
+		},
+		Kind:      components.AlarmKindJob,
+		JobMethod: payload.Method,
+	}
+	// A zero TTL on the wire means no deadline
+	if payload.TTLUnixMs > 0 {
+		ttl := time.UnixMilli(payload.TTLUnixMs)
+		setReq.TTL = &ttl
+	}
+
+	// Persist the job and return its server-issued ID, which the provider keeps stable for an idempotency-key re-dispatch
+	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+	defer cancel()
+	jobID, err := rt.provider.DispatchJob(ctx, ref.NewAlarmRef(payload.ActorType, payload.ActorID, payload.Name), setReq)
+	if err != nil {
+		rt.log.ErrorContext(ctx, "Failed to dispatch job", slog.Any("error", err))
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to dispatch job"))
+	}
+
+	return rt.reply(req, protocol.KindDispatchJobResponse, protocol.DispatchJobResponse{
+		JobID: jobID,
+	})
+}
+
+// handleGetJob retrieves a job by ID, spanning live and dead-lettered jobs
+func (rt *Runtime) handleGetJob(parentCtx context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
+	var payload protocol.GetJobRequest
+	err := req.DecodePayload(&payload)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode get job request"))
+	}
+
+	// The provider looks up live jobs in the alarms table and falls back to the dead-letter store
+	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+	defer cancel()
+	res, err := rt.provider.GetJob(ctx, payload.JobID)
+	if errors.Is(err, components.ErrNoJob) {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeJobNotFound, "job does not exist"))
+	} else if err != nil {
+		rt.log.ErrorContext(ctx, "Failed to get job", slog.Any("error", err))
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to get job"))
+	}
+
+	return rt.reply(req, protocol.KindGetJobResponse, protocol.GetJobResponse{JobInfo: componentsJobInfoToProtocol(res)})
+}
+
+// handleListJobs lists the jobs for an actor
+func (rt *Runtime) handleListJobs(parentCtx context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
+	var payload protocol.ListJobsRequest
+	err := req.DecodePayload(&payload)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode list jobs request"))
+	}
+
+	err = ref.ValidateComponents(payload.ActorType, payload.ActorID)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
+	}
+
+	// The provider returns both live and dead-lettered jobs for the actor
+	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+	defer cancel()
+	res, err := rt.provider.ListJobs(ctx, payload.ActorType, payload.ActorID)
+	if err != nil {
+		rt.log.ErrorContext(ctx, "Failed to list jobs", slog.Any("error", err))
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to list jobs"))
+	}
+
+	// Convert each job to its wire DTO
+	jobs := make([]protocol.JobInfo, len(res))
+	for i := range res {
+		jobs[i] = componentsJobInfoToProtocol(res[i])
+	}
+
+	return rt.reply(req, protocol.KindListJobsResponse, protocol.ListJobsResponse{
+		Jobs: jobs,
+	})
+}
+
+// handleCancelJob cancels a live job for an actor
+func (rt *Runtime) handleCancelJob(parentCtx context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
+	var payload protocol.CancelJobRequest
+	err := req.DecodePayload(&payload)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode cancel job request"))
+	}
+
+	err = ref.ValidateComponents(payload.ActorType, payload.ActorID)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
+	}
+
+	// Cancellation only removes a live job: a dead-lettered job is reported as not found
+	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+	defer cancel()
+	err = rt.provider.CancelJob(ctx, payload.ActorType, payload.ActorID, payload.JobID)
+	if errors.Is(err, components.ErrNoJob) {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeJobNotFound, "job does not exist"))
+	} else if err != nil {
+		rt.log.ErrorContext(ctx, "Failed to cancel job", slog.Any("error", err))
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to cancel job"))
+	}
+
+	return req.Reply(protocol.KindCancelJobResponse, nil)
+}
+
+// handleRetryJob re-dispatches a dead-lettered job and removes its dead-letter record
+func (rt *Runtime) handleRetryJob(parentCtx context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
+	var payload protocol.RetryJobRequest
+	err := req.DecodePayload(&payload)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode retry job request"))
+	}
+
+	// The provider re-dispatches the dead job and removes its dead-letter record atomically, so a crash cannot duplicate the job
+	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+	defer cancel()
+	newID, err := rt.provider.RetryDeadJob(ctx, payload.JobID)
+	if errors.Is(err, components.ErrNoJob) {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeJobNotFound, "job does not exist"))
+	} else if err != nil {
+		rt.log.ErrorContext(ctx, "Failed to retry job", slog.Any("error", err))
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to retry job"))
+	}
+
+	return rt.reply(req, protocol.KindRetryJobResponse, protocol.RetryJobResponse{JobID: newID})
 }
 
 // handleGetState retrieves an actor's persistent state

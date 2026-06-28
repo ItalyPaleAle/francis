@@ -54,6 +54,10 @@ const (
 	ErrCodeStateNotFound ErrorCode = "state_not_found"
 	// ErrCodeAlarmNotFound indicates the requested alarm does not exist
 	ErrCodeAlarmNotFound ErrorCode = "alarm_not_found"
+	// ErrCodeJobNotFound indicates the requested job does not exist
+	ErrCodeJobNotFound ErrorCode = "job_not_found"
+	// ErrCodeJobPermanentFailure indicates the actor's Job method requested an immediate dead-letter, skipping the remaining retries
+	ErrCodeJobPermanentFailure ErrorCode = "job_permanent_failure"
 	// ErrCodeTransportFailure indicates the request was delivered to the peer but the response was not received
 	// The peer actor may have executed the request, so the caller must not auto-retry without an idempotency mechanism to avoid double-execution
 	ErrCodeTransportFailure ErrorCode = "transport_failure"

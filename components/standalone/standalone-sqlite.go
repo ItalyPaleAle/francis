@@ -203,6 +203,12 @@ func (s *StandaloneSQLiteBacked) loadFromDB(ctx context.Context) error {
 		return fmt.Errorf("failed to load alarms: %w", err)
 	}
 
+	// Load dead jobs
+	err = s.loadDeadJobs(queryCtx)
+	if err != nil {
+		return fmt.Errorf("failed to load dead jobs: %w", err)
+	}
+
 	// Load actor state
 	err = s.loadActorState(queryCtx)
 	if err != nil {
@@ -291,8 +297,8 @@ func (s *StandaloneSQLiteBacked) loadAlarms(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
 			alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
-			alarm_interval, alarm_ttl_time, alarm_data,
-			alarm_lease_id, alarm_lease_expiration_time
+			alarm_interval, alarm_cron, alarm_ttl_time, alarm_data,
+			alarm_lease_id, alarm_lease_expiration_time, alarm_kind, job_method
 		FROM alarms
 	`)
 	if err != nil {
@@ -305,15 +311,18 @@ func (s *StandaloneSQLiteBacked) loadAlarms(ctx context.Context) error {
 			a          internal.Alarm
 			dueTimeMs  int64
 			interval   sql.NullString
+			cron       sql.NullString
 			ttlMs      sql.NullInt64
 			data       []byte
 			leaseID    sql.NullString
 			leaseExpMs sql.NullInt64
+			kind       sql.NullString
+			jobMethod  sql.NullString
 		)
 
 		err := rows.Scan(
 			&a.ID, &a.ActorType, &a.ActorID, &a.Name, &dueTimeMs,
-			&interval, &ttlMs, &data, &leaseID, &leaseExpMs,
+			&interval, &cron, &ttlMs, &data, &leaseID, &leaseExpMs, &kind, &jobMethod,
 		)
 		if err != nil {
 			return err
@@ -322,6 +331,9 @@ func (s *StandaloneSQLiteBacked) loadAlarms(ctx context.Context) error {
 		a.DueTime = time.UnixMilli(dueTimeMs)
 		if interval.Valid {
 			a.Interval = interval.String
+		}
+		if cron.Valid {
+			a.Cron = cron.String
 		}
 		if ttlMs.Valid {
 			a.TTL = new(time.UnixMilli(ttlMs.Int64))
@@ -335,10 +347,68 @@ func (s *StandaloneSQLiteBacked) loadAlarms(ctx context.Context) error {
 		if leaseExpMs.Valid {
 			a.LeaseExpiration = new(time.UnixMilli(leaseExpMs.Int64))
 		}
+		if kind.Valid {
+			a.Kind = kind.String
+		}
+		if jobMethod.Valid {
+			a.JobMethod = jobMethod.String
+		}
 
 		key := internal.NewAlarmKey(a.ActorType, a.ActorID, a.Name)
 		s.Alarms[key] = &a
 		s.AlarmsByID[a.ID] = &a
+	}
+
+	return rows.Err()
+}
+
+func (s *StandaloneSQLiteBacked) loadDeadJobs(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT
+			job_id, actor_type, actor_id, job_method, job_data,
+			attempts, last_error, failed_at, original_due, job_interval, job_cron
+		FROM dead_jobs
+	`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			d          internal.DeadJob
+			data       []byte
+			lastError  sql.NullString
+			failedAtMs int64
+			originalMs int64
+			interval   sql.NullString
+			cron       sql.NullString
+		)
+
+		err := rows.Scan(
+			&d.JobID, &d.ActorType, &d.ActorID, &d.Method, &data,
+			&d.Attempts, &lastError, &failedAtMs, &originalMs, &interval, &cron,
+		)
+		if err != nil {
+			return err
+		}
+
+		if len(data) > 0 {
+			d.Data = data
+		}
+		if lastError.Valid {
+			d.LastError = lastError.String
+		}
+		d.FailedAt = time.UnixMilli(failedAtMs)
+		d.OriginalDue = time.UnixMilli(originalMs)
+		if interval.Valid {
+			d.Interval = interval.String
+		}
+		if cron.Valid {
+			d.Cron = cron.String
+		}
+
+		s.DeadJobs[d.JobID] = &d
 	}
 
 	return rows.Err()
@@ -422,6 +492,12 @@ func (s *StandaloneSQLiteBacked) PersistChanges(ctx context.Context, changes *in
 
 	// Process alarm changes
 	err = s.persistAlarmChanges(queryCtx, tx, changes)
+	if err != nil {
+		return err
+	}
+
+	// Process dead job changes
+	err = s.persistDeadJobChanges(queryCtx, tx, changes)
 	if err != nil {
 		return err
 	}
@@ -533,10 +609,14 @@ func (s *StandaloneSQLiteBacked) persistAlarmChanges(ctx context.Context, tx *sq
 		var (
 			intervalVal, leaseIDVal any
 			ttlVal, leaseExpVal     any
+			cronVal, jobMethodVal   any
 		)
 
 		if a.Interval != "" {
 			intervalVal = a.Interval
+		}
+		if a.Cron != "" {
+			cronVal = a.Cron
 		}
 		if a.TTL != nil {
 			ttlVal = a.TTL.UnixMilli()
@@ -547,18 +627,67 @@ func (s *StandaloneSQLiteBacked) persistAlarmChanges(ctx context.Context, tx *sq
 		if a.LeaseExpiration != nil {
 			leaseExpVal = a.LeaseExpiration.UnixMilli()
 		}
+		kind := a.Kind
+		if kind == "" {
+			kind = "alarm"
+		}
+		if a.JobMethod != "" {
+			jobMethodVal = a.JobMethod
+		}
 
 		_, err := tx.ExecContext(ctx,
 			`REPLACE INTO alarms (
 				alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
-			    alarm_interval, alarm_ttl_time, alarm_data,
-			    alarm_lease_id, alarm_lease_expiration_time
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			    alarm_interval, alarm_cron, alarm_ttl_time, alarm_data,
+			    alarm_lease_id, alarm_lease_expiration_time, alarm_kind, job_method
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			a.ID, a.ActorType, a.ActorID, a.Name, a.DueTime.UnixMilli(),
-			intervalVal, ttlVal, a.Data, leaseIDVal, leaseExpVal,
+			intervalVal, cronVal, ttlVal, a.Data, leaseIDVal, leaseExpVal, kind, jobMethodVal,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to upsert alarm %s: %w", a.ID, err)
+		}
+	}
+
+	return nil
+}
+
+func (s *StandaloneSQLiteBacked) persistDeadJobChanges(ctx context.Context, tx *sql.Tx, changes *internal.Changes) error {
+	// Deletes
+	for _, jobID := range changes.DeadJobs.Delete {
+		_, err := tx.ExecContext(ctx, "DELETE FROM dead_jobs WHERE job_id = ?", jobID)
+		if err != nil {
+			return fmt.Errorf("failed to delete dead job %s: %w", jobID, err)
+		}
+	}
+
+	// Upserts
+	for _, dc := range changes.DeadJobs.Set {
+		d := dc.Value
+		var (
+			lastErrorVal         any
+			intervalVal, cronVal any
+		)
+		if d.LastError != "" {
+			lastErrorVal = d.LastError
+		}
+		if d.Interval != "" {
+			intervalVal = d.Interval
+		}
+		if d.Cron != "" {
+			cronVal = d.Cron
+		}
+
+		_, err := tx.ExecContext(ctx,
+			`REPLACE INTO dead_jobs (
+				job_id, actor_type, actor_id, job_method, job_data,
+				attempts, last_error, failed_at, original_due, job_interval, job_cron
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			d.JobID, d.ActorType, d.ActorID, d.Method, d.Data,
+			d.Attempts, lastErrorVal, d.FailedAt.UnixMilli(), d.OriginalDue.UnixMilli(), intervalVal, cronVal,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to upsert dead job %s: %w", d.JobID, err)
 		}
 	}
 

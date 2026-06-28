@@ -56,3 +56,37 @@ func refAlarmPropsToProtocol(p ref.AlarmProperties) protocol.AlarmProperties {
 	}
 	return out
 }
+
+// componentsJobStatusToProtocol maps the provider job status to the wire integer status
+func componentsJobStatusToProtocol(s components.JobStatus) int {
+	switch s {
+	case components.JobStatusActive:
+		return 1
+	case components.JobStatusDeadLettered:
+		return 2
+	default:
+		return 0
+	}
+}
+
+// componentsJobInfoToProtocol converts a provider JobInfo to the wire DTO, expressing timestamps as Unix milliseconds
+func componentsJobInfoToProtocol(j components.JobInfo) protocol.JobInfo {
+	out := protocol.JobInfo{
+		JobID:     j.JobID,
+		ActorType: j.ActorType,
+		ActorID:   j.ActorID,
+		Method:    j.Method,
+		Status:    componentsJobStatusToProtocol(j.Status),
+		Interval:  j.Interval,
+		Cron:      j.Cron,
+		Attempts:  j.Attempts,
+		LastError: j.LastError,
+	}
+	if !j.DueTime.IsZero() {
+		out.DueTimeUnixMs = j.DueTime.UnixMilli()
+	}
+	if !j.CreatedAt.IsZero() {
+		out.CreatedAtUnixMs = j.CreatedAt.UnixMilli()
+	}
+	return out
+}

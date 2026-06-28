@@ -12,5 +12,6 @@ var (
 	ErrNoHost                   = errors.New("could not find a suitable host for this actor")
 	ErrNoActor                  = errors.New("actor does not exist")
 	ErrNoAlarm                  = errors.New("alarm does not exist")
+	ErrNoJob                    = errors.New("job does not exist")
 	ErrNoState                  = errors.New("no state found for the actor")
 )

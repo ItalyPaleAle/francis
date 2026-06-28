@@ -29,9 +29,12 @@ func (p *Provider) GetAlarm(ctx context.Context, aRef ref.AlarmRef) (components.
 		AlarmProperties: ref.AlarmProperties{
 			DueTime:  a.DueTime,
 			Interval: a.Interval,
+			Cron:     a.Cron,
 			TTL:      a.TTL,
 			Data:     a.Data,
 		},
+		Kind:      components.AlarmKind(a.Kind),
+		JobMethod: a.JobMethod,
 	}
 
 	return res, nil
@@ -86,6 +89,7 @@ func (p *Provider) SetAlarm(ctx context.Context, aRef ref.AlarmRef, req componen
 		Name:      aRef.Name,
 		DueTime:   req.DueTime,
 		Interval:  req.Interval,
+		Kind:      string(components.AlarmKindAlarm),
 		TTL:       req.TTL,
 		Data:      data,
 		// Reset lease on any update
@@ -427,9 +431,12 @@ func (p *Provider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmLease) (c
 		AlarmProperties: ref.AlarmProperties{
 			DueTime:  a.DueTime,
 			Interval: a.Interval,
+			Cron:     a.Cron,
 			TTL:      a.TTL,
 			Data:     a.Data,
 		},
+		Kind:      components.AlarmKind(a.Kind),
+		JobMethod: a.JobMethod,
 	}, nil
 }
 

@@ -60,3 +60,36 @@ func TestAlarmProperties_NextExecution(t *testing.T) {
 		require.Error(t, err)
 	})
 }
+
+func TestNextExecutionCron(t *testing.T) {
+	base := time.Date(2026, 6, 28, 12, 2, 0, 0, time.UTC)
+
+	t.Run("cron computes the next occurrence", func(t *testing.T) {
+		p := AlarmProperties{Cron: "*/5 * * * *"}
+		next, err := p.NextExecution(base)
+		require.NoError(t, err)
+		assert.Equal(t, time.Date(2026, 6, 28, 12, 5, 0, 0, time.UTC), next)
+	})
+
+	t.Run("cron takes precedence over interval", func(t *testing.T) {
+		// A nonsensical interval would error if it were used, proving cron wins
+		p := AlarmProperties{Cron: "*/5 * * * *", Interval: "not-a-duration"}
+		next, err := p.NextExecution(base)
+		require.NoError(t, err)
+		assert.Equal(t, time.Date(2026, 6, 28, 12, 5, 0, 0, time.UTC), next)
+	})
+
+	t.Run("cron past TTL returns zero", func(t *testing.T) {
+		ttl := base.Add(time.Minute)
+		p := AlarmProperties{Cron: "*/5 * * * *", TTL: &ttl}
+		next, err := p.NextExecution(base)
+		require.NoError(t, err)
+		assert.True(t, next.IsZero())
+	})
+
+	t.Run("invalid cron returns an error", func(t *testing.T) {
+		p := AlarmProperties{Cron: "not a cron"}
+		_, err := p.NextExecution(base)
+		require.Error(t, err)
+	})
+}

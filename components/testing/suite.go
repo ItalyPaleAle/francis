@@ -2,6 +2,7 @@ package comptesting
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -46,6 +47,8 @@ func (s Suite) RunTests(t *testing.T) {
 	t.Run("release alarm lease", s.TestReleaseAlarmLease)
 	t.Run("update leased alarm", s.TestUpdateLeasedAlarm)
 	t.Run("delete leased alarm", s.TestDeleteLeasedAlarm)
+
+	t.Run("jobs", s.TestJobs)
 }
 
 func (s Suite) RunConcurrencyTests(t *testing.T) {
@@ -830,7 +833,7 @@ func (s Suite) TestListHosts(t *testing.T) {
 		hosts, err := s.p.ListHosts(t.Context())
 		require.NoError(t, err)
 
-		// From GetSpec: H1, H2, H3, H4, H7, H8 are healthy; H5, H6, H9 are unhealthy
+		// From GetSpec: H1, H2, H3, H4, H7, H8 are healthy, while H5, H6, H9 are unhealthy
 		got := hostIDs(hosts)
 		expected := []string{SpecHostH1, SpecHostH2, SpecHostH3, SpecHostH4, SpecHostH7, SpecHostH8}
 		assert.ElementsMatch(t, expected, got, "should return exactly the healthy hosts")
@@ -4581,5 +4584,222 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 		// Verify lease2 is still valid
 		_, err = s.p.GetLeasedAlarm(ctx, lease2)
 		require.NoError(t, err, "lease2 should still be valid")
+	})
+}
+
+// TestJobs exercises the job-specific provider methods: dispatch (with idempotency), get, list, cancel, dead-letter, and replay.
+func (s Suite) TestJobs(t *testing.T) {
+	const jobHost = "0b000000-0000-4000-8000-0000000000b1"
+
+	// jobSeed returns a minimal spec with a single healthy host supporting the "JOB" actor type
+	jobSeed := func() Spec {
+		return Spec{
+			Hosts: HostSpecCollection{
+				{HostID: jobHost, Address: "127.0.0.1:7100", LastHealthAgo: time.Second},
+			},
+			HostActorTypes: HostActorTypeSpecCollection{
+				{HostID: jobHost, ActorType: "JOB", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
+			},
+		}
+	}
+
+	// dispatch creates a job and returns its ID
+	dispatch := func(t *testing.T, ctx context.Context, actorID string, name string, method string, props ref.AlarmProperties, data []byte) string {
+		t.Helper()
+		props.Data = data
+		jobID, err := s.p.DispatchJob(ctx, ref.NewAlarmRef("JOB", actorID, name), components.SetAlarmReq{
+			AlarmProperties: props,
+			Kind:            components.AlarmKindJob,
+			JobMethod:       method,
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, jobID)
+		return jobID
+	}
+
+	// leaseFor dispatches the actor's alarms via the fetcher and returns the lease whose ID matches jobID
+	leaseFor := func(t *testing.T, ctx context.Context, jobID string) *ref.AlarmLease {
+		t.Helper()
+		leases, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{Hosts: []string{jobHost}})
+		require.NoError(t, err)
+		for _, l := range leases {
+			if l.Key() == jobID {
+				return l
+			}
+		}
+		t.Fatalf("did not lease the dispatched job %q", jobID)
+		return nil
+	}
+
+	t.Run("dispatch and get a live job", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		jobID := dispatch(t, ctx, "a1", "k1", "process", ref.AlarmProperties{DueTime: s.p.Now().Add(time.Hour)}, []byte("payload"))
+
+		info, err := s.p.GetJob(ctx, jobID)
+		require.NoError(t, err)
+		assert.Equal(t, jobID, info.JobID)
+		assert.Equal(t, "JOB", info.ActorType)
+		assert.Equal(t, "a1", info.ActorID)
+		assert.Equal(t, "process", info.Method)
+		assert.Equal(t, components.JobStatusPending, info.Status)
+		assert.False(t, info.CreatedAt.IsZero(), "created at should be derived from the UUIDv7 job ID")
+	})
+
+	t.Run("idempotency key dedups re-dispatch", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		// Same actor + same key yields one job
+		id1 := dispatch(t, ctx, "a1", "key", "process", ref.AlarmProperties{DueTime: s.p.Now().Add(time.Hour)}, nil)
+		id2 := dispatch(t, ctx, "a1", "key", "process", ref.AlarmProperties{DueTime: s.p.Now().Add(time.Hour)}, nil)
+		assert.Equal(t, id1, id2, "re-dispatching with the same key must return the same job ID")
+
+		// A different key yields a distinct job
+		id3 := dispatch(t, ctx, "a1", "other", "process", ref.AlarmProperties{DueTime: s.p.Now().Add(time.Hour)}, nil)
+		assert.NotEqual(t, id1, id3)
+	})
+
+	t.Run("list jobs returns live jobs for the actor", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		id1 := dispatch(t, ctx, "list-actor", "j1", "process", ref.AlarmProperties{DueTime: s.p.Now().Add(time.Hour)}, nil)
+		id2 := dispatch(t, ctx, "list-actor", "j2", "process", ref.AlarmProperties{DueTime: s.p.Now().Add(time.Hour)}, nil)
+
+		jobs, err := s.p.ListJobs(ctx, "JOB", "list-actor")
+		require.NoError(t, err)
+		ids := make([]string, len(jobs))
+		for i, j := range jobs {
+			ids[i] = j.JobID
+		}
+		assert.ElementsMatch(t, []string{id1, id2}, ids)
+	})
+
+	t.Run("cancel removes a live job", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		jobID := dispatch(t, ctx, "cancel-actor", "c1", "process", ref.AlarmProperties{DueTime: s.p.Now().Add(time.Hour)}, nil)
+
+		err := s.p.CancelJob(ctx, "JOB", "cancel-actor", jobID)
+		require.NoError(t, err)
+
+		_, err = s.p.GetJob(ctx, jobID)
+		require.ErrorIs(t, err, components.ErrNoJob)
+
+		// Cancelling again reports the job is gone
+		err = s.p.CancelJob(ctx, "JOB", "cancel-actor", jobID)
+		require.ErrorIs(t, err, components.ErrNoJob)
+	})
+
+	t.Run("dead-letter a one-shot job", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		jobID := dispatch(t, ctx, "dead-actor", "d1", "process", ref.AlarmProperties{DueTime: s.p.Now()}, []byte("dead-payload"))
+		lease := leaseFor(t, ctx, jobID)
+
+		err := s.p.DeadLetterAlarm(ctx, lease, components.DeadLetterAlarmReq{Reason: "boom", Attempts: 3})
+		require.NoError(t, err)
+
+		// GetJob now reports the dead-lettered job, with attempts and the last error
+		info, err := s.p.GetJob(ctx, jobID)
+		require.NoError(t, err)
+		assert.Equal(t, components.JobStatusDeadLettered, info.Status)
+		assert.Equal(t, 3, info.Attempts)
+		assert.Equal(t, "boom", info.LastError)
+
+		// The dead job carries its input so it can be replayed
+		dead, err := s.p.GetDeadJob(ctx, jobID)
+		require.NoError(t, err)
+		assert.Equal(t, "process", dead.Method)
+		assert.Equal(t, []byte("dead-payload"), dead.Data)
+
+		// The live alarm row is gone, so the lease no longer resolves
+		_, err = s.p.GetLeasedAlarm(ctx, lease)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
+
+		// Deleting the dead job removes it entirely
+		err = s.p.DeleteDeadJob(ctx, jobID)
+		require.NoError(t, err)
+		_, err = s.p.GetJob(ctx, jobID)
+		require.ErrorIs(t, err, components.ErrNoJob)
+	})
+
+	t.Run("retry re-dispatches a dead job atomically", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		jobID := dispatch(t, ctx, "retry-actor", "rt1", "process", ref.AlarmProperties{DueTime: s.p.Now()}, []byte("payload"))
+		lease := leaseFor(t, ctx, jobID)
+		require.NoError(t, s.p.DeadLetterAlarm(ctx, lease, components.DeadLetterAlarmReq{Reason: "boom", Attempts: 3}))
+
+		// Replay it: a new live job appears and the dead-letter record is gone, both atomically
+		newID, err := s.p.RetryDeadJob(ctx, jobID)
+		require.NoError(t, err)
+		assert.NotEqual(t, jobID, newID, "replay should mint a new job ID")
+
+		// The original ID no longer resolves: neither a live job nor a dead one remains under it
+		_, err = s.p.GetJob(ctx, jobID)
+		require.ErrorIs(t, err, components.ErrNoJob)
+
+		// The new job is live and carries the original method and data
+		info, err := s.p.GetJob(ctx, newID)
+		require.NoError(t, err)
+		assert.NotEqual(t, components.JobStatusDeadLettered, info.Status)
+		assert.Equal(t, "process", info.Method)
+
+		// Retrying a job that is no longer dead-lettered reports it as missing
+		_, err = s.p.RetryDeadJob(ctx, jobID)
+		require.ErrorIs(t, err, components.ErrNoJob)
+	})
+
+	t.Run("dead-letter a repeating occurrence keeps the recurrence", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		jobID := dispatch(t, ctx, "repeat-actor", "r1", "process", ref.AlarmProperties{DueTime: s.p.Now(), Interval: "PT1H"}, nil)
+		lease := leaseFor(t, ctx, jobID)
+
+		next := s.p.Now().Add(time.Hour)
+		err := s.p.DeadLetterAlarm(ctx, lease, components.DeadLetterAlarmReq{Reason: "boom", Attempts: 1, Reschedule: true, NextDueTime: next})
+		require.NoError(t, err)
+
+		// The failed occurrence is dead-lettered under the original ID
+		info, err := s.p.GetJob(ctx, jobID)
+		require.NoError(t, err)
+		assert.Equal(t, components.JobStatusDeadLettered, info.Status)
+
+		// The recurrence continues as a new live job for the same actor
+		jobs, err := s.p.ListJobs(ctx, "JOB", "repeat-actor")
+		require.NoError(t, err)
+		var live, dead int
+		for _, j := range jobs {
+			switch j.Status {
+			case components.JobStatusDeadLettered:
+				dead++
+			default:
+				live++
+				assert.NotEqual(t, jobID, j.JobID, "the recurrence must have a fresh job ID")
+			}
+		}
+		assert.Equal(t, 1, live, "the recurrence should still have one live job")
+		assert.Equal(t, 1, dead, "the failed occurrence should be dead-lettered")
+	})
+
+	t.Run("get and delete report missing jobs", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		_, err := s.p.GetJob(ctx, "11111111-1111-7111-8111-111111111111")
+		require.ErrorIs(t, err, components.ErrNoJob)
+
+		_, err = s.p.GetDeadJob(ctx, "11111111-1111-7111-8111-111111111111")
+		require.ErrorIs(t, err, components.ErrNoJob)
+
+		err = s.p.DeleteDeadJob(ctx, "11111111-1111-7111-8111-111111111111")
+		require.ErrorIs(t, err, components.ErrNoJob)
 	})
 }

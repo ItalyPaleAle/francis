@@ -8,6 +8,7 @@ package actor_mocks
 
 import (
 	"context"
+	"io"
 
 	"github.com/italypaleale/francis/actor"
 	mock "github.com/stretchr/testify/mock"
@@ -38,6 +39,75 @@ type MockHost_Expecter struct {
 
 func (_m *MockHost) EXPECT() *MockHost_Expecter {
 	return &MockHost_Expecter{mock: &_m.Mock}
+}
+
+// CancelJob provides a mock function for the type MockHost
+func (_mock *MockHost) CancelJob(ctx context.Context, actorType string, actorID string, jobID string) error {
+	ret := _mock.Called(ctx, actorType, actorID, jobID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CancelJob")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string) error); ok {
+		r0 = returnFunc(ctx, actorType, actorID, jobID)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockHost_CancelJob_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CancelJob'
+type MockHost_CancelJob_Call struct {
+	*mock.Call
+}
+
+// CancelJob is a helper method to define mock.On call
+//   - ctx context.Context
+//   - actorType string
+//   - actorID string
+//   - jobID string
+func (_e *MockHost_Expecter) CancelJob(ctx interface{}, actorType interface{}, actorID interface{}, jobID interface{}) *MockHost_CancelJob_Call {
+	return &MockHost_CancelJob_Call{Call: _e.mock.On("CancelJob", ctx, actorType, actorID, jobID)}
+}
+
+func (_c *MockHost_CancelJob_Call) Run(run func(ctx context.Context, actorType string, actorID string, jobID string)) *MockHost_CancelJob_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		var arg2 string
+		if args[2] != nil {
+			arg2 = args[2].(string)
+		}
+		var arg3 string
+		if args[3] != nil {
+			arg3 = args[3].(string)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+		)
+	})
+	return _c
+}
+
+func (_c *MockHost_CancelJob_Call) Return(err error) *MockHost_CancelJob_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockHost_CancelJob_Call) RunAndReturn(run func(ctx context.Context, actorType string, actorID string, jobID string) error) *MockHost_CancelJob_Call {
+	_c.Call.Return(run)
+	return _c
 }
 
 // DeleteAlarm provides a mock function for the type MockHost
@@ -172,6 +242,96 @@ func (_c *MockHost_DeleteState_Call) RunAndReturn(run func(ctx context.Context, 
 	return _c
 }
 
+// Dispatch provides a mock function for the type MockHost
+func (_mock *MockHost) Dispatch(ctx context.Context, actorType string, actorID string, method string, data any, properties actor.JobProperties) (string, error) {
+	ret := _mock.Called(ctx, actorType, actorID, method, data, properties)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Dispatch")
+	}
+
+	var r0 string
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string, any, actor.JobProperties) (string, error)); ok {
+		return returnFunc(ctx, actorType, actorID, method, data, properties)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string, any, actor.JobProperties) string); ok {
+		r0 = returnFunc(ctx, actorType, actorID, method, data, properties)
+	} else {
+		r0 = ret.Get(0).(string)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, string, string, any, actor.JobProperties) error); ok {
+		r1 = returnFunc(ctx, actorType, actorID, method, data, properties)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockHost_Dispatch_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Dispatch'
+type MockHost_Dispatch_Call struct {
+	*mock.Call
+}
+
+// Dispatch is a helper method to define mock.On call
+//   - ctx context.Context
+//   - actorType string
+//   - actorID string
+//   - method string
+//   - data any
+//   - properties actor.JobProperties
+func (_e *MockHost_Expecter) Dispatch(ctx interface{}, actorType interface{}, actorID interface{}, method interface{}, data interface{}, properties interface{}) *MockHost_Dispatch_Call {
+	return &MockHost_Dispatch_Call{Call: _e.mock.On("Dispatch", ctx, actorType, actorID, method, data, properties)}
+}
+
+func (_c *MockHost_Dispatch_Call) Run(run func(ctx context.Context, actorType string, actorID string, method string, data any, properties actor.JobProperties)) *MockHost_Dispatch_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		var arg2 string
+		if args[2] != nil {
+			arg2 = args[2].(string)
+		}
+		var arg3 string
+		if args[3] != nil {
+			arg3 = args[3].(string)
+		}
+		var arg4 any
+		if args[4] != nil {
+			arg4 = args[4].(any)
+		}
+		var arg5 actor.JobProperties
+		if args[5] != nil {
+			arg5 = args[5].(actor.JobProperties)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+			arg4,
+			arg5,
+		)
+	})
+	return _c
+}
+
+func (_c *MockHost_Dispatch_Call) Return(jobID string, err error) *MockHost_Dispatch_Call {
+	_c.Call.Return(jobID, err)
+	return _c
+}
+
+func (_c *MockHost_Dispatch_Call) RunAndReturn(run func(ctx context.Context, actorType string, actorID string, method string, data any, properties actor.JobProperties) (string, error)) *MockHost_Dispatch_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetAlarm provides a mock function for the type MockHost
 func (_mock *MockHost) GetAlarm(ctx context.Context, actorType string, actorID string, name string) (actor.AlarmProperties, error) {
 	ret := _mock.Called(ctx, actorType, actorID, name)
@@ -246,6 +406,72 @@ func (_c *MockHost_GetAlarm_Call) Return(alarmProperties actor.AlarmProperties, 
 }
 
 func (_c *MockHost_GetAlarm_Call) RunAndReturn(run func(ctx context.Context, actorType string, actorID string, name string) (actor.AlarmProperties, error)) *MockHost_GetAlarm_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetJob provides a mock function for the type MockHost
+func (_mock *MockHost) GetJob(ctx context.Context, jobID string) (actor.JobInfo, error) {
+	ret := _mock.Called(ctx, jobID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetJob")
+	}
+
+	var r0 actor.JobInfo
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) (actor.JobInfo, error)); ok {
+		return returnFunc(ctx, jobID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) actor.JobInfo); ok {
+		r0 = returnFunc(ctx, jobID)
+	} else {
+		r0 = ret.Get(0).(actor.JobInfo)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = returnFunc(ctx, jobID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockHost_GetJob_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetJob'
+type MockHost_GetJob_Call struct {
+	*mock.Call
+}
+
+// GetJob is a helper method to define mock.On call
+//   - ctx context.Context
+//   - jobID string
+func (_e *MockHost_Expecter) GetJob(ctx interface{}, jobID interface{}) *MockHost_GetJob_Call {
+	return &MockHost_GetJob_Call{Call: _e.mock.On("GetJob", ctx, jobID)}
+}
+
+func (_c *MockHost_GetJob_Call) Run(run func(ctx context.Context, jobID string)) *MockHost_GetJob_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockHost_GetJob_Call) Return(jobInfo actor.JobInfo, err error) *MockHost_GetJob_Call {
+	_c.Call.Return(jobInfo, err)
+	return _c
+}
+
+func (_c *MockHost_GetJob_Call) RunAndReturn(run func(ctx context.Context, jobID string) (actor.JobInfo, error)) *MockHost_GetJob_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -420,21 +646,86 @@ func (_c *MockHost_HaltAll_Call) RunAndReturn(run func() error) *MockHost_HaltAl
 	return _c
 }
 
+// HaltDeferred provides a mock function for the type MockHost
+func (_mock *MockHost) HaltDeferred(actorType string, actorID string) {
+	_mock.Called(actorType, actorID)
+	return
+}
+
+// MockHost_HaltDeferred_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'HaltDeferred'
+type MockHost_HaltDeferred_Call struct {
+	*mock.Call
+}
+
+// HaltDeferred is a helper method to define mock.On call
+//   - actorType string
+//   - actorID string
+func (_e *MockHost_Expecter) HaltDeferred(actorType interface{}, actorID interface{}) *MockHost_HaltDeferred_Call {
+	return &MockHost_HaltDeferred_Call{Call: _e.mock.On("HaltDeferred", actorType, actorID)}
+}
+
+func (_c *MockHost_HaltDeferred_Call) Run(run func(actorType string, actorID string)) *MockHost_HaltDeferred_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 string
+		if args[0] != nil {
+			arg0 = args[0].(string)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockHost_HaltDeferred_Call) Return() *MockHost_HaltDeferred_Call {
+	_c.Call.Return()
+	return _c
+}
+
+func (_c *MockHost_HaltDeferred_Call) RunAndReturn(run func(actorType string, actorID string)) *MockHost_HaltDeferred_Call {
+	_c.Run(run)
+	return _c
+}
+
 // Invoke provides a mock function for the type MockHost
-func (_mock *MockHost) Invoke(ctx context.Context, actorType string, actorID string, method string, data any, out any) error {
-	ret := _mock.Called(ctx, actorType, actorID, method, data, out)
+func (_mock *MockHost) Invoke(ctx context.Context, actorType string, actorID string, method string, data any, opts ...actor.InvokeOption) (actor.Envelope, error) {
+	// actor.InvokeOption
+	_va := make([]interface{}, len(opts))
+	for _i := range opts {
+		_va[_i] = opts[_i]
+	}
+	var _ca []interface{}
+	_ca = append(_ca, ctx, actorType, actorID, method, data)
+	_ca = append(_ca, _va...)
+	ret := _mock.Called(_ca...)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Invoke")
 	}
 
-	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string, any, any) error); ok {
-		r0 = returnFunc(ctx, actorType, actorID, method, data, out)
-	} else {
-		r0 = ret.Error(0)
+	var r0 actor.Envelope
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string, any, ...actor.InvokeOption) (actor.Envelope, error)); ok {
+		return returnFunc(ctx, actorType, actorID, method, data, opts...)
 	}
-	return r0
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string, any, ...actor.InvokeOption) actor.Envelope); ok {
+		r0 = returnFunc(ctx, actorType, actorID, method, data, opts...)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(actor.Envelope)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, string, string, any, ...actor.InvokeOption) error); ok {
+		r1 = returnFunc(ctx, actorType, actorID, method, data, opts...)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
 }
 
 // MockHost_Invoke_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Invoke'
@@ -448,12 +739,13 @@ type MockHost_Invoke_Call struct {
 //   - actorID string
 //   - method string
 //   - data any
-//   - out any
-func (_e *MockHost_Expecter) Invoke(ctx interface{}, actorType interface{}, actorID interface{}, method interface{}, data interface{}, out interface{}) *MockHost_Invoke_Call {
-	return &MockHost_Invoke_Call{Call: _e.mock.On("Invoke", ctx, actorType, actorID, method, data, out)}
+//   - opts ...actor.InvokeOption
+func (_e *MockHost_Expecter) Invoke(ctx interface{}, actorType interface{}, actorID interface{}, method interface{}, data interface{}, opts ...interface{}) *MockHost_Invoke_Call {
+	return &MockHost_Invoke_Call{Call: _e.mock.On("Invoke",
+		append([]interface{}{ctx, actorType, actorID, method, data}, opts...)...)}
 }
 
-func (_c *MockHost_Invoke_Call) Run(run func(ctx context.Context, actorType string, actorID string, method string, data any, out any)) *MockHost_Invoke_Call {
+func (_c *MockHost_Invoke_Call) Run(run func(ctx context.Context, actorType string, actorID string, method string, data any, opts ...actor.InvokeOption)) *MockHost_Invoke_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -475,10 +767,130 @@ func (_c *MockHost_Invoke_Call) Run(run func(ctx context.Context, actorType stri
 		if args[4] != nil {
 			arg4 = args[4].(any)
 		}
-		var arg5 any
-		if args[5] != nil {
-			arg5 = args[5].(any)
+		var arg5 []actor.InvokeOption
+		variadicArgs := make([]actor.InvokeOption, len(args)-5)
+		for i, a := range args[5:] {
+			if a != nil {
+				variadicArgs[i] = a.(actor.InvokeOption)
+			}
 		}
+		arg5 = variadicArgs
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+			arg4,
+			arg5...,
+		)
+	})
+	return _c
+}
+
+func (_c *MockHost_Invoke_Call) Return(envelope actor.Envelope, err error) *MockHost_Invoke_Call {
+	_c.Call.Return(envelope, err)
+	return _c
+}
+
+func (_c *MockHost_Invoke_Call) RunAndReturn(run func(ctx context.Context, actorType string, actorID string, method string, data any, opts ...actor.InvokeOption) (actor.Envelope, error)) *MockHost_Invoke_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// InvokeStream provides a mock function for the type MockHost
+func (_mock *MockHost) InvokeStream(ctx context.Context, actorType string, actorID string, method string, reqContentType string, body io.Reader, opts ...actor.InvokeOption) (string, io.ReadCloser, error) {
+	// actor.InvokeOption
+	_va := make([]interface{}, len(opts))
+	for _i := range opts {
+		_va[_i] = opts[_i]
+	}
+	var _ca []interface{}
+	_ca = append(_ca, ctx, actorType, actorID, method, reqContentType, body)
+	_ca = append(_ca, _va...)
+	ret := _mock.Called(_ca...)
+
+	if len(ret) == 0 {
+		panic("no return value specified for InvokeStream")
+	}
+
+	var r0 string
+	var r1 io.ReadCloser
+	var r2 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string, string, io.Reader, ...actor.InvokeOption) (string, io.ReadCloser, error)); ok {
+		return returnFunc(ctx, actorType, actorID, method, reqContentType, body, opts...)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string, string, io.Reader, ...actor.InvokeOption) string); ok {
+		r0 = returnFunc(ctx, actorType, actorID, method, reqContentType, body, opts...)
+	} else {
+		r0 = ret.Get(0).(string)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, string, string, string, io.Reader, ...actor.InvokeOption) io.ReadCloser); ok {
+		r1 = returnFunc(ctx, actorType, actorID, method, reqContentType, body, opts...)
+	} else {
+		if ret.Get(1) != nil {
+			r1 = ret.Get(1).(io.ReadCloser)
+		}
+	}
+	if returnFunc, ok := ret.Get(2).(func(context.Context, string, string, string, string, io.Reader, ...actor.InvokeOption) error); ok {
+		r2 = returnFunc(ctx, actorType, actorID, method, reqContentType, body, opts...)
+	} else {
+		r2 = ret.Error(2)
+	}
+	return r0, r1, r2
+}
+
+// MockHost_InvokeStream_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'InvokeStream'
+type MockHost_InvokeStream_Call struct {
+	*mock.Call
+}
+
+// InvokeStream is a helper method to define mock.On call
+//   - ctx context.Context
+//   - actorType string
+//   - actorID string
+//   - method string
+//   - reqContentType string
+//   - body io.Reader
+//   - opts ...actor.InvokeOption
+func (_e *MockHost_Expecter) InvokeStream(ctx interface{}, actorType interface{}, actorID interface{}, method interface{}, reqContentType interface{}, body interface{}, opts ...interface{}) *MockHost_InvokeStream_Call {
+	return &MockHost_InvokeStream_Call{Call: _e.mock.On("InvokeStream",
+		append([]interface{}{ctx, actorType, actorID, method, reqContentType, body}, opts...)...)}
+}
+
+func (_c *MockHost_InvokeStream_Call) Run(run func(ctx context.Context, actorType string, actorID string, method string, reqContentType string, body io.Reader, opts ...actor.InvokeOption)) *MockHost_InvokeStream_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		var arg2 string
+		if args[2] != nil {
+			arg2 = args[2].(string)
+		}
+		var arg3 string
+		if args[3] != nil {
+			arg3 = args[3].(string)
+		}
+		var arg4 string
+		if args[4] != nil {
+			arg4 = args[4].(string)
+		}
+		var arg5 io.Reader
+		if args[5] != nil {
+			arg5 = args[5].(io.Reader)
+		}
+		var arg6 []actor.InvokeOption
+		variadicArgs := make([]actor.InvokeOption, len(args)-6)
+		for i, a := range args[6:] {
+			if a != nil {
+				variadicArgs[i] = a.(actor.InvokeOption)
+			}
+		}
+		arg6 = variadicArgs
 		run(
 			arg0,
 			arg1,
@@ -486,17 +898,158 @@ func (_c *MockHost_Invoke_Call) Run(run func(ctx context.Context, actorType stri
 			arg3,
 			arg4,
 			arg5,
+			arg6...,
 		)
 	})
 	return _c
 }
 
-func (_c *MockHost_Invoke_Call) Return(err error) *MockHost_Invoke_Call {
-	_c.Call.Return(err)
+func (_c *MockHost_InvokeStream_Call) Return(respContentType string, resp io.ReadCloser, err error) *MockHost_InvokeStream_Call {
+	_c.Call.Return(respContentType, resp, err)
 	return _c
 }
 
-func (_c *MockHost_Invoke_Call) RunAndReturn(run func(ctx context.Context, actorType string, actorID string, method string, data any, out any) error) *MockHost_Invoke_Call {
+func (_c *MockHost_InvokeStream_Call) RunAndReturn(run func(ctx context.Context, actorType string, actorID string, method string, reqContentType string, body io.Reader, opts ...actor.InvokeOption) (string, io.ReadCloser, error)) *MockHost_InvokeStream_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// ListJobs provides a mock function for the type MockHost
+func (_mock *MockHost) ListJobs(ctx context.Context, actorType string, actorID string) ([]actor.JobInfo, error) {
+	ret := _mock.Called(ctx, actorType, actorID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListJobs")
+	}
+
+	var r0 []actor.JobInfo
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string) ([]actor.JobInfo, error)); ok {
+		return returnFunc(ctx, actorType, actorID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string) []actor.JobInfo); ok {
+		r0 = returnFunc(ctx, actorType, actorID)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]actor.JobInfo)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, string) error); ok {
+		r1 = returnFunc(ctx, actorType, actorID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockHost_ListJobs_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListJobs'
+type MockHost_ListJobs_Call struct {
+	*mock.Call
+}
+
+// ListJobs is a helper method to define mock.On call
+//   - ctx context.Context
+//   - actorType string
+//   - actorID string
+func (_e *MockHost_Expecter) ListJobs(ctx interface{}, actorType interface{}, actorID interface{}) *MockHost_ListJobs_Call {
+	return &MockHost_ListJobs_Call{Call: _e.mock.On("ListJobs", ctx, actorType, actorID)}
+}
+
+func (_c *MockHost_ListJobs_Call) Run(run func(ctx context.Context, actorType string, actorID string)) *MockHost_ListJobs_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		var arg2 string
+		if args[2] != nil {
+			arg2 = args[2].(string)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockHost_ListJobs_Call) Return(jobInfos []actor.JobInfo, err error) *MockHost_ListJobs_Call {
+	_c.Call.Return(jobInfos, err)
+	return _c
+}
+
+func (_c *MockHost_ListJobs_Call) RunAndReturn(run func(ctx context.Context, actorType string, actorID string) ([]actor.JobInfo, error)) *MockHost_ListJobs_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// RetryJob provides a mock function for the type MockHost
+func (_mock *MockHost) RetryJob(ctx context.Context, jobID string) (string, error) {
+	ret := _mock.Called(ctx, jobID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for RetryJob")
+	}
+
+	var r0 string
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) (string, error)); ok {
+		return returnFunc(ctx, jobID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) string); ok {
+		r0 = returnFunc(ctx, jobID)
+	} else {
+		r0 = ret.Get(0).(string)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = returnFunc(ctx, jobID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockHost_RetryJob_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'RetryJob'
+type MockHost_RetryJob_Call struct {
+	*mock.Call
+}
+
+// RetryJob is a helper method to define mock.On call
+//   - ctx context.Context
+//   - jobID string
+func (_e *MockHost_Expecter) RetryJob(ctx interface{}, jobID interface{}) *MockHost_RetryJob_Call {
+	return &MockHost_RetryJob_Call{Call: _e.mock.On("RetryJob", ctx, jobID)}
+}
+
+func (_c *MockHost_RetryJob_Call) Run(run func(ctx context.Context, jobID string)) *MockHost_RetryJob_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockHost_RetryJob_Call) Return(newJobID string, err error) *MockHost_RetryJob_Call {
+	_c.Call.Return(newJobID, err)
+	return _c
+}
+
+func (_c *MockHost_RetryJob_Call) RunAndReturn(run func(ctx context.Context, jobID string) (string, error)) *MockHost_RetryJob_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -577,16 +1130,16 @@ func (_c *MockHost_SetAlarm_Call) RunAndReturn(run func(ctx context.Context, act
 }
 
 // SetState provides a mock function for the type MockHost
-func (_mock *MockHost) SetState(ctx context.Context, actorType string, actorID string, state any) error {
-	ret := _mock.Called(ctx, actorType, actorID, state)
+func (_mock *MockHost) SetState(ctx context.Context, actorType string, actorID string, state any, opts *actor.SetStateOpts) error {
+	ret := _mock.Called(ctx, actorType, actorID, state, opts)
 
 	if len(ret) == 0 {
 		panic("no return value specified for SetState")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, any) error); ok {
-		r0 = returnFunc(ctx, actorType, actorID, state)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, any, *actor.SetStateOpts) error); ok {
+		r0 = returnFunc(ctx, actorType, actorID, state, opts)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -603,11 +1156,12 @@ type MockHost_SetState_Call struct {
 //   - actorType string
 //   - actorID string
 //   - state any
-func (_e *MockHost_Expecter) SetState(ctx interface{}, actorType interface{}, actorID interface{}, state interface{}) *MockHost_SetState_Call {
-	return &MockHost_SetState_Call{Call: _e.mock.On("SetState", ctx, actorType, actorID, state)}
+//   - opts *actor.SetStateOpts
+func (_e *MockHost_Expecter) SetState(ctx interface{}, actorType interface{}, actorID interface{}, state interface{}, opts interface{}) *MockHost_SetState_Call {
+	return &MockHost_SetState_Call{Call: _e.mock.On("SetState", ctx, actorType, actorID, state, opts)}
 }
 
-func (_c *MockHost_SetState_Call) Run(run func(ctx context.Context, actorType string, actorID string, state any)) *MockHost_SetState_Call {
+func (_c *MockHost_SetState_Call) Run(run func(ctx context.Context, actorType string, actorID string, state any, opts *actor.SetStateOpts)) *MockHost_SetState_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -625,11 +1179,16 @@ func (_c *MockHost_SetState_Call) Run(run func(ctx context.Context, actorType st
 		if args[3] != nil {
 			arg3 = args[3].(any)
 		}
+		var arg4 *actor.SetStateOpts
+		if args[4] != nil {
+			arg4 = args[4].(*actor.SetStateOpts)
+		}
 		run(
 			arg0,
 			arg1,
 			arg2,
 			arg3,
+			arg4,
 		)
 	})
 	return _c
@@ -640,7 +1199,7 @@ func (_c *MockHost_SetState_Call) Return(err error) *MockHost_SetState_Call {
 	return _c
 }
 
-func (_c *MockHost_SetState_Call) RunAndReturn(run func(ctx context.Context, actorType string, actorID string, state any) error) *MockHost_SetState_Call {
+func (_c *MockHost_SetState_Call) RunAndReturn(run func(ctx context.Context, actorType string, actorID string, state any, opts *actor.SetStateOpts) error) *MockHost_SetState_Call {
 	_c.Call.Return(run)
 	return _c
 }
