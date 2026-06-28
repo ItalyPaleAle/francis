@@ -7,11 +7,15 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/bootstrapauth"
 	"github.com/italypaleale/francis/internal/channelbind"
 	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/tracing"
 	"github.com/italypaleale/francis/protocol"
 )
 
@@ -149,6 +153,31 @@ func (rt *Runtime) dispatch(ctx context.Context, c *hostConn, req *protocol.Enve
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeHostMismatch, "request is for a different host"))
 	}
 
+	// Span each request as a server span that continues the host's distributed trace
+	ctx, span := tracing.Start(ctx, "runtime."+req.Kind,
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(tracing.RPCKind(req.Kind), tracing.HostID(c.hostID)),
+	)
+	defer span.End()
+
+	// Time the handler so the duration can be recorded as a metric tagged by kind
+	start := rt.clock.Now()
+	resp := rt.route(ctx, c, req)
+
+	// Record request count and duration, tagged by message kind
+	kindAttr := metric.WithAttributes(attribute.String("kind", req.Kind))
+	rt.metrics.rpcRequests.Add(ctx, 1, kindAttr)
+	rt.metrics.rpcDuration.Record(ctx, rt.clock.Now().Sub(start).Seconds(), kindAttr)
+
+	// Surface a structured error response in the span status
+	if resp != nil && resp.Kind == protocol.KindError {
+		tracing.Fail(ctx, "runtime returned an error for "+req.Kind)
+	}
+	return resp
+}
+
+// route dispatches a validated request to the handler for its kind
+func (rt *Runtime) route(ctx context.Context, c *hostConn, req *protocol.Envelope) *protocol.Envelope {
 	switch req.Kind {
 	case protocol.KindRenewCert:
 		return rt.handleRenewCert(ctx, c, req)
@@ -271,6 +300,9 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 			slog.String("newSessionId", c.sessionID),
 		)
 		superseded.close(sessionErrorSuperseded, "session superseded by a newer connection")
+	} else {
+		// Only a genuinely new host changes the connected-hosts gauge, since supersession replaces a session in place
+		rt.metrics.hostsConnected.Add(ctx, 1)
 	}
 
 	// Build the response, always sending the current trust bundle so the host can pick up a root rotation

@@ -7,7 +7,9 @@ import (
 	"sync/atomic"
 
 	"github.com/quic-go/webtransport-go"
+	"go.opentelemetry.io/otel/trace"
 
+	"github.com/italypaleale/francis/internal/tracing"
 	"github.com/italypaleale/francis/protocol"
 )
 
@@ -94,10 +96,25 @@ func (c *hostConn) actorTypeConfig(actorType string) (protocol.ActorHostType, bo
 // sendRequest opens a new bi-directional stream to the host, writes the request, and reads the response
 // It is used for runtime-initiated operations such as ExecuteAlarm
 // The caller's context bounds the round-trip
-func (c *hostConn) sendRequest(ctx context.Context, env *protocol.Envelope) (*protocol.Envelope, error) {
+func (c *hostConn) sendRequest(ctx context.Context, env *protocol.Envelope) (resp *protocol.Envelope, err error) {
 	// Stamp the host identity and session so the host can reject a request meant for a superseded session
 	env.HostID = c.hostID
 	env.SessionID = c.sessionID
+
+	// Span the runtime-initiated call as a client span before propagating the trace context to the host
+	ctx, span := tracing.Start(ctx, "rpc.host."+env.Kind,
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			tracing.RPCKind(env.Kind),
+			tracing.HostID(c.hostID),
+		),
+	)
+	defer func() {
+		tracing.End(span, err)
+	}()
+
+	// Propagate the active trace context so the host continues the same distributed trace
+	protocol.InjectTraceContext(ctx, env)
 
 	stream, err := c.session.OpenStreamSync(ctx)
 	if err != nil {
@@ -105,5 +122,6 @@ func (c *hostConn) sendRequest(ctx context.Context, env *protocol.Envelope) (*pr
 	}
 	defer stream.Close()
 
-	return protocol.RoundTrip(ctx, stream, env)
+	resp, err = protocol.RoundTrip(ctx, stream, env)
+	return resp, err
 }

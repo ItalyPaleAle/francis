@@ -417,7 +417,7 @@ func TestGetOrCreateActorConcurrentColdStart(t *testing.T) {
 			wg.Go(func() {
 				// Release all callers together to maximize the overlap on the cold start
 				<-start
-				got[c], errs[c] = m.getOrCreateActor(r)
+				got[c], errs[c] = m.getOrCreateActor(t.Context(), r)
 			})
 		}
 		close(start)

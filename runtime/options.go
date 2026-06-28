@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/internal/bootstrapauth"
@@ -20,6 +22,7 @@ type RuntimeOption func(*runtimeOptions)
 func newRuntimeOptions() *runtimeOptions {
 	return &runtimeOptions{
 		logger:                  slog.New(slog.DiscardHandler),
+		meter:                   noop.NewMeterProvider().Meter(""),
 		workloadCertTTL:         defaultWorkloadCertTTL,
 		hostHealthCheckDeadline: 20 * time.Second,
 		alarmsPollInterval:      1500 * time.Millisecond,
@@ -44,6 +47,7 @@ type runtimeOptions struct {
 	// workloadCertTTL is the lifetime of issued host workload certificates
 	workloadCertTTL         time.Duration
 	logger                  *slog.Logger
+	meter                   metric.Meter
 	hostHealthCheckDeadline time.Duration
 	alarmsPollInterval      time.Duration
 	providerRequestTimeout  time.Duration
@@ -88,6 +92,15 @@ func WithWorkloadCertTTL(d time.Duration) RuntimeOption {
 // WithLogger sets the slog logger
 func WithLogger(logger *slog.Logger) RuntimeOption {
 	return func(o *runtimeOptions) { o.logger = logger }
+}
+
+// WithMeter sets the OpenTelemetry meter used to record runtime metrics
+func WithMeter(meter metric.Meter) RuntimeOption {
+	return func(o *runtimeOptions) {
+		if meter != nil {
+			o.meter = meter
+		}
+	}
 }
 
 // WithHostHealthCheckDeadline sets the maximum interval between health checks received from a host

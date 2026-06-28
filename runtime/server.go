@@ -74,6 +74,9 @@ type Runtime struct {
 	// Tests can substitute a fake host transport
 	sendToHost func(ctx context.Context, c *hostConn, env *protocol.Envelope) (*protocol.Envelope, error)
 
+	// metrics holds the OpenTelemetry instruments recorded by the runtime
+	metrics *runtimeMetrics
+
 	log   *slog.Logger
 	clock clock.WithTicker
 }
@@ -120,6 +123,12 @@ func NewRuntime(provider components.ActorProvider, opts ...RuntimeOption) (*Runt
 		return nil, err
 	}
 
+	// Build the metric instruments from the configured meter, which is a no-op meter unless one was provided
+	metrics, err := newRuntimeMetrics(options.meter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create runtime metrics: %w", err)
+	}
+
 	// The runtime requests but does not require a client certificate, so a first-time bootstrap that presents no certificate and an mTLS reconnect that does both reach the registration handler, which is the authority on whether a session is authenticated
 	serverTLSConfig := &tls.Config{
 		MinVersion:   tls.VersionTLS13,
@@ -145,6 +154,7 @@ func NewRuntime(provider components.ActorProvider, opts ...RuntimeOption) (*Runt
 		shutdownGracePeriod:     options.shutdownGracePeriod,
 		activeAlarms:            make(map[string]struct{}),
 		retryingAlarms:          make(map[string]struct{}),
+		metrics:                 metrics,
 		log:                     options.logger,
 		clock:                   options.clock,
 	}
@@ -322,6 +332,9 @@ func (rt *Runtime) handleHostDisconnect(c *hostConn) {
 		return
 	}
 
+	// Decrement the connected-hosts gauge for the session we just removed
+	rt.metrics.hostsConnected.Add(context.Background(), -1)
+
 	rt.log.Info("Host disconnected", slog.String("hostId", c.hostID))
 
 	// A host that did not drain disconnected ungracefully: leave its provider record to the health deadline, since it may reconnect and reattach
@@ -360,7 +373,10 @@ func (rt *Runtime) handleStream(ctx context.Context, c *hostConn, stream *webtra
 	// The stream context is canceled when this stream's write side closes, which covers both a per-request cancellation (the caller abandons the request and resets the stream) and session or connection teardown
 	// The caller bounds the operation with its own context timeout, so no deadline travels on the wire
 
-	resp := rt.dispatch(stream.Context(), c, req)
+	// Continue the caller's distributed trace from the trace context carried on the request
+	dispatchCtx := protocol.ExtractTraceContext(stream.Context(), req)
+
+	resp := rt.dispatch(dispatchCtx, c, req)
 	err = protocol.WriteMessage(stream, resp)
 	if err != nil {
 		rt.log.WarnContext(ctx, "Failed to write response to host",

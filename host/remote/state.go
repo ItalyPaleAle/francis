@@ -6,14 +6,26 @@ import (
 	"time"
 
 	msgpack "github.com/vmihailenco/msgpack/v5"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/tracing"
 	"github.com/italypaleale/francis/protocol"
 )
 
-func (h *Host) SetState(ctx context.Context, actorType string, actorID string, state any, opts *actor.SetStateOpts) error {
-	err := ref.ValidateComponents(actorType, actorID)
+func (h *Host) SetState(ctx context.Context, actorType string, actorID string, state any, opts *actor.SetStateOpts) (err error) {
+	ctx, span := tracing.Start(ctx, "state.set",
+		trace.WithAttributes(
+			tracing.ActorType(actorType),
+			tracing.ActorID(actorID),
+		),
+	)
+	defer func() {
+		tracing.End(span, err)
+	}()
+
+	err = ref.ValidateComponents(actorType, actorID)
 	if err != nil {
 		return err
 	}
@@ -44,8 +56,20 @@ func (h *Host) SetState(ctx context.Context, actorType string, actorID string, s
 	return nil
 }
 
-func (h *Host) GetState(ctx context.Context, actorType string, actorID string, dest any) error {
-	err := ref.ValidateComponents(actorType, actorID)
+func (h *Host) GetState(ctx context.Context, actorType string, actorID string, dest any) (err error) {
+	ctx, span := tracing.Start(ctx, "state.get",
+		trace.WithAttributes(
+			tracing.ActorType(actorType),
+			tracing.ActorID(actorID),
+		),
+	)
+
+	defer func() {
+		// A missing state is an expected outcome (an actor reading state it has not written yet)
+		tracing.EndExpected(span, err, actor.ErrStateNotFound)
+	}()
+
+	err = ref.ValidateComponents(actorType, actorID)
 	if err != nil {
 		return err
 	}
@@ -72,8 +96,20 @@ func (h *Host) GetState(ctx context.Context, actorType string, actorID string, d
 	return nil
 }
 
-func (h *Host) DeleteState(ctx context.Context, actorType string, actorID string) error {
-	err := ref.ValidateComponents(actorType, actorID)
+func (h *Host) DeleteState(ctx context.Context, actorType string, actorID string) (err error) {
+	ctx, span := tracing.Start(ctx, "state.delete",
+		trace.WithAttributes(
+			tracing.ActorType(actorType),
+			tracing.ActorID(actorID),
+		),
+	)
+
+	defer func() {
+		// Deleting a state that does not exist already reaches the desired end state
+		tracing.EndExpected(span, err, actor.ErrStateNotFound)
+	}()
+
+	err = ref.ValidateComponents(actorType, actorID)
 	if err != nil {
 		return err
 	}

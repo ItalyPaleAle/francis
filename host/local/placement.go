@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/tracing"
 )
 
 const placementCacheMaxTTL = 5 * time.Second
@@ -62,8 +65,16 @@ func (h *Host) lookupActor(parentCtx context.Context, aRef ref.ActorRef, skipCac
 		}
 	}
 
+	// Span the provider lookup, the slow path taken only on a cold or cache-missed placement
+	ctx, span := tracing.Start(parentCtx, "placement.lookup",
+		trace.WithAttributes(
+			tracing.ActorRef(key),
+		),
+	)
+	defer span.End()
+
 	// Perform a lookup with the provider
-	ctx, cancel := context.WithTimeout(parentCtx, h.providerRequestTimeout)
+	ctx, cancel := context.WithTimeout(ctx, h.providerRequestTimeout)
 	defer cancel()
 	lar, err := h.actorProvider.LookupActor(ctx, aRef, components.LookupActorOpts{
 		ActiveOnly: activeOnly,

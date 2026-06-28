@@ -8,10 +8,12 @@ import (
 	"strconv"
 
 	msgpack "github.com/vmihailenco/msgpack/v5"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/tracing"
 	"github.com/italypaleale/francis/protocol"
 )
 
@@ -94,6 +96,17 @@ func (h *Host) DeleteAlarm(ctx context.Context, actorType string, actorID string
 // It is invoked by the runtime, which owns the alarm lease and schedule
 // This host only activates the actor and runs its Alarm method
 func (h *Host) executeAlarm(ctx context.Context, req protocol.ExecuteAlarmRequest) (protocol.ExecuteAlarmResponse, *protocol.Error) {
+	// Continue the runtime's trace as a server span for the alarm run on this host
+	ctx, span := tracing.Start(ctx, "alarm.execute",
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(
+			tracing.ActorType(req.ActorType),
+			tracing.ActorID(req.ActorID),
+			tracing.AlarmName(req.Name),
+		),
+	)
+	defer span.End()
+
 	aRef := ref.NewActorRef(req.ActorType, req.ActorID)
 
 	// Track when the alarm executed so the runtime can record it on the lease
@@ -129,6 +142,7 @@ func (h *Host) executeAlarm(ctx context.Context, req protocol.ExecuteAlarmReques
 		return nil, nil
 	})
 	if err != nil {
+		tracing.Fail(ctx, err.Error())
 		return protocol.ExecuteAlarmResponse{}, actorcore.InvokeErrorToProtocol(err)
 	}
 

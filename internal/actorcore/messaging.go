@@ -10,9 +10,11 @@ import (
 
 	"github.com/google/uuid"
 	msgpack "github.com/vmihailenco/msgpack/v5"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/tracing"
 	"github.com/italypaleale/francis/protocol"
 )
 
@@ -54,9 +56,21 @@ type PeerInvoker interface {
 }
 
 // Invoke resolves an actor's placement and performs an object invocation, retrying once on a stale placement
-func (m *Manager) Invoke(parentCtx context.Context, resolver PlacementResolver, peer PeerInvoker, r ref.ActorRef, method string, data any, activeOnly bool) (actor.Envelope, error) {
+func (m *Manager) Invoke(parentCtx context.Context, resolver PlacementResolver, peer PeerInvoker, r ref.ActorRef, method string, data any, activeOnly bool) (env actor.Envelope, err error) {
+	// Span the whole logical invocation, including placement resolution and the single stale-placement retry
+	ctx, span := tracing.Start(parentCtx, "actor.invoke",
+		trace.WithAttributes(
+			tracing.ActorType(r.ActorType),
+			tracing.ActorID(r.ActorID),
+			tracing.ActorMethod(method),
+		),
+	)
+	defer func() {
+		tracing.End(span, err)
+	}()
+
 	// Resolve the placement and invoke, using the cache on the first attempt
-	ap, err := resolver.Resolve(parentCtx, r, false, activeOnly)
+	ap, err := resolver.Resolve(ctx, r, false, activeOnly)
 	if err != nil {
 		return nil, fmt.Errorf("failed to look up actor: %w", err)
 	}
@@ -67,8 +81,9 @@ func (m *Manager) Invoke(parentCtx context.Context, resolver PlacementResolver, 
 		return nil, fmt.Errorf("failed to generate request ID: %w", err)
 	}
 	requestID := requestUUID.String()
+	span.SetAttributes(tracing.RequestID(requestID))
 
-	env, retry, retryAfter, err := m.doInvokeObject(parentCtx, resolver, peer, r, ap, method, data, activeOnly, requestID)
+	env, retry, retryAfter, err := m.doInvokeObject(ctx, resolver, peer, r, ap, method, data, activeOnly, requestID)
 	if !retry {
 		return env, err
 	}
@@ -77,18 +92,18 @@ func (m *Manager) Invoke(parentCtx context.Context, resolver PlacementResolver, 
 	resolver.Invalidate(r)
 
 	// If there's a retry-after, honor it (for example from a host that is draining or at capacity)
-	waitErr := m.waitRetryAfter(parentCtx, retryAfter)
+	waitErr := m.waitRetryAfter(ctx, retryAfter)
 	if waitErr != nil {
 		return nil, waitErr
 	}
 
 	// Re-resolve with a fresh lookup and try once more
-	ap, err = resolver.Resolve(parentCtx, r, true, activeOnly)
+	ap, err = resolver.Resolve(ctx, r, true, activeOnly)
 	if err != nil {
 		return nil, fmt.Errorf("failed to look up actor: %w", err)
 	}
 
-	env, _, _, err = m.doInvokeObject(parentCtx, resolver, peer, r, ap, method, data, activeOnly, requestID)
+	env, _, _, err = m.doInvokeObject(ctx, resolver, peer, r, ap, method, data, activeOnly, requestID)
 	return env, err
 }
 
@@ -213,14 +228,24 @@ func (m *Manager) invokePeerObject(ctx context.Context, peer PeerInvoker, r ref.
 // InvokeStream resolves an actor's placement and performs a streamed invocation
 // Stale-placement and not-active errors are returned to the caller rather than retried, because the request body is a one-shot reader that cannot be replayed
 func (m *Manager) InvokeStream(parentCtx context.Context, resolver PlacementResolver, peer PeerInvoker, r ref.ActorRef, method string, reqContentType string, body io.Reader, activeOnly bool) (string, io.ReadCloser, error) {
+	// Span the invocation setup: the span ends when the response metadata is ready, before the caller streams the body
+	ctx, span := tracing.Start(parentCtx, "actor.invoke.stream",
+		trace.WithAttributes(
+			tracing.ActorType(r.ActorType),
+			tracing.ActorID(r.ActorID),
+			tracing.ActorMethod(method),
+		),
+	)
+	defer span.End()
+
 	// Resolve the placement and invoke
-	ap, err := resolver.Resolve(parentCtx, r, false, activeOnly)
+	ap, err := resolver.Resolve(ctx, r, false, activeOnly)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to look up actor: %w", err)
 	}
 
 	if resolver.IsLocal(ap) {
-		ct, resp, err := m.invokeLocalStream(parentCtx, resolver, r, method, reqContentType, body, activeOnly)
+		ct, resp, err := m.invokeLocalStream(ctx, resolver, r, method, reqContentType, body, activeOnly)
 		if err != nil && (errors.Is(err, actor.ErrActorNotActive) || errors.Is(err, actor.ErrActorNotHosted)) {
 			// A stale cached placement routed us here, but the actor is inactive or owned elsewhere: drop the entry so the next call re-resolves
 			// We do not retry the current call because the request body has already been consumed, mirroring the object path's stale-local handling
@@ -231,7 +256,7 @@ func (m *Manager) InvokeStream(parentCtx context.Context, resolver PlacementReso
 	}
 
 	// Stream to the peer that owns the actor
-	ct, resp, retry, err := m.invokePeerStream(parentCtx, peer, r, ap, method, reqContentType, body, activeOnly)
+	ct, resp, retry, err := m.invokePeerStream(ctx, peer, r, ap, method, reqContentType, body, activeOnly)
 
 	// On a stale or unavailable placement, drop the cached entry so the next call re-resolves
 	// We do not retry the current call because the request body has already been consumed

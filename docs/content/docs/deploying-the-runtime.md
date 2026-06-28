@@ -147,8 +147,11 @@ Subcommands (including `print-ca` and `healthcheck`) resolve the config the same
 | `alarmsLeaseDuration` | How long an alarm lease is held while executing. Default `20s`. |
 | `shutdownGracePeriod` | Grace period for a clean shutdown. Default `30s`. |
 | `log.level` | `debug`, `info`, `warn`, or `error`. |
+| `log.json` | Log in structured JSON instead of text. Default `false`. |
 
 Durations accept Go duration strings (e.g. `"1h"`, `"1500ms"`).
+
+For exporting traces, metrics, and logs via OpenTelemetry, see [Observability](/docs/observability).
 
 ## Host bootstrap
 

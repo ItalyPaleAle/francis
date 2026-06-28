@@ -12,8 +12,10 @@ import (
 
 	"github.com/alphadose/haxmap"
 	"github.com/quic-go/webtransport-go"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/italypaleale/francis/internal/ca"
+	"github.com/italypaleale/francis/internal/tracing"
 	"github.com/italypaleale/francis/internal/wt"
 	"github.com/italypaleale/francis/protocol"
 )
@@ -75,8 +77,27 @@ func NewClient(cfg ClientConfig) *Client {
 
 // InvokeObject performs an object invocation against the actor on the peer at address
 // A returned protocol error that is Retryable signals the caller to invalidate its cached placement and retry a fresh lookup
-func (c *Client) InvokeObject(ctx context.Context, address string, req protocol.InvokeActorRequest) (protocol.InvokeActorResponse, *protocol.Error) {
+func (c *Client) InvokeObject(ctx context.Context, address string, req protocol.InvokeActorRequest) (resp protocol.InvokeActorResponse, perr *protocol.Error) {
 	req.Mode = protocol.InvocationModeObject
+
+	// Span the cross-host call as a client span, the parent of the peer's server-side execution span
+	ctx, span := tracing.Start(ctx, "rpc.peer.invoke",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			tracing.PeerAddress(address),
+			tracing.HostID(req.TargetHostID),
+			tracing.ActorType(req.ActorType),
+			tracing.ActorID(req.ActorID),
+			tracing.ActorMethod(req.Method),
+		),
+	)
+	defer func() {
+		if perr != nil {
+			tracing.End(span, perr)
+			return
+		}
+		span.End()
+	}()
 
 	// Reuse a live pooled session to the peer, dialing one if necessary
 	session, err := c.session(ctx, address)
@@ -104,6 +125,9 @@ func (c *Client) InvokeObject(ctx context.Context, address string, req protocol.
 	if err != nil {
 		return protocol.InvokeActorResponse{}, protocol.NewErrorf(protocol.ErrCodeInternal, "failed to encode invocation: %v", err)
 	}
+
+	// Propagate the active trace context so the peer continues the same distributed trace
+	protocol.InjectTraceContext(ctx, env)
 
 	// Set up a context watcher that unblocks the stream's blocking calls when the context is done, since QUIC streams are not context-aware
 	stop := make(chan struct{})
@@ -164,8 +188,27 @@ func (c *Client) InvokeObject(ctx context.Context, address string, req protocol.
 // The request body is streamed from body
 // On success the returned reader carries the streamed response body and must be closed by the caller
 // A returned protocol error that is Retryable signals the caller to invalidate its cached placement and retry a fresh lookup
-func (c *Client) InvokeStream(ctx context.Context, address string, req protocol.InvokeActorRequest, body io.Reader) (string, io.ReadCloser, *protocol.Error) {
+func (c *Client) InvokeStream(ctx context.Context, address string, req protocol.InvokeActorRequest, body io.Reader) (respCT string, respBody io.ReadCloser, perr *protocol.Error) {
 	req.Mode = protocol.InvocationModeStream
+
+	// Span the cross-host call as a client span, the parent of the peer's server-side execution span
+	ctx, span := tracing.Start(ctx, "rpc.peer.invoke.stream",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			tracing.PeerAddress(address),
+			tracing.HostID(req.TargetHostID),
+			tracing.ActorType(req.ActorType),
+			tracing.ActorID(req.ActorID),
+			tracing.ActorMethod(req.Method),
+		),
+	)
+	defer func() {
+		if perr != nil {
+			tracing.End(span, perr)
+			return
+		}
+		span.End()
+	}()
 
 	// Reuse a live pooled session to the peer, dialing one if necessary
 	session, err := c.session(ctx, address)
@@ -212,6 +255,9 @@ func (c *Client) InvokeStream(ctx context.Context, address string, req protocol.
 		_ = stream.Close()
 		return "", nil, protocol.NewErrorf(protocol.ErrCodeInternal, "failed to encode invocation: %v", err)
 	}
+
+	// Propagate the active trace context so the peer continues the same distributed trace
+	protocol.InjectTraceContext(ctx, env)
 
 	err = protocol.WriteMessage(stream, env)
 	if err != nil {

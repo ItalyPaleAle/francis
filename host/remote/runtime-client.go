@@ -14,12 +14,14 @@ import (
 	"time"
 
 	"github.com/quic-go/webtransport-go"
+	"go.opentelemetry.io/otel/trace"
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/internal/bootstrapauth"
 	"github.com/italypaleale/francis/internal/ca"
 	"github.com/italypaleale/francis/internal/certholder"
 	"github.com/italypaleale/francis/internal/channelbind"
+	"github.com/italypaleale/francis/internal/tracing"
 	"github.com/italypaleale/francis/internal/wt"
 	"github.com/italypaleale/francis/protocol"
 )
@@ -638,6 +640,9 @@ func (rc *runtimeClient) handleInbound(ctx context.Context, stream *webtransport
 		return
 	}
 
+	// Continue the runtime's distributed trace from the trace context carried on the request
+	ctx = protocol.ExtractTraceContext(ctx, req)
+
 	// Dispatch to the matching handler and write its response back on the same stream
 	resp := rc.dispatchInbound(ctx, req)
 	_ = protocol.WriteMessage(stream, resp)
@@ -706,7 +711,16 @@ func (rc *runtimeClient) handleTerminateActor(ctx context.Context, req *protocol
 }
 
 // doRequest sends a host-to-runtime request on a new stream and decodes the response into out
-func (rc *runtimeClient) doRequest(ctx context.Context, kind string, payload any, out any) error {
+func (rc *runtimeClient) doRequest(ctx context.Context, kind string, payload any, out any) (err error) {
+	// Span the host-to-runtime call as a client span before propagating the trace context to the runtime
+	ctx, span := tracing.Start(ctx, "rpc.runtime."+kind,
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(tracing.RPCKind(kind)),
+	)
+	defer func() {
+		tracing.End(span, err)
+	}()
+
 	// Snapshot the live session and identity
 	// Without a session there is nowhere to send the request
 	session, hostID, sessionID := rc.snapshot()
@@ -721,6 +735,9 @@ func (rc *runtimeClient) doRequest(ctx context.Context, kind string, payload any
 	}
 	req.HostID = hostID
 	req.SessionID = sessionID
+
+	// Propagate the active trace context so the runtime continues the same distributed trace
+	protocol.InjectTraceContext(ctx, req)
 
 	// Each request gets its own stream, which WebTransport multiplexes over the connection
 	stream, err := session.OpenStreamSync(ctx)

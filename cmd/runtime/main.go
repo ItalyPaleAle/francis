@@ -11,10 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/italypaleale/go-kit/servicerunner"
 	"github.com/italypaleale/go-kit/signals"
 	"github.com/italypaleale/go-kit/utils"
-	"github.com/lmittmann/tint"
-	"github.com/mattn/go-isatty"
 	"gopkg.in/yaml.v3"
 
 	"github.com/italypaleale/francis/components"
@@ -42,6 +41,11 @@ type config struct {
 	ShutdownGracePeriod string `yaml:"shutdownGracePeriod"`
 
 	Log logConfig `yaml:"log"`
+
+	// loadedConfigPath records where the config was loaded from, for kitconfig.Base
+	loadedConfigPath string `yaml:"-"`
+	// instanceID is the resolved OpenTelemetry instance ID, cached for kitconfig.Base
+	instanceID string `yaml:"-"`
 }
 
 // bootstrapConfig selects how joining hosts authenticate
@@ -69,6 +73,8 @@ type providerConfig struct {
 
 type logConfig struct {
 	Level string `yaml:"level"`
+	// JSON logs in JSON format when true, otherwise text or colorized text on a TTY
+	JSON bool `yaml:"json"`
 }
 
 func main() {
@@ -102,19 +108,25 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
 		os.Exit(1)
 	}
-
-	log := initLogger(parseLogLevel(cfg.Log.Level))
+	cfg.SetLoadedConfigPath(configPath)
 
 	ctx := signals.SignalContext(context.Background())
 
-	err = run(ctx, cfg, log)
+	err = run(ctx, cfg)
 	if err != nil {
-		log.Error("Error running runtime", slog.Any("error", err))
+		fmt.Fprintf(os.Stderr, "Error running runtime: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, cfg *config, log *slog.Logger) error {
+func run(ctx context.Context, cfg *config) error {
+	// Initialize observability before anything else so the runtime logs through the OpenTelemetry-bridged logger and traces/metrics are exported
+	obs, err := initObservability(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	log := obs.log
+
 	// Resolve durations, falling back to sensible defaults
 	healthCheckDeadline := timeutils.ParseDurationDefault(cfg.HealthCheckDeadline, components.DefaultHostHealthCheckDeadline)
 	alarmsLeaseDuration := timeutils.ParseDurationDefault(cfg.AlarmsLeaseDuration, components.DefaultAlarmsLeaseDuration)
@@ -152,6 +164,7 @@ func run(ctx context.Context, cfg *config, log *slog.Logger) error {
 		runtime.WithWorkloadCertTTL(workloadCertTTL),
 		bootstrapOpt,
 		runtime.WithLogger(log.With("scope", "runtime")),
+		runtime.WithMeter(obs.meter),
 		runtime.WithHostHealthCheckDeadline(healthCheckDeadline),
 		runtime.WithAlarmsPollInterval(alarmsPollInterval),
 		runtime.WithShutdownGracePeriod(shutdownGracePeriod),
@@ -165,7 +178,24 @@ func run(ctx context.Context, cfg *config, log *slog.Logger) error {
 		return fmt.Errorf("failed to create runtime: %w", err)
 	}
 
-	return rt.Run(ctx)
+	// Run the runtime
+	// This blocks until the context is canceled and the runtime has drained
+	runErr := servicerunner.
+		NewServiceRunner(rt.Run).
+		Run(ctx)
+
+	// Run all the shutdown methods
+	// The context has already been canceled so we use a background one here
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), observabilityShutdownTimeout)
+	defer shutdownCancel()
+	shutdownErr := servicerunner.
+		NewServiceRunner(obs.shutdownServices()...).
+		Run(shutdownCtx)
+	if shutdownErr != nil {
+		log.Error("Error flushing telemetry on shutdown", slog.Any("error", shutdownErr))
+	}
+
+	return runErr
 }
 
 // parsePSKs resolves the configured runtime PSK strings
@@ -336,36 +366,4 @@ func loadConfig(path string) (*config, error) {
 	}
 
 	return cfg, nil
-}
-
-func parseLogLevel(level string) slog.Level {
-	switch level {
-	case "debug":
-		return slog.LevelDebug
-	case "warn":
-		return slog.LevelWarn
-	case "error":
-		return slog.LevelError
-	default:
-		return slog.LevelInfo
-	}
-}
-
-func initLogger(level slog.Level) *slog.Logger {
-	var handler slog.Handler
-	if isatty.IsTerminal(os.Stdout.Fd()) {
-		handler = tint.NewHandler(os.Stdout, &tint.Options{
-			TimeFormat: time.StampMilli,
-			Level:      level,
-		})
-	} else {
-		handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-			Level: level,
-		})
-	}
-
-	log := slog.New(handler).
-		With(slog.String("app", buildinfo.AppName)).
-		With(slog.String("version", buildinfo.AppVersion))
-	return log
 }

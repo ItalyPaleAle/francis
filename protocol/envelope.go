@@ -95,6 +95,9 @@ type Envelope struct {
 	HostID string `msgpack:"h,omitempty"`
 	// SessionID identifies the runtime session, used to detect superseded sessions
 	SessionID string `msgpack:"s,omitempty"`
+	// TraceContext carries the W3C trace context (traceparent/tracestate/baggage) so a trace follows a request across hosts
+	// It is populated only on requests and only when distributed tracing is enabled, so it stays absent otherwise
+	TraceContext map[string]string `msgpack:"tc,omitempty"`
 	// Payload is the MessagePack-encoded, kind-specific body
 	Payload []byte `msgpack:"p,omitempty"`
 }

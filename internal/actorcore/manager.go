@@ -11,12 +11,14 @@ import (
 
 	"github.com/alphadose/haxmap"
 	"github.com/italypaleale/go-kit/eventqueue"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/singleflight"
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/tracing"
 )
 
 const (
@@ -167,7 +169,7 @@ func (m *Manager) Close() {
 // LockAndInvoke gets or creates the actor, acquires its turn-based lock, and runs fn with the actor instance
 func (m *Manager) LockAndInvoke(parentCtx context.Context, r ref.ActorRef, fn func(ctx context.Context, act *ActiveActor) (any, error)) (any, error) {
 	// Get the actor, which may create it
-	act, err := m.getOrCreateActor(r)
+	act, err := m.getOrCreateActor(parentCtx, r)
 	if err != nil {
 		return nil, err
 	}
@@ -193,8 +195,12 @@ func (m *Manager) lockAndInvokeActor(parentCtx context.Context, act *ActiveActor
 	ctx, cancel := context.WithCancelCause(parentCtx)
 	defer cancel(nil)
 
-	// Acquire a lock for turn-based concurrency
-	haltCh, err := act.Lock(ctx)
+	// Span the wait for the actor's turn, which is where a busy actor serializes concurrent callers
+	lockCtx, lockSpan := tracing.Start(ctx, "actor.lock",
+		trace.WithAttributes(tracing.ActorRef(act.Key())),
+	)
+	haltCh, err := act.Lock(lockCtx)
+	tracing.End(lockSpan, err)
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire lock for actor: %w", err)
 	}
@@ -223,10 +229,16 @@ func (m *Manager) lockAndInvokeActor(parentCtx context.Context, act *ActiveActor
 		}
 	}()
 
-	return fn(ctx, act)
+	// Span the actual actor method execution, separate from the turn-wait above
+	execCtx, execSpan := tracing.Start(ctx, "actor.execute",
+		trace.WithAttributes(tracing.ActorRef(act.Key())),
+	)
+	res, err := fn(execCtx, act)
+	tracing.End(execSpan, err)
+	return res, err
 }
 
-func (m *Manager) getOrCreateActor(r ref.ActorRef) (*ActiveActor, error) {
+func (m *Manager) getOrCreateActor(parentCtx context.Context, r ref.ActorRef) (*ActiveActor, error) {
 	key := r.String()
 
 	// Fast path: the actor is already active, so return it without taking the creation lock
@@ -253,9 +265,13 @@ func (m *Manager) getOrCreateActor(r ref.ActorRef) (*ActiveActor, error) {
 		return a, nil
 	}
 
-	// Create the actor and store it as the single active instance for this key
+	// Span the cold-start activation, which runs the actor factory to build a fresh instance
+	_, span := tracing.Start(parentCtx, "actor.activate",
+		trace.WithAttributes(tracing.ActorRef(key)),
+	)
 	a = fn()
 	m.Actors.Set(key, a)
+	span.End()
 
 	return a, nil
 }
@@ -370,14 +386,22 @@ func (m *Manager) HandleIdleActor(act *ActiveActor) {
 }
 
 // HaltActiveActor gracefully halts an actor's instance and removes it from the placement store
-func (m *Manager) HaltActiveActor(act *ActiveActor, drain bool) error {
+func (m *Manager) HaltActiveActor(act *ActiveActor, drain bool) (err error) {
 	key := act.Key()
+
+	// Deactivation runs off the idle processor or shutdown, not a caller request, so it begins its own trace
+	_, span := tracing.Start(context.Background(), "actor.deactivate",
+		trace.WithAttributes(tracing.ActorRef(key)),
+	)
+	defer func() {
+		tracing.End(span, err)
+	}()
 
 	m.log.Debug("Halting actor", slog.String("actorRef", key))
 
 	// First, signal the actor's instance to halt, so it drains the current call and prevents more calls
 	// Note that this call blocks until the current in-process request stops
-	err := act.Halt(drain)
+	err = act.Halt(drain)
 	if errors.Is(err, ErrActorAlreadyHalted) {
 		// The actor is already halting, so nothing else to do here
 		return nil

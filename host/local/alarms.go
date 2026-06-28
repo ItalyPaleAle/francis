@@ -12,11 +12,13 @@ import (
 	"time"
 
 	msgpack "github.com/vmihailenco/msgpack/v5"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/tracing"
 )
 
 func (h *Host) runAlarmFetcher(ctx context.Context) error {
@@ -152,6 +154,16 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 	// Use a background context so an in-flight execution can finish during the shutdown grace period
 	// Individual operations are bounded by providerRequestTimeout
 	ctx := context.Background()
+
+	// A fired alarm is not triggered by a caller request, so it begins its own trace
+	ctx, span := tracing.Start(ctx, "alarm.execute",
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			tracing.ActorRef(lease.ActorRef().String()),
+			tracing.AlarmName(lease.AlarmRef().Name),
+		),
+	)
+	defer span.End()
 
 	key := lease.Key()
 	log := h.log.With(

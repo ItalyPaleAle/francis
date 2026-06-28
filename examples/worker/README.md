@@ -1,11 +1,9 @@
 # Example actor worker (local runtime)
 
-This folder contains a sample app that uses the **local** runtime topology. It is the
-counterpart to [`../remote-worker`](../remote-worker), which uses the remote runtime.
+This folder contains a sample app that uses the **local** runtime topology.  
+It is the counterpart to [`../remote-worker`](../remote-worker), which uses the remote runtime.
 
-The local topology embeds everything into a single process: each worker contains its own
-actor host *and* its own data store (SQLite). Workers discover and invoke each other
-peer-to-peer; there is no separate control plane process.
+The local topology embeds everything into a single process: each worker contains its own actor host *and* its own data store (SQLite). Workers discover and invoke each other peer-to-peer; there is no separate control plane process.
 
 The sample includes:
 
@@ -21,8 +19,7 @@ Build the binary first:
 go build -o bin/worker .
 ```
 
-Each worker stores its state in a `data.db` file relative to its working directory, so
-create a subdirectory for each:
+Each worker stores its state in a `data.db` file relative to its working directory, so create a subdirectory for each:
 
 ```sh
 mkdir -p worker1 worker2
@@ -34,8 +31,7 @@ Then start the cluster:
 supervisord -c supervisord.conf
 ```
 
-This starts two workers whose control servers listen on ports 8081 and 8082. Logs from
-both are streamed to the console.
+This starts two workers whose control servers listen on ports 8081 and 8082. Logs from both are streamed to the console.
 
 You can manage the processes with `supervisorctl`, e.g.:
 
@@ -56,14 +52,12 @@ go run . -worker-address 127.0.0.1:8081 -actor-host-address 127.0.0.1:7571
 go run . -worker-address 127.0.0.1:8082 -actor-host-address 127.0.0.1:7572
 ```
 
-> When running manually each instance writes `data.db` to the current directory.
-> Start them from different directories (or with different working directories) to
-> avoid sharing the same database file.
+> When running manually each instance writes `data.db` to the current directory.  
+> Start them from different directories (or with different working directories) to avoid sharing the same database file.
 
 ## Invoking actors
 
-The control servers run on ports 8081 and 8082. You can perform operations on the actor
-by invoking either endpoint (run these in a separate terminal):
+The control servers run on ports 8081 and 8082. You can perform operations on the actor by invoking either endpoint (run these in a separate terminal):
 
 ```sh
 # Invoke 4 different actors of type "myactor"
@@ -80,12 +74,9 @@ curl http://localhost:8082/invoke/myactor/id3/increment -X POST --data '{"In": 4
 curl http://localhost:8082/invoke/myactor/id4/increment -X POST --data '{"In": 42}'
 ```
 
-> Regardless of which control server you use, some actors will be activated on the first
-> host and others on the second — placement is decided by each host's embedded data store.
+> Regardless of which control server you use, some actors will be activated on the first host and others on the second — placement is decided by each host's embedded data store.
 
-The actors have an idle timeout of 10s, so after 10s of inactivity they get deallocated
-automatically. You will see it logged in the terminal. Invoking the actors again will
-cause them to be re-activated on any host.
+The actors have an idle timeout of 10s, so after 10s of inactivity they get deallocated automatically. You will see it logged in the terminal. Invoking the actors again will cause them to be re-activated on any host.
 
 You can also schedule alarms, which are executed at a future point in time:
 
@@ -93,3 +84,23 @@ You can also schedule alarms, which are executed at a future point in time:
 # Schedules an alarm to be executed right away (due time is the current time) and every 60s, until 2028-10-08
 curl -v -X POST http://localhost:8081/alarm/myactor/actor1/alarm1 --data '{"dueTime":"'$(date -u +"%Y-%m-%dT%H:%M:%SZ")'","interval":"60s","ttl":"2028-10-08T10:00:02Z","data": {"Hello": "World"}}'
 ```
+
+## Observability (OpenTelemetry)
+
+This example configures OpenTelemetry in `observability.go`. In the local topology the application owns the OpenTelemetry setup, so it installs the global tracer and the W3C trace-context propagator that Francis uses to carry a trace across hosts.
+
+Everything is driven by the standard [`OTEL_*` environment variables](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/), so tracing and log export stay off until you set an exporter.
+
+To see the traces a request produces — including the cross-host span when one worker invokes an actor placed on the other — point the workers at an OTLP collector:
+
+```sh
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+export OTEL_TRACES_EXPORTER=otlp
+export OTEL_METRICS_EXPORTER=otlp
+export OTEL_LOGS_EXPORTER=otlp
+```
+
+Then start the workers as above. To print spans to the console instead of shipping them to a collector, set `OTEL_TRACES_EXPORTER=console`. Use `OTEL_TRACES_SAMPLER` (for example `parentbased_traceidratio` with `OTEL_TRACES_SAMPLER_ARG=0.1`) to control trace volume.
+
+See the [Observability docs](https://francis.italypaleale.me/docs/observability) for the full picture.

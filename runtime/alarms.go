@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"github.com/italypaleale/go-kit/eventqueue"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/tracing"
 	"github.com/italypaleale/francis/protocol"
 )
 
@@ -198,6 +200,16 @@ func (rt *Runtime) executeActiveAlarm(lease *ref.AlarmLease) {
 	// The host round-trip, which is the only unbounded step, is bounded separately in dispatchAlarm
 	ctx := context.Background()
 
+	// Alarm dispatch is driven by the runtime poller, not a caller request, so it begins its own trace that the owning host continues
+	ctx, span := tracing.Start(ctx, "alarm.dispatch",
+		trace.WithSpanKind(trace.SpanKindProducer),
+		trace.WithAttributes(
+			tracing.ActorRef(lease.ActorRef().String()),
+			tracing.AlarmName(lease.AlarmRef().Name),
+		),
+	)
+	defer span.End()
+
 	key := lease.Key()
 	log := rt.log.With(
 		slog.String("id", lease.AlarmRef().String()),
@@ -268,6 +280,7 @@ func (rt *Runtime) executeActiveAlarm(lease *ref.AlarmLease) {
 		return
 
 	case executeAlarmStatusCompleted:
+		rt.metrics.alarmsExecuted.Add(ctx, 1)
 		var compErr error
 		reEnqueue, compErr = rt.completeAlarm(ctx, lease, log)
 		if compErr != nil {

@@ -10,8 +10,10 @@ import (
 	"time"
 
 	"github.com/quic-go/webtransport-go"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/internal/tracing"
 	"github.com/italypaleale/francis/internal/wt"
 	"github.com/italypaleale/francis/protocol"
 )
@@ -204,6 +206,13 @@ func (s *Server) handleStream(ctx context.Context, stream *webtransport.Stream, 
 		return
 	}
 
+	// Continue the caller's distributed trace from the trace context carried on the request, opening a server span for the execution on this host
+	ctx = protocol.ExtractTraceContext(ctx, req)
+	ctx, span := tracing.Start(ctx, "rpc.peer.invoke",
+		trace.WithSpanKind(trace.SpanKindServer),
+	)
+	defer span.End()
+
 	// The only message a peer sends is an actor invocation
 	if req.Kind != protocol.KindInvokeActor {
 		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeBadRequest, "unexpected message kind %q", req.Kind)))
@@ -217,6 +226,13 @@ func (s *Server) handleStream(ctx context.Context, stream *webtransport.Stream, 
 		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode invocation request")))
 		return
 	}
+
+	// Tag the span with the resolved actor target now that the metadata is decoded
+	span.SetAttributes(
+		tracing.ActorType(payload.ActorType),
+		tracing.ActorID(payload.ActorID),
+		tracing.ActorMethod(payload.Method),
+	)
 
 	// Reject an unknown invocation mode right away
 	if !payload.Mode.IsValid() {

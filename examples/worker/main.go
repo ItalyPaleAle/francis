@@ -10,8 +10,6 @@ import (
 
 	"github.com/italypaleale/go-kit/servicerunner"
 	"github.com/italypaleale/go-kit/signals"
-	"github.com/lmittmann/tint"
-	"github.com/mattn/go-isatty"
 
 	"github.com/italypaleale/francis/host/local"
 )
@@ -31,18 +29,23 @@ func main() {
 	flag.StringVar(&workerAddress, "worker-address", "127.0.0.1:8081", "Address and port for the example worker to bind to")
 	flag.Parse()
 
-	log = initLogger(slog.LevelDebug)
-
 	ctx := signals.SignalContext(context.Background())
 
 	err := runWorker(ctx)
 	if err != nil {
-		log.Error("Error running worker", slog.Any("error", err))
+		slog.Default().Error("Error running worker", slog.Any("error", err))
 		os.Exit(1)
 	}
 }
 
 func runWorker(ctx context.Context) error {
+	// Initialize observability, driven by the standard OTEL_* environment variables
+	// This installs the global tracer and trace-context propagator, so Francis records and propagates spans across hosts
+	shutdownFns, err := initObservability(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to initialize observability: %w", err)
+	}
+
 	// Options for the host
 	opts := []local.HostOption{
 		local.WithAddress(actorHostAddress),
@@ -72,32 +75,29 @@ func runWorker(ctx context.Context) error {
 	// Get the service
 	actorService := h.Service()
 
-	err = servicerunner.
+	// Run the actor host and the control server
+	// This blocks until the context is canceled and the services have drained
+	runErr := servicerunner.
 		NewServiceRunner(
 			h.Run,
 			runControlServer(actorService),
 		).
 		Run(ctx)
-	if err != nil {
-		return fmt.Errorf("error running services: %w", err)
+
+	// Run all the shutdown methods
+	// The context has already been canceled so we use a background one here
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	shutdownErr := servicerunner.
+		NewServiceRunner(shutdownFns...).
+		Run(shutdownCtx)
+	if shutdownErr != nil {
+		log.Error("Error flushing telemetry on shutdown", slog.Any("error", shutdownErr))
+	}
+
+	if runErr != nil {
+		return fmt.Errorf("error running services: %w", runErr)
 	}
 
 	return nil
-}
-
-func initLogger(level slog.Level) *slog.Logger {
-	var handler slog.Handler
-	if isatty.IsTerminal(os.Stdout.Fd()) {
-		// Enable colors if we have a TTY
-		handler = tint.NewHandler(os.Stdout, &tint.Options{
-			TimeFormat: time.StampMilli,
-			Level:      level,
-		})
-	} else {
-		handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-			Level: level,
-		})
-	}
-
-	return slog.New(handler)
 }
