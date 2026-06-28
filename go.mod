@@ -2,7 +2,10 @@ module github.com/italypaleale/francis
 
 go 1.26.4
 
-tool github.com/vektra/mockery/v3
+tool (
+	github.com/fchimpan/gomod-age
+	github.com/vektra/mockery/v3
+)
 
 require (
 	github.com/MicahParks/keyfunc/v3 v3.8.0
@@ -42,6 +45,7 @@ require (
 	github.com/dunglas/httpsfv v1.1.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fatih/structs v1.1.0 // indirect
+	github.com/fchimpan/gomod-age v0.1.1-0.20260405015303-09005169a479 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect

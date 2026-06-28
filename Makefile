@@ -19,3 +19,7 @@ lint:
 .PHONY: mocks
 mocks:
 	go tool mockery
+
+.PHONY: gomod-age
+gomod-age:
+	go tool gomod-age
