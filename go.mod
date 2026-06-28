@@ -128,4 +128,4 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-replace github.com/quic-go/webtransport-go => github.com/ItalyPaleAle/webtransport-go v0.0.0-20260621112534-576dfd744600
+replace github.com/quic-go/webtransport-go => github.com/italypaleale/webtransport-go v0.0.0-20260628205325-8ec1789ed85f
