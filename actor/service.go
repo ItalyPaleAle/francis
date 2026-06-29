@@ -20,6 +20,8 @@ var (
 	ErrActorHalted = errors.New("actor is halted")
 	// ErrActorTypeUnsupported is returned by methods that perform invocation when the actor type is not supported for this cluster.
 	ErrActorTypeUnsupported = errors.New("actor type is not supported in the cluster")
+	// ErrActorTypeReserved is returned by Invoke and InvokeStream when the target is a built-in (framework-provided) actor type, which clients cannot invoke directly.
+	ErrActorTypeReserved = errors.New("cannot invoke built-in actor type directly")
 	// ErrNoHost is returned by methods that perform invocation when no host is currently available to place the actor
 	ErrNoHost = errors.New("no host is available to place the actor")
 	// ErrServiceNotInitialized is returned by Service methods when the Service was not created via NewService and therefore has no host to delegate to

@@ -17,6 +17,12 @@ func (h *Host) Invoke(ctx context.Context, actorType string, actorID string, met
 		return nil, err
 	}
 
+	// Built-in actors are framework-managed and cannot be invoked directly by clients
+	// Their register/run/unregister flow rides on jobs (a separate path), so this guard does not affect them
+	if ref.IsBuiltInActorType(actorType) {
+		return nil, actor.ErrActorTypeReserved
+	}
+
 	opts := &types.InvokeOpts{}
 	for _, fn := range optsFn {
 		fn(opts)
@@ -30,6 +36,11 @@ func (h *Host) InvokeStream(ctx context.Context, actorType string, actorID strin
 	err := ref.ValidateComponents(actorType, actorID)
 	if err != nil {
 		return "", nil, err
+	}
+
+	// Built-in actors are framework-managed and cannot be invoked directly by clients
+	if ref.IsBuiltInActorType(actorType) {
+		return "", nil, actor.ErrActorTypeReserved
 	}
 
 	opts := &types.InvokeOpts{}

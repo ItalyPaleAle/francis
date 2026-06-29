@@ -22,6 +22,7 @@ import (
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/builtin"
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/postgres"
 	"github.com/italypaleale/francis/components/sqlite"
@@ -83,6 +84,8 @@ type Host struct {
 	actorProvider components.ActorProvider
 	service       *actor.Service
 	core          *actorcore.Manager
+	// builtInActors are framework-managed actors registered before start and bootstrapped once the host is ready
+	builtInActors []*builtin.BuiltInActor
 	// resolver adapts this host to the placement resolver the shared messaging logic depends on
 	resolver actorcore.PlacementResolver
 
@@ -305,6 +308,19 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 		MaxRequestBodySize:  options.MaxRequestBodySize,
 	})
 
+	// Register the built-in actors, before the host starts, so their types are advertised to the provider like any other
+	// They are bootstrapped (their registration job dispatched) once the host is ready, in Run
+	for _, b := range options.BuiltInActors {
+		if b == nil {
+			continue
+		}
+		err = h.core.RegisterActor(b.ActorType(), b.Factory(), b.RegisterOptions())
+		if err != nil {
+			return nil, fmt.Errorf("failed to register built-in actor %q: %w", b.ActorType(), err)
+		}
+	}
+	h.builtInActors = options.BuiltInActors
+
 	return h, nil
 }
 
@@ -370,6 +386,12 @@ func (h *Host) Run(parentCtx context.Context) error {
 	// Signal readiness now that the host is registered and its fields are initialized
 	// Closing the channel also publishes those writes to any goroutine that waits on Ready
 	h.readyOnce.Do(func() { close(h.ready) })
+
+	// Bootstrap the built-in actors now that the host can dispatch jobs
+	// Their registration jobs run on the cluster-wide singleton instance, so it is harmless for every host to do this
+	if len(h.builtInActors) > 0 {
+		go h.bootstrapBuiltInActors(ctx)
+	}
 
 	// Set the draining flag as soon as the context is canceled so the peer server rejects new invocations with a retry-later error before any actors are halted, giving callers a chance to re-resolve
 	go func() {
@@ -460,6 +482,37 @@ func (h *Host) issueSelfCert() error {
 // HaltAll halts all actors active on the host, gracefully
 func (h *Host) HaltAll() error {
 	return h.core.HaltAll()
+}
+
+// bootstrapBuiltInActors dispatches the one-time registration job for each built-in actor once the host is ready
+// It retries with a short backoff because a dispatch can briefly fail right after startup; the register handler is idempotent, so retrying is safe
+func (h *Host) bootstrapBuiltInActors(ctx context.Context) {
+	const maxAttempts = 5
+	for _, b := range h.builtInActors {
+		for attempt := 1; ; attempt++ {
+			dispatchCtx, cancel := context.WithTimeout(ctx, h.providerRequestTimeout)
+			err := b.Bootstrap(dispatchCtx, h.service)
+			cancel()
+			if err == nil {
+				h.log.DebugContext(ctx, "Bootstrapped built-in actor", slog.String("actorType", b.ActorType()))
+				break
+			}
+
+			if attempt >= maxAttempts || ctx.Err() != nil {
+				h.log.WarnContext(ctx, "Failed to bootstrap built-in actor", slog.String("actorType", b.ActorType()), slog.Any("error", err))
+				break
+			}
+
+			// Back off before the next attempt, but stop promptly if the host is shutting down
+			t := h.clock.NewTimer(time.Duration(attempt) * 500 * time.Millisecond)
+			select {
+			case <-t.C():
+			case <-ctx.Done():
+				t.Stop()
+				return
+			}
+		}
+	}
 }
 
 // Ready returns a channel that is closed once the host has registered and is safe to invoke.

@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/builtin"
 	"github.com/italypaleale/francis/host/local"
 	runtimepkg "github.com/italypaleale/francis/runtime"
 	"github.com/italypaleale/francis/tests/integration/framework/process"
@@ -44,6 +45,8 @@ type Options struct {
 	Hosts int
 	// Actors are registered on every host before it starts
 	Actors []frameworkhost.ActorReg
+	// BuiltInActors are framework-managed actors registered on every host via WithBuiltInActor
+	BuiltInActors []*builtin.BuiltInActor
 	// AlarmsPollInterval optionally tunes how frequently alarms are polled, so alarm scenarios fire quickly instead of waiting on the multi-second component defaults
 	// On the local topology it is applied to each host, and on the remote topology to the runtime that owns alarm execution, so the same value speeds up either topology
 	// Zero leaves the component default in place
@@ -111,10 +114,11 @@ func (c *Cluster) buildLocal(t *testing.T, opts Options) {
 	hostPorts := ports.Reserve(t, opts.Hosts)
 	for i := range opts.Hosts {
 		h := frameworkhost.NewLocal(frameworkhost.LocalOptions{
-			Address: addr(hostPorts[i]),
-			Backend: c.backend,
-			Actors:  opts.Actors,
-			Extra:   hostExtra,
+			Address:       addr(hostPorts[i]),
+			Backend:       c.backend,
+			Actors:        opts.Actors,
+			BuiltInActors: opts.BuiltInActors,
+			Extra:         hostExtra,
 		})
 		c.hosts[i] = h
 		c.procs = append(c.procs, h)
@@ -172,6 +176,7 @@ func (c *Cluster) buildRemote(t *testing.T, opts Options) {
 			RuntimeAddresses: runtimeAddrs,
 			BootstrapToken:   token,
 			Actors:           opts.Actors,
+			BuiltInActors:    opts.BuiltInActors,
 		})
 		c.hosts[i] = h
 		c.procs = append(c.procs, h)

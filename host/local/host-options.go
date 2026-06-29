@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/italypaleale/francis/builtin"
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/postgres"
 	"github.com/italypaleale/francis/components/sqlite"
@@ -113,6 +114,13 @@ func WithMaxRequestBodySize(n int64) HostOption {
 	return func(o *newHostOptions) { o.MaxRequestBodySize = n }
 }
 
+// WithBuiltInActor registers a framework-managed built-in actor on the host, such as one created with builtin.NewCronJobActor
+// The host registers it automatically and, once ready, bootstraps it by dispatching its one-time registration job
+// This option can be repeated to register more than one built-in actor
+func WithBuiltInActor(b *builtin.BuiltInActor) HostOption {
+	return func(o *newHostOptions) { o.BuiltInActors = append(o.BuiltInActors, b) }
+}
+
 type newHostOptions struct {
 	Address                   string
 	BindPort                  int
@@ -129,6 +137,7 @@ type newHostOptions struct {
 	ProviderRequestTimeout    time.Duration
 	MaxInFlightRequests       int
 	MaxRequestBodySize        int64
+	BuiltInActors             []*builtin.BuiltInActor
 
 	// Allows setting a clock for testing
 	clock clock.WithTicker
