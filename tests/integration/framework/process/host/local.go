@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/builtin"
 	"github.com/italypaleale/francis/host/local"
 	"github.com/italypaleale/francis/tests/integration/framework/process/clustersecret"
 	"github.com/italypaleale/francis/tests/integration/framework/process/provider"
@@ -23,6 +24,8 @@ type LocalOptions struct {
 	Backend provider.Backend
 	// Actors to register before the host starts
 	Actors []ActorReg
+	// BuiltInActors are framework-managed actors registered via WithBuiltInActor
+	BuiltInActors []*builtin.BuiltInActor
 	// Logger is optional and defaults to the host's discarding logger
 	Logger *slog.Logger
 	// Extra host options applied last, e.g. custom timeouts
@@ -57,6 +60,11 @@ func (p *Local) Address() string {
 	return p.opts.Address
 }
 
+// ListJobs lists an actor's jobs straight through the host, bypassing the Service guard so tests can inspect built-in actors
+func (p *Local) ListJobs(ctx context.Context, actorType string, actorID string) ([]actor.JobInfo, error) {
+	return p.h.ListJobs(ctx, actorType, actorID)
+}
+
 func (p *Local) Run(t *testing.T) {
 	t.Helper()
 
@@ -70,6 +78,9 @@ func (p *Local) Run(t *testing.T) {
 	}
 	if p.opts.Logger != nil {
 		hostOpts = append(hostOpts, local.WithLogger(p.opts.Logger))
+	}
+	for _, b := range p.opts.BuiltInActors {
+		hostOpts = append(hostOpts, local.WithBuiltInActor(b))
 	}
 	hostOpts = append(hostOpts, p.opts.Extra...)
 

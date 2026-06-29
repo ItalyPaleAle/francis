@@ -36,6 +36,8 @@ type Instance interface {
 	// Stop gracefully shuts the host down mid-test, leaving the rest of the topology running
 	// It is idempotent with Cleanup, and the host can be brought back up by calling Run again on the same address
 	Stop(t *testing.T)
+	// ListJobs lists an actor's jobs straight through the host, bypassing the Service guard so tests can inspect built-in actors
+	ListJobs(ctx context.Context, actorType string, actorID string) ([]actor.JobInfo, error)
 }
 
 // ActorReg describes an actor type to register on a host before it starts

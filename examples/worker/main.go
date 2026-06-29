@@ -77,7 +77,7 @@ func runWorker(ctx context.Context) error {
 
 	// Run the actor host and the control server
 	// This blocks until the context is canceled and the services have drained
-	runErr := servicerunner.
+	err = servicerunner.
 		NewServiceRunner(
 			h.Run,
 			runControlServer(actorService),
@@ -95,8 +95,8 @@ func runWorker(ctx context.Context) error {
 		log.Error("Error flushing telemetry on shutdown", slog.Any("error", shutdownErr))
 	}
 
-	if runErr != nil {
-		return fmt.Errorf("error running services: %w", runErr)
+	if err != nil {
+		return fmt.Errorf("error running services: %w", err)
 	}
 
 	return nil

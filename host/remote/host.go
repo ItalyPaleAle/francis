@@ -14,6 +14,7 @@ import (
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/builtin"
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/bootstrapauth"
@@ -45,6 +46,8 @@ type Host struct {
 
 	// core owns the active actors, their turn-based invocation, idle deactivation, and halting
 	core *actorcore.Manager
+	// builtInActors are framework-managed actors registered before start and bootstrapped once the host is ready
+	builtInActors []*builtin.BuiltInActor
 	// resolver adapts this host to the placement resolver the shared messaging logic depends on
 	resolver actorcore.PlacementResolver
 
@@ -238,6 +241,19 @@ func newHost(options *newHostOptions) (*Host, error) {
 		MaxRequestBodySize:  options.MaxRequestBodySize,
 	})
 
+	// Register the built-in actors before the host starts, so their types are advertised to the runtime like any other
+	// They are bootstrapped (their registration method invoked) once the host is ready, in Run
+	for _, b := range options.BuiltInActors {
+		if b == nil {
+			continue
+		}
+		err = h.core.RegisterActor(b.ActorType(), b.Factory(), b.RegisterOptions())
+		if err != nil {
+			return nil, fmt.Errorf("failed to register built-in actor %q: %w", b.ActorType(), err)
+		}
+	}
+	h.builtInActors = options.BuiltInActors
+
 	return h, nil
 }
 
@@ -296,6 +312,18 @@ func (h *Host) Run(parentCtx context.Context) error {
 		runErrCh <- h.runtimeClient.Run(ctx)
 	}()
 
+	// Bootstrap the built-in actors once the host has registered with a runtime and can serve invocations
+	// Their registration runs on the cluster-wide singleton instance, so it is harmless for every host to do this
+	if len(h.builtInActors) > 0 {
+		go func() {
+			select {
+			case <-h.Ready():
+				h.bootstrapBuiltInActors(ctx)
+			case <-ctx.Done():
+			}
+		}()
+	}
+
 	// Wait for whichever service returns first
 	// If the runtime client returns, its drain has already run, so stop the peer server and wait for it
 	// If the peer server fails first, cancel the context to bring the runtime client down too
@@ -330,6 +358,37 @@ func (h *Host) isDraining() bool {
 // HaltAll halts all actors active on the host, gracefully
 func (h *Host) HaltAll() error {
 	return h.core.HaltAll()
+}
+
+// bootstrapBuiltInActors invokes the one-time registration method for each built-in actor once the host is ready
+// It retries with a short backoff because an invocation can briefly fail right after startup (the register handler is idempotent, so retrying is safe)
+func (h *Host) bootstrapBuiltInActors(ctx context.Context) {
+	const maxAttempts = 5
+	for _, b := range h.builtInActors {
+		for i := 1; ; i++ {
+			invokeCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
+			err := b.Bootstrap(invokeCtx, h.service)
+			cancel()
+			if err == nil {
+				h.log.DebugContext(ctx, "Bootstrapped built-in actor", slog.String("actorType", b.ActorType()))
+				break
+			}
+
+			if i >= maxAttempts || ctx.Err() != nil {
+				h.log.WarnContext(ctx, "Failed to bootstrap built-in actor", slog.String("actorType", b.ActorType()), slog.Any("error", err))
+				break
+			}
+
+			// Back off before the next attempt, but stop promptly if the host is shutting down
+			t := h.clock.NewTimer(time.Duration(i) * 500 * time.Millisecond)
+			select {
+			case <-t.C():
+			case <-ctx.Done():
+				t.Stop()
+				return
+			}
+		}
+	}
 }
 
 // drainActors halts all active actors during graceful shutdown, logging any error
