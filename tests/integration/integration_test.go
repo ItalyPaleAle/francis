@@ -22,6 +22,7 @@ import (
 	_ "github.com/italypaleale/francis/tests/integration/suites/alarms"
 	_ "github.com/italypaleale/francis/tests/integration/suites/bootstrap"
 	_ "github.com/italypaleale/francis/tests/integration/suites/builtin/cron"
+	_ "github.com/italypaleale/francis/tests/integration/suites/clientinvoke"
 	_ "github.com/italypaleale/francis/tests/integration/suites/crosshost"
 	_ "github.com/italypaleale/francis/tests/integration/suites/durability"
 	_ "github.com/italypaleale/francis/tests/integration/suites/errorprop"
