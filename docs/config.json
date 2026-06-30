@@ -1,0 +1,21 @@
+{
+  "baseURL": "https://francis.italypaleale.me/",
+  "title": "Francis",
+  "locale": "en-us",
+  "description": "The simple & low-maintenance Go distributed actor framework",
+  "plausibleAnalytics": true,
+  "github": {
+    "url": "https://github.com/ItalyPaleAle/francis",
+    "repo": "https://github.com/ItalyPaleAle/francis",
+    "branch": "main"
+  },
+  "theme": {
+    "scheme": "francis",
+    "iconLight": "icon-light.svg",
+    "iconDark": "icon-dark.svg",
+    "favicon": "icon-light.svg"
+  },
+  "imageMounts": [
+    { "source": "img", "target": "assets/docs/img" }
+  ]
+}
