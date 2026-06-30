@@ -18,7 +18,7 @@ Build a cron job with `cronjob.New` and pass it to the host:
 ```go
 import "github.com/italypaleale/francis/builtin/cronjob"
 
-cleanup, err := cronjob.New("nightly-cleanup",
+cleanupJob, err := cronjob.New("nightly-cleanup",
 	cronjob.WithCron("0 2 * * *"),
 	cronjob.WithJob(func(ctx context.Context) error {
 		// ... runs once across the cluster, every night at 2am ...
@@ -31,7 +31,7 @@ if err != nil {
 
 host, err := local.NewHost(
 	// ... other options ...
-	local.WithBuiltInActor(cleanup),
+	local.WithBuiltInActor(cleanupJob),
 )
 ```
 
@@ -53,17 +53,27 @@ Exactly one of `WithInterval`, `WithPeriod`, or `WithCron` is required, and `Wit
 
 ### How it works
 
-At startup each host invokes a one-time `register` method on the cron job's singleton:
+At startup each host invokes a one-time `register` method on the cron job's scheduler:
 
 1. If the schedule is already registered, `register` does nothing — so it is safe for every host to trigger it, and it stays registered across restarts.
 2. Otherwise it dispatches the repeating job that drives the schedule and records its ID. `WithImmediate` additionally runs the job once right away on this first registration.
 
 Because the actor is a single cluster-wide instance with turn-based execution, concurrent registrations from multiple hosts are automatically collapsed to a single recurring job. It is safe to re-register the actor on every instance in the cluster.
 
+### Triggering a run on demand
+
+Call `Trigger` to run the job once, immediately, regardless of the schedule:
+
+```go
+err := cleanupJob.Trigger(ctx, host.Service())
+```
+
+The run happens on the runner, so triggering returns promptly even if a previous run is still going. Multiple triggers that pile up while a run is still pending are **collapsed into a single run**.
+
 ### Unregistering
 
 Calling `Unregister` cancels the recurring job and clears the actor's state, so a later startup re-registers it cleanly:
 
 ```go
-err := cleanup.Unregister(ctx, host.Service())
+err := cleanupJob.Unregister(ctx, host.Service())
 ```

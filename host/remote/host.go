@@ -14,10 +14,10 @@ import (
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/actor"
-	"github.com/italypaleale/francis/builtin"
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/bootstrapauth"
+	"github.com/italypaleale/francis/internal/builtinactor"
 	"github.com/italypaleale/francis/internal/ca"
 	"github.com/italypaleale/francis/internal/certholder"
 	"github.com/italypaleale/francis/internal/hosttls"
@@ -47,7 +47,7 @@ type Host struct {
 	// core owns the active actors, their turn-based invocation, idle deactivation, and halting
 	core *actorcore.Manager
 	// builtInActors are framework-managed actors registered before start and bootstrapped once the host is ready
-	builtInActors []*builtin.BuiltInActor
+	builtInActors []builtinactor.BuiltInActor
 	// resolver adapts this host to the placement resolver the shared messaging logic depends on
 	resolver actorcore.PlacementResolver
 
@@ -247,9 +247,12 @@ func newHost(options *newHostOptions) (*Host, error) {
 		if b == nil {
 			continue
 		}
-		err = h.core.RegisterActor(b.ActorType(), b.Factory(), b.RegisterOptions())
+		// Built-in actors carry only their bare type
+		// the host adds the reserved prefix when registering
+		actorType := builtinactor.FullActorType(b.ActorType())
+		err = h.core.RegisterActor(actorType, b.Factory(), b.RegisterOptions())
 		if err != nil {
-			return nil, fmt.Errorf("failed to register built-in actor %q: %w", b.ActorType(), err)
+			return nil, fmt.Errorf("failed to register built-in actor %q: %w", actorType, err)
 		}
 	}
 	h.builtInActors = options.BuiltInActors

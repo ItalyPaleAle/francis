@@ -10,6 +10,7 @@ package cron
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,8 +19,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/italypaleale/francis/actor"
-	"github.com/italypaleale/francis/builtin"
 	"github.com/italypaleale/francis/builtin/cronjob"
+	"github.com/italypaleale/francis/internal/builtinactor"
 	"github.com/italypaleale/francis/tests/integration/framework"
 	"github.com/italypaleale/francis/tests/integration/framework/cluster"
 	"github.com/italypaleale/francis/tests/integration/framework/process/provider"
@@ -32,8 +33,10 @@ const (
 	// cronInterval is the cron job's repetition period, kept short so the scenario observes several occurrences quickly
 	cronInterval = 300 * time.Millisecond
 
-	// singletonActorID mirrors the fixed actor ID built-in singletons use, needed to query the actor's jobs
+	// singletonActorID mirrors the fixed actor ID built-in singletons use, needed to query the scheduler half
 	singletonActorID = "singleton"
+	// runnerActorID mirrors the fixed actor ID of the cron job's runner half, where the recurring run job actually lives
+	runnerActorID = "runner"
 
 	eventuallyTimeout = 30 * time.Second
 	eventuallyTick    = 100 * time.Millisecond
@@ -66,10 +69,19 @@ type builtinCron struct {
 	hosts   int
 
 	cluster  *cluster.Cluster
-	cron     *builtin.BuiltInActor
+	cron     *cronjob.CronJob
 	cronType string
 	// runs counts how many times the user job has executed, incremented from the actor's goroutine
 	runs atomic.Int64
+
+	// trigCron is a second cron job that only runs when triggered, used to exercise the trigger API and the scheduler/runner split
+	trigCron *cronjob.CronJob
+	// trigRuns counts executions of the triggered job
+	trigRuns atomic.Int64
+	// trigStarted signals that a triggered run has begun and is about to block
+	trigStarted chan struct{}
+	// trigRelease unblocks the in-flight triggered run so it can complete
+	trigRelease chan struct{}
 }
 
 func (s *builtinCron) Name() string {
@@ -89,13 +101,37 @@ func (s *builtinCron) Setup(t *testing.T) []framework.Option {
 	require.NoError(t, err)
 
 	s.cron = cronActor
-	s.cronType = cronActor.ActorType()
+	// The host registers the actor under the reserved prefix, so jobs and the guard use the full type
+	s.cronType = builtinactor.FullActorType(cronActor.ActorType())
+
+	// A second cron job whose interval is far in the future, so it never fires on its own and only runs when triggered
+	// Its job blocks until released, so the test can hold a run in flight on the runner while it exercises the scheduler
+	s.trigStarted = make(chan struct{}, 1)
+	s.trigRelease = make(chan struct{})
+	trigCron, err := cronjob.New(
+		"e2e-trigger",
+		cronjob.WithInterval(time.Hour),
+		cronjob.WithJob(func(ctx context.Context) error {
+			s.trigRuns.Add(1)
+			select {
+			case s.trigStarted <- struct{}{}:
+			default:
+			}
+			select {
+			case <-s.trigRelease:
+			case <-ctx.Done():
+			}
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+	s.trigCron = trigCron
 
 	s.cluster = cluster.New(t, cluster.Options{
 		Kind:               s.kind,
 		Variant:            s.variant,
 		Hosts:              s.hosts,
-		BuiltInActors:      []*builtin.BuiltInActor{cronActor},
+		BuiltInActors:      []builtinactor.BuiltInActor{cronActor, trigCron},
 		AlarmsPollInterval: pollInterval,
 	})
 
@@ -129,6 +165,42 @@ func (s *builtinCron) Run(t *testing.T) {
 		}
 	})
 
+	// An explicit trigger runs the job immediately, and the long-running run does not block the scheduler's lifecycle invocations
+	t.Run("trigger runs immediately without blocking lifecycle", func(t *testing.T) {
+		// Release the blocked run however the subtest exits, so the host can shut down cleanly
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(s.trigRelease) }) }
+		defer release()
+
+		// The triggered cron is otherwise idle (its schedule is an hour out), so it has not run yet
+		require.Zero(t, s.trigRuns.Load(), "the triggered cron must not run before it is triggered")
+
+		err := s.trigCron.Trigger(ctx, svc)
+		require.NoError(t, err)
+
+		// The triggered run starts on the runner instance
+		select {
+		case <-s.trigStarted:
+		case <-time.After(eventuallyTimeout):
+			t.Fatal("the triggered run did not start")
+		}
+		assert.GreaterOrEqual(t, s.trigRuns.Load(), int64(1), "the trigger should have run the job")
+
+		// The run is now blocked, holding the runner's turn
+		// Unregister targets the separate scheduler actor, so it must return without waiting for the in-flight run
+		done := make(chan error, 1)
+		go func() { done <- s.trigCron.Unregister(ctx, svc) }()
+		select {
+		case err := <-done:
+			require.NoError(t, err, "unregister must not block on the long-running run")
+		case <-time.After(10 * time.Second):
+			t.Fatal("unregister blocked behind the long-running job on the runner")
+		}
+
+		// Let the blocked run finish
+		release()
+	})
+
 	// Unregister cancels the recurring job and stops further executions
 	t.Run("unregister stops execution", func(t *testing.T) {
 		err := s.cron.Unregister(ctx, svc)
@@ -146,12 +218,13 @@ func (s *builtinCron) Run(t *testing.T) {
 	})
 }
 
-// liveRunJobs returns how many live (non-dead-lettered) recurring "run" jobs the singleton has
+// liveRunJobs returns how many live (non-dead-lettered) recurring "run" jobs the runner has
+// The scheduler dispatches the recurring job to the runner instance, so that is where it lives
 // It inspects through the host because the public Service rejects built-in actor types
 // A duplicate registration would surface here as more than one
 func (s *builtinCron) liveRunJobs(t *testing.T) int {
 	t.Helper()
-	jobs, err := s.cluster.Host(0).ListJobs(t.Context(), s.cronType, singletonActorID)
+	jobs, err := s.cluster.Host(0).ListJobs(t.Context(), s.cronType, runnerActorID)
 	require.NoError(t, err)
 
 	var n int

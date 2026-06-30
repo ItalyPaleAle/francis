@@ -4,12 +4,13 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/italypaleale/francis/builtin"
+	"k8s.io/utils/clock"
+
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/postgres"
 	"github.com/italypaleale/francis/components/sqlite"
 	"github.com/italypaleale/francis/components/standalone"
-	"k8s.io/utils/clock"
+	"github.com/italypaleale/francis/internal/builtinactor"
 )
 
 type HostOption func(*newHostOptions)
@@ -117,7 +118,7 @@ func WithMaxRequestBodySize(n int64) HostOption {
 // WithBuiltInActor registers a framework-managed built-in actor on the host, such as one created with cronjob.New
 // The host registers it automatically and, once ready, bootstraps it by invoking its one-time registration method
 // This option can be repeated to register more than one built-in actor
-func WithBuiltInActor(b *builtin.BuiltInActor) HostOption {
+func WithBuiltInActor(b builtinactor.BuiltInActor) HostOption {
 	return func(o *newHostOptions) { o.BuiltInActors = append(o.BuiltInActors, b) }
 }
 
@@ -137,7 +138,7 @@ type newHostOptions struct {
 	ProviderRequestTimeout    time.Duration
 	MaxInFlightRequests       int
 	MaxRequestBodySize        int64
-	BuiltInActors             []*builtin.BuiltInActor
+	BuiltInActors             []builtinactor.BuiltInActor
 
 	// Allows setting a clock for testing
 	clock clock.WithTicker

@@ -10,8 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/italypaleale/francis/actor"
-	"github.com/italypaleale/francis/builtin"
 	"github.com/italypaleale/francis/host/remote"
+	"github.com/italypaleale/francis/internal/builtinactor"
 	"github.com/italypaleale/francis/tests/integration/framework/process/clustersecret"
 )
 
@@ -26,7 +26,7 @@ type RemoteOptions struct {
 	// Actors to register before the host starts
 	Actors []ActorReg
 	// BuiltInActors are framework-managed actors registered via WithBuiltInActor
-	BuiltInActors []*builtin.BuiltInActor
+	BuiltInActors []builtinactor.BuiltInActor
 	// Logger is optional and defaults to the host's discarding logger
 	Logger *slog.Logger
 	// Extra host options applied last, e.g. custom timeouts

@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/italypaleale/francis/actor"
-	"github.com/italypaleale/francis/builtin"
+	"github.com/italypaleale/francis/internal/builtinactor"
 )
 
 func TestNew(t *testing.T) {
@@ -80,9 +80,23 @@ func TestNew(t *testing.T) {
 	})
 }
 
+// TestFactoryRoles verifies the factory builds a scheduler for the singleton and a runner for the runner ID
+func TestFactoryRoles(t *testing.T) {
+	b, err := New("roles", WithInterval(time.Minute), WithJob(func(context.Context) error { return nil }))
+	require.NoError(t, err)
+
+	scheduler := b.Factory()("singleton", nil)
+	_, ok := scheduler.(*cronJobScheduler)
+	assert.True(t, ok, "a non-runner ID should build the scheduler")
+
+	runner := b.Factory()(runnerActorID, nil)
+	_, ok = runner.(*cronJobRunner)
+	assert.True(t, ok, "the runner ID should build the runner")
+}
+
 func TestCronJobRecurringJobOptions(t *testing.T) {
 	t.Run("interval, not immediate, delays first occurrence", func(t *testing.T) {
-		a := &cronJobActor{interval: "PT1M"}
+		a := &cronJobScheduler{interval: "PT1M"}
 		before := time.Now()
 		p := resolveJobProps(t, a)
 		assert.Equal(t, "PT1M", p.Interval)
@@ -94,7 +108,7 @@ func TestCronJobRecurringJobOptions(t *testing.T) {
 	})
 
 	t.Run("interval, immediate, first occurrence is now", func(t *testing.T) {
-		a := &cronJobActor{interval: "PT1M", immediate: true}
+		a := &cronJobScheduler{interval: "PT1M", immediate: true}
 		p := resolveJobProps(t, a)
 		assert.Equal(t, "PT1M", p.Interval)
 		assert.Equal(t, runJobIdempotencyKey, p.IdempotencyKey)
@@ -103,7 +117,7 @@ func TestCronJobRecurringJobOptions(t *testing.T) {
 	})
 
 	t.Run("cron schedule", func(t *testing.T) {
-		a := &cronJobActor{cron: "0 9 * * *"}
+		a := &cronJobScheduler{cron: "0 9 * * *"}
 		p := resolveJobProps(t, a)
 		assert.Equal(t, "0 9 * * *", p.Cron)
 		assert.Empty(t, p.Interval)
@@ -115,62 +129,101 @@ func TestCronJobRecurringJobOptions(t *testing.T) {
 func TestCronJobRegister(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("registers recurring job on empty state", func(t *testing.T) {
-		fc := &fakeClient{dispatchID: "job-1"}
-		a := &cronJobActor{interval: "PT1M", client: fc}
+	t.Run("registers recurring job on the runner on empty state", func(t *testing.T) {
+		state := &fakeClient[cronJobState]{}
+		runner := &fakeClient[struct{}]{dispatchID: "job-1"}
+		a := &cronJobScheduler{interval: "PT1M", state: state, runner: runner}
 
 		require.NoError(t, a.register(ctx))
 
-		require.Len(t, fc.dispatches, 1)
-		assert.Equal(t, methodRun, fc.dispatches[0].method)
-		assert.Equal(t, "PT1M", fc.dispatches[0].props.Interval)
-		require.Len(t, fc.setStateCalls, 1)
-		assert.Equal(t, "job-1", fc.setStateCalls[0].JobID)
+		// The recurring job is dispatched to the runner, not stored on the scheduler
+		require.Len(t, runner.dispatches, 1)
+		assert.Equal(t, methodRun, runner.dispatches[0].method)
+		assert.Equal(t, "PT1M", runner.dispatches[0].props.Interval)
+		assert.Empty(t, state.dispatches, "the scheduler must not dispatch runs to itself")
+		require.Len(t, state.setStateCalls, 1)
+		assert.Equal(t, "job-1", state.setStateCalls[0].JobID)
 	})
 
 	t.Run("is a no-op when already registered", func(t *testing.T) {
-		fc := &fakeClient{state: cronJobState{JobID: "existing"}, dispatchID: "job-2"}
-		a := &cronJobActor{interval: "PT1M", client: fc}
+		state := &fakeClient[cronJobState]{state: cronJobState{JobID: "existing"}}
+		runner := &fakeClient[struct{}]{dispatchID: "job-2"}
+		a := &cronJobScheduler{interval: "PT1M", state: state, runner: runner}
 
 		require.NoError(t, a.register(ctx))
 
-		assert.Empty(t, fc.dispatches, "an already-registered actor must not dispatch again")
-		assert.Empty(t, fc.setStateCalls)
+		assert.Empty(t, runner.dispatches, "an already-registered actor must not dispatch again")
+		assert.Empty(t, state.setStateCalls)
 	})
 
-	t.Run("immediate cron also dispatches a one-shot occurrence", func(t *testing.T) {
-		fc := &fakeClient{dispatchID: "job-3"}
-		a := &cronJobActor{cron: "0 9 * * *", immediate: true, client: fc}
+	t.Run("immediate cron also dispatches a one-shot occurrence to the runner", func(t *testing.T) {
+		state := &fakeClient[cronJobState]{}
+		runner := &fakeClient[struct{}]{dispatchID: "job-3"}
+		a := &cronJobScheduler{cron: "0 9 * * *", immediate: true, state: state, runner: runner}
 
 		require.NoError(t, a.register(ctx))
 
-		require.Len(t, fc.dispatches, 2)
+		require.Len(t, runner.dispatches, 2)
 		// The immediate one-shot is dispatched first, with its own idempotency key and no schedule
-		assert.Equal(t, immediateJobIdempotencyKey, fc.dispatches[0].props.IdempotencyKey)
-		assert.Empty(t, fc.dispatches[0].props.Cron)
-		assert.Empty(t, fc.dispatches[0].props.Interval)
+		assert.Equal(t, immediateJobIdempotencyKey, runner.dispatches[0].props.IdempotencyKey)
+		assert.Empty(t, runner.dispatches[0].props.Cron)
+		assert.Empty(t, runner.dispatches[0].props.Interval)
 		// The recurring cron job follows
-		assert.Equal(t, "0 9 * * *", fc.dispatches[1].props.Cron)
-		assert.Equal(t, runJobIdempotencyKey, fc.dispatches[1].props.IdempotencyKey)
-		require.Len(t, fc.setStateCalls, 1)
-		assert.Equal(t, "job-3", fc.setStateCalls[0].JobID)
+		assert.Equal(t, "0 9 * * *", runner.dispatches[1].props.Cron)
+		assert.Equal(t, runJobIdempotencyKey, runner.dispatches[1].props.IdempotencyKey)
+		require.Len(t, state.setStateCalls, 1)
+		assert.Equal(t, "job-3", state.setStateCalls[0].JobID)
 	})
 
 	t.Run("immediate interval does not dispatch a separate one-shot", func(t *testing.T) {
-		fc := &fakeClient{dispatchID: "job-4"}
-		a := &cronJobActor{interval: "PT1M", immediate: true, client: fc}
+		state := &fakeClient[cronJobState]{}
+		runner := &fakeClient[struct{}]{dispatchID: "job-4"}
+		a := &cronJobScheduler{interval: "PT1M", immediate: true, state: state, runner: runner}
 
 		require.NoError(t, a.register(ctx))
 
-		require.Len(t, fc.dispatches, 1, "interval immediacy is folded into the recurring job's first due time")
-		assert.Equal(t, "PT1M", fc.dispatches[0].props.Interval)
+		require.Len(t, runner.dispatches, 1, "interval immediacy is folded into the recurring job's first due time")
+		assert.Equal(t, "PT1M", runner.dispatches[0].props.Interval)
+	})
+}
+
+func TestCronJobTrigger(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("dispatches a one-shot run to the runner with the collapsing key", func(t *testing.T) {
+		state := &fakeClient[cronJobState]{}
+		runner := &fakeClient[struct{}]{dispatchID: "trigger-1"}
+		a := &cronJobScheduler{interval: "PT1M", state: state, runner: runner}
+
+		require.NoError(t, a.trigger(ctx))
+
+		require.Len(t, runner.dispatches, 1)
+		assert.Equal(t, methodRun, runner.dispatches[0].method)
+		// The fixed idempotency key is what collapses multiple pending triggers into one run
+		assert.Equal(t, triggerJobIdempotencyKey, runner.dispatches[0].props.IdempotencyKey)
+		// A trigger is a one-shot run, with no recurring schedule
+		assert.Empty(t, runner.dispatches[0].props.Interval)
+		assert.Empty(t, runner.dispatches[0].props.Cron)
+		// Triggering does not touch the scheduler's persisted state
+		assert.Empty(t, state.setStateCalls)
+	})
+
+	t.Run("routes the trigger message to trigger", func(t *testing.T) {
+		state := &fakeClient[cronJobState]{}
+		runner := &fakeClient[struct{}]{dispatchID: "trigger-2"}
+		a := &cronJobScheduler{interval: "PT1M", state: state, runner: runner}
+
+		_, err := a.Invoke(ctx, methodTrigger, nil)
+		require.NoError(t, err)
+		require.Len(t, runner.dispatches, 1)
+		assert.Equal(t, triggerJobIdempotencyKey, runner.dispatches[0].props.IdempotencyKey)
 	})
 }
 
 func TestCronJobRun(t *testing.T) {
 	ctx := context.Background()
 	var called bool
-	a := &cronJobActor{job: func(context.Context) error {
+	a := &cronJobRunner{job: func(context.Context) error {
 		called = true
 		return nil
 	}}
@@ -180,10 +233,10 @@ func TestCronJobRun(t *testing.T) {
 }
 
 func TestCronJobUnknownMethod(t *testing.T) {
-	a := &cronJobActor{}
+	a := &cronJobRunner{}
 
-	// Register and unregister are invocations now, so the Job handler treats them as unknown
-	for _, method := range []string{"bogus", builtin.MethodRegister, builtin.MethodUnregister} {
+	// The runner only services run jobs, so lifecycle methods, the trigger message, and bogus names are all unknown
+	for _, method := range []string{"bogus", builtinactor.MethodRegister, builtinactor.MethodUnregister, methodTrigger} {
 		err := a.Job(context.Background(), method, nil)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, actor.ErrJobPermanentFailure, "an unknown job method should dead-letter, not retry forever")
@@ -194,29 +247,31 @@ func TestCronJobInvoke(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("register routes to register", func(t *testing.T) {
-		fc := &fakeClient{dispatchID: "job-1"}
-		a := &cronJobActor{interval: "PT1M", client: fc}
+		state := &fakeClient[cronJobState]{}
+		runner := &fakeClient[struct{}]{dispatchID: "job-1"}
+		a := &cronJobScheduler{interval: "PT1M", state: state, runner: runner}
 
-		_, err := a.Invoke(ctx, builtin.MethodRegister, nil)
+		_, err := a.Invoke(ctx, builtinactor.MethodRegister, nil)
 		require.NoError(t, err)
-		require.Len(t, fc.dispatches, 1)
-		require.Len(t, fc.setStateCalls, 1)
-		assert.Equal(t, "job-1", fc.setStateCalls[0].JobID)
+		require.Len(t, runner.dispatches, 1)
+		require.Len(t, state.setStateCalls, 1)
+		assert.Equal(t, "job-1", state.setStateCalls[0].JobID)
 	})
 
 	t.Run("unregister routes to unregister", func(t *testing.T) {
-		fc := &fakeClient{state: cronJobState{JobID: "job-1"}}
-		a := &cronJobActor{interval: "PT1M", client: fc}
+		state := &fakeClient[cronJobState]{state: cronJobState{JobID: "job-1"}}
+		runner := &fakeClient[struct{}]{}
+		a := &cronJobScheduler{interval: "PT1M", state: state, runner: runner}
 
-		_, err := a.Invoke(ctx, builtin.MethodUnregister, nil)
+		_, err := a.Invoke(ctx, builtinactor.MethodUnregister, nil)
 		require.NoError(t, err)
-		assert.Equal(t, []string{"job-1"}, fc.cancelled)
-		assert.True(t, fc.deleted)
+		// The recurring job is cancelled on the runner, where it was dispatched
+		assert.Equal(t, []string{"job-1"}, runner.cancelled)
+		assert.True(t, state.deleted)
 	})
 
-	// The recurring run is a job, not an invocation, so the Invoke handler rejects it
-	t.Run("rejects a non-lifecycle method", func(t *testing.T) {
-		a := &cronJobActor{}
+	t.Run("rejects an unknown lifecycle method", func(t *testing.T) {
+		a := &cronJobScheduler{}
 		_, err := a.Invoke(ctx, methodRun, nil)
 		require.Error(t, err)
 	})
@@ -225,36 +280,39 @@ func TestCronJobInvoke(t *testing.T) {
 func TestCronJobUnregister(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("cancels the recurring job and clears state", func(t *testing.T) {
-		fc := &fakeClient{state: cronJobState{JobID: "job-1"}}
-		a := &cronJobActor{interval: "PT1M", client: fc}
+	t.Run("cancels the recurring job on the runner and clears state", func(t *testing.T) {
+		state := &fakeClient[cronJobState]{state: cronJobState{JobID: "job-1"}}
+		runner := &fakeClient[struct{}]{}
+		a := &cronJobScheduler{interval: "PT1M", state: state, runner: runner}
 
 		require.NoError(t, a.unregister(ctx))
 
-		assert.Equal(t, []string{"job-1"}, fc.cancelled)
-		assert.True(t, fc.deleted)
+		assert.Equal(t, []string{"job-1"}, runner.cancelled)
+		assert.True(t, state.deleted)
 	})
 
 	t.Run("tolerates an already-cancelled job", func(t *testing.T) {
-		fc := &fakeClient{state: cronJobState{JobID: "job-1"}, cancelErr: actor.ErrJobNotFound}
-		a := &cronJobActor{interval: "PT1M", client: fc}
+		state := &fakeClient[cronJobState]{state: cronJobState{JobID: "job-1"}}
+		runner := &fakeClient[struct{}]{cancelErr: actor.ErrJobNotFound}
+		a := &cronJobScheduler{interval: "PT1M", state: state, runner: runner}
 
 		require.NoError(t, a.unregister(ctx))
-		assert.True(t, fc.deleted)
+		assert.True(t, state.deleted)
 	})
 
 	t.Run("clears state even with no registered job", func(t *testing.T) {
-		fc := &fakeClient{}
-		a := &cronJobActor{interval: "PT1M", client: fc}
+		state := &fakeClient[cronJobState]{}
+		runner := &fakeClient[struct{}]{}
+		a := &cronJobScheduler{interval: "PT1M", state: state, runner: runner}
 
 		require.NoError(t, a.unregister(ctx))
-		assert.Empty(t, fc.cancelled, "nothing to cancel when no job is registered")
-		assert.True(t, fc.deleted)
+		assert.Empty(t, runner.cancelled, "nothing to cancel when no job is registered")
+		assert.True(t, state.deleted)
 	})
 }
 
-// resolveJobProps applies the actor's recurring job options onto a JobProperties for inspection
-func resolveJobProps(t *testing.T, a *cronJobActor) actor.JobProperties {
+// resolveJobProps applies the scheduler's recurring job options onto a JobProperties for inspection
+func resolveJobProps(t *testing.T, a *cronJobScheduler) actor.JobProperties {
 	t.Helper()
 	opts, err := a.recurringJobOptions()
 	require.NoError(t, err)
@@ -266,9 +324,9 @@ func resolveJobProps(t *testing.T, a *cronJobActor) actor.JobProperties {
 	return p
 }
 
-// fakeClient is a hand-rolled actor.Client[cronJobState] that records the calls the cron job actor makes
-type fakeClient struct {
-	state       cronJobState
+// fakeClient is a hand-rolled actor.Client[T] that records the calls the cron job scheduler makes
+type fakeClient[T any] struct {
+	state       T
 	getStateErr error
 
 	dispatchID  string
@@ -276,7 +334,7 @@ type fakeClient struct {
 	dispatches  []dispatchCall
 
 	setStateErr   error
-	setStateCalls []cronJobState
+	setStateCalls []T
 
 	cancelErr error
 	cancelled []string
@@ -290,11 +348,11 @@ type dispatchCall struct {
 	props  actor.JobProperties
 }
 
-func (f *fakeClient) GetState(context.Context) (cronJobState, error) {
+func (f *fakeClient[T]) GetState(context.Context) (T, error) {
 	return f.state, f.getStateErr
 }
 
-func (f *fakeClient) SetState(_ context.Context, state cronJobState, _ *actor.SetStateOpts) error {
+func (f *fakeClient[T]) SetState(_ context.Context, state T, _ *actor.SetStateOpts) error {
 	if f.setStateErr != nil {
 		return f.setStateErr
 	}
@@ -303,7 +361,7 @@ func (f *fakeClient) SetState(_ context.Context, state cronJobState, _ *actor.Se
 	return nil
 }
 
-func (f *fakeClient) DeleteState(context.Context) error {
+func (f *fakeClient[T]) DeleteState(context.Context) error {
 	if f.deleteErr != nil {
 		return f.deleteErr
 	}
@@ -311,7 +369,7 @@ func (f *fakeClient) DeleteState(context.Context) error {
 	return nil
 }
 
-func (f *fakeClient) Dispatch(_ context.Context, method string, _ any, opts ...actor.JobOption) (string, error) {
+func (f *fakeClient[T]) Dispatch(_ context.Context, method string, _ any, opts ...actor.JobOption) (string, error) {
 	var p actor.JobProperties
 	for _, o := range opts {
 		o(&p)
@@ -320,7 +378,7 @@ func (f *fakeClient) Dispatch(_ context.Context, method string, _ any, opts ...a
 	return f.dispatchID, f.dispatchErr
 }
 
-func (f *fakeClient) CancelJob(_ context.Context, jobID string) error {
+func (f *fakeClient[T]) CancelJob(_ context.Context, jobID string) error {
 	if f.cancelErr != nil {
 		return f.cancelErr
 	}
@@ -328,17 +386,22 @@ func (f *fakeClient) CancelJob(_ context.Context, jobID string) error {
 	return nil
 }
 
-// The remaining methods are part of the actor.Client interface but unused by the cron job actor
-func (f *fakeClient) Invoke(context.Context, string, string, string, any, ...actor.InvokeOption) (actor.Envelope, error) {
+// The remaining methods are part of the actor.Client interface but unused by the cron job scheduler
+func (f *fakeClient[T]) Invoke(context.Context, string, string, string, any, ...actor.InvokeOption) (actor.Envelope, error) {
 	return nil, nil
 }
-func (f *fakeClient) SetAlarm(context.Context, string, actor.AlarmProperties) error { return nil }
-func (f *fakeClient) DeleteAlarm(context.Context, string) error                     { return nil }
-func (f *fakeClient) GetJob(context.Context, string) (actor.JobInfo, error) {
+func (f *fakeClient[T]) SetAlarm(context.Context, string, actor.AlarmProperties) error { return nil }
+func (f *fakeClient[T]) DeleteAlarm(context.Context, string) error                     { return nil }
+func (f *fakeClient[T]) GetJob(context.Context, string) (actor.JobInfo, error) {
 	return actor.JobInfo{}, nil
 }
-func (f *fakeClient) ListJobs(context.Context) ([]actor.JobInfo, error) { return nil, nil }
-func (f *fakeClient) RetryJob(context.Context, string) (string, error)  { return "", nil }
-func (f *fakeClient) Halt()                                             {}
+func (f *fakeClient[T]) ListJobs(context.Context) ([]actor.JobInfo, error) { return nil, nil }
+func (f *fakeClient[T]) RetryJob(context.Context, string) (string, error)  { return "", nil }
+func (f *fakeClient[T]) Halt()                                             {}
 
-var _ actor.Client[cronJobState] = (*fakeClient)(nil)
+var (
+	_ actor.Client[cronJobState] = (*fakeClient[cronJobState])(nil)
+	_ actor.Client[struct{}]     = (*fakeClient[struct{}])(nil)
+)
+
+var _ builtinactor.BuiltInActor = (*CronJob)(nil)
