@@ -187,7 +187,7 @@ func New(name string, opts ...Option) (*CronJob, error) {
 }
 
 // CronJob is a built-in cron job actor, returned by New and passed to a host via WithBuiltInActor
-// It satisfies the framework's built-in actor contract (ActorType, Factory, RegisterOptions, Bootstrap) and adds Unregister and Trigger
+// It satisfies the framework's built-in actor contract (ActorType, Factory, RegisterOptions, Bootstrap) and exposes a Service method for the on-demand Trigger and Unregister operations
 // The actor behavior itself lives in the unexported cronJobScheduler and cronJobRunner instances that Factory builds
 type CronJob struct {
 	actorType string
@@ -218,16 +218,32 @@ func (c *CronJob) Bootstrap(ctx context.Context, svc *actor.Service) error {
 	return err
 }
 
+// Service binds the cron job to an actor.Service, returning a CronJobService that exposes the on-demand Trigger and Unregister operations pre-configured for that service
+// Obtain the service from a host with host.Service()
+func (c *CronJob) Service(svc *actor.Service) *CronJobService {
+	return &CronJobService{
+		actorType: c.actorType,
+		svc:       svc,
+	}
+}
+
+// CronJobService exposes the on-demand operations of a cron job (Trigger and Unregister), bound to a specific actor.Service
+// Obtain one from CronJob.Service
+type CronJobService struct {
+	actorType string
+	svc       *actor.Service
+}
+
 // Unregister cancels the recurring job and clears the actor's state, so a later Bootstrap re-registers it cleanly
-func (c *CronJob) Unregister(ctx context.Context, svc *actor.Service) error {
-	_, err := builtinactor.Invoke(ctx, svc, c.actorType, builtinactor.MethodUnregister, nil)
+func (s *CronJobService) Unregister(ctx context.Context) error {
+	_, err := builtinactor.Invoke(ctx, s.svc, s.actorType, builtinactor.MethodUnregister, nil)
 	return err
 }
 
 // Trigger runs the job once, immediately, regardless of the schedule
 // The run happens on the runner, so this returns promptly even while a previous run is still going, and repeated triggers while a run is still pending collapse into a single run
-func (c *CronJob) Trigger(ctx context.Context, svc *actor.Service) error {
-	_, err := builtinactor.Invoke(ctx, svc, c.actorType, methodTrigger, nil)
+func (s *CronJobService) Trigger(ctx context.Context) error {
+	_, err := builtinactor.Invoke(ctx, s.svc, s.actorType, methodTrigger, nil)
 	return err
 }
 

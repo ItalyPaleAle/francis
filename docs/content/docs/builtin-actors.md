@@ -62,10 +62,14 @@ Because the actor is a single cluster-wide instance with turn-based execution, c
 
 ### Triggering a run on demand
 
-Call `Trigger` to run the job once, immediately, regardless of the schedule:
+The on-demand operations are bound to an `actor.Service` via `Service(...)`, which you obtain from a host with `host.Service()`
+
+ Call `Trigger` on the resulting service to run the job once, immediately, regardless of the schedule:
 
 ```go
-err := cleanupJob.Trigger(ctx, host.Service())
+cleanup := cleanupJob.Service(host.Service())
+
+err := cleanup.Trigger(ctx)
 ```
 
 The run happens on the runner, so triggering returns promptly even if a previous run is still going. Multiple triggers that pile up while a run is still pending are **collapsed into a single run**.
@@ -75,5 +79,7 @@ The run happens on the runner, so triggering returns promptly even if a previous
 Calling `Unregister` cancels the recurring job and clears the actor's state, so a later startup re-registers it cleanly:
 
 ```go
-err := cleanupJob.Unregister(ctx, host.Service())
+cleanup := cleanupJob.Service(host.Service())
+
+err := cleanup.Unregister(ctx)
 ```

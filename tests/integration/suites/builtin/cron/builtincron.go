@@ -143,6 +143,8 @@ func (s *builtinCron) Setup(t *testing.T) []framework.Option {
 func (s *builtinCron) Run(t *testing.T) {
 	ctx := t.Context()
 	svc := s.cluster.Service(0)
+	cronSvc := s.cron.Service(svc)
+	trigSvc := s.trigCron.Service(svc)
 
 	// The job runs repeatedly on its schedule (WithImmediate means the first occurrence is right away)
 	t.Run("runs on schedule", func(t *testing.T) {
@@ -175,7 +177,7 @@ func (s *builtinCron) Run(t *testing.T) {
 		// The triggered cron is otherwise idle (its schedule is an hour out), so it has not run yet
 		require.Zero(t, s.trigRuns.Load(), "the triggered cron must not run before it is triggered")
 
-		err := s.trigCron.Trigger(ctx, svc)
+		err := trigSvc.Trigger(ctx)
 		require.NoError(t, err)
 
 		// The triggered run starts on the runner instance
@@ -189,7 +191,9 @@ func (s *builtinCron) Run(t *testing.T) {
 		// The run is now blocked, holding the runner's turn
 		// Unregister targets the separate scheduler actor, so it must return without waiting for the in-flight run
 		done := make(chan error, 1)
-		go func() { done <- s.trigCron.Unregister(ctx, svc) }()
+		go func() {
+			done <- trigSvc.Unregister(ctx)
+		}()
 		select {
 		case err := <-done:
 			require.NoError(t, err, "unregister must not block on the long-running run")
@@ -203,7 +207,7 @@ func (s *builtinCron) Run(t *testing.T) {
 
 	// Unregister cancels the recurring job and stops further executions
 	t.Run("unregister stops execution", func(t *testing.T) {
-		err := s.cron.Unregister(ctx, svc)
+		err := cronSvc.Unregister(ctx)
 		require.NoError(t, err)
 
 		// The recurring job is removed
