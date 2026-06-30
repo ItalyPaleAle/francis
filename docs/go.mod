@@ -4,4 +4,4 @@ go 1.26.3
 
 tool github.com/italypaleale/hugo-assets/cmd/vercel-docs-build
 
-require github.com/italypaleale/hugo-assets v0.1.1-0.20260630025751-fdfd19531756 // indirect
+require github.com/italypaleale/hugo-assets v0.1.1-0.20260630032017-f0afa3b7b614 // indirect
