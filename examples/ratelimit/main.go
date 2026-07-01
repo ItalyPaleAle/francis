@@ -32,10 +32,11 @@ func run(parentCtx context.Context, log *slog.Logger) error {
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
-	// A rate limiter that admits 5 calls per second per key
-	// The limiter is strict by default (no burst slack), so calls for a key are evenly spaced
+	// A rate limiter that admits 5 calls per second per key, tolerating a short burst of 3
+	// Allow never blocks: it reports whether a call is admitted and, when it is not, how long to wait before retrying
 	limiter, err := ratelimit.New("demo",
 		ratelimit.WithRate(5),
+		ratelimit.WithBurst(3),
 	)
 	if err != nil {
 		return err
@@ -70,26 +71,29 @@ func run(parentCtx context.Context, log *slog.Logger) error {
 		return ctx.Err()
 	}
 
-	// Take is bound to the host's Service
+	// Allow is bound to the host's Service
 	rl := limiter.Service(h.Service())
 
-	log.Info("Throttling 8 rapid calls for one key, smoothed to 5/second")
-	start := time.Now()
-	for i := 1; i <= 8; i++ {
-		err = rl.Take(ctx, "user-42")
-		if err != nil {
-			return fmt.Errorf("rate limit take failed: %w", err)
+	log.Info("Sending 6 rapid calls for one key (rate 5/s, burst 3)")
+	for i := 1; i <= 6; i++ {
+		allowed, retryAfter, allowErr := rl.Allow(ctx, "user-42")
+		if allowErr != nil {
+			return fmt.Errorf("rate limit check failed: %w", allowErr)
 		}
-		log.Info("Call admitted", slog.Int("n", i), slog.Duration("elapsed", time.Since(start).Round(time.Millisecond)))
+		if allowed {
+			log.Info("Call admitted", slog.Int("n", i))
+		} else {
+			// retryAfter is what you would return in a Retry-After header alongside a 429
+			log.Info("Call throttled", slog.Int("n", i), slog.Duration("retryAfter", retryAfter.Round(time.Millisecond)))
+		}
 	}
 
-	// A different key has its own limiter, so its first call is admitted immediately
-	start = time.Now()
-	err = rl.Take(ctx, "user-99")
+	// A different key has its own bucket, so its first call is admitted immediately
+	allowed, _, err := rl.Allow(ctx, "user-99")
 	if err != nil {
-		return fmt.Errorf("rate limit take failed: %w", err)
+		return fmt.Errorf("rate limit check failed: %w", err)
 	}
-	log.Info("A different key is not throttled by the first", slog.Duration("elapsed", time.Since(start).Round(time.Millisecond)))
+	log.Info("A different key is not throttled by the first", slog.Bool("allowed", allowed))
 
 	// The demo is done: stop the host and wait for it to drain
 	cancel()

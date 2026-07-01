@@ -88,9 +88,9 @@ err := cleanup.Unregister(ctx)
 
 A rate limiter actor throttles calls **per key**, a free-form string you choose (e.g. an IP address, user ID, route, API token, etc). Each key is limited independently, and its limiter state lives only in the activated actor's memory, for optimal performance.
 
-It follows the leaky-bucket model: `Take` blocks until the key's limiter admits the call, smoothing bursts down to the configured rate rather than rejecting them.  
+It follows the token-bucket model, and `Allow` is a **non-blocking** check: it reports whether the call is admitted right now and, when it is not, how long the caller should wait before retrying. That wait maps directly onto a `Retry-After` header on a `429 Too Many Requests` response.
 
-Calls for the same key are serialized by the actor's turn lock, so holding the turn for the throttle delay is the intended backpressure (calls for different keys run on independent instances and never block each other).
+Because `Allow` never blocks, a throttled call returns immediately instead of holding the actor's turn (calls for different keys run on independent instances and never contend with each other).
 
 ### Registering
 
@@ -122,23 +122,29 @@ As with any built-in actor, register the same rate limiter (same name and option
 |--------|-------------|
 | `WithRate(n)` | Number of calls admitted per period. **Required**, must be greater than zero. |
 | `WithPer(d)` | The window the rate applies over. Defaults to one second, so `WithRate(100)` alone is 100/s; combine with `WithPer(time.Minute)` for a per-minute rate. |
-| `WithSlack(n)` | Burst allowance: how many unspent calls may accumulate for a later burst. By default the limiter is **strict** (no slack), so calls for a key are evenly spaced - pass this to opt into bursting. |
+| `WithBurst(n)` | The token bucket's capacity: how many calls may be admitted instantly before throttling kicks in, refilling at the configured rate. Defaults to **1** (strict), so calls are admitted one at a time - raise it to tolerate short bursts above the steady rate. |
 | `WithIdleTimeout(d)` | How long a key's in-memory limiter is kept after its last call before the actor is deactivated. Defaults to double the period (the `WithPer` window), with a minimum of one minute. Lower it to reclaim memory faster when limiting many distinct keys. |
 
 ### Throttling by key
 
-The `Take` operation is bound to an `actor.Service` via `Service(...)`, which you obtain from a host with `host.Service()`:
+The `Allow` operation is bound to an `actor.Service` via `Service(...)`, which you obtain from a host with `host.Service()`:
 
 ```go
 rl := limiter.Service(host.Service())
 
-// Blocks until this key is allowed to proceed under the configured rate
-err := rl.Take(ctx, clientIP)
+// Non-blocking: reports whether this key may proceed under the configured rate
+allowed, retryAfter, err := rl.Allow(ctx, clientIP)
 if err != nil {
-	// ctx was cancelled before the call was admitted
+	// The key was invalid or the invocation failed (e.g. ctx was cancelled)
 	return err
+}
+if !allowed {
+	// Throttled: retryAfter is how long until the key admits another call
+	w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(retryAfter.Seconds()))))
+	http.Error(w, "rate limited", http.StatusTooManyRequests)
+	return
 }
 // ... handle the request ...
 ```
 
-`Take` returns the context error if the context is cancelled before the call is admitted.
+`Allow` never blocks. When `allowed` is `false`, `retryAfter` tells the caller how long to wait before the key admits another call (it is zero when `allowed` is `true`). The returned `error` is non-nil only when the key is invalid or the underlying actor invocation fails, including context cancellation - it never signals throttling.

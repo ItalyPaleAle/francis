@@ -2,8 +2,8 @@
 
 // Package ratelimit exercises the built-in rate limiter actor end to end:
 //
-//   - Take throttles repeated calls for the same key down to the configured rate
-//   - distinct keys are limited independently, so activity on one key never delays another
+//   - Allow throttles repeated calls for the same key down to the configured rate, rejecting excess calls with a retry-after
+//   - distinct keys are limited independently, so activity on one key never throttles another
 //   - clients cannot invoke a built-in actor directly
 package ratelimit
 
@@ -23,7 +23,7 @@ import (
 	"github.com/italypaleale/francis/tests/integration/suite"
 )
 
-// per is the rate limiter's window, kept at one second so the half-window threshold cleanly separates a throttled call from an immediate one even with cluster invocation overhead
+// per is the rate limiter's window, kept at one second so a throttled call's retry-after is comfortably above zero and bounded by the window even with cluster invocation overhead
 const per = time.Second
 
 // matrix runs the scenario across representative topology/provider combinations
@@ -61,7 +61,7 @@ func (s *builtinRateLimit) Name() string {
 
 func (s *builtinRateLimit) Setup(t *testing.T) []framework.Option {
 	// One call per second
-	// The limiter is strict by default (no burst slack), so the first call for a key is immediate and the next is held for a full window
+	// The limiter is strict by default (a single-token bucket), so the first call for a key is admitted and the next is rejected until the bucket refills
 	rlActor, err := ratelimit.New(
 		"e2e",
 		ratelimit.WithRate(1),
@@ -90,38 +90,33 @@ func (s *builtinRateLimit) Run(t *testing.T) {
 	ctx := t.Context()
 	rl := s.rl.Service(s.cluster.Service(0))
 
-	// Repeated calls for the same key are throttled: the first is admitted right away, the second waits out the window
+	// Repeated calls for the same key are throttled: the first is admitted right away, the second is rejected with a retry-after
 	t.Run("throttles repeated calls for one key", func(t *testing.T) {
 		const key = "throttle-key"
 
-		start := time.Now()
-
-		err := rl.Take(ctx, key)
+		allowed, _, err := rl.Allow(ctx, key)
 		require.NoError(t, err)
+		require.True(t, allowed, "the first call for a fresh key should be admitted")
 
-		err = rl.Take(ctx, key)
+		allowed, retryAfter, err := rl.Allow(ctx, key)
 		require.NoError(t, err)
-
-		elapsed := time.Since(start)
-
-		assert.GreaterOrEqual(t, elapsed, per/2, "the second call for the same key should be held to enforce the rate")
+		assert.False(t, allowed, "the second call for the same key should be throttled")
+		assert.Positive(t, retryAfter, "a throttled call should report how long to wait")
+		assert.LessOrEqual(t, retryAfter, per, "the retry-after should not exceed the window")
 	})
 
-	// A fresh key is admitted immediately even though another key has been used, proving each key has its own limiter
+	// A fresh key is admitted immediately even though another key has been throttled, proving each key has its own limiter
 	t.Run("limits keys independently", func(t *testing.T) {
-		// Touch one key so its limiter exists and its slot is spent
-		err := rl.Take(ctx, "other-key")
+		// Touch one key so its limiter exists and its token is spent
+		allowed, _, err := rl.Allow(ctx, "other-key")
 		require.NoError(t, err)
+		require.True(t, allowed)
 
 		const fresh = "fresh-key"
-		start := time.Now()
-
-		err = rl.Take(ctx, fresh)
+		allowed, retryAfter, err := rl.Allow(ctx, fresh)
 		require.NoError(t, err)
-
-		elapsed := time.Since(start)
-
-		assert.Less(t, elapsed, per/2, "a fresh key must not be throttled by activity on a different key")
+		assert.True(t, allowed, "a fresh key must not be throttled by activity on a different key")
+		assert.Zero(t, retryAfter, "an admitted call should not report a retry-after")
 	})
 
 	// Clients cannot target a built-in actor through the public Service, on any host
@@ -139,10 +134,10 @@ func (s *builtinRateLimit) assertClientRejected(t *testing.T, svc *actor.Service
 
 	const key = "some-key"
 
-	_, invErr := svc.Invoke(ctx, s.rlType, key, "take", nil)
+	_, invErr := svc.Invoke(ctx, s.rlType, key, "allow", nil)
 	require.ErrorIs(t, invErr, actor.ErrActorTypeReserved, "host %d Invoke", host)
 
-	_, _, streamErr := svc.InvokeStream(ctx, s.rlType, key, "take", "", nil)
+	_, _, streamErr := svc.InvokeStream(ctx, s.rlType, key, "allow", "", nil)
 	require.ErrorIs(t, streamErr, actor.ErrActorTypeReserved, "host %d InvokeStream", host)
 
 	setStateErr := svc.SetState(ctx, s.rlType, key, struct{}{}, nil)

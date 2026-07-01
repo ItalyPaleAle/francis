@@ -7,9 +7,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/ratelimit"
+	msgpack "github.com/vmihailenco/msgpack/v5"
+	"golang.org/x/time/rate"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/builtinactor"
 )
 
@@ -22,7 +24,7 @@ func TestNew(t *testing.T) {
 	})
 
 	t.Run("valid with all options", func(t *testing.T) {
-		b, err := New("api", WithRate(2), WithPer(time.Minute), WithSlack(5), WithIdleTimeout(time.Minute))
+		b, err := New("api", WithRate(2), WithPer(time.Minute), WithBurst(5), WithIdleTimeout(time.Minute))
 		require.NoError(t, err)
 		assert.Equal(t, time.Minute, b.RegisterOptions().IdleTimeout)
 	})
@@ -57,8 +59,8 @@ func TestNew(t *testing.T) {
 		require.Error(t, err)
 	})
 
-	t.Run("rejects negative slack", func(t *testing.T) {
-		_, err := New("x", WithRate(1), WithSlack(-1))
+	t.Run("rejects negative burst", func(t *testing.T) {
+		_, err := New("x", WithRate(1), WithBurst(-1))
 		require.Error(t, err)
 	})
 }
@@ -71,7 +73,7 @@ func TestNewDefaultIdleTimeout(t *testing.T) {
 		want time.Duration
 	}{
 		{
-			// No WithPer leaves the period at zero, so the one-minute floor applies
+			// No WithPer leaves the period at its one-second default, so the one-minute floor applies
 			name: "no period falls back to the one-minute floor",
 			opts: []Option{WithRate(100)},
 			want: time.Minute,
@@ -113,22 +115,26 @@ func TestNewDefaultIdleTimeout(t *testing.T) {
 	}
 }
 
-// TestNewDefaultsToStrict verifies that, without WithSlack, the limiter is strict and spaces calls out rather than admitting an initial burst
+// TestNewDefaultsToStrict verifies that, without WithBurst, the bucket holds a single token so a rapid second call is rejected instead of bursting
 func TestNewDefaultsToStrict(t *testing.T) {
-	// Two per 50ms
-	// With the library's default slack of 10 a rapid burst would all be admitted instantly, so real spacing proves strict is the default
+	// Two per 50ms, default burst of one
+	// With a larger burst a rapid second call would be admitted instantly, so a rejection proves strict is the default
 	b, err := New("strict", WithRate(2), WithPer(50*time.Millisecond))
 	require.NoError(t, err)
 
 	a, ok := b.Factory()("k", nil).(*rateLimitActor)
 	require.True(t, ok)
 
-	start := time.Now()
-	for range 3 {
-		_, takeErr := a.Invoke(t.Context(), methodTake, nil)
-		require.NoError(t, takeErr)
-	}
-	assert.GreaterOrEqual(t, time.Since(start), 20*time.Millisecond, "the default limiter should be strict, spacing calls out instead of bursting")
+	// The first call is admitted: the bucket starts full with its single token
+	res := invokeAllow(t, a)
+	assert.True(t, res.Allowed, "the first call should be admitted")
+	assert.Zero(t, res.RetryAfter)
+
+	// The immediate second call is rejected with a positive retry-after, proving there is no burst beyond one
+	res = invokeAllow(t, a)
+	assert.False(t, res.Allowed, "the second call should be throttled with the default single-token bucket")
+	assert.Positive(t, res.RetryAfter, "a throttled call must report how long to wait")
+	assert.LessOrEqual(t, res.RetryAfter, 50*time.Millisecond, "the retry-after should not exceed the window")
 }
 
 // TestFactoryBuildsRateLimitActor verifies the factory builds a rate limit actor with a live limiter for any actor ID (key)
@@ -143,63 +149,112 @@ func TestFactoryBuildsRateLimitActor(t *testing.T) {
 	}
 }
 
-func TestInvokeTake(t *testing.T) {
+func TestInvokeAllow(t *testing.T) {
 	ctx := t.Context()
 
 	t.Run("admits a call under a high rate", func(t *testing.T) {
-		a := &rateLimitActor{limiter: ratelimit.New(1_000_000)}
-		_, err := a.Invoke(ctx, methodTake, nil)
-		require.NoError(t, err)
+		a := &rateLimitActor{limiter: rate.NewLimiter(1_000_000, 1)}
+		res := invokeAllow(t, a)
+		assert.True(t, res.Allowed)
+		assert.Zero(t, res.RetryAfter)
 	})
 
 	t.Run("throttles to the configured rate", func(t *testing.T) {
-		// Two per 50ms without slack: after the first immediate admit, the next is held until the window elapses
-		a := &rateLimitActor{limiter: ratelimit.New(2, ratelimit.Per(50*time.Millisecond), ratelimit.WithoutSlack)}
+		// One per hour with a single-token bucket: the first call is admitted and drains the bucket, the next is throttled for nearly the whole window
+		a := &rateLimitActor{limiter: rate.NewLimiter(rate.Every(time.Hour), 1)}
 
-		start := time.Now()
-		for range 3 {
-			_, err := a.Invoke(ctx, methodTake, nil)
-			require.NoError(t, err)
-		}
-		// Three calls at two-per-50ms means at least one full inter-call gap was enforced
-		assert.GreaterOrEqual(t, time.Since(start), 20*time.Millisecond, "the limiter should have blocked to enforce the rate")
+		first := invokeAllow(t, a)
+		require.True(t, first.Allowed, "the first call should be admitted")
+
+		second := invokeAllow(t, a)
+		assert.False(t, second.Allowed, "the second call should be throttled")
+		assert.Positive(t, second.RetryAfter, "a throttled call must report how long to wait")
+	})
+
+	t.Run("a rejected call does not drain the bucket", func(t *testing.T) {
+		// A single-token bucket that refills slowly: after the first admit, repeated rejects must all report a retry-after rather than pushing it ever further out
+		a := &rateLimitActor{limiter: rate.NewLimiter(rate.Every(time.Hour), 1)}
+
+		require.True(t, invokeAllow(t, a).Allowed)
+
+		firstReject := invokeAllow(t, a)
+		require.False(t, firstReject.Allowed)
+
+		secondReject := invokeAllow(t, a)
+		require.False(t, secondReject.Allowed)
+		// Because the rejected call handed its token back, the wait does not grow with each throttled attempt
+		assert.LessOrEqual(t, secondReject.RetryAfter, firstReject.RetryAfter, "a rejected call must not consume a token")
 	})
 
 	t.Run("rejects an unknown method", func(t *testing.T) {
-		a := &rateLimitActor{limiter: ratelimit.New(1_000_000)}
+		a := &rateLimitActor{limiter: rate.NewLimiter(1_000_000, 1)}
 		_, err := a.Invoke(ctx, "bogus", nil)
 		require.Error(t, err)
 	})
 
-	t.Run("returns the context error without blocking when already cancelled", func(t *testing.T) {
-		// A strict, very slow limiter would block for an hour on the second take, so this proves the cancelled context short-circuits before Take
-		a := &rateLimitActor{limiter: ratelimit.New(1, ratelimit.Per(time.Hour), ratelimit.WithoutSlack)}
-
-		// The first take is admitted immediately, draining the only slot in the window
-		_, err := a.Invoke(ctx, methodTake, nil)
-		require.NoError(t, err)
+	t.Run("returns the context error without touching the limiter when already cancelled", func(t *testing.T) {
+		a := &rateLimitActor{limiter: rate.NewLimiter(1_000_000, 1)}
 
 		cancelled, cancel := context.WithCancel(ctx)
 		cancel()
-		_, err = a.Invoke(cancelled, methodTake, nil)
+		_, err := a.Invoke(cancelled, methodAllow, nil)
 		require.ErrorIs(t, err, context.Canceled)
 	})
 }
 
-func TestServiceTakeValidation(t *testing.T) {
+// TestAllowResultRoundTrip verifies the allow reply survives the msgpack round-trip used for cross-host invocations:
+// the owning host marshals the actor's return value, the caller decodes the body into a generic any, and the envelope then decodes it into allowResult
+func TestAllowResultRoundTrip(t *testing.T) {
+	cases := map[string]allowResult{
+		"admitted":  {Allowed: true},
+		"throttled": {Allowed: false, RetryAfter: 250 * time.Millisecond},
+	}
+
+	for name, want := range cases {
+		t.Run(name, func(t *testing.T) {
+			// The owning host marshals the actor's return value for the response body
+			body, err := msgpack.Marshal(want)
+			require.NoError(t, err)
+
+			// The caller decodes the response body into a generic any, exactly like the peer invocation path
+			var out any
+			require.NoError(t, msgpack.Unmarshal(body, &out))
+
+			// The envelope re-encodes the generic value and decodes it into the concrete result type
+			var got allowResult
+			require.NoError(t, actorcore.NewObjectEnvelope(out).Decode(&got))
+
+			assert.Equal(t, want, got)
+		})
+	}
+}
+
+func TestServiceAllowValidation(t *testing.T) {
 	ctx := t.Context()
 	// A service with a nil Service never reaches the host: key validation happens first and these calls fail before any invocation
 	svc := (&RateLimit{actorType: rateLimitActorTypePrefix + "api"}).Service(nil)
 
 	t.Run("rejects empty key", func(t *testing.T) {
-		err := svc.Take(ctx, "")
+		_, _, err := svc.Allow(ctx, "")
 		require.Error(t, err)
 	})
 
 	t.Run("rejects key with slash", func(t *testing.T) {
-		err := svc.Take(ctx, "a/b")
+		_, _, err := svc.Allow(ctx, "a/b")
 		require.Error(t, err)
 	})
+}
+
+// invokeAllow drives the actor's allow method and returns the decoded result, failing the test on any error
+func invokeAllow(t *testing.T, a *rateLimitActor) allowResult {
+	t.Helper()
+
+	out, err := a.Invoke(t.Context(), methodAllow, nil)
+	require.NoError(t, err)
+
+	res, ok := out.(allowResult)
+	require.True(t, ok, "allow should return an allowResult")
+	return res
 }
 
 var (
