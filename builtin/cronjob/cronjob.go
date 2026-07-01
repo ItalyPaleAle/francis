@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -99,6 +100,12 @@ func New(name string, opts ...Option) (*CronJob, error) {
 		return nil, errors.New("WithJob is required")
 	}
 
+	log := o.logger
+	if log != nil {
+		// Set the job name in the logger
+		log = log.With(slog.String("cronJob", name))
+	}
+
 	actorType := cronJobActorTypePrefix + name
 
 	return &CronJob{
@@ -106,7 +113,10 @@ func New(name string, opts ...Option) (*CronJob, error) {
 		factory: func(actorID string, service *actor.Service) actor.Actor {
 			// The same reserved type backs two instances: the runner executes the job, every other ID is the scheduler singleton
 			if actorID == runnerActorID {
-				return &cronJobRunner{job: o.job}
+				return &cronJobRunner{
+					job: o.job,
+					log: log,
+				}
 			}
 
 			// A built-in actor manages itself through the privileged client, which the public client and Service would reject
@@ -115,6 +125,7 @@ func New(name string, opts ...Option) (*CronJob, error) {
 				interval:  o.interval,
 				cron:      o.cron,
 				immediate: o.immediate,
+				log:       log,
 				// state persists this scheduler's own recurring job ID
 				state: builtinactor.NewClient[cronJobState](actorType, actorID, service),
 				// runner is bound to the runner instance, so the scheduler dispatches and cancels runs there rather than on itself
@@ -202,6 +213,8 @@ type cronJobScheduler struct {
 	interval  string
 	cron      string
 	immediate bool
+	// log is an instance of a logger
+	log *slog.Logger
 	// state persists this scheduler's recurring job ID
 	state actor.Client[cronJobState]
 	// runner is bound to the runner instance, where runs are dispatched and cancelled
@@ -233,6 +246,10 @@ func (a *cronJobScheduler) register(ctx context.Context) error {
 
 	// Already registered: nothing to do
 	if state.JobID != "" {
+		if a.log != nil {
+			a.log.Info("Cron job already registered", slog.String("jobID", state.JobID))
+		}
+
 		return nil
 	}
 
@@ -261,6 +278,10 @@ func (a *cronJobScheduler) register(ctx context.Context) error {
 	err = a.state.SetState(ctx, state, nil)
 	if err != nil {
 		return fmt.Errorf("failed to save cron job state: %w", err)
+	}
+
+	if a.log != nil {
+		a.log.Info("Cron job registered", slog.String("jobID", jobID))
 	}
 
 	return nil
@@ -338,6 +359,8 @@ func (a *cronJobScheduler) unregister(ctx context.Context) error {
 // Splitting it from the scheduler gives the two independent turn locks, so a long-running job does not block the scheduler's lifecycle invocations
 type cronJobRunner struct {
 	job func(ctx context.Context) error
+	// log reports run start/completion events
+	log *slog.Logger
 }
 
 // Job runs the user function for each occurrence delivered by the recurring schedule or an explicit trigger
@@ -348,9 +371,23 @@ func (a *cronJobRunner) Job(ctx context.Context, method string, _ actor.Envelope
 		return fmt.Errorf("%w: unknown cron job method %q", actor.ErrJobPermanentFailure, method)
 	}
 
+	if a.log != nil {
+		a.log.Info("Cron job run started")
+	}
+	start := time.Now()
+
 	err := a.job(ctx)
+
+	duration := time.Since(start)
 	if err != nil {
+		if a.log != nil {
+			a.log.Warn("Cron job run completed with error", slog.Duration("duration", duration), slog.Any("error", err))
+		}
 		return fmt.Errorf("error running job: %w", err)
+	}
+
+	if a.log != nil {
+		a.log.Info("Cron job run completed", slog.Duration("duration", duration))
 	}
 
 	return nil

@@ -2,6 +2,7 @@ package cronjob
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	timeutils "github.com/italypaleale/francis/internal/time"
@@ -17,6 +18,8 @@ type cronJobOptions struct {
 	immediate bool
 	// job is the function executed on each occurrence
 	job func(ctx context.Context) error
+	// logger is the optional slog logger used to report registration and run events
+	logger *slog.Logger
 	// scheduleSetters counts how many of WithInterval/WithPeriod/WithCron were applied, to enforce "exactly one"
 	scheduleSetters int
 }
@@ -63,5 +66,12 @@ func WithJob(fn func(ctx context.Context) error) Option {
 func WithImmediate() Option {
 	return func(o *cronJobOptions) {
 		o.immediate = true
+	}
+}
+
+// WithLogger sets an optional logger used to report job registration and run events
+func WithLogger(logger *slog.Logger) Option {
+	return func(o *cronJobOptions) {
+		o.logger = logger
 	}
 }
