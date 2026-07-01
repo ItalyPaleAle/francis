@@ -51,65 +51,6 @@ const (
 	cronJobIdleTimeout = time.Minute
 )
 
-// cronJobOptions accumulates the configuration applied by the Option builders
-type cronJobOptions struct {
-	// interval is the repetition as an ISO8601 duration string (from WithInterval or WithPeriod)
-	interval string
-	// cron is a standard cron expression (from WithCron)
-	cron string
-	// immediate runs the job once right away on first registration
-	immediate bool
-	// job is the function executed on each occurrence
-	job func(ctx context.Context) error
-	// scheduleSetters counts how many of WithInterval/WithPeriod/WithCron were applied, to enforce "exactly one"
-	scheduleSetters int
-}
-
-// Option configures a cron job actor
-type Option func(*cronJobOptions)
-
-// WithInterval repeats the job on a fixed interval
-// Exactly one of WithInterval, WithPeriod, or WithCron is required
-func WithInterval(d time.Duration) Option {
-	return func(o *cronJobOptions) {
-		o.interval = timeutils.Duration{Time: d}.String()
-		o.scheduleSetters++
-	}
-}
-
-// WithPeriod repeats the job on an ISO8601-formatted duration (e.g. "PT5M", "P1D")
-// Exactly one of WithInterval, WithPeriod, or WithCron is required
-func WithPeriod(iso8601 string) Option {
-	return func(o *cronJobOptions) {
-		o.interval = iso8601
-		o.scheduleSetters++
-	}
-}
-
-// WithCron repeats the job on a standard cron expression (e.g. "0 9 * * 1-5")
-// Exactly one of WithInterval, WithPeriod, or WithCron is required
-func WithCron(expr string) Option {
-	return func(o *cronJobOptions) {
-		o.cron = expr
-		o.scheduleSetters++
-	}
-}
-
-// WithJob sets the function executed on each occurrence
-// It is required
-func WithJob(fn func(ctx context.Context) error) Option {
-	return func(o *cronJobOptions) {
-		o.job = fn
-	}
-}
-
-// WithImmediate also runs the job once right away, but only the first time the actor is registered
-func WithImmediate() Option {
-	return func(o *cronJobOptions) {
-		o.immediate = true
-	}
-}
-
 // New builds a cron job built-in actor identified by name
 //
 // It registers a single durable recurring job that runs the function from WithJob across the cluster on one node at a time, on the schedule given by exactly one of WithInterval, WithPeriod, or WithCron
@@ -187,7 +128,7 @@ func New(name string, opts ...Option) (*CronJob, error) {
 }
 
 // CronJob is a built-in cron job actor, returned by New and passed to a host via WithBuiltInActor
-// It satisfies the framework's built-in actor contract (ActorType, Factory, RegisterOptions, Bootstrap) and exposes a Service method for the on-demand Trigger and Unregister operations
+// It satisfies the framework's built-in actor contract and exposes a Service method for the on-demand Trigger and Unregister operations
 // The actor behavior itself lives in the unexported cronJobScheduler and cronJobRunner instances that Factory builds
 type CronJob struct {
 	actorType string
@@ -332,6 +273,7 @@ func (a *cronJobScheduler) trigger(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to dispatch triggered cron job run: %w", err)
 	}
+
 	return nil
 }
 
@@ -356,6 +298,7 @@ func (a *cronJobScheduler) recurringJobOptions() ([]actor.JobOption, error) {
 			if err != nil {
 				return nil, fmt.Errorf("invalid interval: %w", err)
 			}
+
 			firstDue := time.Now().Add(d.Time).AddDate(d.Years, d.Months, d.Days)
 			opts = append(opts, actor.WithJobDueTime(firstDue))
 		}
@@ -404,5 +347,11 @@ func (a *cronJobRunner) Job(ctx context.Context, method string, _ actor.Envelope
 		// An unknown method is a programming error, so dead-letter it rather than retry forever
 		return fmt.Errorf("%w: unknown cron job method %q", actor.ErrJobPermanentFailure, method)
 	}
-	return a.job(ctx)
+
+	err := a.job(ctx)
+	if err != nil {
+		return fmt.Errorf("error running job: %w", err)
+	}
+
+	return nil
 }

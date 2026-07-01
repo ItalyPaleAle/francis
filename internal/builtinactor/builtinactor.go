@@ -54,7 +54,14 @@ func NewClient[T any](bareActorType string, actorID string, svc *actor.Service) 
 // Built-in actor implementations use it to drive their lifecycle and on-demand methods, which the public Service and client both reject
 // bareActorType is the actor's bare type (without the reserved prefix), and payload is optional: pass nil when the method carries no request data
 func Invoke(ctx context.Context, svc *actor.Service, bareActorType string, method string, payload any) (actor.Envelope, error) {
+	return InvokeActor(ctx, svc, bareActorType, SingletonActorID, method, payload)
+}
+
+// InvokeActor invokes a method on a specific instance of a built-in actor through the privileged client, returning the response envelope
+// It is the actor-ID-addressed counterpart of Invoke, which always targets the cluster-wide singleton: built-in actors that key one instance per actor ID (such as the rate limiter, one instance per rate-limit key) use it to reach an arbitrary instance
+// bareActorType is the actor's bare type (without the reserved prefix), and payload is optional: pass nil when the method carries no request data
+func InvokeActor(ctx context.Context, svc *actor.Service, bareActorType string, actorID string, method string, payload any) (actor.Envelope, error) {
 	fullType := FullActorType(bareActorType)
-	client := actor.NewBuiltInActorClient[any](builtinkey.Key{}, fullType, SingletonActorID, svc)
-	return client.Invoke(ctx, fullType, SingletonActorID, method, payload)
+	client := actor.NewBuiltInActorClient[any](builtinkey.Key{}, fullType, actorID, svc)
+	return client.Invoke(ctx, fullType, actorID, method, payload)
 }

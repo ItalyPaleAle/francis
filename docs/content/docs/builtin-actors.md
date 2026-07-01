@@ -83,3 +83,62 @@ cleanup := cleanupJob.Service(host.Service())
 
 err := cleanup.Unregister(ctx)
 ```
+
+## Rate limiter
+
+A rate limiter actor throttles calls **per key**, a free-form string you choose (e.g. an IP address, user ID, route, API token, etc). Each key is limited independently, and its limiter state lives only in the activated actor's memory, for optimal performance.
+
+It follows the leaky-bucket model: `Take` blocks until the key's limiter admits the call, smoothing bursts down to the configured rate rather than rejecting them.  
+
+Calls for the same key are serialized by the actor's turn lock, so holding the turn for the throttle delay is the intended backpressure (calls for different keys run on independent instances and never block each other).
+
+### Registering
+
+Build a rate limiter with `ratelimit.New` and pass it to the host:
+
+```go
+import "github.com/italypaleale/francis/builtin/ratelimit"
+
+limiter, err := ratelimit.New("api",
+	ratelimit.WithRate(100), // 100 calls per second, per key
+)
+if err != nil {
+	return err
+}
+
+host, err := local.NewHost(
+	// ... other options ...
+	local.WithBuiltInActor(limiter),
+)
+```
+
+As with any built-in actor, register the same rate limiter (same name and options) on every host that should serve it. A given key is always placed on a single host at a time, so its limiter is consistent cluster-wide.
+
+### Options
+
+`ratelimit.New(name, opts...)` takes a unique `name` (used to build the reserved actor type, and must not contain `/`) and these options:
+
+| Option | Description |
+|--------|-------------|
+| `WithRate(n)` | Number of calls admitted per period. **Required**, must be greater than zero. |
+| `WithPer(d)` | The window the rate applies over. Defaults to one second, so `WithRate(100)` alone is 100/s; combine with `WithPer(time.Minute)` for a per-minute rate. |
+| `WithSlack(n)` | Burst allowance: how many unspent calls may accumulate for a later burst. By default the limiter is **strict** (no slack), so calls for a key are evenly spaced - pass this to opt into bursting. |
+| `WithIdleTimeout(d)` | How long a key's in-memory limiter is kept after its last call before the actor is deactivated. Defaults to double the period (the `WithPer` window), with a minimum of one minute. Lower it to reclaim memory faster when limiting many distinct keys. |
+
+### Throttling by key
+
+The `Take` operation is bound to an `actor.Service` via `Service(...)`, which you obtain from a host with `host.Service()`:
+
+```go
+rl := limiter.Service(host.Service())
+
+// Blocks until this key is allowed to proceed under the configured rate
+err := rl.Take(ctx, clientIP)
+if err != nil {
+	// ctx was cancelled before the call was admitted
+	return err
+}
+// ... handle the request ...
+```
+
+`Take` returns the context error if the context is cancelled before the call is admitted.
