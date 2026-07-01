@@ -11,9 +11,9 @@ type rateLimitOptions struct {
 	// per is the window the rate applies over
 	// Defaults to 1 second when empty
 	per time.Duration
-	// slack is the burst allowance carried over from unspent calls, set by WithSlack
-	// It defaults to zero, which makes the limiter strict
-	slack int
+	// burst is the token bucket's capacity: the maximum number of calls that may be admitted instantly before throttling kicks in, set by WithBurst
+	// It defaults to zero, which is treated as a capacity of one, so calls are admitted strictly one at a time
+	burst int
 	// idleTimeout overrides how long an idle key's limiter is kept in memory
 	// Setting to zero or negative uses the default idle timeout, which is the double of the "per" window with a minimum of 1 minute
 	idleTimeout time.Duration
@@ -39,12 +39,12 @@ func WithPer(period time.Duration) Option {
 	}
 }
 
-// WithSlack sets the burst allowance, letting the limiter accumulate up to slack unspent calls for a later burst
-// By default the limiter is strict (no slack), so calls for a key are evenly spaced
-// Pass this to opt into bursting
-func WithSlack(slack int) Option {
+// WithBurst sets the token bucket's capacity: how many calls may be admitted instantly before the limiter starts rejecting, refilling at the configured rate
+// By default the capacity is one, so calls are admitted strictly one at a time and any excess is rejected until the bucket refills
+// Pass this to allow short bursts above the steady rate (e.g. WithRate(10) with WithBurst(20) sustains 10/s but tolerates a spike of 20)
+func WithBurst(burst int) Option {
 	return func(o *rateLimitOptions) {
-		o.slack = slack
+		o.burst = burst
 	}
 }
 
