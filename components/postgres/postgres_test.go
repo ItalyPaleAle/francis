@@ -23,6 +23,7 @@ import (
 
 	"github.com/italypaleale/francis/components"
 	comptesting "github.com/italypaleale/francis/components/testing"
+	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/testutil"
 )
 
@@ -65,7 +66,112 @@ func TestPostgresProvider(t *testing.T) {
 	t.Run("concurrency suite", suite.RunConcurrencyTests)
 }
 
+func TestPostgresTablePrefix(t *testing.T) {
+	// schemaObjects returns the names of all tables, views, and functions created in the test schema
+	schemaObjects := func(t *testing.T, p *PostgresProvider, testSchema string) []string {
+		t.Helper()
+		rows, err := p.db.Query(t.Context(), `
+			SELECT table_name FROM information_schema.tables WHERE table_schema = $1
+			UNION ALL
+			SELECT table_name FROM information_schema.views WHERE table_schema = $1
+			UNION ALL
+			SELECT routine_name FROM information_schema.routines WHERE routine_schema = $1`,
+			testSchema,
+		)
+		require.NoError(t, err)
+		defer rows.Close()
+
+		var names []string
+		for rows.Next() {
+			var name string
+			require.NoError(t, rows.Scan(&name))
+			names = append(names, name)
+		}
+
+		err = rows.Err()
+		require.NoError(t, err)
+
+		return names
+	}
+
+	t.Run("default prefix is francis", func(t *testing.T) {
+		p, testSchema, cleanupFn := initTestProvider(t)
+		t.Cleanup(func() {
+			cleanupFn()
+			p.db.Close()
+		})
+		assert.Equal(t, "francis_", p.tablePrefix)
+
+		names := schemaObjects(t, p, testSchema)
+		assert.Contains(t, names, "francis_hosts")
+		assert.Contains(t, names, "francis_alarms")
+		assert.Contains(t, names, "francis_dead_jobs")
+		assert.Contains(t, names, "francis_host_active_actor_count")
+		assert.Contains(t, names, "francis_metadata")
+		assert.Contains(t, names, "francis_fetch_and_lease_upcoming_alarms_v1")
+		assert.Contains(t, names, "francis_lookup_allocate_actor_v1")
+		// No francis-owned object should exist under its bare, unprefixed name
+		assert.NotContains(t, names, "hosts")
+		assert.NotContains(t, names, "alarms")
+	})
+
+	t.Run("custom prefix", func(t *testing.T) {
+		p, testSchema, cleanupFn := initTestProviderWithPrefix(t, "myapp")
+		t.Cleanup(func() {
+			cleanupFn()
+			p.db.Close()
+		})
+		assert.Equal(t, "myapp_", p.tablePrefix)
+
+		names := schemaObjects(t, p, testSchema)
+		// The test schema only contains francis objects (plus the freeze_time test helpers), so every francis object must carry the prefix
+		assert.Contains(t, names, "myapp_hosts")
+		assert.Contains(t, names, "myapp_alarms")
+		assert.Contains(t, names, "myapp_metadata")
+		assert.Contains(t, names, "myapp_fetch_and_lease_upcoming_alarms_v1")
+	})
+
+	t.Run("custom prefix is functional end-to-end", func(t *testing.T) {
+		p, _, cleanupFn := initTestProviderWithPrefix(t, "myapp")
+		t.Cleanup(func() {
+			cleanupFn()
+			p.db.Close()
+		})
+
+		// Register a host, then read it back through the regular API (which exercises the prefixed stored functions)
+		hostRes, err := p.RegisterHost(t.Context(), components.RegisterHostReq{
+			Address: "10.0.0.1:8080",
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "TestActor", IdleTimeout: 5 * time.Minute},
+			},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, hostRes.HostID)
+
+		hosts, err := p.ListHosts(t.Context())
+		require.NoError(t, err)
+		require.Len(t, hosts, 1)
+		assert.Equal(t, "10.0.0.1:8080", hosts[0].Address)
+
+		// Exercise a stored function that was created with the prefix
+		lookupRes, err := p.LookupActor(
+			t.Context(),
+			ref.ActorRef{
+				ActorType: "TestActor",
+				ActorID:   "actor-1",
+			},
+			components.LookupActorOpts{},
+		)
+		require.NoError(t, err)
+		assert.Equal(t, hostRes.HostID, lookupRes.HostID)
+	})
+}
+
 func initTestProvider(t *testing.T) (p *PostgresProvider, testSchema string, cleanupFn func()) {
+	return initTestProviderWithPrefix(t, "")
+}
+
+func initTestProviderWithPrefix(t *testing.T, tablePrefix string) (p *PostgresProvider, testSchema string, cleanupFn func()) {
 	connString := os.Getenv(connstringEnvVar)
 	if connString == "" {
 		t.Skip(`To run these tests, set the env var ` + connstringEnvVar + ` with the connection string for Postgres database. Example: "` + connstringEnvVar + `=postgres://actors:actors@localhost:5432/actors"`)
@@ -86,7 +192,8 @@ func initTestProvider(t *testing.T) (p *PostgresProvider, testSchema string, cle
 	cleanupFn = func() { cleanupFnT(t) }
 
 	providerOpts := PostgresProviderOptions{
-		DB: conn,
+		DB:          conn,
+		TablePrefix: tablePrefix,
 
 		// Disable automated cleanups in this test
 		// We will run the cleanups automatically
@@ -159,7 +266,8 @@ func (p *PostgresProvider) Seed(ctx context.Context, spec comptesting.Spec) erro
 
 		// Truncate all data
 		for _, tbl := range []string{"active_actors", "host_actor_types", "hosts", "actor_state", "alarms"} {
-			_, err = tx.Exec(ctx, "DELETE FROM "+tbl)
+			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+			_, err = tx.Exec(ctx, "DELETE FROM "+p.tablePrefix+tbl)
 			if err != nil {
 				return z, fmt.Errorf("truncate '%s': %w", tbl, err)
 			}
@@ -177,7 +285,7 @@ func (p *PostgresProvider) Seed(ctx context.Context, spec comptesting.Spec) erro
 			}
 			_, err = tx.CopyFrom(
 				ctx,
-				pgx.Identifier{"hosts"},
+				pgx.Identifier{p.tablePrefix + "hosts"},
 				[]string{"host_id", "host_address", "host_last_health_check"},
 				pgx.CopyFromRows(rows),
 			)
@@ -199,7 +307,7 @@ func (p *PostgresProvider) Seed(ctx context.Context, spec comptesting.Spec) erro
 			}
 			_, err = tx.CopyFrom(
 				ctx,
-				pgx.Identifier{"host_actor_types"},
+				pgx.Identifier{p.tablePrefix + "host_actor_types"},
 				[]string{"host_id", "actor_type", "actor_idle_timeout", "actor_concurrency_limit"},
 				pgx.CopyFromRows(rows),
 			)
@@ -222,7 +330,7 @@ func (p *PostgresProvider) Seed(ctx context.Context, spec comptesting.Spec) erro
 			}
 			_, err = tx.CopyFrom(
 				ctx,
-				pgx.Identifier{"active_actors"},
+				pgx.Identifier{p.tablePrefix + "active_actors"},
 				[]string{"actor_type", "actor_id", "host_id", "actor_idle_timeout", "actor_activation"},
 				pgx.CopyFromRows(rows),
 			)
@@ -263,7 +371,7 @@ func (p *PostgresProvider) Seed(ctx context.Context, spec comptesting.Spec) erro
 			}
 			_, err = tx.CopyFrom(
 				ctx,
-				pgx.Identifier{"alarms"},
+				pgx.Identifier{p.tablePrefix + "alarms"},
 				[]string{
 					"alarm_id", "actor_type", "actor_id", "alarm_name", "alarm_due_time",
 					"alarm_interval", "alarm_ttl_time", "alarm_data",
@@ -283,7 +391,8 @@ func (p *PostgresProvider) Seed(ctx context.Context, spec comptesting.Spec) erro
 }
 
 func (p *PostgresProvider) GetAllActorState(ctx context.Context) (comptesting.ActorStateSpecCollection, error) {
-	rows, err := p.db.Query(ctx, "SELECT actor_type, actor_id, actor_state_data FROM actor_state")
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	rows, err := p.db.Query(ctx, "SELECT actor_type, actor_id, actor_state_data FROM "+p.tablePrefix+"actor_state")
 	if err != nil {
 		return nil, fmt.Errorf("select actor_state: %w", err)
 	}
@@ -305,7 +414,8 @@ func (p *PostgresProvider) GetAllActorState(ctx context.Context) (comptesting.Ac
 func (p *PostgresProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, error) {
 	return postgrestransactions.ExecuteInTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (res comptesting.Spec, err error) {
 		// Load all hosts
-		rows, err := tx.Query(ctx, "SELECT host_id, host_address, now() - host_last_health_check FROM hosts")
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		rows, err := tx.Query(ctx, "SELECT host_id, host_address, now() - host_last_health_check FROM "+p.tablePrefix+"hosts")
 		if err != nil {
 			return res, fmt.Errorf("select hosts: %w", err)
 		}
@@ -322,7 +432,8 @@ func (p *PostgresProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, e
 		rows.Close()
 
 		// Load all actor types
-		rows, err = tx.Query(ctx, "SELECT host_id, actor_type, actor_idle_timeout, actor_concurrency_limit FROM host_actor_types")
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		rows, err = tx.Query(ctx, "SELECT host_id, actor_type, actor_idle_timeout, actor_concurrency_limit FROM "+p.tablePrefix+"host_actor_types")
 		if err != nil {
 			return res, fmt.Errorf("select host_actor_types: %w", err)
 		}
@@ -339,7 +450,8 @@ func (p *PostgresProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, e
 		rows.Close()
 
 		// Load all active actors
-		rows, err = tx.Query(ctx, "SELECT actor_type, actor_id, host_id, actor_idle_timeout, now() - actor_activation FROM active_actors")
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		rows, err = tx.Query(ctx, "SELECT actor_type, actor_id, host_id, actor_idle_timeout, now() - actor_activation FROM "+p.tablePrefix+"active_actors")
 		if err != nil {
 			return res, fmt.Errorf("select active_actors: %w", err)
 		}
@@ -356,7 +468,8 @@ func (p *PostgresProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, e
 		rows.Close()
 
 		// Load all alarms
-		rows, err = tx.Query(ctx, "SELECT alarm_id, actor_type, actor_id, alarm_name, alarm_due_time - now(), alarm_interval, alarm_ttl_time, alarm_data, alarm_lease_id, alarm_lease_expiration_time FROM alarms")
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		rows, err = tx.Query(ctx, "SELECT alarm_id, actor_type, actor_id, alarm_name, alarm_due_time - now(), alarm_interval, alarm_ttl_time, alarm_data, alarm_lease_id, alarm_lease_expiration_time FROM "+p.tablePrefix+"alarms")
 		if err != nil {
 			return res, fmt.Errorf("select alarms: %w", err)
 		}

@@ -16,10 +16,11 @@ func (p *PostgresProvider) GetState(ctx context.Context, ref ref.ActorRef) (data
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	err = p.db.
 		QueryRow(queryCtx,
 			`SELECT actor_state_data
-			FROM actor_state
+			FROM `+p.tablePrefix+`actor_state
 			WHERE
 				actor_type = $1
 				AND actor_id = $2
@@ -46,9 +47,10 @@ func (p *PostgresProvider) SetState(ctx context.Context, ref ref.ActorRef, data 
 	defer cancel()
 
 	// Performs a upsert
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	_, err := p.db.Exec(queryCtx,
 		// If exp is nil, now() + NULL will be NULL
-		`INSERT INTO actor_state
+		`INSERT INTO `+p.tablePrefix+`actor_state
 			(actor_type, actor_id, actor_state_data, actor_state_expiration_time)
 		VALUES ($1, $2, $3, now() + $4)
 		ON CONFLICT (actor_type, actor_id) DO UPDATE SET
@@ -69,8 +71,9 @@ func (p *PostgresProvider) DeleteState(ctx context.Context, ref ref.ActorRef) er
 
 	// We exclude expired state from the deletion because we want to be able to get an appropriate count of affected rows, and return ErrNoState if nothing was deleted
 	// Expired state entries are garbage collected periodically anyways
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := p.db.Exec(queryCtx,
-		`DELETE FROM actor_state
+		`DELETE FROM `+p.tablePrefix+`actor_state
 		WHERE
 			actor_type = $1
 			AND actor_id = $2

@@ -1,12 +1,12 @@
 -- Add the job discriminator and job-specific columns to the alarms table
 -- Jobs ride on the existing alarm engine and are stored as alarm rows with alarm_kind = 'job'
-ALTER TABLE alarms ADD COLUMN alarm_kind text NOT NULL DEFAULT 'alarm';
-ALTER TABLE alarms ADD COLUMN job_method text;
-ALTER TABLE alarms ADD COLUMN alarm_cron text;
+ALTER TABLE %salarms ADD COLUMN alarm_kind text NOT NULL DEFAULT 'alarm';
+ALTER TABLE %salarms ADD COLUMN job_method text;
+ALTER TABLE %salarms ADD COLUMN alarm_cron text;
 
 -- Holds jobs that exhausted their retries or failed permanently
 -- A dead job preserves the original alarm_id as its job_id so it can be looked up and replayed
-CREATE TABLE dead_jobs (
+CREATE TABLE %sdead_jobs (
     -- Job ID, equal to the original alarm_id
     job_id uuid PRIMARY KEY NOT NULL,
     -- Actor type
@@ -31,4 +31,4 @@ CREATE TABLE dead_jobs (
     job_cron text
 );
 
-CREATE INDEX dead_jobs_actor_idx ON dead_jobs (actor_type, actor_id);
+CREATE INDEX %sdead_jobs_actor_idx ON %sdead_jobs (actor_type, actor_id);

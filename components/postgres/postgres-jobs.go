@@ -39,10 +39,11 @@ func (p *PostgresProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, r
 	// Insert the job, or keep the existing one when an idempotency key (alarm name) already maps to a job
 	// The data-modifying CTE only sees rows that existed before the statement, so exactly one branch yields the row: the freshly inserted one, or the pre-existing one on conflict
 	var jobID uuid.UUID
+	// #nosec G202 -- the only concatenated values are static table prefixes, not user input
 	err = p.db.
 		QueryRow(queryCtx, `
 			WITH ins AS (
-				INSERT INTO alarms
+				INSERT INTO `+p.tablePrefix+`alarms
 					(alarm_id, actor_type, actor_id, alarm_name,
 					alarm_due_time, alarm_interval, alarm_cron, alarm_ttl_time, alarm_data,
 					alarm_kind, job_method,
@@ -54,7 +55,7 @@ func (p *PostgresProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, r
 			)
 			SELECT alarm_id FROM ins
 			UNION ALL
-			SELECT alarm_id FROM alarms WHERE actor_type = $2 AND actor_id = $3 AND alarm_name = $4
+			SELECT alarm_id FROM `+p.tablePrefix+`alarms WHERE actor_type = $2 AND actor_id = $3 AND alarm_name = $4
 			LIMIT 1`,
 			alarmID, aRef.ActorType, aRef.ActorID, aRef.Name,
 			req.DueTime, interval, cron, req.TTL, req.Data, req.JobMethod,
@@ -80,9 +81,10 @@ func (p *PostgresProvider) DeadLetterAlarm(ctx context.Context, lease *ref.Alarm
 	// The DELETE and the INSERT target different tables, so there is no unique-index interaction
 	// A missing or invalid lease deletes nothing, so the insert affects no rows and we report it as not found
 	if !req.Reschedule {
+		// #nosec G202 -- the only concatenated values are static table prefixes, not user input
 		res, err := p.db.Exec(queryCtx, `
 			WITH deleted AS (
-				DELETE FROM alarms
+				DELETE FROM `+p.tablePrefix+`alarms
 				WHERE
 					alarm_id = $1
 					AND alarm_lease_id = $2
@@ -90,7 +92,7 @@ func (p *PostgresProvider) DeadLetterAlarm(ctx context.Context, lease *ref.Alarm
 					AND alarm_lease_expiration_time >= now()
 				RETURNING actor_type, actor_id, job_method, alarm_data, alarm_due_time, alarm_interval, alarm_cron
 			)
-			INSERT INTO dead_jobs
+			INSERT INTO `+p.tablePrefix+`dead_jobs
 				(job_id, actor_type, actor_id, job_method, job_data,
 				attempts, last_error, failed_at, original_due, job_interval, job_cron)
 			SELECT $1, actor_type, actor_id, COALESCE(job_method, ''), alarm_data, $3, $4, now(), alarm_due_time, alarm_interval, alarm_cron
@@ -125,10 +127,11 @@ func (p *PostgresProvider) DeadLetterAlarm(ctx context.Context, lease *ref.Alarm
 		interval, cron                *string
 		ttl                           *time.Time
 	)
+	// #nosec G202 -- the only concatenated values are static table prefixes, not user input
 	err = tx.
 		QueryRow(queryCtx, `
 			WITH deleted AS (
-				DELETE FROM alarms
+				DELETE FROM `+p.tablePrefix+`alarms
 				WHERE
 					alarm_id = $1
 					AND alarm_lease_id = $2
@@ -137,7 +140,7 @@ func (p *PostgresProvider) DeadLetterAlarm(ctx context.Context, lease *ref.Alarm
 				RETURNING actor_type, actor_id, alarm_name, job_method, alarm_data, alarm_due_time, alarm_interval, alarm_cron, alarm_ttl_time
 			),
 			dead AS (
-				INSERT INTO dead_jobs
+				INSERT INTO `+p.tablePrefix+`dead_jobs
 					(job_id, actor_type, actor_id, job_method, job_data,
 					attempts, last_error, failed_at, original_due, job_interval, job_cron)
 				SELECT $1, actor_type, actor_id, COALESCE(job_method, ''), alarm_data, $3, $4, now(), alarm_due_time, alarm_interval, alarm_cron
@@ -164,8 +167,9 @@ func (p *PostgresProvider) DeadLetterAlarm(ctx context.Context, lease *ref.Alarm
 	if err != nil {
 		return fmt.Errorf("failed to generate job ID for rescheduled occurrence: %w", err)
 	}
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	_, err = tx.Exec(queryCtx, `
-		INSERT INTO alarms
+		INSERT INTO `+p.tablePrefix+`alarms
 			(alarm_id, actor_type, actor_id, alarm_name,
 			alarm_due_time, alarm_interval, alarm_cron, alarm_ttl_time, alarm_data,
 			alarm_kind, job_method,
@@ -204,12 +208,13 @@ func (p *PostgresProvider) GetJob(ctx context.Context, jobID string) (components
 		interval, cron     *string
 		leased             bool
 	)
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	err = p.db.
 		QueryRow(queryCtx, `
 			SELECT
 				actor_type, actor_id, job_method, alarm_due_time, alarm_interval, alarm_cron,
 				(alarm_lease_id IS NOT NULL AND alarm_lease_expiration_time IS NOT NULL AND alarm_lease_expiration_time >= now())
-			FROM alarms
+			FROM `+p.tablePrefix+`alarms
 			WHERE alarm_id = $1 AND alarm_kind = 'job'`,
 			id,
 		).
@@ -243,10 +248,11 @@ func (p *PostgresProvider) GetJob(ctx context.Context, jobID string) (components
 		lastError   *string
 		originalDue time.Time
 	)
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	err = p.db.
 		QueryRow(queryCtx, `
 			SELECT actor_type, actor_id, job_method, attempts, last_error, original_due, job_interval, job_cron
-			FROM dead_jobs
+			FROM `+p.tablePrefix+`dead_jobs
 			WHERE job_id = $1`,
 			id,
 		).
@@ -278,17 +284,18 @@ func (p *PostgresProvider) ListJobs(ctx context.Context, actorType string, actor
 
 	// Live jobs (alarm rows) and dead-lettered jobs are disjoint by construction, so UNION ALL avoids an extra round-trip without any risk of duplicates
 	// Each branch projects into a common shape: the live branch derives the status and supplies zero attempts and no error, while the dead branch reports its recorded attempts and last error
+	// #nosec G202 -- the only concatenated values are static table prefixes, not user input
 	rows, err := p.db.Query(queryCtx, `
 		SELECT alarm_id, job_method, alarm_due_time, alarm_interval, alarm_cron,
 			CASE WHEN alarm_lease_id IS NOT NULL AND alarm_lease_expiration_time IS NOT NULL AND alarm_lease_expiration_time >= now()
 				THEN 'active' ELSE 'pending' END,
 			0, NULL::text
-		FROM alarms
+		FROM `+p.tablePrefix+`alarms
 		WHERE actor_type = $1 AND actor_id = $2 AND alarm_kind = 'job'
 		UNION ALL
 		SELECT job_id, job_method, original_due, job_interval, job_cron,
 			'dead', attempts, last_error
-		FROM dead_jobs
+		FROM `+p.tablePrefix+`dead_jobs
 		WHERE actor_type = $1 AND actor_id = $2`,
 		actorType, actorID,
 	)
@@ -345,8 +352,9 @@ func (p *PostgresProvider) CancelJob(ctx context.Context, actorType string, acto
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := p.db.Exec(queryCtx, `
-		DELETE FROM alarms
+		DELETE FROM `+p.tablePrefix+`alarms
 		WHERE actor_type = $1 AND actor_id = $2 AND alarm_id = $3 AND alarm_kind = 'job'`,
 		actorType, actorID, id,
 	)
@@ -375,10 +383,11 @@ func (p *PostgresProvider) GetDeadJob(ctx context.Context, jobID string) (compon
 		lastError      *string
 		interval, cron *string
 	)
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	err = p.db.
 		QueryRow(queryCtx, `
 			SELECT actor_type, actor_id, job_method, job_data, attempts, last_error, failed_at, original_due, job_interval, job_cron
-			FROM dead_jobs
+			FROM `+p.tablePrefix+`dead_jobs
 			WHERE job_id = $1`,
 			id,
 		).
@@ -405,7 +414,8 @@ func (p *PostgresProvider) DeleteDeadJob(ctx context.Context, jobID string) erro
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
-	res, err := p.db.Exec(queryCtx, `DELETE FROM dead_jobs WHERE job_id = $1`, id)
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	res, err := p.db.Exec(queryCtx, `DELETE FROM `+p.tablePrefix+`dead_jobs WHERE job_id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)
 	}
@@ -439,13 +449,14 @@ func (p *PostgresProvider) RetryDeadJob(ctx context.Context, jobID string) (stri
 	// Move the dead job back into the alarms table as a fresh, immediate one-shot job in a single statement
 	// A data-modifying CTE runs the delete and the insert atomically in one round-trip, copying the method and data across
 	// When the dead job is missing the delete returns no rows, so the insert affects none and we report it as not found
+	// #nosec G202 -- the only concatenated values are static table prefixes, not user input
 	res, err := p.db.Exec(queryCtx, `
 		WITH deleted AS (
-			DELETE FROM dead_jobs
+			DELETE FROM `+p.tablePrefix+`dead_jobs
 			WHERE job_id = $1
 			RETURNING actor_type, actor_id, job_method, job_data
 		)
-		INSERT INTO alarms
+		INSERT INTO `+p.tablePrefix+`alarms
 			(alarm_id, actor_type, actor_id, alarm_name,
 			alarm_due_time, alarm_data, alarm_kind, job_method,
 			alarm_lease_id, alarm_lease_expiration_time)

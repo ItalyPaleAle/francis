@@ -1,5 +1,5 @@
 -- Helper function to check if an actor is already active and enforce host restrictions
-CREATE OR REPLACE FUNCTION lookup_active_actor_v1(
+CREATE OR REPLACE FUNCTION %slookup_active_actor_v1(
     p_actor_type text,
     p_actor_id text,
     p_host_health_check_deadline interval,
@@ -18,8 +18,8 @@ BEGIN
     -- Check if the actor is already active on any healthy host
     SELECT h.host_id, h.host_address, aa.actor_idle_timeout
     INTO v_host_id, v_host_address, v_idle_timeout
-    FROM active_actors AS aa
-    JOIN hosts AS h ON aa.host_id = h.host_id
+    FROM %sactive_actors AS aa
+    JOIN %shosts AS h ON aa.host_id = h.host_id
     WHERE
         aa.actor_type = p_actor_type
         AND aa.actor_id = p_actor_id
@@ -59,7 +59,7 @@ $$ LANGUAGE plpgsql;
 -- Performs a lookup for an actor or allocates one
 -- If the actor is active, returns it, unless it violates the allowed host constraints
 -- Otherwise, activates the actor on one of the allowed hosts
-CREATE OR REPLACE FUNCTION lookup_allocate_actor_v1(
+CREATE OR REPLACE FUNCTION %slookup_allocate_actor_v1(
     p_actor_type text,
     p_actor_id text,
     p_host_health_check_deadline interval,
@@ -79,7 +79,7 @@ DECLARE
 BEGIN
     -- First, check if the actor is already active on any healthy host
     SELECT * INTO v_result 
-    FROM lookup_active_actor_v1(p_actor_type, p_actor_id, p_host_health_check_deadline, p_allowed_hosts);
+    FROM %slookup_active_actor_v1(p_actor_type, p_actor_id, p_host_health_check_deadline, p_allowed_hosts);
 
     IF FOUND THEN
         host_id := v_result.host_id;
@@ -91,7 +91,7 @@ BEGIN
 
     -- Create a deterministic lock key based on actor type and ID
     -- This ensures the same actor always gets the same lock
-    v_lock_key := abs(h_bigint(p_actor_type || '::' || p_actor_id));
+    v_lock_key := abs(%sh_bigint(p_actor_type || '::' || p_actor_id));
 
     -- Acquire an advisory lock for this specific actor
     -- This prevents concurrent placement of the same actor
@@ -99,7 +99,7 @@ BEGIN
 
     -- Check again if the actor is already active, as it may have gotten activated since we got the lock
     SELECT * INTO v_result 
-    FROM lookup_active_actor_v1(p_actor_type, p_actor_id, p_host_health_check_deadline, p_allowed_hosts);
+    FROM %slookup_active_actor_v1(p_actor_type, p_actor_id, p_host_health_check_deadline, p_allowed_hosts);
 
     IF FOUND THEN
         host_id := v_result.host_id;
@@ -118,19 +118,19 @@ BEGIN
         current_count AS (
             -- Count actual rows instead of using the view to avoid race conditions
             SELECT aa.host_id, COUNT(*) AS active_count
-            FROM active_actors AS aa
+            FROM %sactive_actors AS aa
             WHERE aa.actor_type = p_actor_type
             GROUP BY aa.host_id
         ),
         available_hosts AS (
-            SELECT 
+            SELECT
                 h.host_id,
                 h.host_address,
                 hat.actor_idle_timeout,
                 hat.actor_concurrency_limit,
                 COALESCE(current_count.active_count, 0) AS current_active_count
-            FROM hosts AS h
-            INNER JOIN host_actor_types AS hat ON h.host_id = hat.host_id
+            FROM %shosts AS h
+            INNER JOIN %shost_actor_types AS hat ON h.host_id = hat.host_id
             LEFT JOIN current_count ON h.host_id = current_count.host_id
             WHERE
                 hat.actor_type = p_actor_type
@@ -162,7 +162,7 @@ BEGIN
 
     -- Finally, insert the row in the active actors table to "activate" the actor, in the host we selected
 	-- Note that we perform an upsert query here. This is because the actor (with same type and ID) may already be present in the table, where it's active on a host that has failed (but hasn't been garbage-collected yet)
-    INSERT INTO active_actors (
+    INSERT INTO %sactive_actors (
         actor_type,
         actor_id,
         host_id,

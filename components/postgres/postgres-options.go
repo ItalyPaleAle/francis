@@ -27,6 +27,11 @@ type PostgresProviderOptions struct {
 	// Interval at which to perform garbage collection
 	CleanupInterval time.Duration
 
+	// Prefix added to the name of every table (and other schema object) used by the provider
+	// When set, tables are named "<prefix>_<table>", e.g. with prefix "francis" the hosts table is "francis_hosts"
+	// Defaults to "francis" when empty
+	TablePrefix string
+
 	// Clock, used to pass a mock one for testing
 	clock clock.WithTicker
 }

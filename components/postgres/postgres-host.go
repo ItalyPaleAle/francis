@@ -34,8 +34,9 @@ func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.Regi
 		// Because of the foreign key references, deleting a host also causes all actors hosted there to be deleted
 		queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 		defer cancel()
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err = tx.Exec(queryCtx,
-			`DELETE FROM hosts
+			`DELETE FROM `+p.tablePrefix+`hosts
 			WHERE host_last_health_check < (now() - $1::interval)`,
 			p.cfg.HostHealthCheckDeadline,
 		)
@@ -47,8 +48,9 @@ func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.Regi
 		// We don't do an upsert here on purpose, so if there's already an active host at the same address, this will cause a conflict
 		queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
 		defer cancel()
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err = tx.Exec(queryCtx,
-			`INSERT INTO hosts (host_id, host_address, host_last_health_check)
+			`INSERT INTO `+p.tablePrefix+`hosts (host_id, host_address, host_last_health_check)
 			VALUES ($1, $2, now())`,
 			hostID,
 			req.Address,
@@ -102,8 +104,9 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 		// Clean up unhealthy hosts, but never the registration we are reattaching to
 		queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 		defer cancel()
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err = tx.Exec(queryCtx,
-			`DELETE FROM hosts
+			`DELETE FROM `+p.tablePrefix+`hosts
 			WHERE host_last_health_check < (now() - $1::interval) AND host_id != $2`,
 			p.cfg.HostHealthCheckDeadline, req.ExistingHostID,
 		)
@@ -116,8 +119,9 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 		queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
 		defer cancel()
 		var tag pgconn.CommandTag
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		tag, err = tx.Exec(queryCtx,
-			`UPDATE hosts
+			`UPDATE `+p.tablePrefix+`hosts
 			SET host_address = $1, host_last_health_check = now()
 			WHERE host_id = $2`,
 			req.Address, req.ExistingHostID,
@@ -136,8 +140,9 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 			// The existing registration was not found (already garbage-collected): create a new one
 			queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
 			defer cancel()
+			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 			_, err = tx.Exec(queryCtx,
-				`INSERT INTO hosts (host_id, host_address, host_last_health_check)
+				`INSERT INTO `+p.tablePrefix+`hosts (host_id, host_address, host_last_health_check)
 				VALUES ($1, $2, now())`,
 				newHostID, req.Address,
 			)
@@ -202,9 +207,10 @@ func (p *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, r
 				queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 				defer cancel()
 				var ok bool
+				// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 				err = tx.QueryRow(queryCtx,
 					`SELECT EXISTS (
-						SELECT 1 FROM hosts
+						SELECT 1 FROM `+p.tablePrefix+`hosts
 						WHERE
 							host_id = $1
 							AND host_last_health_check >= (now() - $2::interval)
@@ -240,9 +246,10 @@ func (p *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, r
 func (p *PostgresProvider) updateActorHostLastHealthCheck(ctx context.Context, hostID string, tx pgx.Tx) error {
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := tx.
 		Exec(queryCtx,
-			`UPDATE hosts
+			`UPDATE `+p.tablePrefix+`hosts
 		SET
 			host_last_health_check = now()
 		WHERE
@@ -270,9 +277,10 @@ func (p *PostgresProvider) UnregisterHost(ctx context.Context, hostID string) er
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 	var hostActive bool
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	err := p.db.
 		QueryRow(queryCtx,
-			`DELETE FROM hosts
+			`DELETE FROM `+p.tablePrefix+`hosts
 			WHERE host_id = $1
 			RETURNING host_last_health_check >= (now() - $2::interval)`,
 			hostID,
@@ -299,9 +307,10 @@ func (p *PostgresProvider) ListHosts(ctx context.Context) ([]components.HostInfo
 	// Select only hosts whose last health check is within the deadline, so unhealthy hosts that have not been garbage-collected yet are excluded
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	rows, err := p.db.Query(queryCtx,
 		`SELECT host_id, host_address, host_last_health_check
-		FROM hosts
+		FROM `+p.tablePrefix+`hosts
 		WHERE host_last_health_check >= (now() - $1::interval)`,
 		p.cfg.HostHealthCheckDeadline,
 	)
@@ -337,14 +346,15 @@ func (p *PostgresProvider) LookupActor(ctx context.Context, ref ref.ActorRef, op
 
 	var funcName string
 	if opts.ActiveOnly {
-		funcName = "lookup_active_actor_v1"
+		funcName = p.tablePrefix + "lookup_active_actor_v1"
 	} else {
-		funcName = "lookup_allocate_actor_v1"
+		funcName = p.tablePrefix + "lookup_allocate_actor_v1"
 	}
 
+	// #nosec G202 -- the only concatenated values are the static table prefix and a fixed function name, not user input
 	err := p.db.
 		QueryRow(queryCtx,
-			`SELECT host_id, host_address, idle_timeout 
+			`SELECT host_id, host_address, idle_timeout
 			FROM `+funcName+`($1, $2, $3, $4)`,
 			ref.ActorType,
 			ref.ActorID,
@@ -379,9 +389,10 @@ func (p *PostgresProvider) LookupActor(ctx context.Context, ref ref.ActorRef, op
 func (p *PostgresProvider) RemoveActor(ctx context.Context, ref ref.ActorRef) error {
 	queryCtx, queryCancel := context.WithTimeout(ctx, p.timeout)
 	defer queryCancel()
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := p.db.
 		Exec(queryCtx,
-			`DELETE FROM active_actors
+			`DELETE FROM `+p.tablePrefix+`active_actors
 			WHERE actor_type = $1 AND actor_id = $2`,
 			ref.ActorType, ref.ActorID,
 		)
@@ -400,7 +411,8 @@ func (p *PostgresProvider) consumeJoinToken(ctx context.Context, tx pgx.Tx, join
 	// Lazily delete expired join tokens
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
-	_, err := tx.Exec(queryCtx, `DELETE FROM consumed_join_tokens WHERE expires_at < now()`)
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	_, err := tx.Exec(queryCtx, `DELETE FROM `+p.tablePrefix+`consumed_join_tokens WHERE expires_at < now()`)
 	if err != nil {
 		return fmt.Errorf("error pruning expired join tokens: %w", err)
 	}
@@ -408,8 +420,9 @@ func (p *PostgresProvider) consumeJoinToken(ctx context.Context, tx pgx.Tx, join
 	// Insert the token
 	queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
 	defer cancel()
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	_, err = tx.Exec(queryCtx,
-		`INSERT INTO consumed_join_tokens (join_token, host_id, expires_at)
+		`INSERT INTO `+p.tablePrefix+`consumed_join_tokens (join_token, host_id, expires_at)
 		VALUES ($1, $2, $3)`,
 		joinToken, hostID, expiresAt,
 	)
@@ -428,8 +441,9 @@ func (p *PostgresProvider) insertHostActorTypes(ctx context.Context, tx pgx.Tx, 
 	if deleteExisting {
 		queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 		defer cancel()
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.Exec(queryCtx,
-			`DELETE FROM host_actor_types WHERE host_id = $1`,
+			`DELETE FROM `+p.tablePrefix+`host_actor_types WHERE host_id = $1`,
 			hostID,
 		)
 		if err != nil {
@@ -446,7 +460,7 @@ func (p *PostgresProvider) insertHostActorTypes(ctx context.Context, tx pgx.Tx, 
 	defer cancel()
 	_, err := tx.CopyFrom(
 		queryCtx,
-		pgx.Identifier{"host_actor_types"},
+		pgx.Identifier{p.tablePrefix + "host_actor_types"},
 		[]string{"host_id", "actor_type", "actor_idle_timeout", "actor_concurrency_limit"},
 		&actorHostTypeColl{
 			hostID:     hostID,

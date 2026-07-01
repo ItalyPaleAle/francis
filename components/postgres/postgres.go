@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -30,6 +31,7 @@ var migrationScripts embed.FS
 const (
 	DefaultTimeout         = 5 * time.Second
 	DefaultCleanupInterval = 10 * time.Minute
+	DefaultTablePrefix     = "francis"
 )
 
 type PostgresProvider struct {
@@ -41,6 +43,7 @@ type PostgresProvider struct {
 	cleanupInterval time.Duration
 	gc              cleanup.GarbageCollector
 	clock           clock.WithTicker
+	tablePrefix     string
 }
 
 func NewPostgresProvider(log *slog.Logger, postgresOpts PostgresProviderOptions, providerConfig components.ProviderConfig) (*PostgresProvider, error) {
@@ -56,6 +59,17 @@ func NewPostgresProvider(log *slog.Logger, postgresOpts PostgresProviderOptions,
 		cleanupInterval: postgresOpts.CleanupInterval,
 		db:              postgresOpts.DB,
 		clock:           postgresOpts.clock,
+	}
+
+	// Resolve the table prefix
+	// An unset (empty) prefix falls back to the default
+	tablePrefix := postgresOpts.TablePrefix
+	if tablePrefix == "" {
+		tablePrefix = DefaultTablePrefix
+	}
+	if tablePrefix != "" {
+		// A non-empty prefix is stored with a trailing separator so tables are named e.g. "francis_hosts"
+		p.tablePrefix = tablePrefix + "_"
 	}
 
 	// Set default values
@@ -155,7 +169,7 @@ func (p *PostgresProvider) RenewLeaseInterval() time.Duration {
 func (p *PostgresProvider) performMigrations(ctx context.Context) error {
 	m := postgresmigrations.Migrations{
 		DB:                p.db,
-		MetadataTableName: "metadata",
+		MetadataTableName: p.tablePrefix + "metadata",
 		MetadataKey:       "migrations-version",
 	}
 
@@ -181,9 +195,12 @@ func (p *PostgresProvider) performMigrations(ctx context.Context) error {
 			return fmt.Errorf("error reading migration script '%s': %w", e, err)
 		}
 
+		// Apply the table prefix to the script's "%s" placeholders
+		script := p.q(string(data))
+
 		migrationFns[i] = func(ctx context.Context) error {
 			p.log.InfoContext(ctx, "Performing Postgres database migration", slog.String("migration", e))
-			_, err := m.DB.Exec(ctx, string(data))
+			_, err := m.DB.Exec(ctx, script)
 			if err != nil {
 				return fmt.Errorf("failed to perform migration '%s': %w", e, err)
 			}
@@ -205,23 +222,23 @@ func (p *PostgresProvider) initGC() (err error) {
 		Logger: p.log,
 		UpdateLastCleanupQuery: func(arg any) (string, []any) {
 			return `
-				INSERT INTO metadata (key, value)
+				INSERT INTO ` + p.tablePrefix + `metadata (key, value)
 					VALUES ('last-cleanup', now()::text)
 				ON CONFLICT (key)
 					DO UPDATE SET value = EXCLUDED.value
-				WHERE (EXTRACT('epoch' FROM now() - metadata.value::timestamp) * 1000)::bigint > $1`,
+				WHERE (EXTRACT('epoch' FROM now() - ` + p.tablePrefix + `metadata.value::timestamp) * 1000)::bigint > $1`,
 				[]any{arg}
 		},
 		DeleteExpiredValuesQueries: map[string]cleanup.DeleteExpiredValuesQueryFn{
 			"hosts": func() (string, func() []any) {
-				q := `DELETE FROM hosts WHERE host_last_health_check < (now() - $1::interval)`
+				q := `DELETE FROM ` + p.tablePrefix + `hosts WHERE host_last_health_check < (now() - $1::interval)`
 				return q, func() []any {
 					return []any{p.cfg.HostHealthCheckDeadline}
 				}
 			},
 			"actor_state": func() (string, func() []any) {
 				q := `
-				DELETE FROM actor_state
+				DELETE FROM ` + p.tablePrefix + `actor_state
 				WHERE
 					actor_state_expiration_time IS NOT NULL
 					AND actor_state_expiration_time < now()
@@ -235,6 +252,25 @@ func (p *PostgresProvider) initGC() (err error) {
 		DB:              postgresadapter.AdaptPgxConn(p.db),
 	})
 	return err
+}
+
+// q applies the configured table prefix to a query loaded from an embedded migration script
+// In those files, every table (and other schema object) name is written with a "%s" placeholder immediately before it (e.g. "%shosts"), which this replaces with the prefix
+// Note: Temporary tables are transaction/session-local and thus never prefixed
+func (p *PostgresProvider) q(query string) string {
+	n := strings.Count(query, "%s")
+	if n == 0 {
+		return query
+	}
+
+	args := make([]any, n)
+	for i := range args {
+		args[i] = p.tablePrefix
+	}
+
+	// The only value interpolated here is the statically-derived table prefix, so there's no risk of SQL injection
+	// #nosec G201
+	return fmt.Sprintf(query, args...)
 }
 
 // Convert string slice to UUID slice for PostgreSQL

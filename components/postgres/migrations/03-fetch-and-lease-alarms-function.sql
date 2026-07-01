@@ -1,5 +1,5 @@
 -- Helper function to check if an actor is active on a healthy host
-CREATE OR REPLACE FUNCTION actor_active_v1(
+CREATE OR REPLACE FUNCTION %sactor_active_v1(
     p_actor_type text,
     p_actor_id text,
     p_health_cutoff timestamptz
@@ -8,8 +8,8 @@ RETURNS boolean AS $$
 BEGIN
     RETURN EXISTS (
         SELECT 1
-        FROM active_actors AS aa
-        INNER JOIN hosts AS h ON
+        FROM %sactive_actors AS aa
+        INNER JOIN %shosts AS h ON
             aa.host_id = h.host_id
         WHERE
             aa.actor_type = p_actor_type 
@@ -20,7 +20,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Create a PL/pgSQL function to fetch and lease upcoming alarms
-CREATE OR REPLACE FUNCTION fetch_and_lease_upcoming_alarms_v1(
+CREATE OR REPLACE FUNCTION %sfetch_and_lease_upcoming_alarms_v1(
     p_host_ids uuid[],
     p_host_health_check_deadline interval,
     p_alarms_fetch_ahead_interval interval,
@@ -64,7 +64,7 @@ BEGIN
     WITH
         current_count AS (
             SELECT aa.host_id, aa.actor_type, COUNT(*) AS active_count
-            FROM active_actors AS aa
+            FROM %sactive_actors AS aa
             GROUP BY aa.host_id, aa.actor_type
         )
     INSERT INTO temp_active_hosts
@@ -79,8 +79,8 @@ BEGIN
             WHEN hat.actor_concurrency_limit = 0 THEN 2147483647 - COALESCE(current_count.active_count, 0)
             ELSE GREATEST(0, hat.actor_concurrency_limit - COALESCE(current_count.active_count, 0))
         END AS available_capacity
-    FROM host_actor_types AS hat
-    INNER JOIN hosts h ON
+    FROM %shost_actor_types AS hat
+    INNER JOIN %shosts h ON
         hat.host_id = h.host_id
     LEFT JOIN current_count ON
         hat.host_id = current_count.host_id
@@ -155,10 +155,10 @@ BEGIN
                 UNION
 
                 SELECT aa.host_id
-                FROM active_actors AS aa
+                FROM %sactive_actors AS aa
                 INNER JOIN temp_active_hosts AS tah ON
                     aa.actor_type = tah.actor_type
-                INNER JOIN hosts AS h ON
+                INNER JOIN %shosts AS h ON
                     aa.host_id = h.host_id
                 WHERE
                     h.host_last_health_check < v_health_cutoff
@@ -193,10 +193,10 @@ BEGIN
                             ORDER BY a.alarm_due_time, a.alarm_id
                             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                         ) AS rownum
-                FROM alarms AS a
+                FROM %salarms AS a
                 INNER JOIN actor_type_capacity AS atc ON
                     a.actor_type = atc.actor_type
-                LEFT JOIN active_actors AS aa ON
+                LEFT JOIN %sactive_actors AS aa ON
                     a.actor_type = aa.actor_type
                     AND a.actor_id = aa.actor_id
                 WHERE
@@ -258,10 +258,10 @@ BEGIN
                 SELECT tah.host_id FROM temp_active_hosts AS tah
                 UNION
                 SELECT aa.host_id
-                FROM active_actors AS aa
+                FROM %sactive_actors AS aa
                 INNER JOIN temp_active_hosts AS tah ON
                     aa.actor_type = tah.actor_type
-                INNER JOIN hosts AS h ON
+                INNER JOIN %shosts AS h ON
                     aa.host_id = h.host_id
                 WHERE
                     h.host_last_health_check < v_health_cutoff
@@ -270,10 +270,10 @@ BEGIN
             a.alarm_id, a.actor_type, a.actor_id,
             a.alarm_name, a.alarm_due_time,
             aa.host_id AS existing_host_id
-        FROM alarms AS a
+        FROM %salarms AS a
         INNER JOIN temp_active_hosts AS tah ON
             a.actor_type = tah.actor_type
-        LEFT JOIN active_actors AS aa ON
+        LEFT JOIN %sactive_actors AS aa ON
             a.actor_type = aa.actor_type
             AND a.actor_id = aa.actor_id
         WHERE
@@ -319,7 +319,7 @@ BEGIN
         WHERE tua.existing_host_id IS NULL
     LOOP
         -- Create deterministic lock key from actor type and ID to prevent double activation
-        v_actor_lock_key := abs(h_bigint(rec.actor_type || '::' || rec.actor_id));
+        v_actor_lock_key := abs(%sh_bigint(rec.actor_type || '::' || rec.actor_id));
 
         -- Try to acquire a transaction-level advisory lock for this specific actor.
         -- This may fail if someone else is already holding a lock for the actor: it means the actor is being activated somewhere else, likely because it's going to be invoked (which will keep it busy for a bit).
@@ -329,7 +329,7 @@ BEGIN
         -- This avoids leaking session-level advisory locks onto pooled connections (which could otherwise make an actor permanently un-allocatable on that connection).
         IF pg_try_advisory_xact_lock(v_actor_lock_key) THEN
             -- Check if actor already exists (another process might have created it)
-            IF NOT actor_active_v1(rec.actor_type, rec.actor_id, v_health_cutoff) THEN
+            IF NOT %sactor_active_v1(rec.actor_type, rec.actor_id, v_health_cutoff) THEN
                     -- Find a random host with capacity for this actor type
                     -- Note: There's a chance that multiple queries may allocate actors on the same hosts and we may go over capacity
                     -- We consider this an acceptable risk, as the complexity of handling that case is too significant otherwise (it would require locking the row with a FOR UPDATE in active_actor_hosts, which can lead to deadlocks and other issues)
@@ -348,9 +348,9 @@ BEGIN
                     IF v_allocated_host_id IS NOT NULL THEN
                         -- Insert/update the actor
                         -- Note that we perform an upsert query here. This is because the actor (with same type and ID) may already be present in the table, where it's active on a host that has failed (but hasn't been garbage-collected yet)
-                        INSERT INTO active_actors
+                        INSERT INTO %sactive_actors
                             (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation)
-                        SELECT 
+                        SELECT
                             rec.actor_type, 
                             rec.actor_id, 
                             v_allocated_host_id, 
@@ -388,29 +388,29 @@ BEGIN
 
     -- Finally, acquire leases on all alarms that have actors (existing or allocated)
     RETURN QUERY
-    UPDATE alarms 
-    SET 
+    UPDATE %salarms
+    SET
         alarm_lease_id = gen_random_uuid(),
         alarm_lease_expiration_time = v_lease_expiration
     FROM temp_upcoming_alarms AS tua
     WHERE
-        alarms.alarm_id = tua.alarm_id
+        %salarms.alarm_id = tua.alarm_id
         AND (
             tua.existing_host_id IS NOT NULL
             OR tua.allocated_host_id IS NOT NULL
         )
         AND (
-            alarms.alarm_lease_id IS NULL
-            OR alarms.alarm_lease_expiration_time IS NULL
-            OR alarms.alarm_lease_expiration_time < v_now
+            %salarms.alarm_lease_id IS NULL
+            OR %salarms.alarm_lease_expiration_time IS NULL
+            OR %salarms.alarm_lease_expiration_time < v_now
         )
-    RETURNING 
-        alarms.alarm_id AS r_alarm_id,
-        alarms.actor_type AS r_actor_type,
-        alarms.actor_id AS r_actor_id,
-        alarms.alarm_name AS r_alarm_name,
-        alarms.alarm_due_time AS r_alarm_due_time,
-        alarms.alarm_lease_id AS r_lease_id;
+    RETURNING
+        %salarms.alarm_id AS r_alarm_id,
+        %salarms.actor_type AS r_actor_type,
+        %salarms.actor_id AS r_actor_id,
+        %salarms.alarm_name AS r_alarm_name,
+        %salarms.alarm_due_time AS r_alarm_due_time,
+        %salarms.alarm_lease_id AS r_lease_id;
 
 END;
 $$ LANGUAGE plpgsql;

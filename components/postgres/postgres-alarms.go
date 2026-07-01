@@ -24,11 +24,12 @@ func (p *PostgresProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res 
 		jobMethod *string
 		kind      string
 	)
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	err = p.db.
 		QueryRow(queryCtx, `
 			SELECT
 				alarm_due_time, alarm_interval, alarm_cron, alarm_data, alarm_ttl_time, alarm_kind, job_method
-			FROM alarms
+			FROM `+p.tablePrefix+`alarms
 			WHERE
 				actor_type = $1
 				AND actor_id = $2
@@ -77,10 +78,11 @@ func (p *PostgresProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req c
 	// We do an upsert to replace alarms with the same actor ID, actor type, and alarm name
 	// Any upsert will cause the lease to be lost
 	// To avoid updating rows if there's nothing changed and canceling leases, we add conditions so if the alarm being added is the same as the existing, nothing is changed
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	_, err = p.db.
 		Exec(queryCtx,
 			`
-			INSERT INTO alarms
+			INSERT INTO `+p.tablePrefix+`alarms
 				(alarm_id, actor_type, actor_id, alarm_name,
 				alarm_due_time, alarm_interval, alarm_ttl_time, alarm_data,
 				alarm_lease_id, alarm_lease_expiration_time)
@@ -95,10 +97,10 @@ func (p *PostgresProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req c
 				alarm_lease_id = NULL,
 				alarm_lease_expiration_time = NULL
 			WHERE
-				alarms.alarm_due_time != EXCLUDED.alarm_due_time
-				OR alarms.alarm_interval IS DISTINCT FROM EXCLUDED.alarm_interval
-				OR alarms.alarm_ttl_time IS DISTINCT FROM EXCLUDED.alarm_ttl_time
-				OR alarms.alarm_data IS DISTINCT FROM EXCLUDED.alarm_data
+				`+p.tablePrefix+`alarms.alarm_due_time != EXCLUDED.alarm_due_time
+				OR `+p.tablePrefix+`alarms.alarm_interval IS DISTINCT FROM EXCLUDED.alarm_interval
+				OR `+p.tablePrefix+`alarms.alarm_ttl_time IS DISTINCT FROM EXCLUDED.alarm_ttl_time
+				OR `+p.tablePrefix+`alarms.alarm_data IS DISTINCT FROM EXCLUDED.alarm_data
 			`,
 			alarmID, ref.ActorType, ref.ActorID, ref.Name,
 			req.DueTime, interval, req.TTL, req.Data)
@@ -111,8 +113,9 @@ func (p *PostgresProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req c
 func (p *PostgresProvider) DeleteAlarm(ctx context.Context, ref ref.AlarmRef) error {
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := p.db.Exec(queryCtx,
-		`DELETE FROM alarms
+		`DELETE FROM `+p.tablePrefix+`alarms
 		WHERE
 			actor_type = $1
 			AND actor_id = $2
@@ -145,9 +148,10 @@ func (p *PostgresProvider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req 
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	rows, err := p.db.Query(queryCtx,
 		`SELECT r_alarm_id, r_actor_type, r_actor_id, r_alarm_name, r_alarm_due_time, r_lease_id
-		FROM fetch_and_lease_upcoming_alarms_v1($1, $2, $3, $4, $5)`,
+		FROM `+p.tablePrefix+`fetch_and_lease_upcoming_alarms_v1($1, $2, $3, $4, $5)`,
 		hostUUIDs,
 		p.cfg.HostHealthCheckDeadline,
 		p.cfg.AlarmsFetchAheadInterval,
@@ -209,12 +213,13 @@ func (p *PostgresProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmL
 		jobMethod *string
 		kind      string
 	)
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	err = p.db.
 		QueryRow(queryCtx, `
 			SELECT
 				actor_type, actor_id, alarm_name, alarm_data,
 				alarm_due_time, alarm_interval, alarm_cron, alarm_ttl_time, alarm_kind, job_method
-			FROM alarms
+			FROM `+p.tablePrefix+`alarms
 			WHERE
 				alarm_id = $1
 				AND alarm_lease_id = $2
@@ -285,16 +290,17 @@ func (p *PostgresProvider) RenewAlarmLeases(ctx context.Context, req components.
 
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
+	// #nosec G202 -- the only concatenated values are static table prefixes and an internally-built lease clause, not user input
 	rows, err := p.db.Query(queryCtx,
 		`
-		UPDATE alarms
+		UPDATE `+p.tablePrefix+`alarms
 		SET alarm_lease_expiration_time = now() + $1::interval
 		WHERE
 			alarm_lease_expiration_time IS NOT NULL
 			AND alarm_lease_expiration_time >= now()
 			AND alarm_id IN (
-				SELECT alarm_id FROM alarms a
-				JOIN active_actors aa ON a.actor_type = aa.actor_type AND a.actor_id = aa.actor_id
+				SELECT alarm_id FROM `+p.tablePrefix+`alarms a
+				JOIN `+p.tablePrefix+`active_actors aa ON a.actor_type = aa.actor_type AND a.actor_id = aa.actor_id
 				WHERE aa.host_id = ANY($2)
 				)
 			`+leaseCondition+`
@@ -336,8 +342,9 @@ func (p *PostgresProvider) ReleaseAlarmLease(ctx context.Context, lease *ref.Ala
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := p.db.Exec(queryCtx, `
-		UPDATE alarms
+		UPDATE `+p.tablePrefix+`alarms
 		SET
 			alarm_lease_id = NULL,
 			alarm_lease_expiration_time = NULL
@@ -366,9 +373,10 @@ func (p *PostgresProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Ala
 	// If we want to refresh the lease...
 	var res pgconn.CommandTag
 	if req.RefreshLease {
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		res, err = p.db.Exec(queryCtx,
 			`
-			UPDATE alarms
+			UPDATE `+p.tablePrefix+`alarms
 			SET
 				alarm_lease_expiration_time = now() + $1::interval,
 				alarm_due_time = $2
@@ -382,8 +390,9 @@ func (p *PostgresProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Ala
 			lease.Key(), lease.LeaseID(),
 		)
 	} else {
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		res, err = p.db.Exec(queryCtx, `
-			UPDATE alarms
+			UPDATE `+p.tablePrefix+`alarms
 			SET
 				alarm_lease_id = NULL,
 				alarm_lease_expiration_time = NULL,
@@ -413,8 +422,9 @@ func (p *PostgresProvider) DeleteLeasedAlarm(ctx context.Context, lease *ref.Ala
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := p.db.Exec(queryCtx, `
-		DELETE FROM alarms
+		DELETE FROM `+p.tablePrefix+`alarms
 		WHERE
 			alarm_id = $1
 			AND alarm_lease_id = $2
