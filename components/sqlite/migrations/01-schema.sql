@@ -1,5 +1,5 @@
 -- Contains the active actor hosts
-CREATE TABLE hosts (
+CREATE TABLE %shosts (
     -- ID of the host, as UUID
     host_id text NOT NULL PRIMARY KEY,
     -- Address and port of the host
@@ -8,11 +8,11 @@ CREATE TABLE hosts (
     host_last_health_check integer NOT NULL DEFAULT (unixepoch('subsec') * 1000)
 ) WITHOUT ROWID, STRICT;
 
-CREATE UNIQUE INDEX host_address_idx ON hosts (host_address);
-CREATE INDEX host_last_health_check_idx ON hosts (host_last_health_check);
+CREATE UNIQUE INDEX %shost_address_idx ON %shosts (host_address);
+CREATE INDEX %shost_last_health_check_idx ON %shosts (host_last_health_check);
 
 -- Contains the actor types supported by each host
-CREATE TABLE host_actor_types (
+CREATE TABLE %shost_actor_types (
     -- ID of the host, as UUID
     -- References the "hosts" table
     host_id text NOT NULL,
@@ -25,13 +25,13 @@ CREATE TABLE host_actor_types (
     actor_concurrency_limit int NOT NULL DEFAULT 0,
 
     PRIMARY KEY (host_id, actor_type),
-    FOREIGN KEY (host_id) REFERENCES hosts (host_id) ON DELETE CASCADE
+    FOREIGN KEY (host_id) REFERENCES %shosts (host_id) ON DELETE CASCADE
 ) WITHOUT ROWID, STRICT;
 
-CREATE INDEX actor_type_idx ON host_actor_types (actor_type);
+CREATE INDEX %sactor_type_idx ON %shost_actor_types (actor_type);
 
 -- Contains the actors currently active on a host
-CREATE TABLE active_actors (
+CREATE TABLE %sactive_actors (
     -- Actor type
     actor_type text NOT NULL,
     -- Actor ID
@@ -45,21 +45,21 @@ CREATE TABLE active_actors (
     actor_activation integer NOT NULL DEFAULT (unixepoch('subsec') * 1000),
 
     PRIMARY KEY (actor_type, actor_id),
-    FOREIGN KEY (host_id) REFERENCES hosts (host_id) ON DELETE CASCADE
+    FOREIGN KEY (host_id) REFERENCES %shosts (host_id) ON DELETE CASCADE
 ) WITHOUT ROWID, STRICT;
 
-CREATE INDEX active_actors_host_scan_idx ON active_actors (host_id, actor_type);
+CREATE INDEX %sactive_actors_host_scan_idx ON %sactive_actors (host_id, actor_type);
 
 -- Reports the active actors per each host
-CREATE VIEW host_active_actor_count
+CREATE VIEW %shost_active_actor_count
 	(host_id, actor_type, active_count)
 AS
     SELECT host_id, actor_type, COUNT(*)
-    FROM active_actors
+    FROM %sactive_actors
     GROUP BY host_id, actor_type;
 
 -- Contains the state for each actor
-CREATE TABLE actor_state (
+CREATE TABLE %sactor_state (
     -- Actor type
     actor_type text NOT NULL,
     -- Actor ID
@@ -73,13 +73,13 @@ CREATE TABLE actor_state (
     PRIMARY KEY (actor_type, actor_id)
 ) WITHOUT ROWID, STRICT;
 
-CREATE INDEX actor_state_expiration_time_idx ON actor_state (actor_state_expiration_time)
+CREATE INDEX %sactor_state_expiration_time_idx ON %sactor_state (actor_state_expiration_time)
     WHERE actor_state_expiration_time IS NOT NULL;
 
 -- Contains the list of alarms created
-CREATE TABLE alarms (
+CREATE TABLE %salarms (
     -- Alarm ID, as UUID
-    alarm_id text PRIMARY KEY NOT NULL, 
+    alarm_id text PRIMARY KEY NOT NULL,
     -- Actor type
     actor_type text NOT NULL,
     -- Actor ID
@@ -103,17 +103,17 @@ CREATE TABLE alarms (
     alarm_lease_expiration_time integer
 ) WITHOUT ROWID, STRICT;
 
-CREATE UNIQUE INDEX alarm_ref_idx ON alarms (actor_type, actor_id, alarm_name);
-CREATE INDEX alarm_due_time_idx ON alarms (alarm_due_time);
-CREATE UNIQUE INDEX alarm_lease_id_idx ON alarms (alarm_lease_id)
+CREATE UNIQUE INDEX %salarm_ref_idx ON %salarms (actor_type, actor_id, alarm_name);
+CREATE INDEX %salarm_due_time_idx ON %salarms (alarm_due_time);
+CREATE UNIQUE INDEX %salarm_lease_id_idx ON %salarms (alarm_lease_id)
     WHERE alarm_lease_id IS NOT NULL;
 
 -- Trigger that nullifies the leases on the alarms table when an actor is deactivated
 -- (deleted from the active_actors table)
-CREATE TRIGGER active_actors_delete_update_alarms
-AFTER DELETE ON active_actors
+CREATE TRIGGER %sactive_actors_delete_update_alarms
+AFTER DELETE ON %sactive_actors
 BEGIN
-    UPDATE alarms
+    UPDATE %salarms
     SET
         alarm_lease_id = NULL,
         alarm_lease_expiration_time = NULL

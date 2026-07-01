@@ -40,6 +40,7 @@ const (
 	DefaultConnectionString = "data.db"
 	DefaultTimeout          = 5 * time.Second
 	DefaultCleanupInterval  = 10 * time.Minute
+	DefaultTablePrefix      = "francis"
 )
 
 type SQLiteProvider struct {
@@ -51,6 +52,11 @@ type SQLiteProvider struct {
 	cleanupInterval time.Duration
 	gc              cleanup.GarbageCollector
 	clock           clock.WithTicker
+	tablePrefix     string
+
+	// Fetch-upcoming-alarm queries, with the table prefix already applied, computed once at construction
+	fetchUpcomingAlarmsNoConstraintsQuery   string
+	fetchUpcomingAlarmsWithConstraintsQuery string
 }
 
 func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, providerConfig components.ProviderConfig) (*SQLiteProvider, error) {
@@ -67,6 +73,21 @@ func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, provi
 		clock:           sqliteOpts.clock,
 		db:              sqliteOpts.DB,
 	}
+
+	// Resolve the table prefix
+	// An unset (empty) prefix falls back to the default
+	tablePrefix := sqliteOpts.TablePrefix
+	if tablePrefix == "" {
+		tablePrefix = DefaultTablePrefix
+	}
+	if tablePrefix != "" {
+		// A non-empty prefix is stored with a trailing separator so tables are named e.g. "francis_hosts"
+		s.tablePrefix = tablePrefix + "_"
+	}
+
+	// Pre-compute the prefixed fetch-upcoming-alarm queries so the hot path doesn't re-format them on every fetch
+	s.fetchUpcomingAlarmsNoConstraintsQuery = s.q(queryFetchUpcomingAlarmsNoConstraints)
+	s.fetchUpcomingAlarmsWithConstraintsQuery = s.q(queryFetchUpcomingAlarmsWithConstraints)
 
 	// Set default values
 	if s.timeout <= 0 {
@@ -135,6 +156,11 @@ type SQLiteProviderOptions struct {
 	// Interval at which to perform garbage collection
 	CleanupInterval time.Duration
 
+	// Prefix added to the name of every table (and other schema object) used by the provider
+	// When set, tables are named "<prefix>_<table>", e.g. with prefix "francis" the hosts table is "francis_hosts"
+	// Defaults to "francis" when empty
+	TablePrefix string
+
 	// Clock, used to pass a mock one for testing
 	clock clock.WithTicker
 }
@@ -201,7 +227,7 @@ func (s *SQLiteProvider) RenewLeaseInterval() time.Duration {
 func (s *SQLiteProvider) performMigrations(ctx context.Context) error {
 	m := sqlitemigrations.Migrations{
 		Pool:              s.db,
-		MetadataTableName: "metadata",
+		MetadataTableName: s.tablePrefix + "metadata",
 		MetadataKey:       "migrations-version",
 	}
 
@@ -227,9 +253,12 @@ func (s *SQLiteProvider) performMigrations(ctx context.Context) error {
 			return fmt.Errorf("error reading migration script '%s': %w", e, err)
 		}
 
+		// Apply the table prefix to the script's "%s" placeholders
+		script := s.q(string(data))
+
 		migrationFns[i] = func(ctx context.Context) error {
 			s.log.InfoContext(ctx, "Performing SQLite database migration", slog.String("migration", e))
-			_, err := m.GetConn().ExecContext(ctx, string(data))
+			_, err := m.GetConn().ExecContext(ctx, script)
 			if err != nil {
 				return fmt.Errorf("failed to perform migration '%s': %w", e, err)
 			}
@@ -268,7 +297,7 @@ func (s *SQLiteProvider) initGC() (err error) {
 		UpdateLastCleanupQuery: func(arg any) (string, []any) {
 			now := s.clock.Now().UnixMilli()
 			return `
-				INSERT INTO metadata (key, value)
+				INSERT INTO ` + s.tablePrefix + `metadata (key, value)
 					VALUES ('last-cleanup', ?)
 					ON CONFLICT (key)
 					DO UPDATE SET value = ?
@@ -277,7 +306,7 @@ func (s *SQLiteProvider) initGC() (err error) {
 		},
 		DeleteExpiredValuesQueries: map[string]cleanup.DeleteExpiredValuesQueryFn{
 			"hosts": func() (string, func() []any) {
-				q := `DELETE FROM hosts WHERE host_last_health_check < ?`
+				q := `DELETE FROM ` + s.tablePrefix + `hosts WHERE host_last_health_check < ?`
 				return q, func() []any {
 					now := s.clock.Now()
 					return []any{
@@ -287,7 +316,7 @@ func (s *SQLiteProvider) initGC() (err error) {
 			},
 			"actor_state": func() (string, func() []any) {
 				q := `
-				DELETE FROM actor_state
+				DELETE FROM ` + s.tablePrefix + `actor_state
 				WHERE
 					actor_state_expiration_time IS NOT NULL
 					AND actor_state_expiration_time < ?
@@ -304,6 +333,25 @@ func (s *SQLiteProvider) initGC() (err error) {
 		DB:              sqladapter.AdaptDatabaseSQLConn(s.db),
 	})
 	return err
+}
+
+// q applies the configured table prefix to a query loaded from an embedded SQL file (migration scripts and query files)
+// In those files, every table (and other schema object) name is written with a "%s" placeholder immediately before it (e.g. "%shosts"), which this replaces with the prefix
+// Note: Temporary tables are connection-local and thus never prefixed
+func (s *SQLiteProvider) q(query string) string {
+	n := strings.Count(query, "%s")
+	if n == 0 {
+		return query
+	}
+
+	args := make([]any, n)
+	for i := range args {
+		args[i] = s.tablePrefix
+	}
+
+	// The only value interpolated here is the statically-derived table prefix, so there's no risk of SQL injection
+	// #nosec G201
+	return fmt.Sprintf(query, args...)
 }
 
 // Checks if an error returned by the database is a unique constraint violation error, such as a duplicate unique index or primary key.

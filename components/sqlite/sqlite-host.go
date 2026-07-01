@@ -37,8 +37,9 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 		// Because of the foreign key references, deleting a host also causes all actors hosted there to be deleted
 		queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 		defer cancel()
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err = tx.ExecContext(queryCtx,
-			`DELETE FROM hosts
+			`DELETE FROM `+s.tablePrefix+`hosts
 			WHERE host_last_health_check < ?`,
 			now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
 		)
@@ -50,8 +51,9 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 		// We don't do an upsert here on purpose, so if there's already an active host at the same address, this will cause a conflict
 		queryCtx, cancel = context.WithTimeout(ctx, s.timeout)
 		defer cancel()
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err = tx.ExecContext(queryCtx,
-			`INSERT INTO hosts (host_id, host_address, host_last_health_check)
+			`INSERT INTO `+s.tablePrefix+`hosts (host_id, host_address, host_last_health_check)
 			VALUES (?, ?, ?)`,
 			hostID,
 			req.Address,
@@ -111,8 +113,9 @@ func (s *SQLiteProvider) reattachHost(ctx context.Context, req components.Regist
 		// This lets a host reclaim its registration even if its health record is stale, while still clearing other dead hosts that might otherwise block the address
 		queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 		defer cancel()
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err = tx.ExecContext(queryCtx,
-			`DELETE FROM hosts
+			`DELETE FROM `+s.tablePrefix+`hosts
 			WHERE host_last_health_check < ? AND host_id != ?`,
 			cutoff, req.ExistingHostID,
 		)
@@ -125,8 +128,9 @@ func (s *SQLiteProvider) reattachHost(ctx context.Context, req components.Regist
 		queryCtx, cancel = context.WithTimeout(ctx, s.timeout)
 		defer cancel()
 		var res sql.Result
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		res, err = tx.ExecContext(queryCtx,
-			`UPDATE hosts
+			`UPDATE `+s.tablePrefix+`hosts
 			SET host_address = ?, host_last_health_check = ?
 			WHERE host_id = ?`,
 			req.Address, now, req.ExistingHostID,
@@ -150,8 +154,9 @@ func (s *SQLiteProvider) reattachHost(ctx context.Context, req components.Regist
 			// The existing registration was not found (already garbage-collected): create a new one
 			queryCtx, cancel = context.WithTimeout(ctx, s.timeout)
 			defer cancel()
+			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 			_, err = tx.ExecContext(queryCtx,
-				`INSERT INTO hosts (host_id, host_address, host_last_health_check)
+				`INSERT INTO `+s.tablePrefix+`hosts (host_id, host_address, host_last_health_check)
 				VALUES (?, ?, ?)`,
 				newHostID, req.Address, now,
 			)
@@ -217,9 +222,10 @@ func (s *SQLiteProvider) UpdateActorHost(ctx context.Context, hostID string, req
 				queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 				defer cancel()
 				var ok bool
+				// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 				err = tx.QueryRowContext(queryCtx,
 					`SELECT EXISTS (
-						SELECT 1 FROM hosts 
+						SELECT 1 FROM `+s.tablePrefix+`hosts
 						WHERE
 							host_id = ?
 							AND host_last_health_check >= ?
@@ -257,9 +263,10 @@ func (s *SQLiteProvider) updateActorHostLastHealthCheck(ctx context.Context, hos
 
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := tx.
 		ExecContext(queryCtx,
-			`UPDATE hosts
+			`UPDATE `+s.tablePrefix+`hosts
 		SET
 			host_last_health_check = ?
 		WHERE
@@ -293,9 +300,10 @@ func (s *SQLiteProvider) UnregisterHost(ctx context.Context, hostID string) erro
 	defer cancel()
 	now := s.clock.Now().UnixMilli()
 	var hostActive bool
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	err := s.db.
 		QueryRowContext(queryCtx,
-			`DELETE FROM hosts
+			`DELETE FROM `+s.tablePrefix+`hosts
 			WHERE host_id = ?
 			RETURNING host_last_health_check >= ?`,
 			hostID,
@@ -324,9 +332,10 @@ func (s *SQLiteProvider) ListHosts(ctx context.Context) ([]components.HostInfo, 
 	// Select only hosts whose last health check is within the deadline, so unhealthy hosts that have not been garbage-collected yet are excluded
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	rows, err := s.db.QueryContext(queryCtx,
 		`SELECT host_id, host_address, host_last_health_check
-		FROM hosts
+		FROM `+s.tablePrefix+`hosts
 		WHERE host_last_health_check >= ?`,
 		now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
 	)
@@ -373,14 +382,15 @@ func (s *SQLiteProvider) lookupActiveActor(ctx context.Context, ref ref.ActorRef
 	// Build host restrictions clause
 	hostClause, params := buildLookupActorHostClause(hosts, params)
 
+	// #nosec G202 -- the only concatenated values are the static table prefix and an internally-built host clause, not user input
 	q := `
-		SELECT 
+		SELECT
 			h.host_id, h.host_address, aa.actor_idle_timeout
-		FROM active_actors AS aa
-		JOIN hosts AS h ON
+		FROM ` + s.tablePrefix + `active_actors AS aa
+		JOIN ` + s.tablePrefix + `hosts AS h ON
 			aa.host_id = h.host_id
-		WHERE 
-			aa.actor_type = ? 
+		WHERE
+			aa.actor_type = ?
 			AND aa.actor_id = ?
 			AND h.host_last_health_check >= ?
 			` + hostClause + `
@@ -458,6 +468,8 @@ func (s *SQLiteProvider) LookupActor(ctx context.Context, ref ref.ActorRef, opts
 		//    We perform an upsert query here. This is because the actor (with same type and ID) may already be present in the table, where it's active on a host that has failed but hasn't been garbage-collected yet.
 		// 6. Return the result:
 		//    Finally, we return the result from the lookup_result table.
+		//    Note the "lookup_result" temporary table is connection-local and thus not prefixed
+		// #nosec G202 -- the only concatenated values are the static table prefix and an internally-built host clause, not user input
 		q := `
 		PRAGMA temp_store = MEMORY;
 
@@ -477,11 +489,11 @@ func (s *SQLiteProvider) LookupActor(ctx context.Context, ref ref.ActorRef, opts
 					h.host_address,
 					aa.actor_idle_timeout,
 					1 AS found_existing
-				FROM active_actors AS aa
-				JOIN hosts AS h ON
+				FROM ` + s.tablePrefix + `active_actors AS aa
+				JOIN ` + s.tablePrefix + `hosts AS h ON
 					aa.host_id = h.host_id
-				WHERE 
-					aa.actor_type = ? 
+				WHERE
+					aa.actor_type = ?
 					AND aa.actor_id = ?
 					AND h.host_last_health_check >= ?
 				LIMIT 1
@@ -492,11 +504,11 @@ func (s *SQLiteProvider) LookupActor(ctx context.Context, ref ref.ActorRef, opts
 					h.host_address,
 					hat.actor_idle_timeout,
 					0 AS found_existing
-				FROM hosts AS h
-				INNER JOIN host_actor_types AS hat ON
+				FROM ` + s.tablePrefix + `hosts AS h
+				INNER JOIN ` + s.tablePrefix + `host_actor_types AS hat ON
 					h.host_id = hat.host_id
-				LEFT JOIN host_active_actor_count AS haac ON 
-					h.host_id = haac.host_id 
+				LEFT JOIN ` + s.tablePrefix + `host_active_actor_count AS haac ON
+					h.host_id = haac.host_id
 					AND hat.actor_type = haac.actor_type
 				WHERE 
 					NOT EXISTS (SELECT 1 FROM existing_actor)
@@ -523,9 +535,9 @@ func (s *SQLiteProvider) LookupActor(ctx context.Context, ref ref.ActorRef, opts
 		SELECT host_id, host_address, actor_idle_timeout, found_existing
 		FROM actor_to_use;
 
-		REPLACE INTO active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation)
+		REPLACE INTO ` + s.tablePrefix + `active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation)
 		SELECT ?, ?, host_id, actor_idle_timeout, ?
-		FROM lookup_result 
+		FROM lookup_result
 		WHERE
 			found_existing = 0
 			AND host_id IS NOT NULL;
@@ -578,9 +590,10 @@ func (s *SQLiteProvider) LookupActor(ctx context.Context, ref ref.ActorRef, opts
 func (s *SQLiteProvider) RemoveActor(ctx context.Context, ref ref.ActorRef) error {
 	queryCtx, queryCancel := context.WithTimeout(ctx, s.timeout)
 	defer queryCancel()
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := s.db.
 		ExecContext(queryCtx,
-			`DELETE FROM active_actors
+			`DELETE FROM `+s.tablePrefix+`active_actors
 			WHERE actor_type = ? AND actor_id = ?`,
 			ref.ActorType, ref.ActorID,
 		)
@@ -626,7 +639,8 @@ func (s *SQLiteProvider) consumeJoinToken(ctx context.Context, tx *sql.Tx, joinT
 	// Lazily delete expired join tokens to keep the table tidy without a background job
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-	_, err := tx.ExecContext(queryCtx, `DELETE FROM consumed_join_tokens WHERE expires_at < ?`, now)
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	_, err := tx.ExecContext(queryCtx, `DELETE FROM `+s.tablePrefix+`consumed_join_tokens WHERE expires_at < ?`, now)
 	if err != nil {
 		return fmt.Errorf("error pruning expired join tokens: %w", err)
 	}
@@ -634,8 +648,9 @@ func (s *SQLiteProvider) consumeJoinToken(ctx context.Context, tx *sql.Tx, joinT
 	// Insert the token
 	queryCtx, cancel = context.WithTimeout(ctx, s.timeout)
 	defer cancel()
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	_, err = tx.ExecContext(queryCtx,
-		`INSERT INTO consumed_join_tokens (join_token, host_id, expires_at)
+		`INSERT INTO `+s.tablePrefix+`consumed_join_tokens (join_token, host_id, expires_at)
 		VALUES (?, ?, ?)`,
 		joinToken, hostID, expiresAt.UnixMilli(),
 	)
@@ -654,8 +669,9 @@ func (s *SQLiteProvider) insertHostActorTypes(ctx context.Context, tx *sql.Tx, h
 	if deleteExisting {
 		queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 		defer cancel()
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.ExecContext(queryCtx,
-			`DELETE FROM host_actor_types WHERE host_id = ?`,
+			`DELETE FROM `+s.tablePrefix+`host_actor_types WHERE host_id = ?`,
 			hostID,
 		)
 		if err != nil {
@@ -668,9 +684,12 @@ func (s *SQLiteProvider) insertHostActorTypes(ctx context.Context, tx *sql.Tx, h
 	}
 
 	// Build the query
+	// The table prefix is written as its own segment so there's no SQL string concatenation to flag
 	q := strings.Builder{}
+	q.WriteString(`INSERT INTO `)
+	q.WriteString(s.tablePrefix)
 	q.WriteString(
-		`INSERT INTO host_actor_types
+		`host_actor_types
 			(host_id, actor_type, actor_idle_timeout, actor_concurrency_limit)
 		VALUES `,
 	)

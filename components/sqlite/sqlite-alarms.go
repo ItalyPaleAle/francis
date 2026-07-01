@@ -29,11 +29,12 @@ func (s *SQLiteProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res co
 		kind      string
 		ttlTime   *int64
 	)
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	err = s.db.
 		QueryRowContext(queryCtx, `
 			SELECT
 				alarm_due_time, alarm_interval, alarm_cron, alarm_data, alarm_ttl_time, alarm_kind, job_method
-			FROM alarms
+			FROM `+s.tablePrefix+`alarms
 			WHERE
 				actor_type = ?
 				AND actor_id = ?
@@ -92,9 +93,10 @@ func (s *SQLiteProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req com
 
 	// We do an upsert to replace alarms with the same actor ID, actor type, and alarm name
 	// Any upsert will cause the lease to be lost
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	_, err = s.db.
 		ExecContext(queryCtx,
-			`INSERT INTO alarms
+			`INSERT INTO `+s.tablePrefix+`alarms
 				(alarm_id, actor_type, actor_id, alarm_name,
 				alarm_due_time, alarm_interval, alarm_ttl_time, alarm_data,
 				alarm_lease_id, alarm_lease_expiration_time)
@@ -109,10 +111,10 @@ func (s *SQLiteProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req com
 				alarm_lease_id = NULL,
 				alarm_lease_expiration_time = NULL
 			WHERE
-				alarms.alarm_due_time != EXCLUDED.alarm_due_time
-				OR alarms.alarm_interval IS NOT EXCLUDED.alarm_interval
-				OR alarms.alarm_ttl_time IS NOT EXCLUDED.alarm_ttl_time
-				OR alarms.alarm_data IS NOT EXCLUDED.alarm_data`,
+				`+s.tablePrefix+`alarms.alarm_due_time != EXCLUDED.alarm_due_time
+				OR `+s.tablePrefix+`alarms.alarm_interval IS NOT EXCLUDED.alarm_interval
+				OR `+s.tablePrefix+`alarms.alarm_ttl_time IS NOT EXCLUDED.alarm_ttl_time
+				OR `+s.tablePrefix+`alarms.alarm_data IS NOT EXCLUDED.alarm_data`,
 			alarmID, ref.ActorType, ref.ActorID, ref.Name,
 			req.DueTime.UnixMilli(), interval, ttlTime, req.Data)
 	if err != nil {
@@ -124,8 +126,9 @@ func (s *SQLiteProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req com
 func (s *SQLiteProvider) DeleteAlarm(ctx context.Context, ref ref.AlarmRef) error {
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := s.db.ExecContext(queryCtx,
-		`DELETE FROM alarms
+		`DELETE FROM `+s.tablePrefix+`alarms
 		WHERE
 			actor_type = ?
 			AND actor_id = ?
@@ -177,12 +180,13 @@ func (s *SQLiteProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmLea
 		kind      string
 		ttlTime   *int64
 	)
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	err = s.db.
 		QueryRowContext(queryCtx, `
 			SELECT
 				actor_type, actor_id, alarm_name, alarm_data,
 				alarm_due_time, alarm_interval, alarm_cron, alarm_ttl_time, alarm_kind, job_method
-			FROM alarms
+			FROM `+s.tablePrefix+`alarms
 			WHERE
 				alarm_id = ?
 				AND alarm_lease_id = ?
@@ -264,15 +268,15 @@ func (s *SQLiteProvider) RenewAlarmLeases(ctx context.Context, req components.Re
 	// #nosec G202
 	rows, err := s.db.QueryContext(queryCtx,
 		`
-		UPDATE alarms
+		UPDATE `+s.tablePrefix+`alarms
 		SET alarm_lease_expiration_time = ?
 		WHERE
 			alarm_lease_expiration_time IS NOT NULL
 			AND alarm_lease_expiration_time >= ?
 			`+leaseIdCondition+`
 			AND alarm_id IN (
-				SELECT alarm_id FROM alarms a
-				JOIN active_actors aa ON a.actor_type = aa.actor_type AND a.actor_id = aa.actor_id
+				SELECT alarm_id FROM `+s.tablePrefix+`alarms a
+				JOIN `+s.tablePrefix+`active_actors aa ON a.actor_type = aa.actor_type AND a.actor_id = aa.actor_id
 				WHERE aa.host_id IN (`+hostPlaceholders+`)
 			)
 		RETURNING actor_type, actor_id, alarm_name, alarm_id, alarm_lease_id, alarm_due_time`,
@@ -315,8 +319,9 @@ func (s *SQLiteProvider) ReleaseAlarmLease(ctx context.Context, lease *ref.Alarm
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := s.db.ExecContext(queryCtx, `
-		UPDATE alarms
+		UPDATE `+s.tablePrefix+`alarms
 		SET
 			alarm_lease_id = NULL,
 			alarm_lease_expiration_time = NULL
@@ -360,7 +365,7 @@ func (s *SQLiteProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Alarm
 		// Disable the "G202: SQL string concatenation" gosec warning, since there's no risk of SQL injection here
 		// #nosec G202
 		res, err = s.db.ExecContext(queryCtx, `
-			UPDATE alarms
+			UPDATE `+s.tablePrefix+`alarms
 			SET
 				alarm_lease_expiration_time = ?,
 				alarm_due_time = ?
@@ -372,7 +377,7 @@ func (s *SQLiteProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Alarm
 		// Disable the "G202: SQL string concatenation" gosec warning, since there's no risk of SQL injection here
 		// #nosec G202
 		res, err = s.db.ExecContext(queryCtx, `
-			UPDATE alarms
+			UPDATE `+s.tablePrefix+`alarms
 			SET
 				alarm_lease_id = NULL,
 				alarm_lease_expiration_time = NULL,
@@ -401,8 +406,9 @@ func (s *SQLiteProvider) DeleteLeasedAlarm(ctx context.Context, lease *ref.Alarm
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := s.db.ExecContext(queryCtx, `
-		DELETE FROM alarms
+		DELETE FROM `+s.tablePrefix+`alarms
 		WHERE
 			alarm_id = ?
 			AND alarm_lease_id = ?
@@ -437,6 +443,11 @@ type upcomingAlarmFetcher struct {
 	healthCutoffMs    int64
 	leaseExpirationMs int64
 	batchSize         int
+
+	// tablePrefix is prepended to table names in the inline queries; the fetch queries below are already prefixed
+	tablePrefix               string
+	fetchNoConstraintsQuery   string
+	fetchWithConstraintsQuery string
 }
 
 func newUpcomingAlarmFetcher(tx *sql.Tx, s *SQLiteProvider, req *components.FetchAndLeaseUpcomingAlarmsReq) *upcomingAlarmFetcher {
@@ -454,6 +465,10 @@ func newUpcomingAlarmFetcher(tx *sql.Tx, s *SQLiteProvider, req *components.Fetc
 		healthCutoffMs:    now.Add(-s.cfg.HostHealthCheckDeadline).UnixMilli(),
 		leaseExpirationMs: now.Add(s.cfg.AlarmsLeaseDuration).UnixMilli(),
 		batchSize:         s.cfg.AlarmsFetchAheadBatchSize,
+
+		tablePrefix:               s.tablePrefix,
+		fetchNoConstraintsQuery:   s.fetchUpcomingAlarmsNoConstraintsQuery,
+		fetchWithConstraintsQuery: s.fetchUpcomingAlarmsWithConstraintsQuery,
 	}
 }
 
@@ -542,9 +557,9 @@ func (u *upcomingAlarmFetcher) getActiveHosts(ctx context.Context) (activeHosts 
 						WHEN hat.actor_concurrency_limit = 0 THEN 2147483647 - COALESCE(haac.active_count, 0)
 						ELSE MAX(0, hat.actor_concurrency_limit - COALESCE(haac.active_count, 0))
 					END
-				FROM host_actor_types AS hat
-				JOIN hosts ON hat.host_id = hosts.host_id
-				LEFT JOIN host_active_actor_count AS haac ON hat.host_id = haac.host_id AND hat.actor_type = haac.actor_type
+				FROM `+u.tablePrefix+`host_actor_types AS hat
+				JOIN `+u.tablePrefix+`hosts AS hosts ON hat.host_id = hosts.host_id
+				LEFT JOIN `+u.tablePrefix+`host_active_actor_count AS haac ON hat.host_id = haac.host_id AND hat.actor_type = haac.actor_type
 				WHERE
 					hosts.host_last_health_check >= ?
 					AND hosts.host_id IN (`+hostPlaceholders+`)
@@ -576,10 +591,10 @@ func (u *upcomingAlarmFetcher) fetchUpcoming(ctx context.Context, activeHosts *a
 		args  []any
 	)
 	if activeHosts.hasCapLimit {
-		query = queryFetchUpcomingAlarmsWithConstraints
+		query = u.fetchWithConstraintsQuery
 		args = []any{u.healthCutoffMs, u.batchSize, u.horizonMs, u.nowMs, u.batchSize}
 	} else {
-		query = queryFetchUpcomingAlarmsNoConstraints
+		query = u.fetchNoConstraintsQuery
 		args = []any{u.healthCutoffMs, u.horizonMs, u.nowMs, u.batchSize}
 	}
 
@@ -630,8 +645,9 @@ func (u *upcomingAlarmFetcher) allocateActors(ctx context.Context, activeHosts *
 			queryCtx, cancel := context.WithTimeout(ctx, u.timeout)
 			defer cancel()
 			// Note that we perform an upsert query here. This is because the actor (with same type and ID) may already be present in the table, where it's active on a host that has failed (but hasn't been garbage-collected yet)
+			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 			stmt, err = u.tx.PrepareContext(queryCtx,
-				`REPLACE INTO active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation)
+				`REPLACE INTO `+u.tablePrefix+`active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation)
 				VALUES (?, ?, ?, ?, ?)`,
 			)
 			if err != nil {
@@ -710,7 +726,7 @@ func (u *upcomingAlarmFetcher) obtainLeases(ctx context.Context, fetchedUpcoming
 	// #nosec G202
 	rows, err := u.tx.QueryContext(queryCtx,
 		`
-		UPDATE alarms
+		UPDATE `+u.tablePrefix+`alarms
 		SET
 			alarm_lease_id = ? || '_' || alarm_id,
 			alarm_lease_expiration_time = ?

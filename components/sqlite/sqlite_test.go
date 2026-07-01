@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,6 +50,10 @@ func TestSQLiteProviderDisk(t *testing.T) {
 }
 
 func initTestProvider(t *testing.T, connString string) (p *SQLiteProvider) {
+	return initTestProviderWithPrefix(t, connString, "")
+}
+
+func initTestProviderWithPrefix(t *testing.T, connString string, tablePrefix string) (p *SQLiteProvider) {
 	clock := clocktesting.NewFakeClock(time.Now())
 	h := comptesting.NewSlogClockHandler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
@@ -57,6 +62,7 @@ func initTestProvider(t *testing.T, connString string) (p *SQLiteProvider) {
 
 	providerOpts := SQLiteProviderOptions{
 		ConnectionString: connString,
+		TablePrefix:      tablePrefix,
 
 		// Disable automated cleanups in this test
 		// We will run the cleanups automatically
@@ -110,15 +116,16 @@ func (s *SQLiteProvider) Seed(ctx context.Context, spec comptesting.Spec) error 
 		for _, tbl := range []string{"active_actors", "host_actor_types", "hosts", "actor_state", "alarms"} {
 			// Disable the "G202: SQL string concatenation" gosec warning, since there's no risk of SQL injection here
 			// #nosec G202
-			_, err = tx.ExecContext(ctx, "DELETE FROM "+tbl)
+			_, err = tx.ExecContext(ctx, "DELETE FROM "+s.tablePrefix+tbl)
 			if err != nil {
 				return z, fmt.Errorf("truncate '%s': %w", tbl, err)
 			}
 		}
 
 		// Hosts
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		insHost, err := tx.PrepareContext(ctx,
-			`INSERT INTO hosts (host_id, host_address, host_last_health_check)
+			`INSERT INTO `+s.tablePrefix+`hosts (host_id, host_address, host_last_health_check)
 			VALUES (?, ?, ?)`,
 		)
 		if err != nil {
@@ -135,8 +142,9 @@ func (s *SQLiteProvider) Seed(ctx context.Context, spec comptesting.Spec) error 
 		_ = insHost.Close()
 
 		// Host actor types
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		insHat, err := tx.PrepareContext(ctx,
-			`INSERT INTO host_actor_types (host_id, actor_type, actor_idle_timeout, actor_concurrency_limit)
+			`INSERT INTO `+s.tablePrefix+`host_actor_types (host_id, actor_type, actor_idle_timeout, actor_concurrency_limit)
 			VALUES (?, ?, ?, ?)`,
 		)
 		if err != nil {
@@ -157,8 +165,9 @@ func (s *SQLiteProvider) Seed(ctx context.Context, spec comptesting.Spec) error 
 		_ = insHat.Close()
 
 		// Active actors
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		insAA, err := tx.PrepareContext(ctx,
-			`INSERT INTO active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation)
+			`INSERT INTO `+s.tablePrefix+`active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation)
 			VALUES (?, ?, ?, ?, ?)`,
 		)
 		if err != nil {
@@ -178,8 +187,9 @@ func (s *SQLiteProvider) Seed(ctx context.Context, spec comptesting.Spec) error 
 		_ = insAA.Close()
 
 		// Alarms
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		insAlarm, err := tx.PrepareContext(ctx,
-			`INSERT INTO alarms (
+			`INSERT INTO `+s.tablePrefix+`alarms (
 				alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
 				alarm_interval, alarm_ttl_time, alarm_data,
 				alarm_lease_id, alarm_lease_expiration_time
@@ -230,7 +240,8 @@ func (s *SQLiteProvider) Seed(ctx context.Context, spec comptesting.Spec) error 
 }
 
 func (s *SQLiteProvider) GetAllActorState(ctx context.Context) (comptesting.ActorStateSpecCollection, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT actor_type, actor_id, actor_state_data FROM actor_state")
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	rows, err := s.db.QueryContext(ctx, "SELECT actor_type, actor_id, actor_state_data FROM "+s.tablePrefix+"actor_state")
 	if err != nil {
 		return nil, fmt.Errorf("select actor_state: %w", err)
 	}
@@ -252,7 +263,8 @@ func (s *SQLiteProvider) GetAllActorState(ctx context.Context) (comptesting.Acto
 func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, error) {
 	return sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (res comptesting.Spec, err error) {
 		// Load all hosts
-		rows, err := tx.QueryContext(ctx, "SELECT host_id, host_address, host_last_health_check FROM hosts")
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		rows, err := tx.QueryContext(ctx, "SELECT host_id, host_address, host_last_health_check FROM "+s.tablePrefix+"hosts")
 		if err != nil {
 			return res, fmt.Errorf("select hosts: %w", err)
 		}
@@ -273,7 +285,8 @@ func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, err
 		rows.Close() //nolint:sqlclosecheck
 
 		// Load all actor types
-		rows, err = tx.QueryContext(ctx, "SELECT host_id, actor_type, actor_idle_timeout, actor_concurrency_limit FROM host_actor_types")
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		rows, err = tx.QueryContext(ctx, "SELECT host_id, actor_type, actor_idle_timeout, actor_concurrency_limit FROM "+s.tablePrefix+"host_actor_types")
 		if err != nil {
 			return res, fmt.Errorf("select host_actor_types: %w", err)
 		}
@@ -294,7 +307,8 @@ func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, err
 		rows.Close() //nolint:sqlclosecheck
 
 		// Load all active actors
-		rows, err = tx.QueryContext(ctx, "SELECT actor_type, actor_id, host_id, actor_idle_timeout, actor_activation FROM active_actors")
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		rows, err = tx.QueryContext(ctx, "SELECT actor_type, actor_id, host_id, actor_idle_timeout, actor_activation FROM "+s.tablePrefix+"active_actors")
 		if err != nil {
 			return res, fmt.Errorf("select active_actors: %w", err)
 		}
@@ -316,7 +330,8 @@ func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, err
 		rows.Close() //nolint:sqlclosecheck
 
 		// Load all alarms
-		rows, err = tx.QueryContext(ctx, "SELECT alarm_id, actor_type, actor_id, alarm_name, alarm_due_time, alarm_interval, alarm_ttl_time, alarm_data, alarm_lease_id, alarm_lease_expiration_time FROM alarms")
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		rows, err = tx.QueryContext(ctx, "SELECT alarm_id, actor_type, actor_id, alarm_name, alarm_due_time, alarm_interval, alarm_ttl_time, alarm_data, alarm_lease_id, alarm_lease_expiration_time FROM "+s.tablePrefix+"alarms")
 		if err != nil {
 			return res, fmt.Errorf("select alarms: %w", err)
 		}
@@ -462,6 +477,72 @@ func TestHostGarbageCollection(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, spec.Hosts, "All hosts should be removed")
 		assert.Empty(t, spec.HostActorTypes, "All host actor types should be removed")
+	})
+}
+
+func TestTablePrefix(t *testing.T) {
+	// schemaObjects returns the names of all tables and views in the database
+	schemaObjects := func(t *testing.T, s *SQLiteProvider) []string {
+		t.Helper()
+		rows, err := s.db.QueryContext(t.Context(), "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') ORDER BY name")
+		require.NoError(t, err)
+		defer rows.Close()
+
+		var names []string
+		for rows.Next() {
+			var name string
+			require.NoError(t, rows.Scan(&name))
+			names = append(names, name)
+		}
+		require.NoError(t, rows.Err())
+		return names
+	}
+
+	t.Run("default prefix is francis", func(t *testing.T) {
+		s := initTestProvider(t, "file:prefixdefault?mode=memory")
+		assert.Equal(t, "francis_", s.tablePrefix)
+
+		names := schemaObjects(t, s)
+		assert.Contains(t, names, "francis_hosts")
+		assert.Contains(t, names, "francis_alarms")
+		assert.Contains(t, names, "francis_dead_jobs")
+		assert.Contains(t, names, "francis_host_active_actor_count")
+		assert.Contains(t, names, "francis_metadata")
+		// No object should exist under its bare, unprefixed name
+		assert.NotContains(t, names, "hosts")
+		assert.NotContains(t, names, "alarms")
+	})
+
+	t.Run("custom prefix", func(t *testing.T) {
+		s := initTestProviderWithPrefix(t, "file:prefixcustom?mode=memory", "myapp")
+		assert.Equal(t, "myapp_", s.tablePrefix)
+
+		names := schemaObjects(t, s)
+		for _, name := range names {
+			assert.Truef(t, strings.HasPrefix(name, "myapp_"), "schema object %q is not prefixed", name)
+		}
+		assert.Contains(t, names, "myapp_hosts")
+		assert.Contains(t, names, "myapp_alarms")
+		assert.Contains(t, names, "myapp_metadata")
+	})
+
+	t.Run("custom prefix is functional end-to-end", func(t *testing.T) {
+		s := initTestProviderWithPrefix(t, "file:prefixe2e?mode=memory", "myapp")
+
+		// Register a host and set an alarm, then read them back through the regular API
+		hostRes, err := s.RegisterHost(t.Context(), components.RegisterHostReq{
+			Address: "10.0.0.1:8080",
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "TestActor", IdleTimeout: 5 * time.Minute},
+			},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, hostRes.HostID)
+
+		hosts, err := s.ListHosts(t.Context())
+		require.NoError(t, err)
+		require.Len(t, hosts, 1)
+		assert.Equal(t, "10.0.0.1:8080", hosts[0].Address)
 	})
 }
 

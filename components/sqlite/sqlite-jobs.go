@@ -42,8 +42,9 @@ func (s *SQLiteProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req
 	// Insert the job, or keep the existing one when an idempotency key (alarm name) already maps to a job
 	// SQLite cannot insert from a CTE, so we insert (ignoring conflicts) then read back the resulting ID, both in one transaction
 	jobID, err := sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (string, error) {
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, txErr := tx.ExecContext(ctx, `
-			INSERT INTO alarms
+			INSERT INTO `+s.tablePrefix+`alarms
 				(alarm_id, actor_type, actor_id, alarm_name,
 				alarm_due_time, alarm_interval, alarm_cron, alarm_ttl_time, alarm_data,
 				alarm_kind, job_method,
@@ -59,8 +60,9 @@ func (s *SQLiteProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req
 		}
 
 		var id string
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		txErr = tx.
-			QueryRowContext(ctx, `SELECT alarm_id FROM alarms WHERE actor_type = ? AND actor_id = ? AND alarm_name = ?`,
+			QueryRowContext(ctx, `SELECT alarm_id FROM `+s.tablePrefix+`alarms WHERE actor_type = ? AND actor_id = ? AND alarm_name = ?`,
 				aRef.ActorType, aRef.ActorID, aRef.Name,
 			).
 			Scan(&id)
@@ -90,9 +92,10 @@ func (s *SQLiteProvider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLe
 			interval, cron                *string
 			ttl                           *int64
 		)
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		txErr := tx.
 			QueryRowContext(ctx, `
-				DELETE FROM alarms
+				DELETE FROM `+s.tablePrefix+`alarms
 				WHERE
 					alarm_id = ?
 					AND alarm_lease_id = ?
@@ -113,8 +116,9 @@ func (s *SQLiteProvider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLe
 		method := derefString(jobMethod)
 
 		// Record the failed occurrence in the dead-letter store, preserving the original job ID
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, txErr = tx.ExecContext(ctx, `
-			INSERT INTO dead_jobs
+			INSERT INTO `+s.tablePrefix+`dead_jobs
 				(job_id, actor_type, actor_id, job_method, job_data,
 				attempts, last_error, failed_at, original_due, job_interval, job_cron)
 			VALUES
@@ -133,8 +137,9 @@ func (s *SQLiteProvider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLe
 				return struct{}{}, fmt.Errorf("failed to generate job ID for rescheduled occurrence: %w", genErr)
 			}
 
+			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 			_, txErr = tx.ExecContext(ctx, `
-				INSERT INTO alarms
+				INSERT INTO `+s.tablePrefix+`alarms
 					(alarm_id, actor_type, actor_id, alarm_name,
 					alarm_due_time, alarm_interval, alarm_cron, alarm_ttl_time, alarm_data,
 					alarm_kind, job_method,
@@ -169,12 +174,13 @@ func (s *SQLiteProvider) GetJob(ctx context.Context, jobID string) (components.J
 		interval, cron     *string
 		leased             int
 	)
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	err := s.db.
 		QueryRowContext(queryCtx, `
 			SELECT
 				actor_type, actor_id, job_method, alarm_due_time, alarm_interval, alarm_cron,
 				(alarm_lease_id IS NOT NULL AND alarm_lease_expiration_time IS NOT NULL AND alarm_lease_expiration_time >= ?)
-			FROM alarms
+			FROM `+s.tablePrefix+`alarms
 			WHERE alarm_id = ? AND alarm_kind = 'job'`,
 			now, jobID,
 		).
@@ -210,10 +216,11 @@ func (s *SQLiteProvider) GetJob(ctx context.Context, jobID string) (components.J
 		deadInterval *string
 		deadCron     *string
 	)
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	err = s.db.
 		QueryRowContext(queryCtx, `
 			SELECT actor_type, actor_id, job_method, attempts, last_error, original_due, job_interval, job_cron
-			FROM dead_jobs
+			FROM `+s.tablePrefix+`dead_jobs
 			WHERE job_id = ?`,
 			jobID,
 		).
@@ -247,17 +254,18 @@ func (s *SQLiteProvider) ListJobs(ctx context.Context, actorType string, actorID
 
 	// Live jobs (alarm rows) and dead-lettered jobs are disjoint by construction, so UNION ALL avoids an extra round-trip without any risk of duplicates
 	// Each branch projects into a common shape: the live branch derives the status and supplies zero attempts and no error, while the dead branch reports its recorded attempts and last error
+	// #nosec G202 -- the only concatenated values are static table prefixes, not user input
 	rows, err := s.db.QueryContext(queryCtx, `
 		SELECT alarm_id, job_method, alarm_due_time, alarm_interval, alarm_cron,
 			CASE WHEN alarm_lease_id IS NOT NULL AND alarm_lease_expiration_time IS NOT NULL AND alarm_lease_expiration_time >= ?
 				THEN 'active' ELSE 'pending' END,
 			0, NULL
-		FROM alarms
+		FROM `+s.tablePrefix+`alarms
 		WHERE actor_type = ? AND actor_id = ? AND alarm_kind = 'job'
 		UNION ALL
 		SELECT job_id, job_method, original_due, job_interval, job_cron,
 			'dead', attempts, last_error
-		FROM dead_jobs
+		FROM `+s.tablePrefix+`dead_jobs
 		WHERE actor_type = ? AND actor_id = ?`,
 		now, actorType, actorID, actorType, actorID,
 	)
@@ -308,8 +316,9 @@ func (s *SQLiteProvider) CancelJob(ctx context.Context, actorType string, actorI
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := s.db.ExecContext(queryCtx, `
-		DELETE FROM alarms
+		DELETE FROM `+s.tablePrefix+`alarms
 		WHERE actor_type = ? AND actor_id = ? AND alarm_id = ? AND alarm_kind = 'job'`,
 		actorType, actorID, jobID,
 	)
@@ -339,10 +348,11 @@ func (s *SQLiteProvider) GetDeadJob(ctx context.Context, jobID string) (componen
 		failedAt       int64
 		originalDue    int64
 	)
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	err := s.db.
 		QueryRowContext(queryCtx, `
 			SELECT actor_type, actor_id, job_method, job_data, attempts, last_error, failed_at, original_due, job_interval, job_cron
-			FROM dead_jobs
+			FROM `+s.tablePrefix+`dead_jobs
 			WHERE job_id = ?`,
 			jobID,
 		).
@@ -366,7 +376,8 @@ func (s *SQLiteProvider) DeleteDeadJob(ctx context.Context, jobID string) error 
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	res, err := s.db.ExecContext(queryCtx, `DELETE FROM dead_jobs WHERE job_id = ?`, jobID)
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	res, err := s.db.ExecContext(queryCtx, `DELETE FROM `+s.tablePrefix+`dead_jobs WHERE job_id = ?`, jobID)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)
 	}
@@ -397,8 +408,9 @@ func (s *SQLiteProvider) RetryDeadJob(ctx context.Context, jobID string) (string
 			actorType, actorID, method string
 			data                       []byte
 		)
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		txErr := tx.
-			QueryRowContext(ctx, `DELETE FROM dead_jobs WHERE job_id = ? RETURNING actor_type, actor_id, job_method, job_data`, jobID).
+			QueryRowContext(ctx, `DELETE FROM `+s.tablePrefix+`dead_jobs WHERE job_id = ? RETURNING actor_type, actor_id, job_method, job_data`, jobID).
 			Scan(&actorType, &actorID, &method, &data)
 		if errors.Is(txErr, sql.ErrNoRows) {
 			return "", components.ErrNoJob
@@ -410,8 +422,9 @@ func (s *SQLiteProvider) RetryDeadJob(ctx context.Context, jobID string) (string
 		}
 
 		// Re-dispatch as a fresh, immediate one-shot job with the same method and data, under a new random name
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, txErr = tx.ExecContext(ctx, `
-			INSERT INTO alarms
+			INSERT INTO `+s.tablePrefix+`alarms
 				(alarm_id, actor_type, actor_id, alarm_name,
 				alarm_due_time, alarm_data, alarm_kind, job_method,
 				alarm_lease_id, alarm_lease_expiration_time)

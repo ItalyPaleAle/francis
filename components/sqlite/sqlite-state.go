@@ -14,10 +14,11 @@ func (s *SQLiteProvider) GetState(ctx context.Context, ref ref.ActorRef) (data [
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	err = s.db.
 		QueryRowContext(queryCtx,
 			`SELECT actor_state_data
-			FROM actor_state
+			FROM `+s.tablePrefix+`actor_state
 			WHERE
 				actor_type = ?
 				AND actor_id = ?
@@ -44,8 +45,9 @@ func (s *SQLiteProvider) SetState(ctx context.Context, ref ref.ActorRef, data []
 	defer cancel()
 
 	// Performs a upsert
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	_, err := s.db.ExecContext(queryCtx,
-		`REPLACE INTO actor_state
+		`REPLACE INTO `+s.tablePrefix+`actor_state
 			(actor_type, actor_id, actor_state_data, actor_state_expiration_time)
 		VALUES (?, ?, ?, ?)`,
 		ref.ActorType, ref.ActorID, data, exp,
@@ -63,8 +65,9 @@ func (s *SQLiteProvider) DeleteState(ctx context.Context, ref ref.ActorRef) erro
 
 	// We exclude expired state from the deletion because we want to be able to get an appropriate count of affected rows, and return ErrNoState if nothing was deleted
 	// Expired state entries are garbage collected periodically anyways
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := s.db.ExecContext(queryCtx,
-		`DELETE FROM actor_state
+		`DELETE FROM `+s.tablePrefix+`actor_state
 		WHERE
 			actor_type = ?
 			AND actor_id = ?

@@ -52,10 +52,10 @@ WITH
         UNION
 
         SELECT aa.host_id
-        FROM active_actors AS aa
+        FROM %sactive_actors AS aa
         INNER JOIN temp_capacities AS cap
             USING (actor_type)
-        INNER JOIN hosts AS h
+        INNER JOIN %shosts AS h
             USING (host_id)
         WHERE
             h.host_last_health_check < ?
@@ -87,10 +87,10 @@ WITH
                 ORDER BY a.alarm_due_time, a.alarm_id
                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
             ) AS rownum
-        FROM alarms AS a
+        FROM %salarms AS a
         INNER JOIN actor_type_capacity AS atc
             USING (actor_type)
-        LEFT JOIN active_actors AS aa
+        LEFT JOIN %sactive_actors AS aa
             USING (actor_type, actor_id)
         WHERE 
             a.alarm_due_time <= ?
