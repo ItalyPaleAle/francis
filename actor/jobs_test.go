@@ -76,6 +76,14 @@ func TestJobPropertiesEffectiveDueTime(t *testing.T) {
 		d := p.EffectiveDueTime(now)
 		assert.Equal(t, now, d)
 	})
+
+	t.Run("cron with no due time schedules the first occurrence at the next tick, not now", func(t *testing.T) {
+		// now is a Sunday at noon UTC; "0 9 * * *" next fires the next day at 09:00 UTC
+		p := JobProperties{Cron: "0 9 * * *"}
+		d := p.EffectiveDueTime(now)
+		expected := time.Date(2026, 6, 29, 9, 0, 0, 0, time.UTC)
+		assert.Equal(t, expected, d, "a cron job with no explicit due time must not fire immediately at registration")
+	})
 }
 
 func TestNewJobProperties(t *testing.T) {

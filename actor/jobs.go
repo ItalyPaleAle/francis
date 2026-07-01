@@ -175,13 +175,21 @@ func (p JobProperties) Validate() error {
 }
 
 // EffectiveDueTime resolves the first run time against the given current time.
-// A relative delay wins, then an absolute due time, otherwise the job is due immediately.
+// A relative delay wins, then an absolute due time, then a cron schedule's own next tick, otherwise the job is due immediately.
 func (p JobProperties) EffectiveDueTime(now time.Time) time.Time {
 	switch {
 	case p.Delay > 0:
 		return now.Add(p.Delay)
 	case !p.DueTime.IsZero():
 		return p.DueTime
+	case p.Cron != "":
+		// A repeating cron job with no explicit due time schedules its first occurrence at the next tick rather than firing immediately at registration
+		// Validate has already confirmed the expression parses by the time this runs, so the parse error here should not occur in practice
+		sched, err := cron.ParseStandard(p.Cron)
+		if err != nil {
+			return now
+		}
+		return sched.Next(now)
 	default:
 		return now
 	}
