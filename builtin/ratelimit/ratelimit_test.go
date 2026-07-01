@@ -202,8 +202,8 @@ func TestInvokeAllow(t *testing.T) {
 	})
 }
 
-// TestAllowResultRoundTrip verifies the allow reply survives the msgpack round-trip used for cross-host invocations:
-// the owning host marshals the actor's return value, the caller decodes the body into a generic any, and the envelope then decodes it into allowResult
+// TestAllowResultRoundTrip verifies the allow reply survives the msgpack round-trip used for cross-host invocations.
+// The owning host marshals the actor's return value, the caller decodes the body into a generic any, and the envelope then decodes it into allowResult
 func TestAllowResultRoundTrip(t *testing.T) {
 	cases := map[string]allowResult{
 		"admitted":  {Allowed: true},

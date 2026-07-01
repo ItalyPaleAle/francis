@@ -153,9 +153,11 @@ type RateLimitService struct {
 
 // Allow reports whether a call for the given key is admitted under the configured rate, without blocking
 //
-// When allowed is true the call has consumed a slot and may proceed. When it is false the call was throttled and retryAfter is how long the caller should wait before the key admits another call, which maps directly onto a Retry-After header for a 429 response. retryAfter is zero whenever allowed is true.
+// When allowed is true the call has consumed a slot and may proceed.
+// When it is false the call was throttled and retryAfter is how long the caller should wait before the key admits another call, which maps directly onto a Retry-After header for a 429 response. retryAfter is zero whenever allowed is true.
 //
-// The key is free-form (an IP address, user ID, route, and so on) and must not contain '/'. The returned error is non-nil only when the key is invalid or the underlying actor invocation fails (including context cancellation); it is not used to signal throttling.
+// The key is free-form (e.g. an IP address, user ID, route, etc) and must not contain '/'.
+// The returned error is non-nil only when the key is invalid or the underlying actor invocation fails (including context cancellation) - it is not used to signal throttling.
 func (s *RateLimitService) Allow(ctx context.Context, key string) (allowed bool, retryAfter time.Duration, err error) {
 	if key == "" {
 		return false, 0, errors.New("rate limit key is required")
@@ -220,9 +222,14 @@ func (a *rateLimitActor) Invoke(ctx context.Context, method string, _ actor.Enve
 	if delay > 0 {
 		// Throttled: hand the token back so a rejected call does not drain the bucket, and report how long until a slot frees up
 		r.CancelAt(now)
-		return allowResult{RetryAfter: delay}, nil
+		return allowResult{
+			Allowed:    false,
+			RetryAfter: delay,
+		}, nil
 	}
 
 	// Admitted right now: the reserved token is consumed
-	return allowResult{Allowed: true}, nil
+	return allowResult{
+		Allowed: true,
+	}, nil
 }

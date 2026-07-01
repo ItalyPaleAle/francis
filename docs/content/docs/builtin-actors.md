@@ -88,9 +88,8 @@ err := cleanup.Unregister(ctx)
 
 A rate limiter actor throttles calls **per key**, a free-form string you choose (e.g. an IP address, user ID, route, API token, etc). Each key is limited independently, and its limiter state lives only in the activated actor's memory, for optimal performance.
 
-It follows the token-bucket model, and `Allow` is a **non-blocking** check: it reports whether the call is admitted right now and, when it is not, how long the caller should wait before retrying. That wait maps directly onto a `Retry-After` header on a `429 Too Many Requests` response.
-
-Because `Allow` never blocks, a throttled call returns immediately instead of holding the actor's turn (calls for different keys run on independent instances and never contend with each other).
+It follows the token-bucket model, and `Allow` is a non-blocking check: it reports whether the call is admitted right now and, when it is not, how long the caller should wait before retrying.  
+The returned wait can be used as a  `Retry-After` header on a `429 Too Many Requests` response.
 
 ### Registering
 
@@ -147,4 +146,5 @@ if !allowed {
 // ... handle the request ...
 ```
 
-`Allow` never blocks. When `allowed` is `false`, `retryAfter` tells the caller how long to wait before the key admits another call (it is zero when `allowed` is `true`). The returned `error` is non-nil only when the key is invalid or the underlying actor invocation fails, including context cancellation - it never signals throttling.
+`Allow` never blocks. When `allowed` is `false`, `retryAfter` tells the caller how long to wait before the key admits another call (it is zero when `allowed` is `true`).  
+The returned `error` is non-nil only when the key is invalid or the underlying actor invocation fails, including context cancellation - it never signals throttling.
