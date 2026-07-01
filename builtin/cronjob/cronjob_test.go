@@ -134,7 +134,8 @@ func TestCronJobRegister(t *testing.T) {
 		runner := &fakeClient[struct{}]{dispatchID: "job-1"}
 		a := &cronJobScheduler{interval: "PT1M", state: state, runner: runner}
 
-		require.NoError(t, a.register(ctx))
+		err := a.register(ctx)
+		require.NoError(t, err)
 
 		// The recurring job is dispatched to the runner, not stored on the scheduler
 		require.Len(t, runner.dispatches, 1)
@@ -147,10 +148,18 @@ func TestCronJobRegister(t *testing.T) {
 
 	t.Run("is a no-op when already registered with a matching schedule", func(t *testing.T) {
 		state := &fakeClient[cronJobState]{state: cronJobState{JobID: "existing"}}
-		runner := &fakeClient[struct{}]{dispatchID: "job-2", getJobInfo: actor.JobInfo{Interval: "PT1M"}}
-		a := &cronJobScheduler{interval: "PT1M", state: state, runner: runner}
+		runner := &fakeClient[struct{}]{
+			dispatchID: "job-2",
+			getJobInfo: actor.JobInfo{Interval: "PT1M"},
+		}
+		a := &cronJobScheduler{
+			interval: "PT1M",
+			state: state,
+			runner: runner,
+		}
 
-		require.NoError(t, a.register(ctx))
+		err := a.register(ctx)
+		require.NoError(t, err)
 
 		assert.Empty(t, runner.dispatches, "a matching schedule must not dispatch again")
 		assert.Empty(t, runner.cancelled)
@@ -160,10 +169,21 @@ func TestCronJobRegister(t *testing.T) {
 	t.Run("replaces the job when the configured schedule changed, preserving the next due time", func(t *testing.T) {
 		oldDue := time.Now().Add(3 * time.Hour)
 		state := &fakeClient[cronJobState]{state: cronJobState{JobID: "existing"}}
-		runner := &fakeClient[struct{}]{dispatchID: "job-new", getJobInfo: actor.JobInfo{Interval: "PT5M", DueTime: oldDue}}
-		a := &cronJobScheduler{interval: "PT1M", state: state, runner: runner}
+		runner := &fakeClient[struct{}]{
+			dispatchID: "job-new",
+			getJobInfo: actor.JobInfo{
+				Interval: "PT5M",
+				DueTime: oldDue,
+			},
+		}
+		a := &cronJobScheduler{
+			interval: "PT1M", 
+			state: state, 
+			runner: runner,
+		}
 
-		require.NoError(t, a.register(ctx))
+		err := a.register(ctx)
+		require.NoError(t, err)
 
 		// The outdated job is cancelled and a fresh one is dispatched with the currently configured schedule
 		assert.Equal(t, []string{"existing"}, runner.cancelled)
@@ -178,10 +198,22 @@ func TestCronJobRegister(t *testing.T) {
 	t.Run("replaces the job and runs immediately when the schedule changed and WithImmediate is set", func(t *testing.T) {
 		oldDue := time.Now().Add(3 * time.Hour)
 		state := &fakeClient[cronJobState]{state: cronJobState{JobID: "existing"}}
-		runner := &fakeClient[struct{}]{dispatchID: "job-new", getJobInfo: actor.JobInfo{Cron: "0 9 * * *", DueTime: oldDue}}
-		a := &cronJobScheduler{cron: "0 10 * * *", immediate: true, state: state, runner: runner}
+		runner := &fakeClient[struct{}]{
+			dispatchID: "job-new",
+			getJobInfo: actor.JobInfo{
+				Cron: "0 9 * * *",
+				DueTime: oldDue,
+			},
+		}
+		a := &cronJobScheduler{
+			cron: "0 10 * * *",
+			immediate: true,
+			state: state,
+			runner: runner,
+		}
 
-		require.NoError(t, a.register(ctx))
+		err := a.register(ctx)
+		require.NoError(t, err)
 
 		assert.Equal(t, []string{"existing"}, runner.cancelled)
 		require.Len(t, runner.dispatches, 2, "a replaced schedule with WithImmediate also dispatches the one-shot occurrence")
@@ -196,7 +228,8 @@ func TestCronJobRegister(t *testing.T) {
 		runner := &fakeClient[struct{}]{dispatchID: "job-new", getJobErr: actor.ErrJobNotFound}
 		a := &cronJobScheduler{interval: "PT1M", state: state, runner: runner}
 
-		require.NoError(t, a.register(ctx))
+		err := a.register(ctx)
+		require.NoError(t, err)
 
 		assert.Empty(t, runner.cancelled, "nothing to cancel when the job is already gone")
 		require.Len(t, runner.dispatches, 1)

@@ -307,9 +307,11 @@ func (a *cronJobScheduler) registerNew(ctx context.Context, preserveDueTime time
 	if err != nil {
 		return err
 	}
+
 	if !a.immediate && !preserveDueTime.IsZero() {
 		jobOpts = append(jobOpts, actor.WithJobDueTime(preserveDueTime))
 	}
+
 	jobID, err := a.runner.Dispatch(ctx, methodRun, nil, jobOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to register recurring cron job: %w", err)
