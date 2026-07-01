@@ -249,7 +249,7 @@ func (a *cronJobScheduler) register(ctx context.Context) error {
 		return a.reconcileSchedule(ctx, state.JobID)
 	}
 
-	return a.registerNew(ctx)
+	return a.registerNew(ctx, time.Time{})
 }
 
 // reconcileSchedule loads the already-registered job and compares its schedule to the one currently configured
@@ -262,7 +262,7 @@ func (a *cronJobScheduler) reconcileSchedule(ctx context.Context, jobID string) 
 			a.log.Warn("Registered cron job is missing; re-registering", slog.String("jobID", jobID))
 		}
 
-		return a.registerNew(ctx)
+		return a.registerNew(ctx, time.Time{})
 	} else if err != nil {
 		return fmt.Errorf("failed to load registered cron job: %w", err)
 	}
@@ -285,12 +285,16 @@ func (a *cronJobScheduler) reconcileSchedule(ctx context.Context, jobID string) 
 		return fmt.Errorf("failed to cancel outdated cron job: %w", err)
 	}
 
-	return a.registerNew(ctx)
+	// Keep the next occurrence at the time the old schedule already had it due for, rather than resetting the clock from now
+	// Only the recurrence going forward picks up the new schedule
+	return a.registerNew(ctx, job.DueTime)
 }
 
 // registerNew dispatches the recurring job for the configured schedule and persists its ID, replacing whatever was previously stored
 // When WithImmediate is set, it also runs once right away: folded into the recurring job's first due time for interval/period, or as a separate one-shot occurrence for cron, which schedules its own next tick
-func (a *cronJobScheduler) registerNew(ctx context.Context) error {
+// preserveDueTime, when non-zero, pins the first occurrence to that time instead of letting the configured schedule compute a fresh one - used when replacing a job whose schedule changed, so the replacement does not reset how soon the next run happens
+// It is ignored when WithImmediate is set, since immediate execution takes priority
+func (a *cronJobScheduler) registerNew(ctx context.Context, preserveDueTime time.Time) error {
 	if a.immediate && a.cron != "" {
 		_, err := a.runner.Dispatch(ctx, methodRun, nil, actor.WithIdempotencyKey(immediateJobIdempotencyKey))
 		if err != nil {
@@ -302,6 +306,9 @@ func (a *cronJobScheduler) registerNew(ctx context.Context) error {
 	jobOpts, err := a.recurringJobOptions()
 	if err != nil {
 		return err
+	}
+	if !a.immediate && !preserveDueTime.IsZero() {
+		jobOpts = append(jobOpts, actor.WithJobDueTime(preserveDueTime))
 	}
 	jobID, err := a.runner.Dispatch(ctx, methodRun, nil, jobOpts...)
 	if err != nil {
