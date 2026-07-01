@@ -154,8 +154,8 @@ func TestCronJobRegister(t *testing.T) {
 		}
 		a := &cronJobScheduler{
 			interval: "PT1M",
-			state: state,
-			runner: runner,
+			state:    state,
+			runner:   runner,
 		}
 
 		err := a.register(ctx)
@@ -173,13 +173,13 @@ func TestCronJobRegister(t *testing.T) {
 			dispatchID: "job-new",
 			getJobInfo: actor.JobInfo{
 				Interval: "PT5M",
-				DueTime: oldDue,
+				DueTime:  oldDue,
 			},
 		}
 		a := &cronJobScheduler{
-			interval: "PT1M", 
-			state: state, 
-			runner: runner,
+			interval: "PT1M",
+			state:    state,
+			runner:   runner,
 		}
 
 		err := a.register(ctx)
@@ -201,15 +201,15 @@ func TestCronJobRegister(t *testing.T) {
 		runner := &fakeClient[struct{}]{
 			dispatchID: "job-new",
 			getJobInfo: actor.JobInfo{
-				Cron: "0 9 * * *",
+				Cron:    "0 9 * * *",
 				DueTime: oldDue,
 			},
 		}
 		a := &cronJobScheduler{
-			cron: "0 10 * * *",
+			cron:      "0 10 * * *",
 			immediate: true,
-			state: state,
-			runner: runner,
+			state:     state,
+			runner:    runner,
 		}
 
 		err := a.register(ctx)
