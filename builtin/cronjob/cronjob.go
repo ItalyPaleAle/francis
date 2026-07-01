@@ -236,28 +236,67 @@ func (a *cronJobScheduler) Invoke(ctx context.Context, method string, _ actor.En
 	}
 }
 
-// register sets up the recurring job exactly once
-// It is idempotent: once a job ID is stored it returns immediately, and the recurring job carries a stable idempotency key so a retried registration never creates a duplicate
+// register sets up the recurring job, or, if one is already registered, reconciles it against the configured schedule
+// A retried registration is safe: the recurring job carries a stable idempotency key so re-dispatching it never creates a duplicate
 func (a *cronJobScheduler) register(ctx context.Context) error {
 	state, err := a.state.GetState(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to read cron job state: %w", err)
 	}
 
-	// Already registered: nothing to do
+	// Already registered: reconcile the existing job's schedule against the configured one rather than assuming it still matches
 	if state.JobID != "" {
+		return a.reconcileSchedule(ctx, state.JobID)
+	}
+
+	return a.registerNew(ctx, time.Time{})
+}
+
+// reconcileSchedule loads the already-registered job and compares its schedule to the one currently configured
+// A mismatch (e.g. the cron expression or interval was changed in code since the job was first registered) replaces the job: the old one is cancelled and a new one is registered in its place, running immediately too when WithImmediate is set
+// A missing job (e.g. cancelled outside the framework) is treated the same as never having registered
+func (a *cronJobScheduler) reconcileSchedule(ctx context.Context, jobID string) error {
+	job, err := a.runner.GetJob(ctx, jobID)
+	if errors.Is(err, actor.ErrJobNotFound) {
 		if a.log != nil {
-			a.log.Info("Cron job already registered", slog.String("jobID", state.JobID))
+			a.log.Warn("Registered cron job is missing; re-registering", slog.String("jobID", jobID))
+		}
+
+		return a.registerNew(ctx, time.Time{})
+	} else if err != nil {
+		return fmt.Errorf("failed to load registered cron job: %w", err)
+	}
+
+	if job.Cron == a.cron && job.Interval == a.interval {
+		if a.log != nil {
+			a.log.Info("Cron job already registered", slog.String("jobID", jobID))
 		}
 
 		return nil
 	}
 
-	// On first registration with WithImmediate, run once right away
-	// For interval/period this is folded into the recurring job's first due time
-	// Cron schedules the next tick, so dispatch a one-shot occurrence now
+	if a.log != nil {
+		a.log.Info("Cron job schedule changed; replacing recurring job", slog.String("oldJobID", jobID))
+	}
+
+	err = a.runner.CancelJob(ctx, jobID)
+	if err != nil && !errors.Is(err, actor.ErrJobNotFound) {
+		// A job that is already gone is fine: we still want to register the new schedule
+		return fmt.Errorf("failed to cancel outdated cron job: %w", err)
+	}
+
+	// Keep the next occurrence at the time the old schedule already had it due for, rather than resetting the clock from now
+	// Only the recurrence going forward picks up the new schedule
+	return a.registerNew(ctx, job.DueTime)
+}
+
+// registerNew dispatches the recurring job for the configured schedule and persists its ID, replacing whatever was previously stored
+// When WithImmediate is set, it also runs once right away: folded into the recurring job's first due time for interval/period, or as a separate one-shot occurrence for cron, which schedules its own next tick
+// preserveDueTime, when non-zero, pins the first occurrence to that time instead of letting the configured schedule compute a fresh one - used when replacing a job whose schedule changed, so the replacement does not reset how soon the next run happens
+// It is ignored when WithImmediate is set, since immediate execution takes priority
+func (a *cronJobScheduler) registerNew(ctx context.Context, preserveDueTime time.Time) error {
 	if a.immediate && a.cron != "" {
-		_, err = a.runner.Dispatch(ctx, methodRun, nil, actor.WithIdempotencyKey(immediateJobIdempotencyKey))
+		_, err := a.runner.Dispatch(ctx, methodRun, nil, actor.WithIdempotencyKey(immediateJobIdempotencyKey))
 		if err != nil {
 			return fmt.Errorf("failed to dispatch immediate cron job occurrence: %w", err)
 		}
@@ -268,14 +307,18 @@ func (a *cronJobScheduler) register(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
+	if !a.immediate && !preserveDueTime.IsZero() {
+		jobOpts = append(jobOpts, actor.WithJobDueTime(preserveDueTime))
+	}
+
 	jobID, err := a.runner.Dispatch(ctx, methodRun, nil, jobOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to register recurring cron job: %w", err)
 	}
 
 	// Persist the job ID so a duplicate register is a no-op and unregister can cancel it
-	state.JobID = jobID
-	err = a.state.SetState(ctx, state, nil)
+	err = a.state.SetState(ctx, cronJobState{JobID: jobID}, nil)
 	if err != nil {
 		return fmt.Errorf("failed to save cron job state: %w", err)
 	}
