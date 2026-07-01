@@ -115,7 +115,8 @@ func TestNewDefaultIdleTimeout(t *testing.T) {
 
 // TestNewDefaultsToStrict verifies that, without WithSlack, the limiter is strict and spaces calls out rather than admitting an initial burst
 func TestNewDefaultsToStrict(t *testing.T) {
-	// Two per 50ms; with the library's default slack of 10 a rapid burst would all be admitted instantly, so real spacing proves strict is the default
+	// Two per 50ms
+	// With the library's default slack of 10 a rapid burst would all be admitted instantly, so real spacing proves strict is the default
 	b, err := New("strict", WithRate(2), WithPer(50*time.Millisecond))
 	require.NoError(t, err)
 

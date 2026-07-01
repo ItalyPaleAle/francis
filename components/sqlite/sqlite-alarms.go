@@ -444,7 +444,8 @@ type upcomingAlarmFetcher struct {
 	leaseExpirationMs int64
 	batchSize         int
 
-	// tablePrefix is prepended to table names in the inline queries; the fetch queries below are already prefixed
+	// tablePrefix is prepended to table names in the inline queries
+	// The fetch queries below are already prefixed
 	tablePrefix               string
 	fetchNoConstraintsQuery   string
 	fetchWithConstraintsQuery string

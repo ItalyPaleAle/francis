@@ -28,9 +28,10 @@ var sqliteMigrations embed.FS
 type StandaloneSQLiteBacked struct {
 	*internal.Provider
 
-	db      *sql.DB
-	timeout time.Duration
-	log     *slog.Logger
+	db          *sql.DB
+	timeout     time.Duration
+	log         *slog.Logger
+	tablePrefix string
 }
 
 // StandaloneSQLiteOptions contains options for creating a StandaloneSQLiteBacked provider.
@@ -52,6 +53,11 @@ type StandaloneSQLiteOptions struct {
 	// Default is 5 minutes
 	// Set to a negative value to disable
 	CleanupInterval time.Duration
+
+	// Prefix added to the name of every table (and other schema object) used by the provider
+	// When set, tables are named "<prefix>_<table>", e.g. with prefix "francis" the hosts table is "francis_hosts"
+	// Defaults to "francis" when empty
+	TablePrefix string
 }
 
 const defaultSQLiteTimeout = 5 * time.Second
@@ -68,9 +74,10 @@ func NewStandaloneSQLiteBacked(log *slog.Logger, opts StandaloneSQLiteOptions, p
 	}
 
 	s := &StandaloneSQLiteBacked{
-		db:      opts.DB,
-		timeout: timeout,
-		log:     log,
+		db:          opts.DB,
+		timeout:     timeout,
+		log:         log,
+		tablePrefix: resolveTablePrefix(opts.TablePrefix),
 	}
 
 	// Create the core provider with this as the persistence hook
@@ -127,7 +134,7 @@ func (s *StandaloneSQLiteBacked) validateConnection(ctx context.Context) error {
 func (s *StandaloneSQLiteBacked) runMigrations(ctx context.Context) error {
 	m := sqlitemigrations.Migrations{
 		Pool:              s.db,
-		MetadataTableName: "metadata",
+		MetadataTableName: s.tablePrefix + "metadata",
 		MetadataKey:       "migrations-version",
 	}
 
@@ -152,9 +159,12 @@ func (s *StandaloneSQLiteBacked) runMigrations(ctx context.Context) error {
 			return fmt.Errorf("error reading migration script '%s': %w", name, err)
 		}
 
+		// Apply the table prefix to the script's "%s" placeholders
+		script := applyTablePrefix(s.tablePrefix, string(data))
+
 		migrationFns[i] = func(ctx context.Context) error {
 			s.log.InfoContext(ctx, "Performing SQLite database migration", slog.String("migration", name))
-			_, err := m.GetConn().ExecContext(ctx, string(data))
+			_, err := m.GetConn().ExecContext(ctx, script)
 			if err != nil {
 				return fmt.Errorf("failed to perform migration '%s': %w", name, err)
 			}
@@ -219,7 +229,8 @@ func (s *StandaloneSQLiteBacked) loadFromDB(ctx context.Context) error {
 }
 
 func (s *StandaloneSQLiteBacked) loadHosts(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, "SELECT host_id, host_address, host_last_health_check FROM hosts")
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	rows, err := s.db.QueryContext(ctx, "SELECT host_id, host_address, host_last_health_check FROM "+s.tablePrefix+"hosts")
 	if err != nil {
 		return err
 	}
@@ -243,7 +254,8 @@ func (s *StandaloneSQLiteBacked) loadHosts(ctx context.Context) error {
 }
 
 func (s *StandaloneSQLiteBacked) loadHostActorTypes(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, "SELECT host_id, actor_type, actor_idle_timeout, actor_concurrency_limit FROM host_actor_types")
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	rows, err := s.db.QueryContext(ctx, "SELECT host_id, actor_type, actor_idle_timeout, actor_concurrency_limit FROM "+s.tablePrefix+"host_actor_types")
 	if err != nil {
 		return err
 	}
@@ -269,7 +281,8 @@ func (s *StandaloneSQLiteBacked) loadHostActorTypes(ctx context.Context) error {
 }
 
 func (s *StandaloneSQLiteBacked) loadActiveActors(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, "SELECT actor_type, actor_id, host_id, actor_idle_timeout, actor_activation FROM active_actors")
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	rows, err := s.db.QueryContext(ctx, "SELECT actor_type, actor_id, host_id, actor_idle_timeout, actor_activation FROM "+s.tablePrefix+"active_actors")
 	if err != nil {
 		return err
 	}
@@ -294,12 +307,13 @@ func (s *StandaloneSQLiteBacked) loadActiveActors(ctx context.Context) error {
 }
 
 func (s *StandaloneSQLiteBacked) loadAlarms(ctx context.Context) error {
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
 			alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
 			alarm_interval, alarm_cron, alarm_ttl_time, alarm_data,
 			alarm_lease_id, alarm_lease_expiration_time, alarm_kind, job_method
-		FROM alarms
+		FROM `+s.tablePrefix+`alarms
 	`)
 	if err != nil {
 		return err
@@ -363,11 +377,12 @@ func (s *StandaloneSQLiteBacked) loadAlarms(ctx context.Context) error {
 }
 
 func (s *StandaloneSQLiteBacked) loadDeadJobs(ctx context.Context) error {
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
 			job_id, actor_type, actor_id, job_method, job_data,
 			attempts, last_error, failed_at, original_due, job_interval, job_cron
-		FROM dead_jobs
+		FROM `+s.tablePrefix+`dead_jobs
 	`)
 	if err != nil {
 		return err
@@ -415,7 +430,8 @@ func (s *StandaloneSQLiteBacked) loadDeadJobs(ctx context.Context) error {
 }
 
 func (s *StandaloneSQLiteBacked) loadActorState(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, "SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time FROM actor_state")
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	rows, err := s.db.QueryContext(ctx, "SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time FROM "+s.tablePrefix+"actor_state")
 	if err != nil {
 		return err
 	}
@@ -520,7 +536,8 @@ func (s *StandaloneSQLiteBacked) PersistChanges(ctx context.Context, changes *in
 func (s *StandaloneSQLiteBacked) persistHostChanges(ctx context.Context, tx *sql.Tx, changes *internal.Changes) error {
 	// Deletes
 	for _, hostID := range changes.Hosts.Delete {
-		_, err := tx.ExecContext(ctx, "DELETE FROM hosts WHERE host_id = ?", hostID)
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		_, err := tx.ExecContext(ctx, "DELETE FROM "+s.tablePrefix+"hosts WHERE host_id = ?", hostID)
 		if err != nil {
 			return fmt.Errorf("failed to delete host %s: %w", hostID, err)
 		}
@@ -529,8 +546,9 @@ func (s *StandaloneSQLiteBacked) persistHostChanges(ctx context.Context, tx *sql
 	// Upserts
 	for _, hc := range changes.Hosts.Set {
 		h := hc.Value
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.ExecContext(ctx,
-			`REPLACE INTO hosts (host_id, host_address, host_last_health_check) VALUES (?, ?, ?)`,
+			`REPLACE INTO `+s.tablePrefix+`hosts (host_id, host_address, host_last_health_check) VALUES (?, ?, ?)`,
 			h.ID, h.Address, h.LastHealthCheck.UnixMilli(),
 		)
 		if err != nil {
@@ -544,8 +562,9 @@ func (s *StandaloneSQLiteBacked) persistHostChanges(ctx context.Context, tx *sql
 func (s *StandaloneSQLiteBacked) persistHostActorTypeChanges(ctx context.Context, tx *sql.Tx, changes *internal.Changes) error {
 	// Deletes
 	for _, key := range changes.HostActorTypes.Delete {
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.ExecContext(ctx,
-			"DELETE FROM host_actor_types WHERE host_id = ? AND actor_type = ?",
+			"DELETE FROM "+s.tablePrefix+"host_actor_types WHERE host_id = ? AND actor_type = ?",
 			key.HostID, key.ActorType,
 		)
 		if err != nil {
@@ -555,8 +574,9 @@ func (s *StandaloneSQLiteBacked) persistHostActorTypeChanges(ctx context.Context
 
 	// Upserts
 	for _, hat := range changes.HostActorTypes.Set {
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.ExecContext(ctx,
-			`REPLACE INTO host_actor_types (host_id, actor_type, actor_idle_timeout, actor_concurrency_limit) VALUES (?, ?, ?, ?)`,
+			`REPLACE INTO `+s.tablePrefix+`host_actor_types (host_id, actor_type, actor_idle_timeout, actor_concurrency_limit) VALUES (?, ?, ?, ?)`,
 			hat.HostID, hat.ActorType, hat.IdleTimeout.Milliseconds(), hat.ConcurrencyLimit,
 		)
 		if err != nil {
@@ -570,8 +590,9 @@ func (s *StandaloneSQLiteBacked) persistHostActorTypeChanges(ctx context.Context
 func (s *StandaloneSQLiteBacked) persistActiveActorChanges(ctx context.Context, tx *sql.Tx, changes *internal.Changes) error {
 	// Deletes
 	for _, key := range changes.ActiveActors.Delete {
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.ExecContext(ctx,
-			"DELETE FROM active_actors WHERE actor_type = ? AND actor_id = ?",
+			"DELETE FROM "+s.tablePrefix+"active_actors WHERE actor_type = ? AND actor_id = ?",
 			key.ActorType, key.ActorID,
 		)
 		if err != nil {
@@ -582,8 +603,9 @@ func (s *StandaloneSQLiteBacked) persistActiveActorChanges(ctx context.Context, 
 	// Upserts
 	for _, aac := range changes.ActiveActors.Set {
 		aa := aac.Value
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.ExecContext(ctx,
-			`REPLACE INTO active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation) VALUES (?, ?, ?, ?, ?)`,
+			`REPLACE INTO `+s.tablePrefix+`active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation) VALUES (?, ?, ?, ?, ?)`,
 			aa.ActorType, aa.ActorID, aa.HostID, aa.IdleTimeout.Milliseconds(), aa.Activation.UnixMilli(),
 		)
 		if err != nil {
@@ -597,7 +619,8 @@ func (s *StandaloneSQLiteBacked) persistActiveActorChanges(ctx context.Context, 
 func (s *StandaloneSQLiteBacked) persistAlarmChanges(ctx context.Context, tx *sql.Tx, changes *internal.Changes) error {
 	// Deletes
 	for _, alarmID := range changes.Alarms.Delete {
-		_, err := tx.ExecContext(ctx, "DELETE FROM alarms WHERE alarm_id = ?", alarmID)
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		_, err := tx.ExecContext(ctx, "DELETE FROM "+s.tablePrefix+"alarms WHERE alarm_id = ?", alarmID)
 		if err != nil {
 			return fmt.Errorf("failed to delete alarm %s: %w", alarmID, err)
 		}
@@ -635,8 +658,9 @@ func (s *StandaloneSQLiteBacked) persistAlarmChanges(ctx context.Context, tx *sq
 			jobMethodVal = a.JobMethod
 		}
 
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.ExecContext(ctx,
-			`REPLACE INTO alarms (
+			`REPLACE INTO `+s.tablePrefix+`alarms (
 				alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
 			    alarm_interval, alarm_cron, alarm_ttl_time, alarm_data,
 			    alarm_lease_id, alarm_lease_expiration_time, alarm_kind, job_method
@@ -655,7 +679,8 @@ func (s *StandaloneSQLiteBacked) persistAlarmChanges(ctx context.Context, tx *sq
 func (s *StandaloneSQLiteBacked) persistDeadJobChanges(ctx context.Context, tx *sql.Tx, changes *internal.Changes) error {
 	// Deletes
 	for _, jobID := range changes.DeadJobs.Delete {
-		_, err := tx.ExecContext(ctx, "DELETE FROM dead_jobs WHERE job_id = ?", jobID)
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		_, err := tx.ExecContext(ctx, "DELETE FROM "+s.tablePrefix+"dead_jobs WHERE job_id = ?", jobID)
 		if err != nil {
 			return fmt.Errorf("failed to delete dead job %s: %w", jobID, err)
 		}
@@ -678,8 +703,9 @@ func (s *StandaloneSQLiteBacked) persistDeadJobChanges(ctx context.Context, tx *
 			cronVal = d.Cron
 		}
 
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.ExecContext(ctx,
-			`REPLACE INTO dead_jobs (
+			`REPLACE INTO `+s.tablePrefix+`dead_jobs (
 				job_id, actor_type, actor_id, job_method, job_data,
 				attempts, last_error, failed_at, original_due, job_interval, job_cron
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -697,8 +723,9 @@ func (s *StandaloneSQLiteBacked) persistDeadJobChanges(ctx context.Context, tx *
 func (s *StandaloneSQLiteBacked) persistActorStateChanges(ctx context.Context, tx *sql.Tx, changes *internal.Changes) error {
 	// Deletes
 	for _, key := range changes.ActorState.Delete {
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.ExecContext(ctx,
-			"DELETE FROM actor_state WHERE actor_type = ? AND actor_id = ?",
+			"DELETE FROM "+s.tablePrefix+"actor_state WHERE actor_type = ? AND actor_id = ?",
 			key.ActorType, key.ActorID,
 		)
 		if err != nil {
@@ -715,8 +742,9 @@ func (s *StandaloneSQLiteBacked) persistActorStateChanges(ctx context.Context, t
 			expVal = entry.Expiration.UnixMilli()
 		}
 
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.ExecContext(ctx,
-			`REPLACE INTO actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time) VALUES (?, ?, ?, ?)`,
+			`REPLACE INTO `+s.tablePrefix+`actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time) VALUES (?, ?, ?, ?)`,
 			key.ActorType, key.ActorID, entry.Data, expVal,
 		)
 		if err != nil {

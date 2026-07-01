@@ -29,9 +29,10 @@ var postgresMigrations embed.FS
 type StandalonePostgresBacked struct {
 	*internal.Provider
 
-	db      *pgxpool.Pool
-	timeout time.Duration
-	log     *slog.Logger
+	db          *pgxpool.Pool
+	timeout     time.Duration
+	log         *slog.Logger
+	tablePrefix string
 }
 
 // StandalonePostgresOptions contains options for creating a StandalonePostgresBacked provider.
@@ -53,6 +54,11 @@ type StandalonePostgresOptions struct {
 	// Default is 5 minutes
 	// Set to a negative value to disable
 	CleanupInterval time.Duration
+
+	// Prefix added to the name of every table (and other schema object) used by the provider
+	// When set, tables are named "<prefix>_<table>", e.g. with prefix "francis" the hosts table is "francis_hosts"
+	// Defaults to "francis" when empty
+	TablePrefix string
 }
 
 const defaultPostgresTimeout = 5 * time.Second
@@ -69,9 +75,10 @@ func NewStandalonePostgresBacked(log *slog.Logger, opts StandalonePostgresOption
 	}
 
 	s := &StandalonePostgresBacked{
-		db:      opts.DB,
-		timeout: timeout,
-		log:     log,
+		db:          opts.DB,
+		timeout:     timeout,
+		log:         log,
+		tablePrefix: resolveTablePrefix(opts.TablePrefix),
 	}
 
 	// Create the core provider with this as the persistence hook
@@ -108,7 +115,7 @@ func (s *StandalonePostgresBacked) Init(ctx context.Context) error {
 func (s *StandalonePostgresBacked) runMigrations(ctx context.Context) error {
 	m := postgresmigrations.Migrations{
 		DB:                s.db,
-		MetadataTableName: "metadata",
+		MetadataTableName: s.tablePrefix + "metadata",
 		MetadataKey:       "migrations-version",
 	}
 
@@ -133,9 +140,12 @@ func (s *StandalonePostgresBacked) runMigrations(ctx context.Context) error {
 			return fmt.Errorf("error reading migration script '%s': %w", name, err)
 		}
 
+		// Apply the table prefix to the script's "%s" placeholders
+		script := applyTablePrefix(s.tablePrefix, string(data))
+
 		migrationFns[i] = func(ctx context.Context) error {
 			s.log.InfoContext(ctx, "Performing Postgres database migration", slog.String("migration", name))
-			_, err := m.DB.Exec(ctx, string(data))
+			_, err := m.DB.Exec(ctx, script)
 			if err != nil {
 				return fmt.Errorf("failed to perform migration '%s': %w", name, err)
 			}
@@ -200,7 +210,8 @@ func (s *StandalonePostgresBacked) loadFromDB(ctx context.Context) error {
 }
 
 func (s *StandalonePostgresBacked) loadHosts(ctx context.Context) error {
-	rows, err := s.db.Query(ctx, "SELECT host_id, host_address, host_last_health_check FROM hosts")
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	rows, err := s.db.Query(ctx, "SELECT host_id, host_address, host_last_health_check FROM "+s.tablePrefix+"hosts")
 	if err != nil {
 		return err
 	}
@@ -220,7 +231,8 @@ func (s *StandalonePostgresBacked) loadHosts(ctx context.Context) error {
 }
 
 func (s *StandalonePostgresBacked) loadHostActorTypes(ctx context.Context) error {
-	rows, err := s.db.Query(ctx, "SELECT host_id, actor_type, actor_idle_timeout, actor_concurrency_limit FROM host_actor_types")
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	rows, err := s.db.Query(ctx, "SELECT host_id, actor_type, actor_idle_timeout, actor_concurrency_limit FROM "+s.tablePrefix+"host_actor_types")
 	if err != nil {
 		return err
 	}
@@ -246,7 +258,8 @@ func (s *StandalonePostgresBacked) loadHostActorTypes(ctx context.Context) error
 }
 
 func (s *StandalonePostgresBacked) loadActiveActors(ctx context.Context) error {
-	rows, err := s.db.Query(ctx, "SELECT actor_type, actor_id, host_id, actor_idle_timeout, actor_activation FROM active_actors")
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	rows, err := s.db.Query(ctx, "SELECT actor_type, actor_id, host_id, actor_idle_timeout, actor_activation FROM "+s.tablePrefix+"active_actors")
 	if err != nil {
 		return err
 	}
@@ -270,12 +283,13 @@ func (s *StandalonePostgresBacked) loadActiveActors(ctx context.Context) error {
 }
 
 func (s *StandalonePostgresBacked) loadAlarms(ctx context.Context) error {
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	rows, err := s.db.Query(ctx, `
 		SELECT
 			alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
 			alarm_interval, alarm_cron, alarm_ttl_time, alarm_data,
 			alarm_lease_id, alarm_lease_expiration_time, alarm_kind, job_method
-		FROM alarms
+		FROM `+s.tablePrefix+`alarms
 	`)
 	if err != nil {
 		return err
@@ -337,11 +351,12 @@ func (s *StandalonePostgresBacked) loadAlarms(ctx context.Context) error {
 }
 
 func (s *StandalonePostgresBacked) loadDeadJobs(ctx context.Context) error {
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	rows, err := s.db.Query(ctx, `
 		SELECT
 			job_id, actor_type, actor_id, job_method, job_data,
 			attempts, last_error, failed_at, original_due, job_interval, job_cron
-		FROM dead_jobs
+		FROM `+s.tablePrefix+`dead_jobs
 	`)
 	if err != nil {
 		return err
@@ -385,7 +400,8 @@ func (s *StandalonePostgresBacked) loadDeadJobs(ctx context.Context) error {
 }
 
 func (s *StandalonePostgresBacked) loadActorState(ctx context.Context) error {
-	rows, err := s.db.Query(ctx, "SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time FROM actor_state")
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	rows, err := s.db.Query(ctx, "SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time FROM "+s.tablePrefix+"actor_state")
 	if err != nil {
 		return err
 	}
@@ -489,7 +505,8 @@ func (s *StandalonePostgresBacked) PersistChanges(ctx context.Context, changes *
 func (s *StandalonePostgresBacked) persistHostChanges(ctx context.Context, tx pgx.Tx, changes *internal.Changes) error {
 	// Deletes
 	for _, hostID := range changes.Hosts.Delete {
-		_, err := tx.Exec(ctx, "DELETE FROM hosts WHERE host_id = $1", hostID)
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		_, err := tx.Exec(ctx, "DELETE FROM "+s.tablePrefix+"hosts WHERE host_id = $1", hostID)
 		if err != nil {
 			return fmt.Errorf("failed to delete host %s: %w", hostID, err)
 		}
@@ -498,8 +515,9 @@ func (s *StandalonePostgresBacked) persistHostChanges(ctx context.Context, tx pg
 	// Upserts
 	for _, hc := range changes.Hosts.Set {
 		h := hc.Value
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.Exec(ctx,
-			`INSERT INTO hosts (host_id, host_address, host_last_health_check)
+			`INSERT INTO `+s.tablePrefix+`hosts (host_id, host_address, host_last_health_check)
 			VALUES ($1, $2, $3)
 			ON CONFLICT(host_id) DO UPDATE SET
 				host_address = EXCLUDED.host_address,
@@ -517,8 +535,9 @@ func (s *StandalonePostgresBacked) persistHostChanges(ctx context.Context, tx pg
 func (s *StandalonePostgresBacked) persistHostActorTypeChanges(ctx context.Context, tx pgx.Tx, changes *internal.Changes) error {
 	// Deletes
 	for _, key := range changes.HostActorTypes.Delete {
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.Exec(ctx,
-			"DELETE FROM host_actor_types WHERE host_id = $1 AND actor_type = $2",
+			"DELETE FROM "+s.tablePrefix+"host_actor_types WHERE host_id = $1 AND actor_type = $2",
 			key.HostID, key.ActorType,
 		)
 		if err != nil {
@@ -528,8 +547,9 @@ func (s *StandalonePostgresBacked) persistHostActorTypeChanges(ctx context.Conte
 
 	// Upserts
 	for _, hat := range changes.HostActorTypes.Set {
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.Exec(ctx,
-			`INSERT INTO host_actor_types (host_id, actor_type, actor_idle_timeout, actor_concurrency_limit)
+			`INSERT INTO `+s.tablePrefix+`host_actor_types (host_id, actor_type, actor_idle_timeout, actor_concurrency_limit)
 			VALUES ($1, $2, $3, $4)
 			ON CONFLICT(host_id, actor_type) DO UPDATE SET
 				actor_idle_timeout = EXCLUDED.actor_idle_timeout,
@@ -547,8 +567,9 @@ func (s *StandalonePostgresBacked) persistHostActorTypeChanges(ctx context.Conte
 func (s *StandalonePostgresBacked) persistActiveActorChanges(ctx context.Context, tx pgx.Tx, changes *internal.Changes) error {
 	// Deletes
 	for _, key := range changes.ActiveActors.Delete {
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.Exec(ctx,
-			"DELETE FROM active_actors WHERE actor_type = $1 AND actor_id = $2",
+			"DELETE FROM "+s.tablePrefix+"active_actors WHERE actor_type = $1 AND actor_id = $2",
 			key.ActorType, key.ActorID,
 		)
 		if err != nil {
@@ -559,8 +580,9 @@ func (s *StandalonePostgresBacked) persistActiveActorChanges(ctx context.Context
 	// Upserts
 	for _, aac := range changes.ActiveActors.Set {
 		aa := aac.Value
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.Exec(ctx,
-			`INSERT INTO active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation)
+			`INSERT INTO `+s.tablePrefix+`active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation)
 			VALUES ($1, $2, $3, $4, $5)
 			ON CONFLICT(actor_type, actor_id) DO UPDATE SET
 				host_id = EXCLUDED.host_id,
@@ -579,7 +601,8 @@ func (s *StandalonePostgresBacked) persistActiveActorChanges(ctx context.Context
 func (s *StandalonePostgresBacked) persistAlarmChanges(ctx context.Context, tx pgx.Tx, changes *internal.Changes) error {
 	// Deletes
 	for _, alarmID := range changes.Alarms.Delete {
-		_, err := tx.Exec(ctx, "DELETE FROM alarms WHERE alarm_id = $1", alarmID)
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		_, err := tx.Exec(ctx, "DELETE FROM "+s.tablePrefix+"alarms WHERE alarm_id = $1", alarmID)
 		if err != nil {
 			return fmt.Errorf("failed to delete alarm %s: %w", alarmID, err)
 		}
@@ -617,8 +640,9 @@ func (s *StandalonePostgresBacked) persistAlarmChanges(ctx context.Context, tx p
 			jobMethodVal = a.JobMethod
 		}
 
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.Exec(ctx,
-			`INSERT INTO alarms (
+			`INSERT INTO `+s.tablePrefix+`alarms (
 				alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
 			    alarm_interval, alarm_cron, alarm_ttl_time, alarm_data,
 			    alarm_lease_id, alarm_lease_expiration_time, alarm_kind, job_method)
@@ -650,7 +674,8 @@ func (s *StandalonePostgresBacked) persistAlarmChanges(ctx context.Context, tx p
 func (s *StandalonePostgresBacked) persistDeadJobChanges(ctx context.Context, tx pgx.Tx, changes *internal.Changes) error {
 	// Deletes
 	for _, jobID := range changes.DeadJobs.Delete {
-		_, err := tx.Exec(ctx, "DELETE FROM dead_jobs WHERE job_id = $1", jobID)
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		_, err := tx.Exec(ctx, "DELETE FROM "+s.tablePrefix+"dead_jobs WHERE job_id = $1", jobID)
 		if err != nil {
 			return fmt.Errorf("failed to delete dead job %s: %w", jobID, err)
 		}
@@ -673,8 +698,9 @@ func (s *StandalonePostgresBacked) persistDeadJobChanges(ctx context.Context, tx
 			cronVal = d.Cron
 		}
 
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.Exec(ctx,
-			`INSERT INTO dead_jobs (
+			`INSERT INTO `+s.tablePrefix+`dead_jobs (
 				job_id, actor_type, actor_id, job_method, job_data,
 				attempts, last_error, failed_at, original_due, job_interval, job_cron)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
@@ -703,8 +729,9 @@ func (s *StandalonePostgresBacked) persistDeadJobChanges(ctx context.Context, tx
 func (s *StandalonePostgresBacked) persistActorStateChanges(ctx context.Context, tx pgx.Tx, changes *internal.Changes) error {
 	// Deletes
 	for _, key := range changes.ActorState.Delete {
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.Exec(ctx,
-			"DELETE FROM actor_state WHERE actor_type = $1 AND actor_id = $2",
+			"DELETE FROM "+s.tablePrefix+"actor_state WHERE actor_type = $1 AND actor_id = $2",
 			key.ActorType, key.ActorID,
 		)
 		if err != nil {
@@ -721,8 +748,9 @@ func (s *StandalonePostgresBacked) persistActorStateChanges(ctx context.Context,
 			expVal = entry.Expiration.UTC()
 		}
 
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.Exec(ctx,
-			`INSERT INTO actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time)
+			`INSERT INTO `+s.tablePrefix+`actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time)
 			VALUES ($1, $2, $3, $4)
 			ON CONFLICT(actor_type, actor_id) DO UPDATE SET
 				actor_state_data = EXCLUDED.actor_state_data,

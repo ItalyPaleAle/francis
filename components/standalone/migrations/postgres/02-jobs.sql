@@ -1,10 +1,10 @@
 -- Add the job discriminator and job-specific columns to the alarms table
-ALTER TABLE alarms ADD COLUMN alarm_kind TEXT NOT NULL DEFAULT 'alarm';
-ALTER TABLE alarms ADD COLUMN job_method TEXT;
-ALTER TABLE alarms ADD COLUMN alarm_cron TEXT;
+ALTER TABLE %salarms ADD COLUMN alarm_kind TEXT NOT NULL DEFAULT 'alarm';
+ALTER TABLE %salarms ADD COLUMN job_method TEXT;
+ALTER TABLE %salarms ADD COLUMN alarm_cron TEXT;
 
 -- Dead-lettered jobs
-CREATE TABLE dead_jobs (
+CREATE TABLE %sdead_jobs (
     job_id UUID PRIMARY KEY NOT NULL,   -- equal to the original alarm_id
     actor_type TEXT NOT NULL,
     actor_id TEXT NOT NULL,
@@ -18,4 +18,4 @@ CREATE TABLE dead_jobs (
     job_cron TEXT
 );
 
-CREATE INDEX dead_jobs_actor_idx ON dead_jobs (actor_type, actor_id);
+CREATE INDEX %sdead_jobs_actor_idx ON %sdead_jobs (actor_type, actor_id);

@@ -1,12 +1,12 @@
 -- Hosts table
-CREATE TABLE hosts (
+CREATE TABLE %shosts (
     host_id UUID PRIMARY KEY NOT NULL,
     host_address TEXT NOT NULL UNIQUE,
     host_last_health_check TIMESTAMP NOT NULL  -- stored as UTC
 );
 
 -- Host actor types table
-CREATE TABLE host_actor_types (
+CREATE TABLE %shost_actor_types (
     host_id UUID NOT NULL,
     actor_type TEXT NOT NULL,
     actor_idle_timeout BIGINT NOT NULL,           -- milliseconds
@@ -15,7 +15,7 @@ CREATE TABLE host_actor_types (
 );
 
 -- Active actors table
-CREATE TABLE active_actors (
+CREATE TABLE %sactive_actors (
     actor_type TEXT NOT NULL,
     actor_id TEXT NOT NULL,
     host_id UUID NOT NULL,
@@ -25,7 +25,7 @@ CREATE TABLE active_actors (
 );
 
 -- Alarms table
-CREATE TABLE alarms (
+CREATE TABLE %salarms (
     alarm_id UUID PRIMARY KEY NOT NULL,
     actor_type TEXT NOT NULL,
     actor_id TEXT NOT NULL,
@@ -40,7 +40,7 @@ CREATE TABLE alarms (
 );
 
 -- Actor state table
-CREATE TABLE actor_state (
+CREATE TABLE %sactor_state (
     actor_type TEXT NOT NULL,
     actor_id TEXT NOT NULL,
     actor_state_data BYTEA NOT NULL,

@@ -56,7 +56,8 @@ func run(parentCtx context.Context, log *slog.Logger) error {
 		return fmt.Errorf("failed to create actor host: %w", err)
 	}
 
-	// Run the host in the background; the demo drives it once it is ready
+	// Run the host in the background
+	// The demo drives it once it is ready
 	errCh := make(chan error, 1)
 	go func() { errCh <- h.Run(ctx) }()
 

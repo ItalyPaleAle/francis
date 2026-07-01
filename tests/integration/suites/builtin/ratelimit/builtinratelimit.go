@@ -60,7 +60,8 @@ func (s *builtinRateLimit) Name() string {
 }
 
 func (s *builtinRateLimit) Setup(t *testing.T) []framework.Option {
-	// One call per second; the limiter is strict by default (no burst slack), so the first call for a key is immediate and the next is held for a full window
+	// One call per second
+	// The limiter is strict by default (no burst slack), so the first call for a key is immediate and the next is held for a full window
 	rlActor, err := ratelimit.New(
 		"e2e",
 		ratelimit.WithRate(1),

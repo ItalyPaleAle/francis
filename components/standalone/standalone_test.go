@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -56,7 +57,134 @@ func TestStandalonePostgresBacked(t *testing.T) {
 	t.Run("suite", suite.RunTests)
 }
 
+func TestStandaloneTablePrefix(t *testing.T) {
+	t.Run("SQLite", func(t *testing.T) {
+		// sqliteTables returns the names of all tables in the database, excluding SQLite's internal objects
+		sqliteTables := func(t *testing.T, p *StandaloneSQLiteBacked) []string {
+			t.Helper()
+			rows, err := p.db.QueryContext(t.Context(), "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+			require.NoError(t, err)
+			defer rows.Close()
+
+			var names []string
+			for rows.Next() {
+				var name string
+				require.NoError(t, rows.Scan(&name))
+				names = append(names, name)
+			}
+
+			err = rows.Err()
+			require.NoError(t, err)
+
+			return names
+		}
+
+		t.Run("default prefix is francis", func(t *testing.T) {
+			p := initSQLiteTestProvider(t)
+			require.Equal(t, "francis_", p.tablePrefix)
+
+			names := sqliteTables(t, p)
+			require.Contains(t, names, "francis_hosts")
+			require.Contains(t, names, "francis_alarms")
+			require.Contains(t, names, "francis_dead_jobs")
+			require.Contains(t, names, "francis_metadata")
+			// No object should exist under its bare, unprefixed name
+			require.NotContains(t, names, "hosts")
+			require.NotContains(t, names, "alarms")
+		})
+
+		t.Run("custom prefix", func(t *testing.T) {
+			p := initSQLiteTestProviderWithPrefix(t, "myapp")
+			require.Equal(t, "myapp_", p.tablePrefix)
+
+			names := sqliteTables(t, p)
+			for _, name := range names {
+				require.Truef(t, strings.HasPrefix(name, "myapp_"), "table %q is not prefixed", name)
+			}
+			require.Contains(t, names, "myapp_hosts")
+			require.Contains(t, names, "myapp_dead_jobs")
+			require.Contains(t, names, "myapp_metadata")
+		})
+
+		t.Run("custom prefix is functional end-to-end", func(t *testing.T) {
+			p := initSQLiteTestProviderWithPrefix(t, "myapp")
+
+			// Register a host and read it back through the regular API (which uses the prefixed inline queries)
+			hostRes, err := p.RegisterHost(t.Context(), components.RegisterHostReq{
+				Address: "10.0.0.1:8080",
+				ActorTypes: []components.ActorHostType{
+					{ActorType: "TestActor", IdleTimeout: 5 * time.Minute},
+				},
+			})
+			require.NoError(t, err)
+			require.NotEmpty(t, hostRes.HostID)
+
+			hosts, err := p.ListHosts(t.Context())
+			require.NoError(t, err)
+			require.Len(t, hosts, 1)
+			require.Equal(t, "10.0.0.1:8080", hosts[0].Address)
+		})
+	})
+
+	t.Run("Postgres", func(t *testing.T) {
+		// tableInSchema reports whether a table exists in the connection's current schema (the isolated per-test schema)
+		tableInSchema := func(t *testing.T, p *StandalonePostgresBacked, name string) bool {
+			t.Helper()
+			var exists bool
+			err := p.db.
+				QueryRow(t.Context(),
+					"SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = $1)",
+					name,
+				).
+				Scan(&exists)
+			require.NoError(t, err)
+			return exists
+		}
+
+		t.Run("default prefix is francis", func(t *testing.T) {
+			p, cleanupFn := initPostgresTestProvider(t)
+			t.Cleanup(cleanupFn)
+			require.Equal(t, "francis_", p.tablePrefix)
+
+			require.True(t, tableInSchema(t, p, "francis_hosts"))
+			require.True(t, tableInSchema(t, p, "francis_dead_jobs"))
+			require.True(t, tableInSchema(t, p, "francis_metadata"))
+			// No object should exist under its bare, unprefixed name
+			require.False(t, tableInSchema(t, p, "hosts"))
+			require.False(t, tableInSchema(t, p, "alarms"))
+		})
+
+		t.Run("custom prefix is functional end-to-end", func(t *testing.T) {
+			p, cleanupFn := initPostgresTestProviderWithPrefix(t, "myapp")
+			t.Cleanup(cleanupFn)
+			require.Equal(t, "myapp_", p.tablePrefix)
+
+			require.True(t, tableInSchema(t, p, "myapp_hosts"))
+			require.False(t, tableInSchema(t, p, "hosts"))
+
+			// Register a host and read it back through the regular API (which uses the prefixed inline queries)
+			hostRes, err := p.RegisterHost(t.Context(), components.RegisterHostReq{
+				Address: "10.0.0.1:8080",
+				ActorTypes: []components.ActorHostType{
+					{ActorType: "TestActor", IdleTimeout: 5 * time.Minute},
+				},
+			})
+			require.NoError(t, err)
+			require.NotEmpty(t, hostRes.HostID)
+
+			hosts, err := p.ListHosts(t.Context())
+			require.NoError(t, err)
+			require.Len(t, hosts, 1)
+			require.Equal(t, "10.0.0.1:8080", hosts[0].Address)
+		})
+	})
+}
+
 func initSQLiteTestProvider(t *testing.T) *StandaloneSQLiteBacked {
+	return initSQLiteTestProviderWithPrefix(t, "")
+}
+
+func initSQLiteTestProviderWithPrefix(t *testing.T, tablePrefix string) *StandaloneSQLiteBacked {
 	clock := clocktesting.NewFakeClock(time.Now())
 	h := comptesting.NewSlogClockHandler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
@@ -74,8 +202,9 @@ func initSQLiteTestProvider(t *testing.T) *StandaloneSQLiteBacked {
 	require.NoError(t, err, "Error enabling foreign keys")
 
 	providerOpts := StandaloneSQLiteOptions{
-		DB:    db,
-		Clock: clock,
+		DB:          db,
+		Clock:       clock,
+		TablePrefix: tablePrefix,
 	}
 	providerConfig := comptesting.GetProviderConfig()
 
@@ -102,6 +231,10 @@ func initSQLiteTestProvider(t *testing.T) *StandaloneSQLiteBacked {
 }
 
 func initPostgresTestProvider(t *testing.T) (*StandalonePostgresBacked, func()) {
+	return initPostgresTestProviderWithPrefix(t, "")
+}
+
+func initPostgresTestProviderWithPrefix(t *testing.T, tablePrefix string) (*StandalonePostgresBacked, func()) {
 	connString := os.Getenv(postgresConnstringEnvVar)
 	if connString == "" {
 		t.Skip(`To run these tests, set the env var ` + postgresConnstringEnvVar + ` with the connection string for Postgres database. Example: "` + postgresConnstringEnvVar + `=postgres://actors:actors@localhost:5432/actors"`)
@@ -121,8 +254,9 @@ func initPostgresTestProvider(t *testing.T) (*StandalonePostgresBacked, func()) 
 	conn, cleanupSchema := connectPostgresTestDatabase(t, connString, testSchema)
 
 	providerOpts := StandalonePostgresOptions{
-		DB:    conn,
-		Clock: clock,
+		DB:          conn,
+		Clock:       clock,
+		TablePrefix: tablePrefix,
 	}
 	providerConfig := comptesting.GetProviderConfig()
 
@@ -446,7 +580,7 @@ func (p *StandaloneSQLiteBacked) clearDatabase(ctx context.Context) error {
 	tables := []string{"alarms", "active_actors", "host_actor_types", "hosts", "actor_state"}
 	for _, table := range tables {
 		//nolint:gosec
-		_, err := p.db.ExecContext(ctx, "DELETE FROM "+table)
+		_, err := p.db.ExecContext(ctx, "DELETE FROM "+p.tablePrefix+table)
 		if err != nil {
 			return err
 		}
@@ -657,7 +791,8 @@ func (p *StandalonePostgresBacked) clearData() {
 func (p *StandalonePostgresBacked) clearDatabase(ctx context.Context) error {
 	tables := []string{"alarms", "active_actors", "host_actor_types", "hosts", "actor_state"}
 	for _, table := range tables {
-		_, err := p.db.Exec(ctx, "DELETE FROM "+table)
+		//nolint:gosec
+		_, err := p.db.Exec(ctx, "DELETE FROM "+p.tablePrefix+table)
 		if err != nil {
 			return err
 		}

@@ -5,7 +5,8 @@
 // A key's limiter lives only in the activated actor's memory and is never persisted to storage, so deactivating the actor simply resets that key's throttle state
 //
 // Take follows the semantics of go.uber.org/ratelimit: it blocks until the key's leaky bucket admits the call, smoothing bursts down to the configured rate rather than rejecting them
-// Calls for the same key are serialized by the actor's turn lock, so holding the turn for the throttle delay is the intended backpressure; calls for different keys run on independent instances and never block each other
+// Calls for the same key are serialized by the actor's turn lock, so holding the turn for the throttle delay is the intended backpressure
+// Calls for different keys run on independent instances and never block each other
 package ratelimit
 
 import (
