@@ -177,7 +177,11 @@ func initTestProviderWithPrefix(t *testing.T, tablePrefix string) (p *PostgresPr
 		t.Skip(`To run these tests, set the env var ` + connstringEnvVar + ` with the connection string for Postgres database. Example: "` + connstringEnvVar + `=postgres://actors:actors@localhost:5432/actors"`)
 	}
 
-	clock := clocktesting.NewFakeClock(time.Now())
+	// Start the clock in a deliberately non-UTC location (-07:00) so every time.Time produced by the provider carries a non-UTC location
+	// Combined with the non-UTC session time zone, this ensures times are normalized to UTC on both the Go side (.UTC()) and the SQL side (AT TIME ZONE 'utc')
+	clock := clocktesting.NewFakeClock(
+		time.Now().In(time.FixedZone("test-nonutc", -7*60*60)),
+	)
 	h := comptesting.NewSlogClockHandler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}), clock)
@@ -617,6 +621,75 @@ func TestHostGarbageCollection(t *testing.T) {
 	})
 }
 
+// TestPostgresTimestampsStoredAsUTC guards the invariant that every time value is stored as a UTC timestamp, independent of the server/session time zone
+// The test connections are deliberately pinned to a non-UTC session time zone (see connectTestDatabase) and the clock runs in a non-UTC location (see initTestProviderWithPrefix), so any time-zone-dependent handling would be caught here
+func TestPostgresTimestampsStoredAsUTC(t *testing.T) {
+	p, testSchema, cleanupFn := initTestProvider(t)
+	t.Cleanup(func() {
+		cleanupFn()
+		p.db.Close()
+	})
+
+	t.Run("no timestamptz columns exist", func(t *testing.T) {
+		// Every time column must be "timestamp without time zone" so its value is a UTC wall clock
+		// A timestamptz column would be rendered or interpreted in the session time zone, which we forbid
+		rows, err := p.db.Query(t.Context(), `
+			SELECT table_name, column_name
+			FROM information_schema.columns
+			WHERE table_schema = $1 AND data_type = 'timestamp with time zone'
+			ORDER BY table_name, column_name`,
+			testSchema,
+		)
+		require.NoError(t, err)
+		defer rows.Close()
+
+		var offenders []string
+		for rows.Next() {
+			var tbl, col string
+			err = rows.Scan(&tbl, &col)
+			require.NoError(t, err)
+			offenders = append(offenders, tbl+"."+col)
+		}
+		err = rows.Err()
+		require.NoError(t, err)
+		assert.Empty(t, offenders, "these columns use timestamptz but must use timestamp (UTC)")
+	})
+
+	t.Run("times are stored as UTC regardless of time zone", func(t *testing.T) {
+		// A due time expressed in a non-UTC zone (+05:30), whose UTC wall clock is 2026-03-15T07:00:45.123456
+		loc := time.FixedZone("plus0530", 5*60*60+30*60)
+		dueTime := time.Date(2026, 3, 15, 12, 30, 45, 123456000, loc)
+
+		aRef := ref.AlarmRef{
+			ActorType: "TestActor",
+			ActorID:   "utc-actor",
+			Name:      "utc-alarm",
+		}
+		err := p.SetAlarm(t.Context(), aRef, components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{DueTime: dueTime},
+		})
+		require.NoError(t, err)
+
+		// Read back through the API: the same instant must come back, returned in UTC
+		got, err := p.GetAlarm(t.Context(), aRef)
+		require.NoError(t, err)
+		assert.True(t, got.DueTime.Equal(dueTime), "instant must be preserved (got %s, want %s)", got.DueTime, dueTime)
+		assert.Equal(t, time.UTC, got.DueTime.Location(), "times must be returned in UTC")
+
+		// Read the raw stored value rendered without any time-zone conversion
+		// For a timestamp column this is the stored value, which must equal the UTC wall clock even though the session is +05:30
+		var stored string
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		err = p.db.QueryRow(t.Context(),
+			`SELECT to_char(alarm_due_time, 'YYYY-MM-DD"T"HH24:MI:SS.US') FROM `+p.tablePrefix+`alarms
+			WHERE actor_type = $1 AND actor_id = $2 AND alarm_name = $3`,
+			aRef.ActorType, aRef.ActorID, aRef.Name,
+		).Scan(&stored)
+		require.NoError(t, err)
+		assert.Equal(t, dueTime.UTC().Format("2006-01-02T15:04:05.000000"), stored)
+	})
+}
+
 func generateTestSchemaName(t *testing.T) string {
 	t.Helper()
 
@@ -647,6 +720,15 @@ func connectTestDatabase(t *testing.T, connString string, testSchema string) (co
 		_, err = c.Exec(queryCtx, `SET SESSION search_path = "`+testSchema+`", pg_catalog, public`)
 		if err != nil {
 			return fmt.Errorf("failed to set search path for session: %w", err)
+		}
+
+		// Pin every test connection to a deliberately non-UTC session time zone (+05:30, no DST)
+		// All times must be stored and handled as UTC regardless of the server/session time zone, so running the whole suite under a non-UTC session guards against any time-zone-dependent handling
+		queryCtx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_, err = c.Exec(queryCtx, `SET SESSION TIME ZONE 'Asia/Kolkata'`)
+		if err != nil {
+			return fmt.Errorf("failed to set session time zone: %w", err)
 		}
 
 		return nil

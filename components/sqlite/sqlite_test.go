@@ -19,6 +19,7 @@ import (
 
 	"github.com/italypaleale/francis/components"
 	comptesting "github.com/italypaleale/francis/components/testing"
+	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/testutil"
 )
 
@@ -49,12 +50,50 @@ func TestSQLiteProviderDisk(t *testing.T) {
 	t.Run("concurrency suite", suite.RunConcurrencyTests)
 }
 
+// TestSQLiteTimestampsStoredAsUnixMillis verifies the provider stores every time as an absolute unix-milliseconds instant, which is inherently UTC-correct
+// The clock runs in a non-UTC location (see initTestProviderWithPrefix), so a wall-clock-derived value would be caught here
+func TestSQLiteTimestampsStoredAsUnixMillis(t *testing.T) {
+	s := initTestProvider(t, "file:utctest?mode=memory")
+
+	// A due time expressed in a non-UTC zone (+05:30), whose absolute instant is unaffected by the location
+	loc := time.FixedZone("plus0530", 5*60*60+30*60)
+	dueTime := time.Date(2026, 3, 15, 12, 30, 45, 123000000, loc)
+
+	aRef := ref.AlarmRef{
+		ActorType: "TestActor",
+		ActorID:   "utc-actor",
+		Name:      "utc-alarm",
+	}
+	err := s.SetAlarm(t.Context(), aRef, components.SetAlarmReq{
+		AlarmProperties: ref.AlarmProperties{DueTime: dueTime},
+	})
+	require.NoError(t, err)
+
+	// The stored integer must be the absolute unix-milliseconds instant, not a wall-clock-derived value
+	var stored int64
+	err = s.db.QueryRowContext(t.Context(),
+		"SELECT alarm_due_time FROM "+s.tablePrefix+"alarms WHERE actor_type = ? AND actor_id = ? AND alarm_name = ?",
+		aRef.ActorType, aRef.ActorID, aRef.Name,
+	).Scan(&stored)
+	require.NoError(t, err)
+	require.Equal(t, dueTime.UnixMilli(), stored, "alarm_due_time must be stored as the absolute unix-milliseconds instant")
+
+	// Reading back through the API must preserve the same instant
+	got, err := s.GetAlarm(t.Context(), aRef)
+	require.NoError(t, err)
+	require.True(t, got.DueTime.Equal(dueTime), "instant must be preserved (got %s, want %s)", got.DueTime, dueTime)
+}
+
 func initTestProvider(t *testing.T, connString string) (p *SQLiteProvider) {
 	return initTestProviderWithPrefix(t, connString, "")
 }
 
 func initTestProviderWithPrefix(t *testing.T, connString string, tablePrefix string) (p *SQLiteProvider) {
-	clock := clocktesting.NewFakeClock(time.Now())
+	// Start the clock in a deliberately non-UTC location (-07:00) so every time.Time carries a non-UTC location
+	// Times are stored as absolute unix-milliseconds instants, which must remain UTC-correct regardless of the location
+	clock := clocktesting.NewFakeClock(
+		time.Now().In(time.FixedZone("test-nonutc", -7*60*60)),
+	)
 	h := comptesting.NewSlogClockHandler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}), clock)

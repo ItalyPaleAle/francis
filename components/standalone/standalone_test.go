@@ -180,12 +180,102 @@ func TestStandaloneTablePrefix(t *testing.T) {
 	})
 }
 
+// TestStandalonePostgresTimestampsStoredAsUTC verifies the Postgres-backed standalone provider persists every time as a UTC timestamp, independent of the server/session time zone
+// The test connection is pinned to a non-UTC session time zone and the clock runs in a non-UTC location, so any time-zone-dependent handling would be caught here
+func TestStandalonePostgresTimestampsStoredAsUTC(t *testing.T) {
+	p, cleanupFn := initPostgresTestProvider(t)
+	t.Cleanup(cleanupFn)
+
+	t.Run("no timestamptz columns exist", func(t *testing.T) {
+		// Every time column must be "timestamp without time zone" so its value is a UTC wall clock
+		// A timestamptz column would be rendered or interpreted in the session time zone, which we forbid
+		rows, err := p.db.Query(t.Context(), `
+			SELECT table_name, column_name
+			FROM information_schema.columns
+			WHERE table_schema = current_schema() AND data_type = 'timestamp with time zone'
+			ORDER BY table_name, column_name`)
+		require.NoError(t, err)
+		defer rows.Close()
+
+		var offenders []string
+		for rows.Next() {
+			var tbl, col string
+			err = rows.Scan(&tbl, &col)
+			require.NoError(t, err)
+			offenders = append(offenders, tbl+"."+col)
+		}
+		err = rows.Err()
+		require.NoError(t, err)
+		require.Empty(t, offenders, "these columns use timestamptz but must use timestamp (UTC)")
+	})
+
+	t.Run("persisted times are stored as UTC regardless of time zone", func(t *testing.T) {
+		// A due time expressed in a non-UTC zone (+05:30), whose UTC wall clock is 2026-03-15T07:00:45.123456
+		loc := time.FixedZone("plus0530", 5*60*60+30*60)
+		dueTime := time.Date(2026, 3, 15, 12, 30, 45, 123456000, loc)
+
+		// Persisting an alarm writes the due time to the DB synchronously (persist-before-apply)
+		aRef := ref.AlarmRef{
+			ActorType: "TestActor",
+			ActorID:   "utc-actor",
+			Name:      "utc-alarm",
+		}
+		err := p.SetAlarm(t.Context(), aRef, components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{DueTime: dueTime},
+		})
+		require.NoError(t, err)
+
+		// The raw stored value, rendered without any time-zone conversion, must equal the UTC wall clock even though the session is +05:30
+		var stored string
+		err = p.db.QueryRow(t.Context(),
+			`SELECT to_char(alarm_due_time, 'YYYY-MM-DD"T"HH24:MI:SS.US') FROM `+p.tablePrefix+`alarms
+			WHERE actor_type = $1 AND actor_id = $2 AND alarm_name = $3`,
+			aRef.ActorType, aRef.ActorID, aRef.Name,
+		).Scan(&stored)
+		require.NoError(t, err)
+		require.Equal(t, dueTime.UTC().Format("2006-01-02T15:04:05.000000"), stored)
+	})
+}
+
+// TestStandaloneSQLiteTimestampsStoredAsUnixMillis verifies the SQLite-backed standalone provider persists every time as an absolute unix-milliseconds instant, which is inherently UTC-correct
+func TestStandaloneSQLiteTimestampsStoredAsUnixMillis(t *testing.T) {
+	p := initSQLiteTestProvider(t)
+
+	// A due time expressed in a non-UTC zone (+05:30), whose absolute instant is unaffected by the location
+	loc := time.FixedZone("plus0530", 5*60*60+30*60)
+	dueTime := time.Date(2026, 3, 15, 12, 30, 45, 123000000, loc)
+
+	// Persisting an alarm writes the due time to the DB synchronously (persist-before-apply)
+	aRef := ref.AlarmRef{
+		ActorType: "TestActor",
+		ActorID:   "utc-actor",
+		Name:      "utc-alarm",
+	}
+	err := p.SetAlarm(t.Context(), aRef, components.SetAlarmReq{
+		AlarmProperties: ref.AlarmProperties{DueTime: dueTime},
+	})
+	require.NoError(t, err)
+
+	// The stored integer must be the absolute unix-milliseconds instant, not a wall-clock-derived value
+	var stored int64
+	err = p.db.QueryRowContext(t.Context(),
+		"SELECT alarm_due_time FROM "+p.tablePrefix+"alarms WHERE actor_type = ? AND actor_id = ? AND alarm_name = ?",
+		aRef.ActorType, aRef.ActorID, aRef.Name,
+	).Scan(&stored)
+	require.NoError(t, err)
+	require.Equal(t, dueTime.UnixMilli(), stored, "alarm_due_time must be stored as the absolute unix-milliseconds instant")
+}
+
 func initSQLiteTestProvider(t *testing.T) *StandaloneSQLiteBacked {
 	return initSQLiteTestProviderWithPrefix(t, "")
 }
 
 func initSQLiteTestProviderWithPrefix(t *testing.T, tablePrefix string) *StandaloneSQLiteBacked {
-	clock := clocktesting.NewFakeClock(time.Now())
+	// Start the clock in a deliberately non-UTC location (-07:00) so every time.Time carries a non-UTC location
+	// Times must still be persisted and reloaded as absolute, UTC-correct instants
+	clock := clocktesting.NewFakeClock(
+		time.Now().In(time.FixedZone("test-nonutc", -7*60*60)),
+	)
 	h := comptesting.NewSlogClockHandler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}), clock)
@@ -195,7 +285,9 @@ func initSQLiteTestProviderWithPrefix(t *testing.T, tablePrefix string) *Standal
 	db, err := sql.Open("sqlite", ":memory:")
 	require.NoError(t, err, "Error opening SQLite database")
 	db.SetMaxOpenConns(1) // Required for in-memory SQLite
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() {
+		db.Close()
+	})
 
 	// Enable foreign keys — required by the provider (with MaxOpenConns(1) this applies to the single connection)
 	_, err = db.ExecContext(t.Context(), "PRAGMA foreign_keys = ON")
@@ -240,7 +332,8 @@ func initPostgresTestProviderWithPrefix(t *testing.T, tablePrefix string) (*Stan
 		t.Skip(`To run these tests, set the env var ` + postgresConnstringEnvVar + ` with the connection string for Postgres database. Example: "` + postgresConnstringEnvVar + `=postgres://actors:actors@localhost:5432/actors"`)
 	}
 
-	clock := clocktesting.NewFakeClock(time.Now())
+	// Start the clock in a deliberately non-UTC location (-07:00), combined with the non-UTC session time zone set in connectPostgresTestDatabase, to exercise UTC normalization on both sides
+	clock := clocktesting.NewFakeClock(time.Now().In(time.FixedZone("test-nonutc", -7*60*60)))
 	h := comptesting.NewSlogClockHandler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}), clock)
@@ -317,6 +410,15 @@ func connectPostgresTestDatabase(t *testing.T, connString string, testSchema str
 		_, err = c.Exec(queryCtx, `SET SESSION search_path = "`+testSchema+`", pg_catalog, public`)
 		if err != nil {
 			return fmt.Errorf("failed to set search path for session: %w", err)
+		}
+
+		// Pin every test connection to a deliberately non-UTC session time zone (+05:30, no DST)
+		// All times must be stored and handled as UTC regardless of the server/session time zone
+		queryCtx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_, err = c.Exec(queryCtx, `SET SESSION TIME ZONE 'Asia/Kolkata'`)
+		if err != nil {
+			return fmt.Errorf("failed to set session time zone: %w", err)
 		}
 
 		return nil
