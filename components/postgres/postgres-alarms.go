@@ -102,8 +102,9 @@ func (p *PostgresProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req c
 				OR `+p.tablePrefix+`alarms.alarm_ttl_time IS DISTINCT FROM EXCLUDED.alarm_ttl_time
 				OR `+p.tablePrefix+`alarms.alarm_data IS DISTINCT FROM EXCLUDED.alarm_data
 			`,
+			// alarm_due_time and alarm_ttl_time are stored as UTC
 			alarmID, ref.ActorType, ref.ActorID, ref.Name,
-			req.DueTime, interval, req.TTL, req.Data)
+			req.DueTime.UTC(), interval, utcPtr(req.TTL), req.Data)
 	if err != nil {
 		return fmt.Errorf("failed to create alarm: %w", err)
 	}
@@ -224,7 +225,7 @@ func (p *PostgresProvider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmL
 				alarm_id = $1
 				AND alarm_lease_id = $2
 				AND alarm_lease_expiration_time IS NOT NULL
-				AND alarm_lease_expiration_time >= now()`,
+				AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')`,
 			lease.Key(), lease.LeaseID(),
 		).
 		Scan(
@@ -294,10 +295,10 @@ func (p *PostgresProvider) RenewAlarmLeases(ctx context.Context, req components.
 	rows, err := p.db.Query(queryCtx,
 		`
 		UPDATE `+p.tablePrefix+`alarms
-		SET alarm_lease_expiration_time = now() + $1::interval
+		SET alarm_lease_expiration_time = (now() AT TIME ZONE 'utc') + $1::interval
 		WHERE
 			alarm_lease_expiration_time IS NOT NULL
-			AND alarm_lease_expiration_time >= now()
+			AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')
 			AND alarm_id IN (
 				SELECT alarm_id FROM `+p.tablePrefix+`alarms a
 				JOIN `+p.tablePrefix+`active_actors aa ON a.actor_type = aa.actor_type AND a.actor_id = aa.actor_id
@@ -352,7 +353,7 @@ func (p *PostgresProvider) ReleaseAlarmLease(ctx context.Context, lease *ref.Ala
 			alarm_id = $1
 			AND alarm_lease_id = $2
 			AND alarm_lease_expiration_time IS NOT NULL
-			AND alarm_lease_expiration_time >= now()`,
+			AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')`,
 		lease.Key(), lease.LeaseID(),
 	)
 	if err != nil {
@@ -378,15 +379,16 @@ func (p *PostgresProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Ala
 			`
 			UPDATE `+p.tablePrefix+`alarms
 			SET
-				alarm_lease_expiration_time = now() + $1::interval,
+				alarm_lease_expiration_time = (now() AT TIME ZONE 'utc') + $1::interval,
 				alarm_due_time = $2
 			WHERE
 				alarm_id = $3
 				AND alarm_lease_id = $4
 				AND alarm_lease_expiration_time IS NOT NULL
-				AND alarm_lease_expiration_time >= now()
+				AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')
 			`,
-			p.cfg.AlarmsLeaseDuration, req.DueTime,
+			// alarm_due_time is stored as UTC
+			p.cfg.AlarmsLeaseDuration, req.DueTime.UTC(),
 			lease.Key(), lease.LeaseID(),
 		)
 	} else {
@@ -401,9 +403,10 @@ func (p *PostgresProvider) UpdateLeasedAlarm(ctx context.Context, lease *ref.Ala
 				alarm_id = $2
 				AND alarm_lease_id = $3
 				AND alarm_lease_expiration_time IS NOT NULL
-				AND alarm_lease_expiration_time >= now()
+				AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')
 			`,
-			req.DueTime,
+			// alarm_due_time is stored as UTC
+			req.DueTime.UTC(),
 			lease.Key(), lease.LeaseID(),
 		)
 	}
@@ -429,7 +432,7 @@ func (p *PostgresProvider) DeleteLeasedAlarm(ctx context.Context, lease *ref.Ala
 			alarm_id = $1
 			AND alarm_lease_id = $2
 			AND alarm_lease_expiration_time IS NOT NULL
-			AND alarm_lease_expiration_time >= now()`,
+			AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')`,
 		lease.Key(), lease.LeaseID(),
 	)
 	if err != nil {

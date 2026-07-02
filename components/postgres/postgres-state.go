@@ -24,7 +24,7 @@ func (p *PostgresProvider) GetState(ctx context.Context, ref ref.ActorRef) (data
 			WHERE
 				actor_type = $1
 				AND actor_id = $2
-				AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > now())`,
+				AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > (now() AT TIME ZONE 'utc'))`,
 			ref.ActorType, ref.ActorID,
 		).
 		Scan(&data)
@@ -52,7 +52,7 @@ func (p *PostgresProvider) SetState(ctx context.Context, ref ref.ActorRef, data 
 		// If exp is nil, now() + NULL will be NULL
 		`INSERT INTO `+p.tablePrefix+`actor_state
 			(actor_type, actor_id, actor_state_data, actor_state_expiration_time)
-		VALUES ($1, $2, $3, now() + $4)
+		VALUES ($1, $2, $3, (now() AT TIME ZONE 'utc') + $4)
 		ON CONFLICT (actor_type, actor_id) DO UPDATE SET
 			actor_state_data = EXCLUDED.actor_state_data,
 			actor_state_expiration_time = EXCLUDED.actor_state_expiration_time`,
@@ -77,7 +77,7 @@ func (p *PostgresProvider) DeleteState(ctx context.Context, ref ref.ActorRef) er
 		WHERE
 			actor_type = $1
 			AND actor_id = $2
-			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > now())`,
+			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > (now() AT TIME ZONE 'utc'))`,
 		ref.ActorType, ref.ActorID,
 	)
 	if err != nil {

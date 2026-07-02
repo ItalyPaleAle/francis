@@ -22,9 +22,11 @@ CREATE TABLE %sdead_jobs (
     -- Last error recorded for the job
     last_error text,
     -- Time the job was dead-lettered
-    failed_at timestamptz NOT NULL,
+    -- Stored as UTC
+    failed_at timestamp NOT NULL,
     -- Original due time of the failed occurrence
-    original_due timestamptz NOT NULL,
+    -- Stored as UTC
+    original_due timestamp NOT NULL,
     -- Repetition interval of the original job, if any
     job_interval text,
     -- Cron schedule of the original job, if any

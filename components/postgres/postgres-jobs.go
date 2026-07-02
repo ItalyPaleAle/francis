@@ -89,13 +89,13 @@ func (p *PostgresProvider) DeadLetterAlarm(ctx context.Context, lease *ref.Alarm
 					alarm_id = $1
 					AND alarm_lease_id = $2
 					AND alarm_lease_expiration_time IS NOT NULL
-					AND alarm_lease_expiration_time >= now()
+					AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')
 				RETURNING actor_type, actor_id, job_method, alarm_data, alarm_due_time, alarm_interval, alarm_cron
 			)
 			INSERT INTO `+p.tablePrefix+`dead_jobs
 				(job_id, actor_type, actor_id, job_method, job_data,
 				attempts, last_error, failed_at, original_due, job_interval, job_cron)
-			SELECT $1, actor_type, actor_id, COALESCE(job_method, ''), alarm_data, $3, $4, now(), alarm_due_time, alarm_interval, alarm_cron
+			SELECT $1, actor_type, actor_id, COALESCE(job_method, ''), alarm_data, $3, $4, now() AT TIME ZONE 'utc', alarm_due_time, alarm_interval, alarm_cron
 			FROM deleted`,
 			jobID, lease.LeaseID(), req.Attempts, req.Reason,
 		)
@@ -136,14 +136,14 @@ func (p *PostgresProvider) DeadLetterAlarm(ctx context.Context, lease *ref.Alarm
 					alarm_id = $1
 					AND alarm_lease_id = $2
 					AND alarm_lease_expiration_time IS NOT NULL
-					AND alarm_lease_expiration_time >= now()
+					AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')
 				RETURNING actor_type, actor_id, alarm_name, job_method, alarm_data, alarm_due_time, alarm_interval, alarm_cron, alarm_ttl_time
 			),
 			dead AS (
 				INSERT INTO `+p.tablePrefix+`dead_jobs
 					(job_id, actor_type, actor_id, job_method, job_data,
 					attempts, last_error, failed_at, original_due, job_interval, job_cron)
-				SELECT $1, actor_type, actor_id, COALESCE(job_method, ''), alarm_data, $3, $4, now(), alarm_due_time, alarm_interval, alarm_cron
+				SELECT $1, actor_type, actor_id, COALESCE(job_method, ''), alarm_data, $3, $4, now() AT TIME ZONE 'utc', alarm_due_time, alarm_interval, alarm_cron
 				FROM deleted
 			)
 			SELECT actor_type, actor_id, alarm_name, job_method, alarm_data, alarm_interval, alarm_cron, alarm_ttl_time
@@ -176,8 +176,10 @@ func (p *PostgresProvider) DeadLetterAlarm(ctx context.Context, lease *ref.Alarm
 			alarm_lease_id, alarm_lease_expiration_time)
 		VALUES
 			($1, $2, $3, $4, $5, $6, $7, $8, $9, 'job', $10, NULL, NULL)`,
+		// alarm_due_time is stored as UTC
+		// ttl already comes from the DB as UTC
 		newID, actorType, actorID, alarmName,
-		req.NextDueTime, interval, cron, ttl, data, method,
+		req.NextDueTime.UTC(), interval, cron, ttl, data, method,
 	)
 	if err != nil {
 		return fmt.Errorf("error rescheduling repeating job: %w", err)
@@ -213,7 +215,7 @@ func (p *PostgresProvider) GetJob(ctx context.Context, jobID string) (components
 		QueryRow(queryCtx, `
 			SELECT
 				actor_type, actor_id, job_method, alarm_due_time, alarm_interval, alarm_cron,
-				(alarm_lease_id IS NOT NULL AND alarm_lease_expiration_time IS NOT NULL AND alarm_lease_expiration_time >= now())
+				(alarm_lease_id IS NOT NULL AND alarm_lease_expiration_time IS NOT NULL AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc'))
 			FROM `+p.tablePrefix+`alarms
 			WHERE alarm_id = $1 AND alarm_kind = 'job'`,
 			id,
@@ -287,7 +289,7 @@ func (p *PostgresProvider) ListJobs(ctx context.Context, actorType string, actor
 	// #nosec G202 -- the only concatenated values are static table prefixes, not user input
 	rows, err := p.db.Query(queryCtx, `
 		SELECT alarm_id, job_method, alarm_due_time, alarm_interval, alarm_cron,
-			CASE WHEN alarm_lease_id IS NOT NULL AND alarm_lease_expiration_time IS NOT NULL AND alarm_lease_expiration_time >= now()
+			CASE WHEN alarm_lease_id IS NOT NULL AND alarm_lease_expiration_time IS NOT NULL AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')
 				THEN 'active' ELSE 'pending' END,
 			0, NULL::text
 		FROM `+p.tablePrefix+`alarms
@@ -462,7 +464,8 @@ func (p *PostgresProvider) RetryDeadJob(ctx context.Context, jobID string) (stri
 			alarm_lease_id, alarm_lease_expiration_time)
 		SELECT $2, actor_type, actor_id, $3, $4, job_data, 'job', job_method, NULL, NULL
 		FROM deleted`,
-		id, newID, alarmNameObj.String(), p.clock.Now(),
+		// alarm_due_time is stored as UTC
+		id, newID, alarmNameObj.String(), p.clock.Now().UTC(),
 	)
 	if err != nil {
 		return "", fmt.Errorf("error re-dispatching job: %w", err)

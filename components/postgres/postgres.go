@@ -223,15 +223,15 @@ func (p *PostgresProvider) initGC() (err error) {
 		UpdateLastCleanupQuery: func(arg any) (string, []any) {
 			return `
 				INSERT INTO ` + p.tablePrefix + `metadata (key, value)
-					VALUES ('last-cleanup', now()::text)
+					VALUES ('last-cleanup', (now() AT TIME ZONE 'utc')::text)
 				ON CONFLICT (key)
 					DO UPDATE SET value = EXCLUDED.value
-				WHERE (EXTRACT('epoch' FROM now() - ` + p.tablePrefix + `metadata.value::timestamp) * 1000)::bigint > $1`,
+				WHERE (EXTRACT('epoch' FROM (now() AT TIME ZONE 'utc') - ` + p.tablePrefix + `metadata.value::timestamp) * 1000)::bigint > $1`,
 				[]any{arg}
 		},
 		DeleteExpiredValuesQueries: map[string]cleanup.DeleteExpiredValuesQueryFn{
 			"hosts": func() (string, func() []any) {
-				q := `DELETE FROM ` + p.tablePrefix + `hosts WHERE host_last_health_check < (now() - $1::interval)`
+				q := `DELETE FROM ` + p.tablePrefix + `hosts WHERE host_last_health_check < ((now() AT TIME ZONE 'utc') - $1::interval)`
 				return q, func() []any {
 					return []any{p.cfg.HostHealthCheckDeadline}
 				}
@@ -241,7 +241,7 @@ func (p *PostgresProvider) initGC() (err error) {
 				DELETE FROM ` + p.tablePrefix + `actor_state
 				WHERE
 					actor_state_expiration_time IS NOT NULL
-					AND actor_state_expiration_time < now()
+					AND actor_state_expiration_time < (now() AT TIME ZONE 'utc')
 				`
 				return q, func() []any {
 					return nil
@@ -271,6 +271,17 @@ func (p *PostgresProvider) q(query string) string {
 	// The only value interpolated here is the statically-derived table prefix, so there's no risk of SQL injection
 	// #nosec G201
 	return fmt.Sprintf(query, args...)
+}
+
+// utcPtr returns a pointer to the UTC representation of t, or nil if t is nil
+// All time columns store UTC values, so times must be normalized to UTC before being written
+func utcPtr(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+
+	u := t.UTC()
+	return &u
 }
 
 // Convert string slice to UUID slice for PostgreSQL

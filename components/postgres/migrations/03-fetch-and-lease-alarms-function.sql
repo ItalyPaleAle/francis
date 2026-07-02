@@ -2,7 +2,8 @@
 CREATE OR REPLACE FUNCTION %sactor_active_v1(
     p_actor_type text,
     p_actor_id text,
-    p_health_cutoff timestamptz
+    -- UTC
+    p_health_cutoff timestamp
 )
 RETURNS boolean AS $$
 BEGIN
@@ -32,20 +33,23 @@ RETURNS TABLE (
     r_actor_type text,
     r_actor_id text,
     r_alarm_name text,
-    r_alarm_due_time timestamptz,
+    -- UTC
+    r_alarm_due_time timestamp,
     r_lease_id uuid
 ) AS $$
 DECLARE
-    v_now timestamptz;
-    v_horizon timestamptz;
-    v_health_cutoff timestamptz;
-    v_lease_expiration timestamptz;
+    -- All time variables are UTC
+    v_now timestamp;
+    v_horizon timestamp;
+    v_health_cutoff timestamp;
+    v_lease_expiration timestamp;
     v_allocated_host_id uuid;
     v_actor_lock_key bigint;
     rec RECORD;
 BEGIN
     -- Initialize time variables
-    v_now := now();
+    -- now() is converted to UTC so all time values in this function are UTC timestamps
+    v_now := now() AT TIME ZONE 'utc';
     v_horizon := v_now + p_alarms_fetch_ahead_interval;
     v_health_cutoff := v_now - p_host_health_check_deadline;
     v_lease_expiration := v_now + p_alarms_lease_duration;
@@ -100,7 +104,7 @@ BEGIN
         actor_type text NOT NULL,
         actor_id text NOT NULL,
         alarm_name text NOT NULL,
-        alarm_due_time timestamptz NOT NULL,
+        alarm_due_time timestamp NOT NULL,
         existing_host_id uuid,
         allocated_host_id uuid
     ) ON COMMIT DROP;

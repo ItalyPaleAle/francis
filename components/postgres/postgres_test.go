@@ -262,7 +262,8 @@ func (p *PostgresProvider) Seed(ctx context.Context, spec comptesting.Spec) erro
 	_, tErr := postgrestransactions.ExecuteInTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (z struct{}, err error) {
 		// We need to get the current time here because we cannot use "now()" when using CopyFrom
 		// However, since time in the database is "frozen" and synced with the mock clock, it should be the same
-		now := p.clock.Now()
+		// Time columns store UTC values, so seed everything in UTC
+		now := p.clock.Now().UTC()
 
 		// Truncate all data
 		for _, tbl := range []string{"active_actors", "host_actor_types", "hosts", "actor_state", "alarms"} {
@@ -415,7 +416,7 @@ func (p *PostgresProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, e
 	return postgrestransactions.ExecuteInTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (res comptesting.Spec, err error) {
 		// Load all hosts
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-		rows, err := tx.Query(ctx, "SELECT host_id, host_address, now() - host_last_health_check FROM "+p.tablePrefix+"hosts")
+		rows, err := tx.Query(ctx, "SELECT host_id, host_address, (now() AT TIME ZONE 'utc') - host_last_health_check FROM "+p.tablePrefix+"hosts")
 		if err != nil {
 			return res, fmt.Errorf("select hosts: %w", err)
 		}
@@ -451,7 +452,7 @@ func (p *PostgresProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, e
 
 		// Load all active actors
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-		rows, err = tx.Query(ctx, "SELECT actor_type, actor_id, host_id, actor_idle_timeout, now() - actor_activation FROM "+p.tablePrefix+"active_actors")
+		rows, err = tx.Query(ctx, "SELECT actor_type, actor_id, host_id, actor_idle_timeout, (now() AT TIME ZONE 'utc') - actor_activation FROM "+p.tablePrefix+"active_actors")
 		if err != nil {
 			return res, fmt.Errorf("select active_actors: %w", err)
 		}
@@ -469,7 +470,7 @@ func (p *PostgresProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, e
 
 		// Load all alarms
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-		rows, err = tx.Query(ctx, "SELECT alarm_id, actor_type, actor_id, alarm_name, alarm_due_time - now(), alarm_interval, alarm_ttl_time, alarm_data, alarm_lease_id, alarm_lease_expiration_time FROM "+p.tablePrefix+"alarms")
+		rows, err = tx.Query(ctx, "SELECT alarm_id, actor_type, actor_id, alarm_name, alarm_due_time - (now() AT TIME ZONE 'utc'), alarm_interval, alarm_ttl_time, alarm_data, alarm_lease_id, alarm_lease_expiration_time FROM "+p.tablePrefix+"alarms")
 		if err != nil {
 			return res, fmt.Errorf("select alarms: %w", err)
 		}

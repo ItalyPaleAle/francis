@@ -37,7 +37,7 @@ func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.Regi
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err = tx.Exec(queryCtx,
 			`DELETE FROM `+p.tablePrefix+`hosts
-			WHERE host_last_health_check < (now() - $1::interval)`,
+			WHERE host_last_health_check < ((now() AT TIME ZONE 'utc') - $1::interval)`,
 			p.cfg.HostHealthCheckDeadline,
 		)
 		if err != nil {
@@ -51,7 +51,7 @@ func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.Regi
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err = tx.Exec(queryCtx,
 			`INSERT INTO `+p.tablePrefix+`hosts (host_id, host_address, host_last_health_check)
-			VALUES ($1, $2, now())`,
+			VALUES ($1, $2, now() AT TIME ZONE 'utc')`,
 			hostID,
 			req.Address,
 		)
@@ -107,7 +107,7 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err = tx.Exec(queryCtx,
 			`DELETE FROM `+p.tablePrefix+`hosts
-			WHERE host_last_health_check < (now() - $1::interval) AND host_id != $2`,
+			WHERE host_last_health_check < ((now() AT TIME ZONE 'utc') - $1::interval) AND host_id != $2`,
 			p.cfg.HostHealthCheckDeadline, req.ExistingHostID,
 		)
 		if err != nil {
@@ -122,7 +122,7 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		tag, err = tx.Exec(queryCtx,
 			`UPDATE `+p.tablePrefix+`hosts
-			SET host_address = $1, host_last_health_check = now()
+			SET host_address = $1, host_last_health_check = now() AT TIME ZONE 'utc'
 			WHERE host_id = $2`,
 			req.Address, req.ExistingHostID,
 		)
@@ -143,7 +143,7 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 			_, err = tx.Exec(queryCtx,
 				`INSERT INTO `+p.tablePrefix+`hosts (host_id, host_address, host_last_health_check)
-				VALUES ($1, $2, now())`,
+				VALUES ($1, $2, now() AT TIME ZONE 'utc')`,
 				newHostID, req.Address,
 			)
 			if isConstraintError(err) {
@@ -213,7 +213,7 @@ func (p *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, r
 						SELECT 1 FROM `+p.tablePrefix+`hosts
 						WHERE
 							host_id = $1
-							AND host_last_health_check >= (now() - $2::interval)
+							AND host_last_health_check >= ((now() AT TIME ZONE 'utc') - $2::interval)
 					)`,
 					hostID,
 					p.cfg.HostHealthCheckDeadline,
@@ -251,10 +251,10 @@ func (p *PostgresProvider) updateActorHostLastHealthCheck(ctx context.Context, h
 		Exec(queryCtx,
 			`UPDATE `+p.tablePrefix+`hosts
 		SET
-			host_last_health_check = now()
+			host_last_health_check = now() AT TIME ZONE 'utc'
 		WHERE
 			host_id = $1
-			AND host_last_health_check >= (now() - $2::interval)`,
+			AND host_last_health_check >= ((now() AT TIME ZONE 'utc') - $2::interval)`,
 			hostID,
 			p.cfg.HostHealthCheckDeadline,
 		)
@@ -282,7 +282,7 @@ func (p *PostgresProvider) UnregisterHost(ctx context.Context, hostID string) er
 		QueryRow(queryCtx,
 			`DELETE FROM `+p.tablePrefix+`hosts
 			WHERE host_id = $1
-			RETURNING host_last_health_check >= (now() - $2::interval)`,
+			RETURNING host_last_health_check >= ((now() AT TIME ZONE 'utc') - $2::interval)`,
 			hostID,
 			p.cfg.HostHealthCheckDeadline,
 		).
@@ -311,7 +311,7 @@ func (p *PostgresProvider) ListHosts(ctx context.Context) ([]components.HostInfo
 	rows, err := p.db.Query(queryCtx,
 		`SELECT host_id, host_address, host_last_health_check
 		FROM `+p.tablePrefix+`hosts
-		WHERE host_last_health_check >= (now() - $1::interval)`,
+		WHERE host_last_health_check >= ((now() AT TIME ZONE 'utc') - $1::interval)`,
 		p.cfg.HostHealthCheckDeadline,
 	)
 	if err != nil {
@@ -412,7 +412,7 @@ func (p *PostgresProvider) consumeJoinToken(ctx context.Context, tx pgx.Tx, join
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	_, err := tx.Exec(queryCtx, `DELETE FROM `+p.tablePrefix+`consumed_join_tokens WHERE expires_at < now()`)
+	_, err := tx.Exec(queryCtx, `DELETE FROM `+p.tablePrefix+`consumed_join_tokens WHERE expires_at < (now() AT TIME ZONE 'utc')`)
 	if err != nil {
 		return fmt.Errorf("error pruning expired join tokens: %w", err)
 	}
@@ -424,7 +424,8 @@ func (p *PostgresProvider) consumeJoinToken(ctx context.Context, tx pgx.Tx, join
 	_, err = tx.Exec(queryCtx,
 		`INSERT INTO `+p.tablePrefix+`consumed_join_tokens (join_token, host_id, expires_at)
 		VALUES ($1, $2, $3)`,
-		joinToken, hostID, expiresAt,
+		// expires_at is stored as UTC
+		joinToken, hostID, expiresAt.UTC(),
 	)
 	if isConstraintError(err) {
 		// A unique-constraint violation means the same token was already used

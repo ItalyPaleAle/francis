@@ -23,7 +23,7 @@ BEGIN
     WHERE
         aa.actor_type = p_actor_type
         AND aa.actor_id = p_actor_id
-        AND h.host_last_health_check >= (now() - p_host_health_check_deadline);
+        AND h.host_last_health_check >= ((now() AT TIME ZONE 'utc') - p_host_health_check_deadline);
 
     -- If we found an active actor
     IF FOUND THEN
@@ -134,7 +134,7 @@ BEGIN
             LEFT JOIN current_count ON h.host_id = current_count.host_id
             WHERE
                 hat.actor_type = p_actor_type
-            AND h.host_last_health_check >= (now() - p_host_health_check_deadline)
+            AND h.host_last_health_check >= ((now() AT TIME ZONE 'utc') - p_host_health_check_deadline)
             AND (
                 hat.actor_concurrency_limit = 0 
                 OR COALESCE(current_count.active_count, 0) < hat.actor_concurrency_limit
@@ -173,7 +173,8 @@ BEGIN
         p_actor_id,
         v_host_id,
         v_idle_timeout,
-        now()
+        -- Stored as UTC
+        now() AT TIME ZONE 'utc'
     )
     ON CONFLICT (actor_type, actor_id) DO UPDATE SET
         host_id = EXCLUDED.host_id,
