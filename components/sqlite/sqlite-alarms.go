@@ -525,15 +525,13 @@ func (u *upcomingAlarmFetcher) getActiveHosts(ctx context.Context) (activeHosts 
 	// #nosec G202
 	rows, err := u.tx.
 		QueryContext(queryCtx,
-			// For this connection, we set "temp_store = MEMORY" to tell SQLite to keep the temporary data in-memory
-			// Then, we create the temporary table, and finally insert data in there
+			// Create the temporary table and insert data in there
+			// go-sql-utils sets the PRAGMA "temp_store=MEMORY" by default so this table should stay in-memory
 			// (Note the table may already exist if it was created previously in a connection, so that's why we delete all data from it to start)
 			// We add the list of hosts passed as input, filtering unhealthy ones out and including available capacity for all
 			// Note that if an actor host has no limit on a given actor type, we consider it to be "limited to MaxInt32" (2147483647)
 			// Also note that we do not filter out hosts/actor_type combinations at capacity, because we can still fetch alarms for actors active on them
 			`
-				PRAGMA temp_store = MEMORY;
-
 				CREATE TEMPORARY TABLE IF NOT EXISTS temp_capacities (
 					host_id text NOT NULL,
 					actor_type text NOT NULL,
@@ -565,7 +563,7 @@ func (u *upcomingAlarmFetcher) getActiveHosts(ctx context.Context) (activeHosts 
 					hosts.host_last_health_check >= ?
 					AND hosts.host_id IN (`+hostPlaceholders+`)
 				RETURNING host_id, actor_type, idle_timeout, concurrency_limit, capacity
-				`,
+			`,
 			args...,
 		)
 	if err != nil {

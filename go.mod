@@ -14,7 +14,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/italypaleale/go-kit v0.0.0-20260620130522-3cb485fabbc9
-	github.com/italypaleale/go-sql-utils v0.2.4-0.20260619045406-d40ba2b291e8
+	github.com/italypaleale/go-sql-utils v0.2.4-0.20260702021114-e1dfdfb67d0e
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/lmittmann/tint v1.1.3
@@ -30,7 +30,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.43.0
 	go.uber.org/goleak v1.3.0
 	golang.org/x/sync v0.21.0
-	golang.org/x/time v0.12.0
+	golang.org/x/time v0.15.0
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/utils v0.0.0-20260617174310-a95e086a2553
 	modernc.org/sqlite v1.53.0
