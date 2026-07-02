@@ -41,24 +41,16 @@ func TestPostgresCreateTestDB(t *testing.T) {
 	// Comment out to have the schema created for manual testing
 	t.SkipNow()
 
-	p, testSchema, _ := initTestProvider(t)
+	// Close this database at the end, but do not cleanup the data
+	p, testSchema := initTestProvider(t, false)
 	t.Log(`Session option query: SET SESSION search_path = "` + testSchema + `", pg_catalog, public`)
-
-	// Close the database at the end, but do not cleanup the data
-	t.Cleanup(func() {
-		p.db.Close()
-	})
 
 	// Seed with the test data
 	require.NoError(t, p.Seed(t.Context(), comptesting.GetSpec()))
 }
 
 func TestPostgresProvider(t *testing.T) {
-	p, _, cleanupFn := initTestProvider(t)
-	t.Cleanup(func() {
-		cleanupFn()
-		p.db.Close()
-	})
+	p, _ := initTestProvider(t, true)
 
 	// Run the test suites
 	suite := comptesting.NewSuite(p)
@@ -95,11 +87,7 @@ func TestPostgresTablePrefix(t *testing.T) {
 	}
 
 	t.Run("default prefix is francis", func(t *testing.T) {
-		p, testSchema, cleanupFn := initTestProvider(t)
-		t.Cleanup(func() {
-			cleanupFn()
-			p.db.Close()
-		})
+		p, testSchema := initTestProvider(t, true)
 		assert.Equal(t, "francis_", p.tablePrefix)
 
 		names := schemaObjects(t, p, testSchema)
@@ -116,11 +104,7 @@ func TestPostgresTablePrefix(t *testing.T) {
 	})
 
 	t.Run("custom prefix", func(t *testing.T) {
-		p, testSchema, cleanupFn := initTestProviderWithPrefix(t, "myapp")
-		t.Cleanup(func() {
-			cleanupFn()
-			p.db.Close()
-		})
+		p, testSchema := initTestProviderWithPrefix(t, "myapp", true)
 		assert.Equal(t, "myapp_", p.tablePrefix)
 
 		names := schemaObjects(t, p, testSchema)
@@ -132,11 +116,7 @@ func TestPostgresTablePrefix(t *testing.T) {
 	})
 
 	t.Run("custom prefix is functional end-to-end", func(t *testing.T) {
-		p, _, cleanupFn := initTestProviderWithPrefix(t, "myapp")
-		t.Cleanup(func() {
-			cleanupFn()
-			p.db.Close()
-		})
+		p, _ := initTestProviderWithPrefix(t, "myapp", true)
 
 		// Register a host, then read it back through the regular API (which exercises the prefixed stored functions)
 		hostRes, err := p.RegisterHost(t.Context(), components.RegisterHostReq{
@@ -167,11 +147,11 @@ func TestPostgresTablePrefix(t *testing.T) {
 	})
 }
 
-func initTestProvider(t *testing.T) (p *PostgresProvider, testSchema string, cleanupFn func()) {
-	return initTestProviderWithPrefix(t, "")
+func initTestProvider(t *testing.T, cleanup bool) (p *PostgresProvider, testSchema string) {
+	return initTestProviderWithPrefix(t, "", cleanup)
 }
 
-func initTestProviderWithPrefix(t *testing.T, tablePrefix string) (p *PostgresProvider, testSchema string, cleanupFn func()) {
+func initTestProviderWithPrefix(t *testing.T, tablePrefix string, cleanup bool) (p *PostgresProvider, testSchema string) {
 	connString := os.Getenv(connstringEnvVar)
 	if connString == "" {
 		t.Skip(`To run these tests, set the env var ` + connstringEnvVar + ` with the connection string for Postgres database. Example: "` + connstringEnvVar + `=postgres://actors:actors@localhost:5432/actors"`)
@@ -192,8 +172,7 @@ func initTestProviderWithPrefix(t *testing.T, tablePrefix string) (p *PostgresPr
 	t.Log("Test schema:", testSchema)
 
 	// Connect to the database beforehand so we can create a new schema for the tests
-	conn, cleanupFnT := connectTestDatabase(t, connString, testSchema)
-	cleanupFn = func() { cleanupFnT(t) }
+	conn := connectTestDatabase(t, connString, testSchema, cleanup)
 
 	providerOpts := PostgresProviderOptions{
 		DB:          conn,
@@ -232,7 +211,7 @@ func initTestProviderWithPrefix(t *testing.T, tablePrefix string) (p *PostgresPr
 	// Wait for Run to call <-ctx.Done()
 	ctx.WaitForDone()
 
-	return p, testSchema, cleanupFn
+	return p, testSchema
 }
 
 func (p *PostgresProvider) CleanupExpired(_ context.Context) error {
@@ -505,11 +484,7 @@ func (p *PostgresProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, e
 }
 
 func TestHostGarbageCollection(t *testing.T) {
-	p, _, cleanupFn := initTestProvider(t)
-	t.Cleanup(func() {
-		cleanupFn()
-		p.db.Close()
-	})
+	p, _ := initTestProvider(t, true)
 
 	t.Run("garbage collector removes expired hosts", func(t *testing.T) {
 		// Register multiple hosts at different times
@@ -624,11 +599,7 @@ func TestHostGarbageCollection(t *testing.T) {
 // TestPostgresTimestampsStoredAsUTC guards the invariant that every time value is stored as a UTC timestamp, independent of the server/session time zone
 // The test connections are deliberately pinned to a non-UTC session time zone (see connectTestDatabase) and the clock runs in a non-UTC location (see initTestProviderWithPrefix), so any time-zone-dependent handling would be caught here
 func TestPostgresTimestampsStoredAsUTC(t *testing.T) {
-	p, testSchema, cleanupFn := initTestProvider(t)
-	t.Cleanup(func() {
-		cleanupFn()
-		p.db.Close()
-	})
+	p, testSchema := initTestProvider(t, true)
 
 	t.Run("no timestamptz columns exist", func(t *testing.T) {
 		// Every time column must be "timestamp without time zone" so its value is a UTC wall clock
@@ -699,67 +670,27 @@ func generateTestSchemaName(t *testing.T) string {
 	return "test_" + hex.EncodeToString(testSchemaB)
 }
 
-func connectTestDatabase(t *testing.T, connString string, testSchema string) (conn *pgxpool.Pool, cleanupFn func(t *testing.T)) {
+func connectTestDatabase(t *testing.T, connString string, testSchema string, cleanup bool) *pgxpool.Pool {
 	t.Helper()
 
-	// Parse the connection string
-	cfg, err := pgxpool.ParseConfig(connString)
-	require.NoError(t, err)
-
-	// Set a callback so we can make sure that the schema exists after connecting, and setting the correct search path
-	cfg.AfterConnect = func(ctx context.Context, c *pgx.Conn) error {
-		queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		_, err := c.Exec(queryCtx, `CREATE SCHEMA IF NOT EXISTS "`+testSchema+`"`)
-		if err != nil {
-			return fmt.Errorf("failed to ensure test schema '%s' exists: %w", testSchema, err)
-		}
-
-		queryCtx, cancel = context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		_, err = c.Exec(queryCtx, `SET SESSION search_path = "`+testSchema+`", pg_catalog, public`)
-		if err != nil {
-			return fmt.Errorf("failed to set search path for session: %w", err)
-		}
-
+	conn := testutil.PostgresTestDB(t, connString, testSchema, cleanup, func(ctx context.Context, c *pgx.Conn) error {
 		// Pin every test connection to a deliberately non-UTC session time zone (+05:30, no DST)
 		// All times must be stored and handled as UTC regardless of the server/session time zone, so running the whole suite under a non-UTC session guards against any time-zone-dependent handling
-		queryCtx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		_, err = c.Exec(queryCtx, `SET SESSION TIME ZONE 'Asia/Kolkata'`)
-		if err != nil {
-			return fmt.Errorf("failed to set session time zone: %w", err)
+		_, rErr := c.Exec(queryCtx, `SET SESSION TIME ZONE 'Asia/Kolkata'`)
+		if rErr != nil {
+			return fmt.Errorf("failed to set session time zone: %w", rErr)
 		}
 
 		return nil
-	}
-
-	// Log notices from the database
-	if cfg.ConnConfig == nil {
-		cfg.ConnConfig = &pgx.ConnConfig{}
-	}
-	/*cfg.ConnConfig.OnNotice = func(pc *pgconn.PgConn, n *pgconn.Notice) {
-		fmt.Println("PostgreSQL NOTICE:", n.Message)
-	}*/
-
-	// Connect to the database
-	conn, err = pgxpool.NewWithConfig(t.Context(), cfg)
-	require.NoError(t, err, "Failed to connect to database")
+	})
 
 	// Execute the test setup queries
 	queryCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	_, err = conn.Exec(queryCtx, queryTestSetup)
+	_, err := conn.Exec(queryCtx, queryTestSetup)
 	require.NoError(t, err, "Failed to perform test setup")
 
-	// Cleanup function that deletes the schema at the end of the tests
-	cleanupFn = func(t *testing.T) {
-		// Use a background context because t.Context() has been canceled already
-		queryCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_, err := conn.Exec(queryCtx, `DROP SCHEMA "`+testSchema+`" CASCADE`)
-		require.NoError(t, err, "Failed to drop test schema")
-	}
-
-	return conn, cleanupFn
+	return conn
 }

@@ -71,16 +71,16 @@ func (b *postgresBackend) Run(t *testing.T) {
 	// Ensure every pooled connection lands in the per-run schema
 	schema := b.schema
 	cfg.AfterConnect = func(ctx context.Context, c *pgx.Conn) error {
-		createCtx, createCancel := context.WithTimeout(ctx, 5*time.Second)
-		defer createCancel()
-		_, err := c.Exec(createCtx, `CREATE SCHEMA IF NOT EXISTS "`+schema+`"`)
+		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_, err := c.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS "`+schema+`"`)
 		if err != nil {
 			return fmt.Errorf("failed to ensure test schema %q exists: %w", schema, err)
 		}
 
-		pathCtx, pathCancel := context.WithTimeout(ctx, 5*time.Second)
-		defer pathCancel()
-		_, err = c.Exec(pathCtx, `SET SESSION search_path = "`+schema+`", pg_catalog, public`)
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_, err = c.Exec(ctx, `SET SESSION search_path = "`+schema+`", pg_catalog, public`)
 		if err != nil {
 			return fmt.Errorf("failed to set search path for session: %w", err)
 		}
@@ -139,7 +139,7 @@ func (b *postgresBackend) Cleanup(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 10*time.Second)
 	defer cancel()
 	_, err := b.pool.Exec(ctx, `DROP SCHEMA "`+b.schema+`" CASCADE`)
-	require.NoError(t, err, "failed to drop test schema")
+	require.NoErrorf(t, err, "Failed to drop test schema '%s'", b.schema)
 
 	b.pool.Close()
 	b.pool = nil

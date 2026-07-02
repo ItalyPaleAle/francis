@@ -26,6 +26,7 @@ import (
 	"github.com/italypaleale/francis/components/standalone/internal"
 	comptesting "github.com/italypaleale/francis/components/testing"
 	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/testutil"
 )
 
 func TestStandaloneMemory(t *testing.T) {
@@ -49,8 +50,7 @@ func TestStandaloneSQLiteBacked(t *testing.T) {
 const postgresConnstringEnvVar = "TEST_STANDALONE_POSTGRES_CONNSTRING"
 
 func TestStandalonePostgresBacked(t *testing.T) {
-	p, cleanupFn := initPostgresTestProvider(t)
-	t.Cleanup(cleanupFn)
+	p := initPostgresTestProvider(t)
 
 	// Run the test suites
 	suite := comptesting.NewSuite(p)
@@ -142,8 +142,7 @@ func TestStandaloneTablePrefix(t *testing.T) {
 		}
 
 		t.Run("default prefix is francis", func(t *testing.T) {
-			p, cleanupFn := initPostgresTestProvider(t)
-			t.Cleanup(cleanupFn)
+			p := initPostgresTestProvider(t)
 			require.Equal(t, "francis_", p.tablePrefix)
 
 			require.True(t, tableInSchema(t, p, "francis_hosts"))
@@ -155,8 +154,7 @@ func TestStandaloneTablePrefix(t *testing.T) {
 		})
 
 		t.Run("custom prefix is functional end-to-end", func(t *testing.T) {
-			p, cleanupFn := initPostgresTestProviderWithPrefix(t, "myapp")
-			t.Cleanup(cleanupFn)
+			p := initPostgresTestProviderWithPrefix(t, "myapp")
 			require.Equal(t, "myapp_", p.tablePrefix)
 
 			require.True(t, tableInSchema(t, p, "myapp_hosts"))
@@ -183,8 +181,7 @@ func TestStandaloneTablePrefix(t *testing.T) {
 // TestStandalonePostgresTimestampsStoredAsUTC verifies the Postgres-backed standalone provider persists every time as a UTC timestamp, independent of the server/session time zone
 // The test connection is pinned to a non-UTC session time zone and the clock runs in a non-UTC location, so any time-zone-dependent handling would be caught here
 func TestStandalonePostgresTimestampsStoredAsUTC(t *testing.T) {
-	p, cleanupFn := initPostgresTestProvider(t)
-	t.Cleanup(cleanupFn)
+	p := initPostgresTestProvider(t)
 
 	t.Run("no timestamptz columns exist", func(t *testing.T) {
 		// Every time column must be "timestamp without time zone" so its value is a UTC wall clock
@@ -322,11 +319,11 @@ func initSQLiteTestProviderWithPrefix(t *testing.T, tablePrefix string) *Standal
 	return p
 }
 
-func initPostgresTestProvider(t *testing.T) (*StandalonePostgresBacked, func()) {
+func initPostgresTestProvider(t *testing.T) *StandalonePostgresBacked {
 	return initPostgresTestProviderWithPrefix(t, "")
 }
 
-func initPostgresTestProviderWithPrefix(t *testing.T, tablePrefix string) (*StandalonePostgresBacked, func()) {
+func initPostgresTestProviderWithPrefix(t *testing.T, tablePrefix string) *StandalonePostgresBacked {
 	connString := os.Getenv(postgresConnstringEnvVar)
 	if connString == "" {
 		t.Skip(`To run these tests, set the env var ` + postgresConnstringEnvVar + ` with the connection string for Postgres database. Example: "` + postgresConnstringEnvVar + `=postgres://actors:actors@localhost:5432/actors"`)
@@ -344,7 +341,7 @@ func initPostgresTestProviderWithPrefix(t *testing.T, tablePrefix string) (*Stan
 	t.Log("Test schema:", testSchema)
 
 	// Connect to the database with the test schema
-	conn, cleanupSchema := connectPostgresTestDatabase(t, connString, testSchema)
+	conn := connectPostgresTestDatabase(t, connString, testSchema)
 
 	providerOpts := StandalonePostgresOptions{
 		DB:          conn,
@@ -371,13 +368,10 @@ func initPostgresTestProviderWithPrefix(t *testing.T, tablePrefix string) (*Stan
 	// Give a brief moment for Run to start
 	time.Sleep(10 * time.Millisecond)
 
-	cleanupFn := func() {
-		cancel()
-		cleanupSchema(t)
-		conn.Close()
-	}
+	// Cleanup at the end
+	t.Cleanup(cancel)
 
-	return p, cleanupFn
+	return p
 }
 
 func generateTestSchemaName(t *testing.T) string {
@@ -389,55 +383,21 @@ func generateTestSchemaName(t *testing.T) string {
 	return "test_standalone_" + hex.EncodeToString(testSchemaB)
 }
 
-func connectPostgresTestDatabase(t *testing.T, connString string, testSchema string) (conn *pgxpool.Pool, cleanupFn func(t *testing.T)) {
+func connectPostgresTestDatabase(t *testing.T, connString string, testSchema string) *pgxpool.Pool {
 	t.Helper()
 
-	// Parse the connection string
-	cfg, err := pgxpool.ParseConfig(connString)
-	require.NoError(t, err)
-
-	// Set a callback so we can make sure that the schema exists after connecting, and setting the correct search path
-	cfg.AfterConnect = func(ctx context.Context, c *pgx.Conn) error {
+	return testutil.PostgresTestDB(t, connString, testSchema, true, func(ctx context.Context, c *pgx.Conn) error {
+		// Pin every test connection to a deliberately non-UTC session time zone (+05:30, no DST)
+		// All times must be stored and handled as UTC regardless of the server/session time zone, so running the whole suite under a non-UTC session guards against any time-zone-dependent handling
 		queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		_, err := c.Exec(queryCtx, `CREATE SCHEMA IF NOT EXISTS "`+testSchema+`"`)
-		if err != nil {
-			return fmt.Errorf("failed to ensure test schema '%s' exists: %w", testSchema, err)
-		}
-
-		queryCtx, cancel = context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		_, err = c.Exec(queryCtx, `SET SESSION search_path = "`+testSchema+`", pg_catalog, public`)
-		if err != nil {
-			return fmt.Errorf("failed to set search path for session: %w", err)
-		}
-
-		// Pin every test connection to a deliberately non-UTC session time zone (+05:30, no DST)
-		// All times must be stored and handled as UTC regardless of the server/session time zone
-		queryCtx, cancel = context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		_, err = c.Exec(queryCtx, `SET SESSION TIME ZONE 'Asia/Kolkata'`)
-		if err != nil {
-			return fmt.Errorf("failed to set session time zone: %w", err)
+		_, rErr := c.Exec(queryCtx, `SET SESSION TIME ZONE 'Asia/Kolkata'`)
+		if rErr != nil {
+			return fmt.Errorf("failed to set session time zone: %w", rErr)
 		}
 
 		return nil
-	}
-
-	// Connect to the database
-	conn, err = pgxpool.NewWithConfig(t.Context(), cfg)
-	require.NoError(t, err, "Failed to connect to database")
-
-	// Cleanup function that deletes the schema at the end of the tests
-	cleanupFn = func(t *testing.T) {
-		// Use a background context because t.Context() has been canceled already
-		queryCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_, err := conn.Exec(queryCtx, `DROP SCHEMA "`+testSchema+`" CASCADE`)
-		require.NoError(t, err, "Failed to drop test schema")
-	}
-
-	return conn, cleanupFn
+	})
 }
 
 func initTestProvider(t *testing.T) *StandaloneMemory {

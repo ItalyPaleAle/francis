@@ -8,6 +8,7 @@ package components_mocks
 
 import (
 	"context"
+	"io"
 	"time"
 
 	"github.com/italypaleale/francis/components"
@@ -40,6 +41,63 @@ type MockActorProvider_Expecter struct {
 
 func (_m *MockActorProvider) EXPECT() *MockActorProvider_Expecter {
 	return &MockActorProvider_Expecter{mock: &_m.Mock}
+}
+
+// Backup provides a mock function for the type MockActorProvider
+func (_mock *MockActorProvider) Backup(ctx context.Context, w io.Writer) error {
+	ret := _mock.Called(ctx, w)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Backup")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, io.Writer) error); ok {
+		r0 = returnFunc(ctx, w)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockActorProvider_Backup_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Backup'
+type MockActorProvider_Backup_Call struct {
+	*mock.Call
+}
+
+// Backup is a helper method to define mock.On call
+//   - ctx context.Context
+//   - w io.Writer
+func (_e *MockActorProvider_Expecter) Backup(ctx any, w any) *MockActorProvider_Backup_Call {
+	return &MockActorProvider_Backup_Call{Call: _e.mock.On("Backup", ctx, w)}
+}
+
+func (_c *MockActorProvider_Backup_Call) Run(run func(ctx context.Context, w io.Writer)) *MockActorProvider_Backup_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 io.Writer
+		if args[1] != nil {
+			arg1 = args[1].(io.Writer)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockActorProvider_Backup_Call) Return(err error) *MockActorProvider_Backup_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockActorProvider_Backup_Call) RunAndReturn(run func(ctx context.Context, w io.Writer) error) *MockActorProvider_Backup_Call {
+	_c.Call.Return(run)
+	return _c
 }
 
 // CancelJob provides a mock function for the type MockActorProvider
@@ -1463,6 +1521,63 @@ func (_c *MockActorProvider_RenewLeaseInterval_Call) Return(duration time.Durati
 }
 
 func (_c *MockActorProvider_RenewLeaseInterval_Call) RunAndReturn(run func() time.Duration) *MockActorProvider_RenewLeaseInterval_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// Restore provides a mock function for the type MockActorProvider
+func (_mock *MockActorProvider) Restore(ctx context.Context, r io.Reader) error {
+	ret := _mock.Called(ctx, r)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Restore")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, io.Reader) error); ok {
+		r0 = returnFunc(ctx, r)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// MockActorProvider_Restore_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Restore'
+type MockActorProvider_Restore_Call struct {
+	*mock.Call
+}
+
+// Restore is a helper method to define mock.On call
+//   - ctx context.Context
+//   - r io.Reader
+func (_e *MockActorProvider_Expecter) Restore(ctx any, r any) *MockActorProvider_Restore_Call {
+	return &MockActorProvider_Restore_Call{Call: _e.mock.On("Restore", ctx, r)}
+}
+
+func (_c *MockActorProvider_Restore_Call) Run(run func(ctx context.Context, r io.Reader)) *MockActorProvider_Restore_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 io.Reader
+		if args[1] != nil {
+			arg1 = args[1].(io.Reader)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockActorProvider_Restore_Call) Return(err error) *MockActorProvider_Restore_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *MockActorProvider_Restore_Call) RunAndReturn(run func(ctx context.Context, r io.Reader) error) *MockActorProvider_Restore_Call {
 	_c.Call.Return(run)
 	return _c
 }

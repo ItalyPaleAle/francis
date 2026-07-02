@@ -57,8 +57,9 @@ func (p *PostgresProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, r
 			UNION ALL
 			SELECT alarm_id FROM `+p.tablePrefix+`alarms WHERE actor_type = $2 AND actor_id = $3 AND alarm_name = $4
 			LIMIT 1`,
+			// alarm_due_time and alarm_ttl_time are stored as UTC
 			alarmID, aRef.ActorType, aRef.ActorID, aRef.Name,
-			req.DueTime, interval, cron, req.TTL, req.Data, req.JobMethod,
+			req.DueTime.UTC(), interval, cron, utcPtr(req.TTL), req.Data, req.JobMethod,
 		).
 		Scan(&jobID)
 	if err != nil {
