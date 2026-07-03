@@ -22,7 +22,7 @@ func runPrintCA(_ []string) int {
 		return 1
 	}
 
-	psks, err := parsePSKs(cfg.RuntimePSKs)
+	psks, err := cfg.parsePSKs()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return 1
@@ -37,5 +37,6 @@ func runPrintCA(_ []string) int {
 	for _, pem := range bundle {
 		_, _ = os.Stdout.Write(pem)
 	}
+
 	return 0
 }

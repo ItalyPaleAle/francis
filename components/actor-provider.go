@@ -11,10 +11,10 @@ import (
 )
 
 const (
-	DefaultHostHealthCheckDeadline  = 20 * time.Second
-	DefaultAlarmsLeaseDuration      = 20 * time.Second
-	DefaultAlarmsFetchAheadInterval = 2500 * time.Millisecond
-	DefaultAlarmsFetchAheadBatch    = 25
+	DefaultHostHealthCheckDeadline   = 20 * time.Second
+	DefaultAlarmsLeaseDuration       = 20 * time.Second
+	DefaultAlarmsFetchAheadInterval  = 2500 * time.Millisecond
+	DefaultAlarmsFetchAheadBatchSize = 25
 )
 
 // ActorProvider is the interface implemented by all actor providers

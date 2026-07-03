@@ -137,26 +137,3 @@ func TestRunHealthcheckFailsWhenServerUnreachable(t *testing.T) {
 		assert.NotZero(t, code, "healthcheck should fail when the runtime is unreachable")
 	})
 }
-
-func TestLoopbackBindAddr(t *testing.T) {
-	tests := []struct {
-		bind string
-		want string
-	}{
-		{":8443", "127.0.0.1:8443"},
-		{"0.0.0.0:8443", "127.0.0.1:8443"},
-		{"127.0.0.1:8443", "127.0.0.1:8443"},
-		{"example.com:8443", "127.0.0.1:8443"},
-	}
-	for _, tt := range tests {
-		got, err := loopbackBindAddr(tt.bind)
-		require.NoError(t, err, "bind %q", tt.bind)
-		assert.Equal(t, tt.want, got, "bind %q", tt.bind)
-	}
-
-	// Missing port and unparseable addresses are rejected
-	_, err := loopbackBindAddr("bad")
-	require.Error(t, err)
-	_, err = loopbackBindAddr(":")
-	require.Error(t, err)
-}

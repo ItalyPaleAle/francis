@@ -20,6 +20,16 @@ type ProviderConfig struct {
 	AlarmsFetchAheadBatchSize int
 }
 
+// NewProviderConfig returns a ProviderConfig with all default values
+func NewProviderConfig() ProviderConfig {
+	return ProviderConfig{
+		HostHealthCheckDeadline:   DefaultHostHealthCheckDeadline,
+		AlarmsLeaseDuration:       DefaultAlarmsLeaseDuration,
+		AlarmsFetchAheadInterval:  DefaultAlarmsFetchAheadInterval,
+		AlarmsFetchAheadBatchSize: DefaultAlarmsFetchAheadBatchSize,
+	}
+}
+
 func (o *ProviderConfig) Validate() error {
 	if o.HostHealthCheckDeadline < time.Second {
 		return errors.New("property HostHealthCheckDeadline is not valid: must be at least 1s")

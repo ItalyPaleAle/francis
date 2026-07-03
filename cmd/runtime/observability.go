@@ -29,27 +29,27 @@ func (o *observabilityHandles) shutdownServices() []servicerunner.Service {
 }
 
 // GetLoadedConfigPath returns the path the config was loaded from
-func (c *config) GetLoadedConfigPath() string {
-	return c.loadedConfigPath
+func (cfg *config) GetLoadedConfigPath() string {
+	return cfg.loadedConfigPath
 }
 
 // SetLoadedConfigPath records the path the config was loaded from
-func (c *config) SetLoadedConfigPath(path string) {
-	c.loadedConfigPath = path
+func (cfg *config) SetLoadedConfigPath(path string) {
+	cfg.loadedConfigPath = path
 }
 
 // GetInstanceID returns the resolved OpenTelemetry instance ID
-func (c *config) GetInstanceID() string {
-	return c.instanceID
+func (cfg *config) GetInstanceID() string {
+	return cfg.instanceID
 }
 
 // GetOtelResource builds the OpenTelemetry resource describing this runtime
 // It is schemaless so it never returns an error, which the go-kit initializers treat as fatal
-func (c *config) GetOtelResource(name string) (*resource.Resource, error) {
+func (cfg *config) GetOtelResource(name string) (*resource.Resource, error) {
 	return resource.NewSchemaless(
 		attribute.String("service.name", name),
 		attribute.String("service.version", buildinfo.AppVersion),
-		attribute.String("service.instance.id", c.GetInstanceID()),
+		attribute.String("service.instance.id", cfg.GetInstanceID()),
 	), nil
 }
 
@@ -73,13 +73,7 @@ func initObservability(ctx context.Context, cfg *config) (*observabilityHandles,
 	cfg.instanceID = instanceID
 
 	// Logs: level and format come from config, while OTLP export is controlled by OTEL_LOGS_EXPORTER
-	log, logShutdown, err := observability.InitLogs(ctx, observability.InitLogsOpts{
-		Level:      cfg.Log.Level,
-		JSON:       cfg.Log.JSON,
-		Config:     cfg,
-		AppName:    buildinfo.AppName,
-		AppVersion: buildinfo.AppVersion,
-	})
+	log, logShutdown, err := observability.InitLogs(ctx, cfg.getObservabilityInitLogOpts())
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize logging: %w", err)
 	}
