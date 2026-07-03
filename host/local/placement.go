@@ -138,7 +138,3 @@ func (h *Host) invalidatePlacement(aRef ref.ActorRef) {
 		h.placementCache.Delete(aRef.String())
 	}
 }
-
-func (h *Host) deactivationTimeoutForActorType(actorType string) time.Duration {
-	return h.core.ActorsConfig[actorType].DeactivationTimeout
-}
