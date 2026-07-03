@@ -128,7 +128,7 @@ The runtime looks for its configuration in this order:
    - `~/.francis`
    - `/etc/francis`
 
-Subcommands (including `print-ca` and `healthcheck`) resolve the config the same way.
+Subcommands (including `print-ca`, `healthcheck`, `backup`, and `restore`) resolve the config the same way.
 
 ### Configuration reference
 
@@ -232,3 +232,5 @@ The runtime stores all state and alarms in its configured provider, selected by 
 - **SQLite** works well when a single runtime owns the database. Set `connectionString` to a file path, e.g. `data.db`.  
   Do **not** place the SQLite file on a networked filesystem like NFS/SMB.
 - **In-memory** is non-durable and intended for testing only. Set `connectionString: memory`.
+
+To export the data store to a portable file (for backups or to migrate between backends) see [Backup and restore](/docs/backup-and-restore).
