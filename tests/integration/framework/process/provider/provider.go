@@ -93,6 +93,6 @@ func providerConfig() components.ProviderConfig {
 		HostHealthCheckDeadline:   components.DefaultHostHealthCheckDeadline,
 		AlarmsLeaseDuration:       components.DefaultAlarmsLeaseDuration,
 		AlarmsFetchAheadInterval:  components.DefaultAlarmsFetchAheadInterval,
-		AlarmsFetchAheadBatchSize: components.DefaultAlarmsFetchAheadBatch,
+		AlarmsFetchAheadBatchSize: components.DefaultAlarmsFetchAheadBatchSize,
 	}
 }

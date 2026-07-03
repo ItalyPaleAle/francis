@@ -14,4 +14,5 @@ var (
 	ErrNoAlarm                  = errors.New("alarm does not exist")
 	ErrNoJob                    = errors.New("job does not exist")
 	ErrNoState                  = errors.New("no state found for the actor")
+	ErrHostsConnected           = errors.New("one or more hosts are currently connected")
 )

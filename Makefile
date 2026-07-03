@@ -8,7 +8,7 @@ test-race:
 
 .PHONY: test-integration
 test-integration:
-	go test -tags integration -v -count=1 -timeout 15m ./tests/integration/...
+	go test -tags integration -count=1 -timeout 15m ./tests/integration/...
 
 .PHONY: lint
 lint:

@@ -457,6 +457,111 @@ func (_c *MockClient_Halt_Call[T]) RunAndReturn(run func()) *MockClient_Halt_Cal
 	return _c
 }
 
+// Invoke provides a mock function for the type MockClient
+func (_mock *MockClient[T]) Invoke(ctx context.Context, actorType string, actorID string, method string, data any, opts ...actor.InvokeOption) (actor.Envelope, error) {
+	// actor.InvokeOption
+	_va := make([]any, len(opts))
+	for _i := range opts {
+		_va[_i] = opts[_i]
+	}
+	var _ca []any
+	_ca = append(_ca, ctx, actorType, actorID, method, data)
+	_ca = append(_ca, _va...)
+	ret := _mock.Called(_ca...)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Invoke")
+	}
+
+	var r0 actor.Envelope
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string, any, ...actor.InvokeOption) (actor.Envelope, error)); ok {
+		return returnFunc(ctx, actorType, actorID, method, data, opts...)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string, any, ...actor.InvokeOption) actor.Envelope); ok {
+		r0 = returnFunc(ctx, actorType, actorID, method, data, opts...)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(actor.Envelope)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, string, string, any, ...actor.InvokeOption) error); ok {
+		r1 = returnFunc(ctx, actorType, actorID, method, data, opts...)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockClient_Invoke_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Invoke'
+type MockClient_Invoke_Call[T any] struct {
+	*mock.Call
+}
+
+// Invoke is a helper method to define mock.On call
+//   - ctx context.Context
+//   - actorType string
+//   - actorID string
+//   - method string
+//   - data any
+//   - opts ...actor.InvokeOption
+func (_e *MockClient_Expecter[T]) Invoke(ctx any, actorType any, actorID any, method any, data any, opts ...any) *MockClient_Invoke_Call[T] {
+	return &MockClient_Invoke_Call[T]{Call: _e.mock.On("Invoke",
+		append([]any{ctx, actorType, actorID, method, data}, opts...)...)}
+}
+
+func (_c *MockClient_Invoke_Call[T]) Run(run func(ctx context.Context, actorType string, actorID string, method string, data any, opts ...actor.InvokeOption)) *MockClient_Invoke_Call[T] {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		var arg2 string
+		if args[2] != nil {
+			arg2 = args[2].(string)
+		}
+		var arg3 string
+		if args[3] != nil {
+			arg3 = args[3].(string)
+		}
+		var arg4 any
+		if args[4] != nil {
+			arg4 = args[4].(any)
+		}
+		var arg5 []actor.InvokeOption
+		variadicArgs := make([]actor.InvokeOption, len(args)-5)
+		for i, a := range args[5:] {
+			if a != nil {
+				variadicArgs[i] = a.(actor.InvokeOption)
+			}
+		}
+		arg5 = variadicArgs
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+			arg4,
+			arg5...,
+		)
+	})
+	return _c
+}
+
+func (_c *MockClient_Invoke_Call[T]) Return(envelope actor.Envelope, err error) *MockClient_Invoke_Call[T] {
+	_c.Call.Return(envelope, err)
+	return _c
+}
+
+func (_c *MockClient_Invoke_Call[T]) RunAndReturn(run func(ctx context.Context, actorType string, actorID string, method string, data any, opts ...actor.InvokeOption) (actor.Envelope, error)) *MockClient_Invoke_Call[T] {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ListJobs provides a mock function for the type MockClient
 func (_mock *MockClient[T]) ListJobs(ctx context.Context) ([]actor.JobInfo, error) {
 	ret := _mock.Called(ctx)

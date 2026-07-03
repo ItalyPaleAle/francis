@@ -7,7 +7,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net"
 	"os"
 	"time"
 
@@ -64,7 +63,7 @@ func runHealthcheck(args []string) int {
 	// Default to the locally-running server: the IPv4 loopback on the runtime's configured bind port
 	if addr == "" {
 		var err error
-		addr, err = loopbackBindAddr(cfg.Bind)
+		addr, err = cfg.loopbackBindAddr()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error resolving bind address: %v\n", err)
 			return 1
@@ -130,7 +129,7 @@ func buildHealthcheckTLSConfig(cfg *config, insecureSkipVerify bool) (*tls.Confi
 	}
 
 	// Derive the same CA the runtime uses
-	psks, err := parsePSKs(cfg.RuntimePSKs)
+	psks, err := cfg.parsePSKs()
 	if err != nil {
 		return nil, fmt.Errorf("error parsing runtime PSKs: %w", err)
 	}
@@ -149,19 +148,4 @@ func buildHealthcheckTLSConfig(cfg *config, insecureSkipVerify bool) (*tls.Confi
 	tlsConfig.VerifyPeerCertificate = ca.VerifyPeerSPIFFE(roots, ca.RuntimePrefix, nil)
 
 	return tlsConfig, nil
-}
-
-// loopbackBindAddr rewrites a runtime bind address as an IPv4 loopback dial target, keeping the port
-// The healthcheck runs alongside the runtime, so it always probes the loopback regardless of the bound host
-// It uses 127.0.0.1 rather than "localhost" because QUIC dials a single resolved address with no fallback: if "localhost" resolved to ::1 but the runtime binds to an IPv4 address, the probe would fail and needlessly mark the container unhealthy
-func loopbackBindAddr(bind string) (string, error) {
-	_, port, err := net.SplitHostPort(bind)
-	if err != nil {
-		return "", fmt.Errorf("invalid bind address '%s': %w", bind, err)
-	}
-	if port == "" {
-		return "", fmt.Errorf("bind address '%s' has no port", bind)
-	}
-
-	return net.JoinHostPort("127.0.0.1", port), nil
 }

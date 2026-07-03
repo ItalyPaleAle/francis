@@ -26,7 +26,7 @@ import (
 // Runs the full test suite with a fast, in-memory database
 func TestSQLiteProviderInMemory(t *testing.T) {
 	// Connect to an in-memory database
-	s := initTestProvider(t, "file:dbtest?mode=memory")
+	s := initTestProvider(t, testutil.SQLiteConnString(t))
 
 	// Run the test suites
 	suite := comptesting.NewSuite(s)
@@ -53,7 +53,7 @@ func TestSQLiteProviderDisk(t *testing.T) {
 // TestSQLiteTimestampsStoredAsUnixMillis verifies the provider stores every time as an absolute unix-milliseconds instant, which is inherently UTC-correct
 // The clock runs in a non-UTC location (see initTestProviderWithPrefix), so a wall-clock-derived value would be caught here
 func TestSQLiteTimestampsStoredAsUnixMillis(t *testing.T) {
-	s := initTestProvider(t, "file:utctest?mode=memory")
+	s := initTestProvider(t, testutil.SQLiteConnString(t))
 
 	// A due time expressed in a non-UTC zone (+05:30), whose absolute instant is unaffected by the location
 	loc := time.FixedZone("plus0530", 5*60*60+30*60)
@@ -538,7 +538,7 @@ func TestTablePrefix(t *testing.T) {
 	}
 
 	t.Run("default prefix is francis", func(t *testing.T) {
-		s := initTestProvider(t, "file:prefixdefault?mode=memory")
+		s := initTestProvider(t, testutil.SQLiteConnString(t))
 		assert.Equal(t, "francis_", s.tablePrefix)
 
 		names := schemaObjects(t, s)
@@ -553,7 +553,7 @@ func TestTablePrefix(t *testing.T) {
 	})
 
 	t.Run("custom prefix", func(t *testing.T) {
-		s := initTestProviderWithPrefix(t, "file:prefixcustom?mode=memory", "myapp")
+		s := initTestProviderWithPrefix(t, testutil.SQLiteConnString(t), "myapp")
 		assert.Equal(t, "myapp_", s.tablePrefix)
 
 		names := schemaObjects(t, s)
@@ -566,7 +566,7 @@ func TestTablePrefix(t *testing.T) {
 	})
 
 	t.Run("custom prefix is functional end-to-end", func(t *testing.T) {
-		s := initTestProviderWithPrefix(t, "file:prefixe2e?mode=memory", "myapp")
+		s := initTestProviderWithPrefix(t, testutil.SQLiteConnString(t), "myapp")
 
 		// Register a host and set an alarm, then read them back through the regular API
 		hostRes, err := s.RegisterHost(t.Context(), components.RegisterHostReq{

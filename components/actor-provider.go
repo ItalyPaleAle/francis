@@ -2,6 +2,7 @@ package components
 
 import (
 	"context"
+	"io"
 	"time"
 
 	"github.com/google/uuid"
@@ -10,10 +11,10 @@ import (
 )
 
 const (
-	DefaultHostHealthCheckDeadline  = 20 * time.Second
-	DefaultAlarmsLeaseDuration      = 20 * time.Second
-	DefaultAlarmsFetchAheadInterval = 2500 * time.Millisecond
-	DefaultAlarmsFetchAheadBatch    = 25
+	DefaultHostHealthCheckDeadline   = 20 * time.Second
+	DefaultAlarmsLeaseDuration       = 20 * time.Second
+	DefaultAlarmsFetchAheadInterval  = 2500 * time.Millisecond
+	DefaultAlarmsFetchAheadBatchSize = 25
 )
 
 // ActorProvider is the interface implemented by all actor providers
@@ -127,6 +128,14 @@ type ActorProvider interface {
 	// DeleteState deletes the persistent state of an actor.
 	// If there's no state, returns ErrNoState.
 	DeleteState(ctx context.Context, ref ref.ActorRef) error
+
+	// Backup writes a portable, versioned snapshot of all persistent data (actor state, alarms, and dead-lettered jobs) to w.
+	// It takes a consistent snapshot inside a transaction, so it can run while the cluster is online.
+	Backup(ctx context.Context, w io.Writer) error
+
+	// Restore wipes all existing persistent data (actor state, alarms, and dead-lettered jobs) and loads a snapshot produced by Backup from r.
+	// It returns ErrHostsConnected if any host is currently connected, since restoring underneath live hosts would corrupt running actors.
+	Restore(ctx context.Context, r io.Reader) error
 
 	// HealthCheckInterval returns the recommended health check interval for hosts.
 	HealthCheckInterval() time.Duration
