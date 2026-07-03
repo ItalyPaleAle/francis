@@ -57,8 +57,8 @@ github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2
 github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
 github.com/italypaleale/go-kit v0.0.0-20260703002252-b413738a463f h1:cyvaGWNg9AisrfG2guQspCawM6HhLaqbpHAppsePyH4=
 github.com/italypaleale/go-kit v0.0.0-20260703002252-b413738a463f/go.mod h1:pl0r3F+thZIyDsyDo8aOUsAIVcsRuAeP1bB4GuAHLoY=
-github.com/italypaleale/go-sql-utils v0.2.4-0.20260702021114-e1dfdfb67d0e h1:HDhmMkWAlLy/Elr/+T7diAZgAI+sDY2hYAyIAyefUYk=
-github.com/italypaleale/go-sql-utils v0.2.4-0.20260702021114-e1dfdfb67d0e/go.mod h1:BJStxMfB6fzYVcOe0oZQCjGIPZQu76UBmg1Wuy6Z/7I=
+github.com/italypaleale/go-sql-utils v0.2.4-0.20260703205853-9dc103a534d1 h1:CDADsLwr2e2tj0mlckw6TXyLp0oYmTKeBqDsA6ZJBLQ=
+github.com/italypaleale/go-sql-utils v0.2.4-0.20260703205853-9dc103a534d1/go.mod h1:BJStxMfB6fzYVcOe0oZQCjGIPZQu76UBmg1Wuy6Z/7I=
 github.com/italypaleale/webtransport-go v0.0.0-20260628205325-8ec1789ed85f h1:civBBLtvTuERF28bkw19EO8Q4N0AGwapGDyxM7iad/w=
 github.com/italypaleale/webtransport-go v0.0.0-20260628205325-8ec1789ed85f/go.mod h1:SHgEzUFVyj+9WUSuGB1P6Zd351Pww2leWV3SwlTovkA=
 github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6 h1:D/V0gu4zQ3cL2WKeVNVM4r2gLxGGf6McLwgXzRTo2RQ=
