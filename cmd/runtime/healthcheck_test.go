@@ -14,7 +14,7 @@ import (
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/standalone"
-	"github.com/italypaleale/francis/runtime"
+	"github.com/italypaleale/francis/internal/runtime"
 )
 
 var (

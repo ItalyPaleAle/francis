@@ -16,7 +16,7 @@ import (
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/host/local"
 	"github.com/italypaleale/francis/internal/builtinactor"
-	runtimepkg "github.com/italypaleale/francis/runtime"
+	runtimepkg "github.com/italypaleale/francis/internal/runtime"
 	"github.com/italypaleale/francis/tests/integration/framework/process"
 	"github.com/italypaleale/francis/tests/integration/framework/process/clustersecret"
 	frameworkhost "github.com/italypaleale/francis/tests/integration/framework/process/host"

@@ -13,7 +13,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	runtimepkg "github.com/italypaleale/francis/runtime"
+	runtimepkg "github.com/italypaleale/francis/internal/runtime"
 	"github.com/italypaleale/francis/tests/integration/framework/process/clustersecret"
 	"github.com/italypaleale/francis/tests/integration/framework/process/provider"
 )

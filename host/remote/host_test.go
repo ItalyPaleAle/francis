@@ -19,8 +19,8 @@ import (
 	"github.com/italypaleale/francis/components/standalone"
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/runtime"
 	"github.com/italypaleale/francis/protocol"
-	"github.com/italypaleale/francis/runtime"
 )
 
 // testActor is a minimal actor used by the integration tests

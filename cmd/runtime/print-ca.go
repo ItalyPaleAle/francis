@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/italypaleale/francis/runtime"
+	"github.com/italypaleale/francis/internal/runtime"
 )
 
 // runPrintCA derives the cluster CA from the configured runtime PSKs and writes the PEM-encoded certificates to stdout

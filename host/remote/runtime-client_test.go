@@ -24,7 +24,7 @@ import (
 	"github.com/italypaleale/francis/internal/hosttls"
 	"github.com/italypaleale/francis/internal/wt"
 	"github.com/italypaleale/francis/protocol"
-	"github.com/italypaleale/francis/runtime"
+	"github.com/italypaleale/francis/internal/runtime"
 )
 
 // freeUDPAddr returns a localhost address with a currently-free UDP port

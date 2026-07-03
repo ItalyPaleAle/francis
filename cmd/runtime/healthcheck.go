@@ -13,9 +13,9 @@ import (
 	"github.com/quic-go/quic-go/http3"
 
 	"github.com/italypaleale/francis/internal/ca"
+	"github.com/italypaleale/francis/internal/runtime"
 	"github.com/italypaleale/francis/internal/wt"
 	"github.com/italypaleale/francis/protocol"
-	"github.com/italypaleale/francis/runtime"
 )
 
 // defaultHealthcheckTimeout is the default time bound for a single healthcheck probe

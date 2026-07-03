@@ -18,8 +18,8 @@ import (
 	"github.com/italypaleale/francis/components/sqlite"
 	"github.com/italypaleale/francis/components/standalone"
 	"github.com/italypaleale/francis/internal/bootstrapauth"
+	"github.com/italypaleale/francis/internal/runtime"
 	timeutils "github.com/italypaleale/francis/internal/time"
-	"github.com/italypaleale/francis/runtime"
 )
 
 func main() {
