@@ -14,7 +14,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/italypaleale/go-kit v0.0.0-20260703002252-b413738a463f
-	github.com/italypaleale/go-sql-utils v0.2.4-0.20260703205853-9dc103a534d1
+	github.com/italypaleale/go-sql-utils v0.2.4
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/lmittmann/tint v1.1.3
