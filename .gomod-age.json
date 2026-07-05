@@ -7,8 +7,8 @@
   "allow": [
     {
       "module": "github.com/quic-go/webtransport-go",
-      "version": "v0.10.0",
-      "reason": "forked"
+      "version": "v0.11.1-0.20260705032152-a2d9e5cab744",
+      "reason": ""
     }
   ]
 }

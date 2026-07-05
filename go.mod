@@ -20,7 +20,7 @@ require (
 	github.com/lmittmann/tint v1.1.3
 	github.com/mattn/go-isatty v0.0.22
 	github.com/quic-go/quic-go v0.60.0
-	github.com/quic-go/webtransport-go v0.10.0
+	github.com/quic-go/webtransport-go v0.11.1-0.20260705032152-a2d9e5cab744
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/stretchr/testify v1.11.1
 	github.com/vmihailenco/msgpack/v5 v5.4.1
@@ -126,5 +126,3 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
-
-replace github.com/quic-go/webtransport-go => github.com/italypaleale/webtransport-go v0.0.0-20260628205325-8ec1789ed85f
