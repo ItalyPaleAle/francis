@@ -191,7 +191,8 @@ func (s *RateLimitService) Allow(ctx context.Context, key string) (allowed bool,
 type allowResult struct {
 	// Allowed reports whether the call was admitted under the configured rate
 	Allowed bool `msgpack:"allowed"`
-	// RetryAfter is how long the caller should wait before retrying when the call was not admitted; it is zero when Allowed is true
+	// RetryAfter is how long the caller should wait before retrying when the call was not admitted
+	// It is zero when Allowed is true
 	RetryAfter time.Duration `msgpack:"retryAfter"`
 }
 

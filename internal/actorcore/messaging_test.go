@@ -1,6 +1,7 @@
 package actorcore
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -25,6 +26,7 @@ import (
 )
 
 // echoActor is a minimal actor that echoes the decoded request back as the result
+// It implements both ActorInvoke and ActorPeek, prefixing the result differently so tests can tell which one ran
 type echoActor struct{}
 
 func (e *echoActor) Invoke(_ context.Context, method string, data actor.Envelope) (any, error) {
@@ -35,7 +37,16 @@ func (e *echoActor) Invoke(_ context.Context, method string, data actor.Envelope
 	return "echo:" + method + ":" + s, nil
 }
 
+func (e *echoActor) Peek(_ context.Context, method string, data actor.Envelope) (any, error) {
+	var s string
+	if data != nil {
+		_ = data.Decode(&s)
+	}
+	return "peek:" + method + ":" + s, nil
+}
+
 // streamActor is a minimal actor that echoes the request body back through the streamed response
+// It implements both ActorStream and ActorPeekStream, prefixing the result differently so tests can tell which one ran
 type streamActor struct{}
 
 func (s *streamActor) InvokeStream(_ context.Context, method string, reqContentType string, body io.Reader, w actor.StreamResponseWriter) error {
@@ -48,7 +59,40 @@ func (s *streamActor) InvokeStream(_ context.Context, method string, reqContentT
 	return err
 }
 
-func streamFactory(_ string, _ *actor.Service) actor.Actor { return &streamActor{} }
+func (s *streamActor) PeekStream(_ context.Context, method string, reqContentType string, body io.Reader, w actor.StreamResponseWriter) error {
+	in, err := io.ReadAll(body)
+	if err != nil {
+		return err
+	}
+	w.SetContentType(reqContentType)
+	_, err = w.Write([]byte("peekstream:" + method + ":" + string(in)))
+	return err
+}
+
+func streamFactory(_ string, _ *actor.Service) actor.Actor {
+	return &streamActor{}
+}
+
+// invokeOnlyActor implements only ActorInvoke, used to prove a Peek against it is rejected
+type invokeOnlyActor struct{}
+
+func (a *invokeOnlyActor) Invoke(_ context.Context, _ string, _ actor.Envelope) (any, error) {
+	return "invoked", nil
+}
+
+// bytesStreamWriter is a minimal in-memory actor.StreamResponseWriter for testing PeerInvokeStream directly
+type bytesStreamWriter struct {
+	contentType string
+	buf         bytes.Buffer
+}
+
+func (w *bytesStreamWriter) SetContentType(ct string) {
+	w.contentType = ct
+}
+
+func (w *bytesStreamWriter) Write(p []byte) (int, error) {
+	return w.buf.Write(p)
+}
 
 // fakeResolver is a scripted PlacementResolver: each Resolve call returns the next placement, and IsLocal compares the placement to localHostID
 type fakeResolver struct {
@@ -155,7 +199,7 @@ func TestManagerInvokeLocal(t *testing.T) {
 		}
 		peer := &fakePeer{}
 
-		env, err := m.Invoke(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "x", false)
+		env, err := m.Invoke(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "x", false, false)
 		require.NoError(t, err)
 		assert.Equal(t, "echo:ping:x", decodeEnvelope(t, env))
 
@@ -174,10 +218,10 @@ func TestManagerInvokeLocal(t *testing.T) {
 		aRef := ref.NewActorRef("testactor", "a1")
 
 		// First call activates the actor and claims it
-		_, err := m.Invoke(t.Context(), resolver, peer, aRef, "ping", "x", false)
+		_, err := m.Invoke(t.Context(), resolver, peer, aRef, "ping", "x", false, false)
 		require.NoError(t, err)
 		// Second call finds it already active, so no further claim is made
-		_, err = m.Invoke(t.Context(), resolver, peer, aRef, "ping", "y", false)
+		_, err = m.Invoke(t.Context(), resolver, peer, aRef, "ping", "y", false, false)
 		require.NoError(t, err)
 
 		assert.Equal(t, 1, resolver.confirmCalls)
@@ -194,7 +238,7 @@ func TestManagerInvokeLocal(t *testing.T) {
 		out, _ := msgpack.Marshal("from-peer")
 		peer := &fakePeer{results: []peerObjResult{{resp: protocol.InvokeActorResponse{Data: out}}}}
 
-		env, err := m.Invoke(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "x", false)
+		env, err := m.Invoke(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "x", false, false)
 		require.NoError(t, err)
 		assert.Equal(t, "from-peer", decodeEnvelope(t, env))
 
@@ -216,7 +260,7 @@ func TestManagerInvokePeer(t *testing.T) {
 		out, _ := msgpack.Marshal("peer-result")
 		peer := &fakePeer{results: []peerObjResult{{resp: protocol.InvokeActorResponse{Data: out}}}}
 
-		env, err := m.Invoke(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "x", false)
+		env, err := m.Invoke(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "x", false, false)
 		require.NoError(t, err)
 		assert.Equal(t, "peer-result", decodeEnvelope(t, env))
 		assert.Equal(t, "h2", peer.lastReq.TargetHostID)
@@ -235,13 +279,57 @@ func TestManagerInvokePeer(t *testing.T) {
 			{resp: protocol.InvokeActorResponse{Data: out}},
 		}}
 
-		env, err := m.Invoke(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "x", false)
+		env, err := m.Invoke(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "x", false, false)
 		require.NoError(t, err)
 		assert.Equal(t, "second-peer", decodeEnvelope(t, env))
 		assert.Equal(t, 1, resolver.invalidated)
 		assert.Equal(t, 2, peer.calls)
 		assert.Equal(t, "addr3", peer.lastAddr)
 	})
+}
+
+func TestManagerInvokeLocalPeek(t *testing.T) {
+	t.Run("dispatches to Peek instead of Invoke", func(t *testing.T) {
+		m := newMessagingManager(t, echoFactory)
+		resolver := &fakeResolver{
+			localHostID: "h1",
+			placements:  []*Placement{{HostID: "h1", Address: "addr1"}},
+		}
+		peer := &fakePeer{}
+
+		env, err := m.Invoke(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "x", false, true)
+		require.NoError(t, err)
+		assert.Equal(t, "peek:ping:x", decodeEnvelope(t, env))
+	})
+
+	t.Run("an actor without ActorPeek rejects a Peek", func(t *testing.T) {
+		m := newMessagingManager(t, func(_ string, _ *actor.Service) actor.Actor { return &invokeOnlyActor{} })
+		resolver := &fakeResolver{
+			localHostID: "h1",
+			placements:  []*Placement{{HostID: "h1", Address: "addr1"}},
+		}
+		peer := &fakePeer{}
+
+		_, err := m.Invoke(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "x", false, true)
+		require.ErrorIs(t, err, ErrActorMethodUnsupported)
+	})
+}
+
+func TestManagerInvokePeerPeek(t *testing.T) {
+	m := newMessagingManager(t, echoFactory)
+	resolver := &fakeResolver{
+		localHostID: "h1",
+		placements:  []*Placement{{HostID: "h2", Address: "addr2"}},
+	}
+	out, _ := msgpack.Marshal("peek-result")
+	peer := &fakePeer{results: []peerObjResult{{resp: protocol.InvokeActorResponse{Data: out}}}}
+
+	env, err := m.Invoke(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "x", false, true)
+	require.NoError(t, err)
+	assert.Equal(t, "peek-result", decodeEnvelope(t, env))
+
+	// The outgoing peer request must carry ReadOnly so the owning host runs it under the shared lock
+	assert.True(t, peer.lastReq.ReadOnly)
 }
 
 func TestManagerInvokeHonorsRetryAfter(t *testing.T) {
@@ -270,7 +358,7 @@ func TestManagerInvokeHonorsRetryAfter(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		env, err := m.Invoke(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "x", false)
+		env, err := m.Invoke(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "x", false, false)
 		done <- result{env: env, err: err}
 	}()
 
@@ -341,6 +429,76 @@ func TestManagerPeerInvokeObject(t *testing.T) {
 	})
 }
 
+func TestManagerPeerInvokeObjectReadOnly(t *testing.T) {
+	t.Run("dispatches to Peek when ReadOnly is set", func(t *testing.T) {
+		m := newMessagingManager(t, echoFactory)
+		resolver := &fakeResolver{localHostID: "h1"}
+
+		argData, _ := msgpack.Marshal("hi")
+		resp, perr := m.PeerInvokeObject(t.Context(), resolver, protocol.InvokeActorRequest{
+			ActorType: "testactor",
+			ActorID:   "a1",
+			Method:    "ping",
+			Data:      argData,
+			ReadOnly:  true,
+		})
+		require.Nil(t, perr)
+
+		var got string
+		err := msgpack.Unmarshal(resp.Data, &got)
+		require.NoError(t, err)
+		assert.Equal(t, "peek:ping:hi", got)
+	})
+
+	t.Run("an actor without ActorPeek is rejected", func(t *testing.T) {
+		m := newMessagingManager(t, func(_ string, _ *actor.Service) actor.Actor { return &invokeOnlyActor{} })
+		resolver := &fakeResolver{localHostID: "h1"}
+
+		_, perr := m.PeerInvokeObject(t.Context(), resolver, protocol.InvokeActorRequest{
+			ActorType: "testactor",
+			ActorID:   "a1",
+			Method:    "ping",
+			ReadOnly:  true,
+		})
+		require.NotNil(t, perr)
+	})
+}
+
+func TestManagerPeerInvokeStreamReadOnly(t *testing.T) {
+	t.Run("dispatches to PeekStream when ReadOnly is set", func(t *testing.T) {
+		m := newMessagingManager(t, streamFactory)
+		resolver := &fakeResolver{localHostID: "h1"}
+		w := &bytesStreamWriter{}
+
+		perr := m.PeerInvokeStream(t.Context(), resolver, protocol.InvokeActorRequest{
+			ActorType:   "testactor",
+			ActorID:     "a1",
+			Method:      "ping",
+			ContentType: "text/plain",
+			ReadOnly:    true,
+		}, strings.NewReader("hi"), w)
+		require.Nil(t, perr)
+		assert.Equal(t, "text/plain", w.contentType)
+		assert.Equal(t, "peekstream:ping:hi", w.buf.String())
+	})
+
+	t.Run("active-only and read-only together require an already-active actor", func(t *testing.T) {
+		m := newMessagingManager(t, streamFactory)
+		resolver := &fakeResolver{localHostID: "h1"}
+		w := &bytesStreamWriter{}
+
+		perr := m.PeerInvokeStream(t.Context(), resolver, protocol.InvokeActorRequest{
+			ActorType:  "testactor",
+			ActorID:    "a1",
+			Method:     "ping",
+			ActiveOnly: true,
+			ReadOnly:   true,
+		}, strings.NewReader("hi"), w)
+		require.NotNil(t, perr)
+		assert.Equal(t, protocol.ErrCodeActorNotActive, perr.Code)
+	})
+}
+
 func TestManagerInvokeStreamStaleLocal(t *testing.T) {
 	t.Run("a stale local placement is invalidated when the actor is owned elsewhere", func(t *testing.T) {
 		m := newMessagingManager(t, echoFactory)
@@ -352,7 +510,7 @@ func TestManagerInvokeStreamStaleLocal(t *testing.T) {
 		}
 		peer := &fakePeer{}
 
-		_, _, err := m.InvokeStream(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "", nil, false)
+		_, _, err := m.InvokeStream(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "", nil, false, false)
 		require.ErrorIs(t, err, actor.ErrActorNotHosted)
 
 		// The one-shot body cannot be replayed, so the call is not retried, but the stale entry is dropped so the next call re-resolves
@@ -369,7 +527,7 @@ func TestManagerInvokeStreamStaleLocal(t *testing.T) {
 		peer := &fakePeer{}
 
 		// An active-only stream invocation never claims the actor and finds it inactive here
-		_, _, err := m.InvokeStream(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "", nil, true)
+		_, _, err := m.InvokeStream(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "", nil, true, false)
 		require.ErrorIs(t, err, actor.ErrActorNotActive)
 
 		assert.Equal(t, 1, resolver.invalidated)
@@ -384,7 +542,7 @@ func TestManagerInvokeStreamStaleLocal(t *testing.T) {
 		}
 		peer := &fakePeer{}
 
-		ct, resp, err := m.InvokeStream(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "text/plain", strings.NewReader("hi"), false)
+		ct, resp, err := m.InvokeStream(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "text/plain", strings.NewReader("hi"), false, false)
 		require.NoError(t, err)
 		assert.Equal(t, "text/plain", ct)
 		got, err := io.ReadAll(resp)
@@ -395,6 +553,41 @@ func TestManagerInvokeStreamStaleLocal(t *testing.T) {
 		// A successful invocation leaves the cached placement in place
 		assert.Equal(t, 0, resolver.invalidated)
 		assert.Equal(t, 1, resolver.confirmCalls)
+	})
+}
+
+func TestManagerInvokeStreamPeek(t *testing.T) {
+	t.Run("dispatches to PeekStream instead of InvokeStream", func(t *testing.T) {
+		m := newMessagingManager(t, streamFactory)
+		resolver := &fakeResolver{
+			localHostID: "h1",
+			placements:  []*Placement{{HostID: "h1", Address: "addr1"}},
+		}
+		peer := &fakePeer{}
+
+		ct, resp, err := m.InvokeStream(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "text/plain", strings.NewReader("hi"), false, true)
+		require.NoError(t, err)
+		assert.Equal(t, "text/plain", ct)
+
+		got, err := io.ReadAll(resp)
+		require.NoError(t, err)
+
+		err = resp.Close()
+		require.NoError(t, err)
+
+		assert.Equal(t, "peekstream:ping:hi", string(got))
+	})
+
+	t.Run("an actor without ActorPeekStream rejects a PeekStream", func(t *testing.T) {
+		m := newMessagingManager(t, func(_ string, _ *actor.Service) actor.Actor { return &invokeOnlyActor{} })
+		resolver := &fakeResolver{
+			localHostID: "h1",
+			placements:  []*Placement{{HostID: "h1", Address: "addr1"}},
+		}
+		peer := &fakePeer{}
+
+		_, _, err := m.InvokeStream(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "text/plain", strings.NewReader("hi"), false, true)
+		require.ErrorIs(t, err, ErrActorMethodUnsupported)
 	})
 }
 

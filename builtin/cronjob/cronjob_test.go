@@ -474,8 +474,17 @@ func (f *fakeClient[T]) CancelJob(_ context.Context, jobID string) error {
 func (f *fakeClient[T]) Invoke(context.Context, string, string, string, any, ...actor.InvokeOption) (actor.Envelope, error) {
 	return nil, nil
 }
+
+func (f *fakeClient[T]) Peek(context.Context, string, string, string, any, ...actor.InvokeOption) (actor.Envelope, error) {
+	return nil, nil
+}
+
 func (f *fakeClient[T]) SetAlarm(context.Context, string, actor.AlarmProperties) error { return nil }
-func (f *fakeClient[T]) DeleteAlarm(context.Context, string) error                     { return nil }
+
+func (f *fakeClient[T]) DeleteAlarm(context.Context, string) error {
+	return nil
+}
+
 func (f *fakeClient[T]) GetJob(context.Context, string) (actor.JobInfo, error) {
 	return f.getJobInfo, f.getJobErr
 }

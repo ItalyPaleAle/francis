@@ -636,3 +636,453 @@ func TestLockAndInvokeActive(t *testing.T) {
 		assert.False(t, exists, "an active-only invocation must never activate the actor")
 	})
 }
+
+func TestLockAndPeek(t *testing.T) {
+	clock := clocktesting.NewFakeClock(time.Now())
+	log := slog.New(slog.DiscardHandler)
+
+	newHost := func() *Manager {
+		host := &Manager{
+			Actors:              haxmap.New[string, *ActiveActor](8),
+			log:                 log,
+			clock:               clock,
+			shutdownGracePeriod: 5 * time.Second,
+			ActorsConfig: map[string]components.ActorHostType{
+				"testactor": {IdleTimeout: 5 * time.Minute},
+			},
+			ActorFactories: map[string]actor.Factory{
+				"testactor": func(actorID string, service *actor.Service) actor.Actor {
+					return &actor_mocks.MockActorDeactivate{}
+				},
+			},
+		}
+		host.IdleProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ActiveActor]{
+			ExecuteFn: host.HandleIdleActor,
+			Clock:     clock,
+		})
+		return host
+	}
+
+	t.Run("successful peek activates the actor", func(t *testing.T) {
+		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+
+		host := newHost()
+		defer host.IdleProcessor.Close()
+
+		actorRef := ref.NewActorRef("testactor", "peek1")
+
+		result, err := host.LockAndPeek(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
+			return "peeked", nil
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "peeked", result)
+
+		_, exists := host.Actors.Get(actorRef.String())
+		assert.True(t, exists)
+	})
+
+	t.Run("concurrent peeks overlap", func(t *testing.T) {
+		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+
+		host := newHost()
+		defer host.IdleProcessor.Close()
+
+		actorRef := ref.NewActorRef("testactor", "peek2")
+
+		const numPeeks = 5
+		var (
+			active    atomic.Int32
+			maxActive atomic.Int32
+			wg        sync.WaitGroup
+		)
+		errs := make(chan error, numPeeks)
+
+		for range numPeeks {
+			wg.Go(func() {
+				_, pErr := host.LockAndPeek(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
+					n := active.Add(1)
+					for {
+						m := maxActive.Load()
+						if n <= m || maxActive.CompareAndSwap(m, n) {
+							break
+						}
+					}
+					time.Sleep(20 * time.Millisecond)
+					active.Add(-1)
+					return nil, nil
+				})
+				errs <- pErr
+			})
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			require.NoError(t, err)
+		}
+
+		// More than one peek must have run concurrently, proving they share the read lock rather than serializing
+		assert.Greater(t, maxActive.Load(), int32(1))
+	})
+
+	t.Run("a peek and an invoke are mutually exclusive", func(t *testing.T) {
+		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+
+		host := newHost()
+		defer host.IdleProcessor.Close()
+
+		actorRef := ref.NewActorRef("testactor", "peek3")
+
+		// Activate the actor and hold the write lock via LockAndInvoke
+		// invokeErr/peekErr are written only by their goroutine and read only after the corresponding done channel is closed, so the channel close/receive establishes the happens-before relationship that makes this safe without asserting inside the goroutine
+		invokeStartedCh := make(chan struct{})
+		invokeReleaseCh := make(chan struct{})
+		invokeErrCh := make(chan error)
+		go func() {
+			_, invokeErr := host.LockAndInvoke(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
+				close(invokeStartedCh)
+				<-invokeReleaseCh
+				return nil, nil
+			})
+			invokeErrCh <- invokeErr
+		}()
+
+		select {
+		case <-invokeStartedCh:
+		case <-time.After(3 * time.Second):
+			t.Fatal("invoke did not start in time")
+		}
+
+		// A peek attempted while the invoke holds the write lock must wait
+		var peekErr error
+		peekDone := make(chan struct{})
+		go func() {
+			_, peekErr = host.LockAndPeek(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
+				return nil, nil
+			})
+			close(peekDone)
+		}()
+
+		select {
+		case <-peekDone:
+			t.Fatal("peek completed while the invoke still held the write lock")
+		case <-time.After(50 * time.Millisecond):
+			// Expected
+		}
+
+		close(invokeReleaseCh)
+
+		select {
+		case err := <-invokeErrCh:
+			require.NoError(t, err)
+		case <-time.After(3 * time.Second):
+			t.Fatal("invoke did not complete")
+		}
+
+		select {
+		case <-peekDone:
+		case <-time.After(3 * time.Second):
+			t.Fatal("peek did not complete after the invoke released the lock")
+		}
+		require.NoError(t, peekErr)
+	})
+
+	t.Run("an idle actor with an active peek is not deactivated", func(t *testing.T) {
+		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+
+		host := newHost()
+		defer host.IdleProcessor.Close()
+
+		actorRef := ref.NewActorRef("testactor", "peek4")
+
+		peekStartedCh := make(chan struct{})
+		peekReleaseCh := make(chan struct{})
+		peekErrCh := make(chan error)
+		go func() {
+			_, peekErr := host.LockAndPeek(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
+				close(peekStartedCh)
+				<-peekReleaseCh
+				return nil, nil
+			})
+			peekErrCh <- peekErr
+		}()
+
+		select {
+		case <-peekStartedCh:
+		case <-time.After(3 * time.Second):
+			t.Fatal("peek did not start in time")
+		}
+
+		act, ok := host.Actors.Get(actorRef.String())
+		require.True(t, ok)
+
+		// TryLock backs HandleIdleActor's decision to deactivate
+		// It must fail while a Peek is in flight
+		locked, haltCh, err := act.TryLock()
+		require.NoError(t, err)
+		assert.False(t, locked, "an actor with an active Peek must be reported as busy")
+		assert.Nil(t, haltCh)
+
+		close(peekReleaseCh)
+
+		select {
+		case err = <-peekErrCh:
+			require.NoError(t, err)
+		case <-time.After(3 * time.Second):
+			t.Fatal("peek did not complete")
+		}
+
+		// Once the peek releases, the actor is idle again and can be locked
+		locked, _, err = act.TryLock()
+		require.NoError(t, err)
+		assert.True(t, locked)
+		act.Unlock()
+	})
+}
+
+func TestLockAndPeekActive(t *testing.T) {
+	clock := clocktesting.NewFakeClock(time.Now())
+	log := slog.New(slog.DiscardHandler)
+
+	newHost := func() *Manager {
+		host := &Manager{
+			Actors:              haxmap.New[string, *ActiveActor](8),
+			log:                 log,
+			clock:               clock,
+			shutdownGracePeriod: 5 * time.Second,
+			ActorsConfig: map[string]components.ActorHostType{
+				"testactor": {IdleTimeout: 5 * time.Minute},
+			},
+			ActorFactories: map[string]actor.Factory{
+				"testactor": func(actorID string, service *actor.Service) actor.Actor {
+					return &actor_mocks.MockActorDeactivate{}
+				},
+			},
+		}
+		host.IdleProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ActiveActor]{
+			ExecuteFn: host.HandleIdleActor,
+			Clock:     clock,
+		})
+		return host
+	}
+
+	t.Run("peeks an already-active actor", func(t *testing.T) {
+		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+
+		host := newHost()
+		defer host.IdleProcessor.Close()
+
+		actorRef := ref.NewActorRef("testactor", "active1")
+
+		instance := &actor_mocks.MockActorDeactivate{}
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		host.Actors.Set(actorRef.String(), activeAct)
+
+		called := false
+		result, err := host.LockAndPeekActive(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
+			called = true
+			return "ok", nil
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "ok", result)
+		assert.True(t, called)
+	})
+
+	t.Run("returns ErrActorNotActive and does not create the actor", func(t *testing.T) {
+		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+
+		host := newHost()
+		defer host.IdleProcessor.Close()
+
+		actorRef := ref.NewActorRef("testactor", "inactive")
+
+		called := false
+		result, err := host.LockAndPeekActive(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
+			called = true
+			return "ok", nil
+		})
+		require.ErrorIs(t, err, actor.ErrActorNotActive)
+		assert.Nil(t, result)
+		assert.False(t, called, "the peek function must not run for an inactive actor")
+
+		_, exists := host.Actors.Get(actorRef.String())
+		assert.False(t, exists, "an active-only peek must never activate the actor")
+	})
+}
+
+// TestQueueOrderingAroundLongRunningHead drives the same scenario as the locker-level test, but through the Manager's LockAndPeek/LockAndInvoke, so it also exercises actor activation and the halt-watcher goroutine around the raw lock
+// Each "actor" is simulated as a function parked on a channel rather than a sleep, so the test controls exactly when it exits and can assert on the exact instant the queue continues processing
+func TestQueueOrderingAroundLongRunningHead(t *testing.T) {
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+
+	clock := clocktesting.NewFakeClock(time.Now())
+	log := slog.New(slog.DiscardHandler)
+
+	host := &Manager{
+		Actors:              haxmap.New[string, *ActiveActor](8),
+		log:                 log,
+		clock:               clock,
+		shutdownGracePeriod: 5 * time.Second,
+		ActorsConfig: map[string]components.ActorHostType{
+			"testactor": {IdleTimeout: 5 * time.Minute},
+		},
+		ActorFactories: map[string]actor.Factory{
+			"testactor": func(actorID string, service *actor.Service) actor.Actor {
+				return &actor_mocks.MockActorDeactivate{}
+			},
+		},
+	}
+	host.IdleProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ActiveActor]{
+		ExecuteFn: host.HandleIdleActor,
+		Clock:     clock,
+	})
+	defer host.IdleProcessor.Close()
+
+	actorRef := ref.NewActorRef("testactor", "order1")
+
+	// Peek A is the head: it acquires immediately (activating the actor) and then simulates a long-running read by blocking on a channel until the test releases it
+	// errA is written only by the goroutine below and read only after doneA is closed, so the channel close/receive establishes the happens-before relationship that makes this safe without asserting inside the goroutine
+	unblockA := make(chan struct{})
+	acquiredA := make(chan struct{})
+	doneA := make(chan error)
+	go func() {
+		_, errA := host.LockAndPeek(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
+			close(acquiredA)
+			<-unblockA
+			return nil, nil
+		})
+		doneA <- errA
+	}()
+
+	select {
+	case <-acquiredA:
+	case <-time.After(3 * time.Second):
+		t.Fatal("peek A did not start in time")
+	}
+
+	// Peek B arrives while peek A (the head) is still running: it must join immediately, not wait, since no invoke is queued yet
+	acquiredB := make(chan struct{})
+	unblockB := make(chan struct{})
+	doneB := make(chan error)
+	go func() {
+		_, errB := host.LockAndPeek(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
+			close(acquiredB)
+			<-unblockB
+			return nil, nil
+		})
+		doneB <- errB
+	}()
+
+	select {
+	case <-acquiredB:
+	case <-time.After(3 * time.Second):
+		t.Fatal("peek B should join the active peek A immediately rather than waiting")
+	}
+
+	// An invoke arriving now must wait, since peeks A and B are both still active
+	// Once it does start, it simulates its own long-running task, blocking on a channel until the test releases it
+	invokeStarted := make(chan struct{})
+	unblockInvoke := make(chan struct{})
+	invokeErrCh := make(chan error)
+	go func() {
+		_, invokeErr := host.LockAndInvoke(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
+			close(invokeStarted)
+			<-unblockInvoke
+			return nil, nil
+		})
+		invokeErrCh <- invokeErr
+	}()
+
+	select {
+	case <-invokeStarted:
+		t.Fatal("invoke must not start while peeks A and B are still active")
+	case <-time.After(100 * time.Millisecond):
+		// Expected: still waiting
+	}
+
+	// Peek A and B finish their long-running work (the channel unblocks, simulating the task exiting)
+	close(unblockA)
+	close(unblockB)
+
+	select {
+	case err := <-doneA:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("peek A did not complete")
+	}
+	select {
+	case err := <-doneB:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("peek B did not complete")
+	}
+
+	// The queue continues processing: with both peeks gone, the waiting invoke starts next
+	select {
+	case <-invokeStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("invoke did not start after both peeks released")
+	}
+
+	// Two more peeks arrive while the invoke is active: both must wait, since an invoke excludes every peek
+	peekCStarted := make(chan struct{})
+	peekDStarted := make(chan struct{})
+	doneC := make(chan error)
+	doneD := make(chan error)
+	go func() {
+		_, errC := host.LockAndPeek(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
+			close(peekCStarted)
+			return nil, nil
+		})
+		doneC <- errC
+	}()
+	go func() {
+		_, errD := host.LockAndPeek(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
+			close(peekDStarted)
+			return nil, nil
+		})
+		doneD <- errD
+	}()
+
+	select {
+	case <-peekCStarted:
+		t.Fatal("peek C must not start while the invoke is active")
+	case <-peekDStarted:
+		t.Fatal("peek D must not start while the invoke is active")
+	case <-time.After(100 * time.Millisecond):
+		// Expected: both still waiting
+	}
+
+	// The invoke finishes its long-running work (the channel unblocks): the queue continues processing by granting both waiting peeks together
+	close(unblockInvoke)
+
+	select {
+	case err := <-invokeErrCh:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("invoke did not complete")
+	}
+
+	select {
+	case <-peekCStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("peek C did not start after the invoke released")
+	}
+	select {
+	case <-peekDStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("peek D did not start after the invoke released")
+	}
+
+	select {
+	case err := <-doneC:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("peek C did not complete")
+	}
+	select {
+	case err := <-doneD:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("peek D did not complete")
+	}
+}

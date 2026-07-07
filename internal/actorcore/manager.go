@@ -166,7 +166,7 @@ func (m *Manager) Close() {
 	}
 }
 
-// LockAndInvoke gets or creates the actor, acquires its turn-based lock, and runs fn with the actor instance
+// LockAndInvoke gets or creates the actor, acquires its exclusive (write) turn-based lock, and runs fn with the actor instance
 func (m *Manager) LockAndInvoke(parentCtx context.Context, r ref.ActorRef, fn func(ctx context.Context, act *ActiveActor) (any, error)) (any, error) {
 	// Get the actor, which may create it
 	act, err := m.getOrCreateActor(parentCtx, r)
@@ -174,10 +174,10 @@ func (m *Manager) LockAndInvoke(parentCtx context.Context, r ref.ActorRef, fn fu
 		return nil, err
 	}
 
-	return m.lockAndInvokeActor(parentCtx, act, fn)
+	return m.lockAndInvokeActor(parentCtx, act, false, fn)
 }
 
-// LockAndInvokeActive runs fn against an actor only if it is already active on this host
+// LockAndInvokeActive runs fn against an actor's exclusive (write) lock only if it is already active on this host
 // It never activates the actor, returning actor.ErrActorNotActive when the actor is not active, so active-only invocations can be honored authoritatively here
 func (m *Manager) LockAndInvokeActive(parentCtx context.Context, r ref.ActorRef, fn func(ctx context.Context, act *ActiveActor) (any, error)) (any, error) {
 	// Only proceed if the actor is already active
@@ -186,11 +186,44 @@ func (m *Manager) LockAndInvokeActive(parentCtx context.Context, r ref.ActorRef,
 		return nil, actor.ErrActorNotActive
 	}
 
-	return m.lockAndInvokeActor(parentCtx, act, fn)
+	return m.lockAndInvokeActor(parentCtx, act, false, fn)
+}
+
+// LockAndPeek gets or creates the actor, acquires its shared (read) turn-based lock, and runs fn with the actor instance
+// Unlike LockAndInvoke, concurrent LockAndPeek calls against the same actor can run at the same time, as long as no LockAndInvoke call is in progress
+func (m *Manager) LockAndPeek(parentCtx context.Context, r ref.ActorRef, fn func(ctx context.Context, act *ActiveActor) (any, error)) (any, error) {
+	// Get the actor, which may create it
+	act, err := m.getOrCreateActor(parentCtx, r)
+	if err != nil {
+		return nil, err
+	}
+
+	return m.lockAndInvokeActor(parentCtx, act, true, fn)
+}
+
+// LockAndPeekActive runs fn against an actor's shared (read) lock only if it is already active on this host
+// It never activates the actor, returning actor.ErrActorNotActive when the actor is not active, so active-only invocations can be honored authoritatively here
+func (m *Manager) LockAndPeekActive(parentCtx context.Context, r ref.ActorRef, fn func(ctx context.Context, act *ActiveActor) (any, error)) (any, error) {
+	// Only proceed if the actor is already active
+	act, ok := m.Actors.Get(r.String())
+	if !ok || act == nil {
+		return nil, actor.ErrActorNotActive
+	}
+
+	return m.lockAndInvokeActor(parentCtx, act, true, fn)
 }
 
 // lockAndInvokeActor acquires the actor's turn-based lock and runs fn, canceling the call if the actor is halted mid-flight
-func (m *Manager) lockAndInvokeActor(parentCtx context.Context, act *ActiveActor, fn func(ctx context.Context, act *ActiveActor) (any, error)) (any, error) {
+// readOnly selects the shared (read) lock used by Peek
+func (m *Manager) lockAndInvokeActor(parentCtx context.Context, act *ActiveActor, readOnly bool, fn func(ctx context.Context, act *ActiveActor) (any, error)) (any, error) {
+	// Determine the methods to use
+	acquire := act.Lock
+	release := act.Unlock
+	if readOnly {
+		acquire = act.RLock
+		release = act.RUnlock
+	}
+
 	// Create a context for this request, which allows us to stop it in-flight if needed
 	ctx, cancel := context.WithCancelCause(parentCtx)
 	defer cancel(nil)
@@ -199,12 +232,13 @@ func (m *Manager) lockAndInvokeActor(parentCtx context.Context, act *ActiveActor
 	lockCtx, lockSpan := tracing.Start(ctx, "actor.lock",
 		trace.WithAttributes(tracing.ActorRef(act.Key())),
 	)
-	haltCh, err := act.Lock(lockCtx)
+
+	haltCh, err := acquire(lockCtx)
 	tracing.End(lockSpan, err)
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire lock for actor: %w", err)
 	}
-	defer act.Unlock()
+	defer release()
 
 	go func() {
 		select {

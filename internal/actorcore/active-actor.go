@@ -148,6 +148,35 @@ func (a *ActiveActor) Unlock() {
 	a.locker.Unlock()
 }
 
+// RLock acquires a shared (read) lock for turn-based concurrency, allowing other Peek calls to run concurrently while excluding Invoke.
+// This function blocks until the lock is acquired
+func (a *ActiveActor) RLock(ctx context.Context) (chan struct{}, error) {
+	if a.halted.Load() {
+		return nil, actor.ErrActorHalted
+	}
+
+	err := a.locker.RLock(ctx)
+	switch {
+	case errors.Is(err, locker.ErrStopped):
+		// If the locker is stopped, it means that the actor has been halted
+		return nil, actor.ErrActorHalted
+	case ctx.Err() != nil && errors.Is(err, ctx.Err()):
+		return nil, ctx.Err()
+	case err != nil:
+		return nil, fmt.Errorf("failed to acquire read lock: %w", err)
+	}
+
+	// Update the time the actor became idle at, just like Lock, so an active Peek keeps the actor from going idle
+	a.UpdateIdleAt(0)
+
+	return a.haltCh, nil
+}
+
+// RUnlock releases a shared (read) lock acquired with RLock
+func (a *ActiveActor) RUnlock() {
+	a.locker.RUnlock()
+}
+
 // Halt the active actor
 func (a *ActiveActor) Halt(drain bool) error {
 	if !a.halted.CompareAndSwap(false, true) {

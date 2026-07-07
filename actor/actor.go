@@ -14,6 +14,14 @@ type ActorInvoke interface {
 	Invoke(ctx context.Context, method string, data Envelope) (any, error)
 }
 
+// ActorPeek can be implemented by actors that offer the read-only Peek method.
+// Peek is the read-side analogue of Invoke: the framework runs it under the actor's shared (read) lock, so multiple Peek calls can run concurrently with each other, while still excluding any in-flight Invoke.
+// The framework rejects state-mutating client calls made from within Peek, but it cannot stop a handler from mutating its own in-memory fields, so Peek implementations must treat the actor as read-only themselves.
+type ActorPeek interface {
+	// Peek is called when an actor is peeked.
+	Peek(ctx context.Context, method string, data Envelope) (any, error)
+}
+
 // ActorAlarm can be implemented by actors that offer the Alarm method.
 type ActorAlarm interface {
 	// Alarm is invoked upon execution of an alarm.

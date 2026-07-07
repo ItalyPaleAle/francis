@@ -23,6 +23,7 @@ An actor implements behaviors by satisfying optional interfaces:
 | Interface | Method | Purpose |
 |-----------|--------|---------|
 | `actor.ActorInvoke` | `Invoke(ctx, method, data)` | Handle a method call |
+| `actor.ActorPeek` | `Peek(ctx, method, data)` | Handle a read-only method call, concurrently with other `Peek`s |
 | `actor.ActorAlarm` | `Alarm(ctx, name, data)` | Handle a fired alarm |
 | `actor.ActorDeactivate` | `Deactivate(ctx)` | Run cleanup before deactivation |
 
@@ -100,6 +101,13 @@ Alarms are stored in the database, so they survive restarts and are delivered ev
 3. The owning host activates the actor if needed and runs the invocation.
 
 In the **local** topology, placement is coordinated through each host's embedded data store. In the **remote** topology, instead, the standalone runtime coordinates placement. Either way, callers don't need to know where an actor lives.
+
+## Peek: read-only concurrency
+
+`Invoke` is modeled on an exclusive lock: only one runs at a time for a given actor. `Peek` is the shared analogue, modeled on a read lock: many `Peek` calls against the same actor can run concurrently with each other, while still being mutually exclusive with any in-flight `Invoke`.  
+This lets read-heavy workloads avoid waiting behind other reads, without giving up the safety of turn-based concurrency for writes.
+
+An actor opts in by implementing `actor.ActorPeek` alongside (or instead of) `actor.ActorInvoke`. See [Writing actors](/docs/writing-actors#peek-handle-read-only-method-calls) for details, including what the framework can and cannot enforce about read-only behavior.
 
 ## Actor lifecycle
 

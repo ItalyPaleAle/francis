@@ -147,7 +147,7 @@ func runRestore(ctx context.Context, args []string) int {
 
 	err = provider.Restore(ctx, r)
 
-	// The provider refuses to restore while hosts are connected; surface that with actionable guidance
+	// The provider refuses to restore while hosts are connected
 	if errors.Is(err, components.ErrHostsConnected) {
 		log.Error("Refusing to restore because one or more hosts are connected to the cluster. Stop all hosts connected to this database before restoring.")
 		return 2

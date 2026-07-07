@@ -99,6 +99,38 @@ func (m *MyActor) Invoke(ctx context.Context, method string, data actor.Envelope
 	return res, nil
 }
 
+// Peek returns the counter without touching it, so many concurrent Peek calls can run at once
+// Unlike Invoke, Peek must never mutate the actor's persisted state or in-memory fields, since other Peek calls could be reading them concurrently
+func (m *MyActor) Peek(ctx context.Context, method string, data actor.Envelope) (any, error) {
+	state, err := m.client.GetState(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("error retrieving state: %w", err)
+	}
+
+	// A "-wait" suffix simulates a slow read, demonstrating that concurrent Peek calls overlap instead of queuing behind each other like Invoke does
+	before, ok := strings.CutSuffix(method, "-wait")
+	if ok {
+		method = before
+
+		const waitTime = 10000 * time.Millisecond
+		select {
+		case <-time.After(waitTime):
+			// All good
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	m.log.InfoContext(ctx, "Actor peeked", "method", method, "counter", state.Counter)
+
+	var res struct {
+		Out int64
+	}
+	res.Out = state.Counter
+
+	return res, nil
+}
+
 func (m *MyActor) Alarm(ctx context.Context, name string, data actor.Envelope) error {
 	var d struct {
 		Hello string

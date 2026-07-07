@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -61,6 +62,24 @@ func (a *testActor) Invoke(ctx context.Context, method string, data actor.Envelo
 	}
 }
 
+// Peek mirrors Invoke's "echo" and "getstate" cases, prefixed differently so tests can tell a Peek ran rather than an Invoke
+func (a *testActor) Peek(ctx context.Context, method string, data actor.Envelope) (any, error) {
+	signal(a.invokeCh, "peek:"+method)
+
+	switch method {
+	case "echo":
+		var in string
+		_ = data.Decode(&in)
+		return a.label + "peek-echo:" + in, nil
+	case "getstate":
+		var out string
+		err := a.svc.GetState(ctx, "T", a.id, &out)
+		return out, err
+	default:
+		return nil, nil
+	}
+}
+
 func (a *testActor) Alarm(_ context.Context, name string, _ actor.Envelope) error {
 	signal(a.alarmCh, name)
 	return nil
@@ -77,6 +96,20 @@ func (a *testActor) InvokeStream(_ context.Context, method string, reqContentTyp
 
 	w.SetContentType(reqContentType)
 	_, err = w.Write([]byte(a.label + "stream:" + string(data)))
+	return err
+}
+
+// PeekStream mirrors InvokeStream, prefixed differently so tests can tell a PeekStream ran rather than an InvokeStream
+func (a *testActor) PeekStream(_ context.Context, method string, reqContentType string, body io.Reader, w actor.StreamResponseWriter) error {
+	signal(a.invokeCh, "peek:"+method)
+
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return err
+	}
+
+	w.SetContentType(reqContentType)
+	_, err = w.Write([]byte(a.label + "peek-stream:" + string(data)))
 	return err
 }
 
@@ -378,6 +411,104 @@ func TestHostRemoteMultiHostPeerInvocation(t *testing.T) {
 	assert.False(t, hostA.isLocal(ap))
 }
 
+// TestHostRemoteMultiHostPeerPeek verifies a host peeking an actor the runtime places on a different host routes peer-to-peer with the ReadOnly flag set, and that the peer runs it through Peek rather than Invoke
+func TestHostRemoteMultiHostPeerPeek(t *testing.T) {
+	runtimeAddr, _ := startTestRuntime(t, t.Context())
+
+	// Host A registers no actor types, so it can only reach actors by routing to peers
+	hostA := newRemoteHost(t, runtimeAddr)
+
+	// Host B owns actor type "T", so the runtime can only place "T" actors there
+	hostB := newRemoteHost(t, runtimeAddr)
+	invokeCh := make(chan string, 4)
+	err := hostB.RegisterActor("T", func(actorID string, service *actor.Service) actor.Actor {
+		return &testActor{svc: service, id: actorID, label: "B:", invokeCh: invokeCh}
+	}, RegisterActorOptions{})
+	require.NoError(t, err)
+
+	runRemoteHost(t, hostB)
+	runRemoteHost(t, hostA)
+
+	// Host A peeks "T", which the runtime places on host B, so the call must traverse the peer transport
+	res, err := hostA.Service().Peek(t.Context(), "T", "peer1", "echo", "hi")
+	require.NoError(t, err)
+
+	var out string
+	err = res.Decode(&out)
+	require.NoError(t, err)
+	assert.Equal(t, "B:peek-echo:hi", out, "the actor's Peek method ran on host B and the result returned to host A")
+
+	// Confirm host B actually executed the invocation through Peek, not Invoke
+	select {
+	case method := <-invokeCh:
+		assert.Equal(t, "peek:echo", method)
+	case <-time.After(5 * time.Second):
+		t.Fatal("host B did not execute the peek")
+	}
+}
+
+// TestHostRemoteMultiHostConcurrentPeeksOverlap verifies that concurrent cross-host Peek calls against the same actor run at the same time, while a concurrent Invoke still excludes them
+func TestHostRemoteMultiHostConcurrentPeeksOverlap(t *testing.T) {
+	runtimeAddr, _ := startTestRuntime(t, t.Context())
+
+	hostA := newRemoteHost(t, runtimeAddr)
+
+	hostB := newRemoteHost(t, runtimeAddr)
+	const peekDelay = 200 * time.Millisecond
+	var active atomic.Int32
+	var maxActive atomic.Int32
+	err := hostB.RegisterActor("T", func(actorID string, service *actor.Service) actor.Actor {
+		return &slowPeekActor{delay: peekDelay, active: &active, maxActive: &maxActive}
+	}, RegisterActorOptions{})
+	require.NoError(t, err)
+
+	runRemoteHost(t, hostB)
+	runRemoteHost(t, hostA)
+
+	// Warm up the actor so its placement is resolved before the concurrent peeks race
+	_, err = hostA.Service().Peek(t.Context(), "T", "concurrent1", "ping", nil)
+	require.NoError(t, err)
+	active.Store(0)
+	maxActive.Store(0)
+
+	const numPeeks = 5
+	var wg sync.WaitGroup
+	errs := make(chan error, numPeeks)
+	for range numPeeks {
+		wg.Go(func() {
+			_, pErr := hostA.Service().Peek(t.Context(), "T", "concurrent1", "ping", nil)
+			errs <- pErr
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	assert.Greater(t, maxActive.Load(), int32(1), "concurrent cross-host peeks must overlap rather than serialize")
+}
+
+// slowPeekActor sleeps for delay on every Peek call while tracking how many Peek calls are concurrently in flight
+type slowPeekActor struct {
+	delay     time.Duration
+	active    *atomic.Int32
+	maxActive *atomic.Int32
+}
+
+func (a *slowPeekActor) Peek(_ context.Context, _ string, _ actor.Envelope) (any, error) {
+	n := a.active.Add(1)
+	for {
+		m := a.maxActive.Load()
+		if n <= m || a.maxActive.CompareAndSwap(m, n) {
+			break
+		}
+	}
+	time.Sleep(a.delay)
+	a.active.Add(-1)
+	return nil, nil
+}
+
 // TestHostRemoteStalePlacementReResolves verifies that a stale cached placement routing a call to the wrong host is detected by the ownership confirmation, re-resolved to the real owner, and never double-activates the actor
 func TestHostRemoteStalePlacementReResolves(t *testing.T) {
 	runtimeAddr, _ := startTestRuntime(t, t.Context())
@@ -547,6 +678,31 @@ func TestHostRemoteStreamInvocation(t *testing.T) {
 		got, err := io.ReadAll(resp)
 		require.NoError(t, err)
 		assert.Equal(t, "B:stream:ping", string(got))
+	})
+
+	t.Run("cross-host peer peek stream", func(t *testing.T) {
+		hostA := newRemoteHost(t, runtimeAddr)
+		hostB := newRemoteHost(t, runtimeAddr)
+		err := hostB.RegisterActor("S", func(actorID string, service *actor.Service) actor.Actor {
+			return &testActor{svc: service, id: actorID, label: "B:"}
+		}, RegisterActorOptions{})
+		require.NoError(t, err)
+
+		runRemoteHost(t, hostB)
+		runRemoteHost(t, hostA)
+
+		reqCtx, reqCancel := context.WithTimeout(ctx, 10*time.Second)
+		defer reqCancel()
+
+		// Host A peek-streams to "S", which the runtime places on host B, so it traverses the peer transport with ReadOnly set
+		ct, resp, err := hostA.Service().PeekStream(reqCtx, "S", "s1", "echo", "application/test", strings.NewReader("ping"))
+		require.NoError(t, err)
+		defer resp.Close()
+
+		assert.Equal(t, "application/test", ct)
+		got, err := io.ReadAll(resp)
+		require.NoError(t, err)
+		assert.Equal(t, "B:peek-stream:ping", string(got), "the actor's PeekStream method must have run on host B")
 	})
 }
 

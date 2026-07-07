@@ -4,6 +4,7 @@ import (
 	"context"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -160,12 +161,12 @@ func TestTurnBasedLocker_TryLock(t *testing.T) {
 		locker := &TurnBasedLocker{}
 
 		// First goroutine acquires with Lock
-		err := locker.Lock(context.Background())
+		err := locker.Lock(t.Context())
 		require.NoError(t, err)
 
 		// Second goroutine waits in queue
 		go func() {
-			_ = locker.Lock(context.Background())
+			_ = locker.Lock(t.Context())
 		}()
 
 		// Wait for the goroutine to be queued
@@ -855,10 +856,10 @@ func TestTurnBasedLocker_GrantCancelRace(t *testing.T) {
 			l := &TurnBasedLocker{}
 
 			// Hold the lock so the next caller has to queue
-			err := l.Lock(context.Background())
+			err := l.Lock(t.Context())
 			require.NoError(t, err)
 
-			ctx, cancel := context.WithCancel(context.Background())
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 
 			// The waiter queues, then releases the lock if it ends up being granted it
@@ -912,12 +913,689 @@ func TestTurnBasedLocker_GrantCancelRace(t *testing.T) {
 	})
 }
 
+func TestTurnBasedLocker_RLock(t *testing.T) {
+	t.Run("first acquire succeeds", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		err := locker.RLock(t.Context())
+		require.NoError(t, err)
+		assert.True(t, locker.IsLocked())
+		assert.Equal(t, 0, locker.QueueLength())
+		assert.Equal(t, 1, locker.readers)
+
+		locker.RUnlock()
+	})
+
+	t.Run("already stopped returns error", func(t *testing.T) {
+		locker := &TurnBasedLocker{stopped: true}
+
+		err := locker.RLock(t.Context())
+		require.ErrorIs(t, err, ErrStopped)
+	})
+
+	t.Run("multiple readers proceed concurrently", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		const numReaders = 10
+		var (
+			active    atomic.Int32
+			maxActive atomic.Int32
+			wg        sync.WaitGroup
+		)
+		errs := make(chan error, numReaders)
+
+		for range numReaders {
+			wg.Go(func() {
+				err := locker.RLock(t.Context())
+				if err != nil {
+					errs <- err
+					return
+				}
+
+				n := active.Add(1)
+				for {
+					m := maxActive.Load()
+					if n <= m || maxActive.CompareAndSwap(m, n) {
+						break
+					}
+				}
+
+				time.Sleep(20 * time.Millisecond)
+
+				active.Add(-1)
+				locker.RUnlock()
+			})
+		}
+
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			require.NoError(t, err)
+		}
+
+		// More than one reader must have been active at the same time, proving they ran concurrently rather than serialized
+		assert.Greater(t, maxActive.Load(), int32(1))
+		assert.False(t, locker.IsLocked())
+	})
+
+	t.Run("queues behind a waiting writer to avoid writer starvation", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		// An active reader forces the writer below to queue
+		err := locker.RLock(t.Context())
+		require.NoError(t, err)
+
+		writerAcquired := make(chan struct{})
+		go func() {
+			wErr := locker.Lock(t.Context())
+			if wErr == nil {
+				close(writerAcquired)
+			}
+		}()
+
+		assert.EventuallyWithT(t, func(c *assert.CollectT) {
+			assert.Equal(c, 1, locker.QueueLength())
+		}, 3*time.Second, 10*time.Millisecond)
+
+		// A new reader arriving while a writer is queued must queue too, rather than joining the active reader and starving the writer
+		readerAcquired := make(chan struct{})
+		go func() {
+			rErr := locker.RLock(t.Context())
+			if rErr == nil {
+				close(readerAcquired)
+			}
+		}()
+
+		assert.EventuallyWithT(t, func(c *assert.CollectT) {
+			assert.Equal(c, 2, locker.QueueLength())
+		}, 3*time.Second, 10*time.Millisecond)
+
+		select {
+		case <-writerAcquired:
+			t.Fatal("writer acquired the lock while the original reader still held it")
+		default:
+		}
+
+		// Releasing the original reader must grant the queued writer next, not the queued reader
+		locker.RUnlock()
+
+		select {
+		case <-writerAcquired:
+		case <-time.After(3 * time.Second):
+			t.Fatal("writer did not acquire the lock after the reader released it")
+		}
+
+		select {
+		case <-readerAcquired:
+			t.Fatal("queued reader acquired the lock before the writer")
+		default:
+		}
+
+		locker.Unlock()
+
+		select {
+		case <-readerAcquired:
+		case <-time.After(3 * time.Second):
+			t.Fatal("queued reader did not acquire the lock after the writer released it")
+		}
+
+		locker.RUnlock()
+	})
+
+	t.Run("context cancellation removes from queue", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+		ctx, cancel := context.WithCancel(t.Context())
+		t.Cleanup(cancel)
+
+		// A writer holds the lock so the readers below have to queue
+		err := locker.Lock(t.Context())
+		require.NoError(t, err)
+
+		done := make(chan error, 2)
+		go func() {
+			done <- locker.RLock(ctx)
+		}()
+		go func() {
+			done <- locker.RLock(ctx)
+		}()
+
+		assert.EventuallyWithT(t, func(c *assert.CollectT) {
+			assert.Equal(c, 2, locker.QueueLength())
+		}, 3*time.Second, 10*time.Millisecond)
+
+		cancel()
+
+		for range 2 {
+			select {
+			case err = <-done:
+				require.ErrorIs(t, err, context.Canceled)
+			case <-time.After(3 * time.Second):
+				t.Fatal("Did not receive an error in 3s")
+			}
+		}
+
+		assert.Equal(t, 0, locker.QueueLength())
+		locker.Unlock()
+	})
+}
+
+func TestTurnBasedLocker_WriterReaderExclusion(t *testing.T) {
+	t.Run("writer excludes readers", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		err := locker.Lock(t.Context())
+		require.NoError(t, err)
+
+		readerDone := make(chan error, 1)
+		go func() {
+			readerDone <- locker.RLock(t.Context())
+		}()
+
+		assert.EventuallyWithT(t, func(c *assert.CollectT) {
+			assert.Equal(c, 1, locker.QueueLength())
+		}, 3*time.Second, 10*time.Millisecond)
+
+		select {
+		case <-readerDone:
+			t.Fatal("reader acquired the lock while the writer held it")
+		case <-time.After(50 * time.Millisecond):
+			// Expected
+		}
+
+		locker.Unlock()
+
+		select {
+		case err = <-readerDone:
+			require.NoError(t, err)
+		case <-time.After(3 * time.Second):
+			t.Fatal("reader did not acquire the lock after the writer released it")
+		}
+
+		locker.RUnlock()
+	})
+
+	t.Run("readers exclude a writer until every one of them releases", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		err := locker.RLock(t.Context())
+		require.NoError(t, err)
+		err = locker.RLock(t.Context())
+		require.NoError(t, err)
+
+		writerDone := make(chan error, 1)
+		go func() {
+			writerDone <- locker.Lock(t.Context())
+		}()
+
+		assert.EventuallyWithT(t, func(c *assert.CollectT) {
+			assert.Equal(c, 1, locker.QueueLength())
+		}, 3*time.Second, 10*time.Millisecond)
+
+		select {
+		case <-writerDone:
+			t.Fatal("writer acquired the lock while readers held it")
+		case <-time.After(50 * time.Millisecond):
+			// Expected
+		}
+
+		// Releasing only one of the two readers must not be enough to grant the writer
+		locker.RUnlock()
+
+		select {
+		case <-writerDone:
+			t.Fatal("writer acquired the lock while a reader still held it")
+		case <-time.After(50 * time.Millisecond):
+			// Expected
+		}
+
+		locker.RUnlock()
+
+		select {
+		case err = <-writerDone:
+			require.NoError(t, err)
+		case <-time.After(3 * time.Second):
+			t.Fatal("writer did not acquire the lock after the last reader released it")
+		}
+
+		locker.Unlock()
+	})
+}
+
+func TestTurnBasedLocker_ReaderBatching(t *testing.T) {
+	t.Run("grants every queued reader together in one batch", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		// A writer holds the lock so the readers below all queue up behind it
+		err := locker.Lock(t.Context())
+		require.NoError(t, err)
+
+		const numReaders = 5
+		acquired := make(chan int, numReaders)
+		for i := range numReaders {
+			go func(id int) {
+				rErr := locker.RLock(t.Context())
+				if rErr == nil {
+					acquired <- id
+				}
+			}(i)
+		}
+
+		assert.EventuallyWithTf(t, func(c *assert.CollectT) {
+			assert.Equal(c, numReaders, locker.QueueLength())
+		}, 3*time.Second, 50*time.Millisecond, "Queue's length was not %d before the deadline", numReaders)
+
+		// Releasing the writer should hand the lock to every queued reader at once
+		locker.Unlock()
+
+		for range numReaders {
+			select {
+			case <-acquired:
+			case <-time.After(3 * time.Second):
+				t.Fatal("not all readers were granted the lock")
+			}
+		}
+
+		assert.Equal(t, numReaders, locker.readers)
+		assert.Equal(t, 0, locker.QueueLength())
+
+		for range numReaders {
+			locker.RUnlock()
+		}
+		assert.False(t, locker.IsLocked())
+	})
+
+	t.Run("batch stops at the next queued writer", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		err := locker.Lock(t.Context())
+		require.NoError(t, err)
+
+		// Two readers, then a writer, then one more reader all queue up behind the held writer
+		readerAcquired := make(chan int, 3)
+		writerAcquired := make(chan struct{})
+		go func() {
+			if locker.RLock(t.Context()) == nil {
+				readerAcquired <- 1
+			}
+		}()
+		go func() {
+			if locker.RLock(t.Context()) == nil {
+				readerAcquired <- 2
+			}
+		}()
+		assert.EventuallyWithT(t, func(c *assert.CollectT) {
+			assert.Equal(c, 2, locker.QueueLength())
+		}, 3*time.Second, 10*time.Millisecond)
+
+		go func() {
+			if locker.Lock(t.Context()) == nil {
+				close(writerAcquired)
+			}
+		}()
+		assert.EventuallyWithT(t, func(c *assert.CollectT) {
+			assert.Equal(c, 3, locker.QueueLength())
+		}, 3*time.Second, 10*time.Millisecond)
+
+		go func() {
+			if locker.RLock(t.Context()) == nil {
+				readerAcquired <- 3
+			}
+		}()
+		assert.EventuallyWithT(t, func(c *assert.CollectT) {
+			assert.Equal(c, 4, locker.QueueLength())
+		}, 3*time.Second, 10*time.Millisecond)
+
+		// Releasing the held writer must grant only the first two readers, leaving the writer and the trailing reader queued
+		locker.Unlock()
+
+		for range 2 {
+			select {
+			case <-readerAcquired:
+			case <-time.After(3 * time.Second):
+				t.Fatal("first batch of readers was not granted the lock")
+			}
+		}
+
+		select {
+		case <-writerAcquired:
+			t.Fatal("writer acquired the lock ahead of its turn")
+		case <-readerAcquired:
+			t.Fatal("trailing reader acquired the lock ahead of the queued writer")
+		case <-time.After(50 * time.Millisecond):
+			// Expected: the writer and the trailing reader are still queued
+		}
+
+		assert.Equal(t, 2, locker.readers)
+		assert.Equal(t, 2, locker.QueueLength())
+
+		locker.RUnlock()
+		locker.RUnlock()
+
+		select {
+		case <-writerAcquired:
+		case <-time.After(3 * time.Second):
+			t.Fatal("writer did not acquire the lock after both readers released")
+		}
+
+		locker.Unlock()
+
+		select {
+		case <-readerAcquired:
+		case <-time.After(3 * time.Second):
+			t.Fatal("trailing reader did not acquire the lock after the writer released")
+		}
+
+		locker.RUnlock()
+	})
+}
+
+func TestTurnBasedLocker_TryLockWithReaders(t *testing.T) {
+	t.Run("fails while any reader is active", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		err := locker.RLock(t.Context())
+		require.NoError(t, err)
+
+		acquired, err := locker.TryLock()
+		require.NoError(t, err)
+		assert.False(t, acquired)
+
+		locker.RUnlock()
+
+		acquired, err = locker.TryLock()
+		require.NoError(t, err)
+		assert.True(t, acquired)
+		locker.Unlock()
+	})
+}
+
+func TestTurnBasedLocker_StopWithReaders(t *testing.T) {
+	t.Run("cancels the queue without draining active readers", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		err := locker.RLock(t.Context())
+		require.NoError(t, err)
+
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- locker.Lock(t.Context())
+		}()
+
+		assert.EventuallyWithT(t, func(c *assert.CollectT) {
+			assert.Equal(c, 1, locker.QueueLength())
+		}, 3*time.Second, 10*time.Millisecond)
+
+		locker.Stop()
+
+		select {
+		case err = <-errCh:
+			require.ErrorIs(t, err, ErrStopped)
+		case <-time.After(3 * time.Second):
+			t.Fatal("queued writer did not receive ErrStopped")
+		}
+
+		// Stop cancels only queued waiters: the already-active reader is untouched
+		assert.True(t, locker.IsLocked())
+		locker.RUnlock()
+		assert.False(t, locker.IsLocked())
+	})
+}
+
+func TestTurnBasedLocker_StopAndWaitWithReaders(t *testing.T) {
+	t.Run("waits for every active reader to release before returning", func(t *testing.T) {
+		locker := &TurnBasedLocker{}
+
+		err := locker.RLock(t.Context())
+		require.NoError(t, err)
+		err = locker.RLock(t.Context())
+		require.NoError(t, err)
+
+		stopCh := make(chan struct{})
+		go func() {
+			locker.StopAndWait()
+			close(stopCh)
+		}()
+
+		select {
+		case <-stopCh:
+			t.Fatal("StopAndWait completed while readers were still active")
+		case <-time.After(100 * time.Millisecond):
+			// Expected
+		}
+
+		// Releasing only one of the two readers must not be enough
+		locker.RUnlock()
+
+		select {
+		case <-stopCh:
+			t.Fatal("StopAndWait completed while a reader was still active")
+		case <-time.After(100 * time.Millisecond):
+			// Expected
+		}
+
+		locker.RUnlock()
+
+		select {
+		case <-stopCh:
+			// Expected
+		case <-time.After(3 * time.Second):
+			t.Fatal("StopAndWait did not complete after the last reader released")
+		}
+
+		assert.True(t, locker.IsStopped())
+		assert.False(t, locker.IsLocked())
+	})
+}
+
+func TestTurnBasedLocker_RLockGrantCancelRace(t *testing.T) {
+	// Mirrors TestTurnBasedLocker_GrantCancelRace for the shared side: if a canceled reader failed to release its just-granted slot, the reader count would leak and the locker would wedge forever
+	t.Run("grant racing context cancellation does not leak a reader slot", func(t *testing.T) {
+		iteration := func() {
+			l := &TurnBasedLocker{}
+
+			// Hold the lock exclusively so the next RLock has to queue
+			err := l.Lock(t.Context())
+			require.NoError(t, err)
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			waiterDone := make(chan struct{})
+			go func() {
+				werr := l.RLock(ctx)
+				if werr == nil {
+					l.RUnlock()
+				}
+				close(waiterDone)
+			}()
+
+			for l.QueueLength() == 0 {
+				runtime.Gosched()
+			}
+
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			wg.Go(func() {
+				<-start
+				cancel()
+			})
+			wg.Go(func() {
+				<-start
+				l.Unlock()
+			})
+			close(start)
+			wg.Wait()
+
+			<-waiterDone
+
+			require.False(t, l.IsLocked(), "lock leaked after grant/cancel race")
+			require.Zero(t, l.QueueLength())
+
+			acquired, tryErr := l.TryLock()
+			require.NoError(t, tryErr)
+			require.True(t, acquired, "locker wedged after grant/cancel race")
+			l.Unlock()
+		}
+
+		for range 2000 {
+			iteration()
+		}
+	})
+}
+
+// TestTurnBasedLocker_QueueOrderingAroundLongRunningHead simulates a long-running holder as a goroutine parked on a channel, rather than a sleep, so the test controls exactly when it exits and can assert on the exact instant the queue is unblocked
+// It walks through both directions required by the RW contract: while a Peek is the active head, a later Peek must join immediately but an Invoke must wait
+// While an Invoke is the active head, every Peek must wait, and releasing the Invoke grants them all together
+func TestTurnBasedLocker_QueueOrderingAroundLongRunningHead(t *testing.T) {
+	l := &TurnBasedLocker{}
+
+	// Peek A is the head: it acquires immediately and then simulates a long-running task by blocking on a channel until the test releases it
+	// errA is written only by the goroutine below and read only after acquiredA is closed, so the channel close/receive establishes the happens-before relationship that makes this safe without asserting inside the goroutine
+	var errA error
+	unblockA := make(chan struct{})
+	acquiredA := make(chan struct{})
+	doneA := make(chan struct{})
+	go func() {
+		errA = l.RLock(t.Context())
+		close(acquiredA)
+		<-unblockA
+		l.RUnlock()
+		close(doneA)
+	}()
+
+	select {
+	case <-acquiredA:
+	case <-time.After(3 * time.Second):
+		t.Fatal("peek A did not acquire in time")
+	}
+	require.NoError(t, errA)
+
+	// Peek B arrives while peek A (the head) is still running: it must join immediately, not wait, since no writer is queued yet
+	var errB error
+	acquiredB := make(chan struct{})
+	unblockB := make(chan struct{})
+	doneB := make(chan struct{})
+	go func() {
+		errB = l.RLock(t.Context())
+		close(acquiredB)
+		<-unblockB
+		l.RUnlock()
+		close(doneB)
+	}()
+
+	select {
+	case <-acquiredB:
+	case <-time.After(3 * time.Second):
+		t.Fatal("peek B should join the active peek A immediately rather than waiting")
+	}
+	require.NoError(t, errB)
+
+	// An invoke arriving now must wait, since peeks A and B are both still active
+	invokeErr := make(chan error)
+	go func() {
+		invokeErr <- l.Lock(t.Context())
+	}()
+
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, 1, l.QueueLength())
+	}, 3*time.Second, 10*time.Millisecond, "the invoke should be parked in the queue behind the two active peeks")
+
+	select {
+	case <-invokeErr:
+		t.Fatal("invoke must not acquire while peeks A and B are still active")
+	case <-time.After(100 * time.Millisecond):
+		// Expected: still waiting
+	}
+
+	// Peek A and B finish their long-running work (the channel unblocks, simulating the task exiting)
+	close(unblockA)
+	close(unblockB)
+
+	select {
+	case <-doneA:
+	case <-time.After(3 * time.Second):
+		t.Fatal("peek A did not release")
+	}
+	select {
+	case <-doneB:
+	case <-time.After(3 * time.Second):
+		t.Fatal("peek B did not release")
+	}
+
+	// The queue continues processing: with both peeks gone, the waiting invoke is granted next
+	select {
+	case err := <-invokeErr:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("invoke did not acquire after both peeks released")
+	}
+
+	// The invoke is now the head: it simulates its own long-running task, blocking on a channel
+	unblockInvoke := make(chan struct{})
+	invokeDone := make(chan struct{})
+	go func() {
+		<-unblockInvoke
+		l.Unlock()
+		close(invokeDone)
+	}()
+
+	// Two more peeks arrive while the invoke is active: both must wait, since a writer excludes every reader
+	var errC, errD error
+	peekCAcquired := make(chan struct{})
+	peekDAcquired := make(chan struct{})
+	go func() {
+		errC = l.RLock(t.Context())
+		close(peekCAcquired)
+	}()
+	go func() {
+		errD = l.RLock(t.Context())
+		close(peekDAcquired)
+	}()
+
+	assert.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Equal(c, 2, l.QueueLength())
+	}, 3*time.Second, 10*time.Millisecond, "peeks C and D should be parked in the queue behind the active invoke")
+
+	select {
+	case <-peekCAcquired:
+		t.Fatal("peek C must not acquire while the invoke is active")
+	case <-peekDAcquired:
+		t.Fatal("peek D must not acquire while the invoke is active")
+	case <-time.After(100 * time.Millisecond):
+		// Expected: both still waiting
+	}
+
+	// The invoke finishes its long-running work (the channel unblocks): the queue continues processing by granting both waiting peeks together
+	close(unblockInvoke)
+
+	select {
+	case <-invokeDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("invoke did not release")
+	}
+
+	select {
+	case <-peekCAcquired:
+	case <-time.After(3 * time.Second):
+		t.Fatal("peek C did not acquire after the invoke released")
+	}
+	select {
+	case <-peekDAcquired:
+	case <-time.After(3 * time.Second):
+		t.Fatal("peek D did not acquire after the invoke released")
+	}
+	require.NoError(t, errC)
+	require.NoError(t, errD)
+
+	l.RUnlock()
+	l.RUnlock()
+}
+
 func BenchmarkTurnBasedLocker_LockUnlock(b *testing.B) {
 	locker := &TurnBasedLocker{}
 	ctx := b.Context()
 
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		err := locker.Lock(ctx)
 		if err != nil {
 			b.Fatal(err)
@@ -939,6 +1617,23 @@ func BenchmarkTurnBasedLocker_ConcurrentLockUnlock(b *testing.B) {
 				return
 			}
 			locker.Unlock()
+		}
+	})
+}
+
+func BenchmarkTurnBasedLocker_ConcurrentRLockRUnlock(b *testing.B) {
+	locker := &TurnBasedLocker{}
+	ctx := b.Context()
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			err := locker.RLock(ctx)
+			if err != nil {
+				b.Error(err)
+				return
+			}
+			locker.RUnlock()
 		}
 	})
 }

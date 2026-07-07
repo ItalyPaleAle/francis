@@ -32,6 +32,8 @@ var (
 	ErrJobPermanentFailure = errors.New("job failed permanently")
 	// ErrJobNotFound is returned by job methods when the job cannot be found.
 	ErrJobNotFound = errors.New("job not found")
+	// ErrReadOnly is returned by Client methods that mutate state, alarms, or jobs when called from within a Peek/PeekStream invocation.
+	ErrReadOnly = errors.New("cannot modify state during a read-only (Peek) invocation")
 )
 
 // Service allows interacting with the actor host, to invoke actors and perform operations on state and alarms.
@@ -84,6 +86,43 @@ func (s *Service) InvokeStream(ctx context.Context, actorType string, actorID st
 	}
 
 	return s.host.InvokeStream(ctx, actorType, actorID, method, reqContentType, body, opts...)
+}
+
+// Peek performs a read-only invocation of an actor.
+// Unlike Invoke, concurrent Peek calls against the same actor can run at the same time (however a Peek and an Invoke never overlap).
+// The actor must implement ActorPeek to be called this way.
+// Pass WithInvokeActiveOnly to peek the actor only if it is already active, without activating it, in which case ErrActorNotActive is returned when it is not
+func (s *Service) Peek(ctx context.Context, actorType string, actorID string, method string, data any, opts ...InvokeOption) (Envelope, error) {
+	if ref.IsBuiltInActorType(actorType) {
+		return nil, ErrActorTypeReserved
+	}
+
+	return s.peek(ctx, actorType, actorID, method, data, opts...)
+}
+
+// peek is the unguarded Peek used by the in-actor client, which is allowed to target built-in actors
+func (s *Service) peek(ctx context.Context, actorType string, actorID string, method string, data any, opts ...InvokeOption) (Envelope, error) {
+	if !s.ready() {
+		return nil, ErrServiceNotInitialized
+	}
+
+	return s.host.Peek(ctx, actorType, actorID, method, data, opts...)
+}
+
+// PeekStream performs a streamed, read-only invocation of an actor.
+// The request body is streamed from body, and the response body is returned as a reader that the caller must close.
+// The actor must implement ActorPeekStream to be called this way.
+// Pass WithInvokeActiveOnly to peek the actor only if it is already active, without activating it, in which case ErrActorNotActive is returned when it is not
+func (s *Service) PeekStream(ctx context.Context, actorType string, actorID string, method string, reqContentType string, body io.Reader, opts ...InvokeOption) (respContentType string, resp io.ReadCloser, err error) {
+	if ref.IsBuiltInActorType(actorType) {
+		return "", nil, ErrActorTypeReserved
+	}
+
+	if !s.ready() {
+		return "", nil, ErrServiceNotInitialized
+	}
+
+	return s.host.PeekStream(ctx, actorType, actorID, method, reqContentType, body, opts...)
 }
 
 // SetState saves the state for an actor.

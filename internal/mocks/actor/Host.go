@@ -988,6 +988,228 @@ func (_c *MockHost_ListJobs_Call) RunAndReturn(run func(ctx context.Context, act
 	return _c
 }
 
+// Peek provides a mock function for the type MockHost
+func (_mock *MockHost) Peek(ctx context.Context, actorType string, actorID string, method string, data any, opts ...actor.InvokeOption) (actor.Envelope, error) {
+	// actor.InvokeOption
+	_va := make([]any, len(opts))
+	for _i := range opts {
+		_va[_i] = opts[_i]
+	}
+	var _ca []any
+	_ca = append(_ca, ctx, actorType, actorID, method, data)
+	_ca = append(_ca, _va...)
+	ret := _mock.Called(_ca...)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Peek")
+	}
+
+	var r0 actor.Envelope
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string, any, ...actor.InvokeOption) (actor.Envelope, error)); ok {
+		return returnFunc(ctx, actorType, actorID, method, data, opts...)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string, any, ...actor.InvokeOption) actor.Envelope); ok {
+		r0 = returnFunc(ctx, actorType, actorID, method, data, opts...)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(actor.Envelope)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, string, string, any, ...actor.InvokeOption) error); ok {
+		r1 = returnFunc(ctx, actorType, actorID, method, data, opts...)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockHost_Peek_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Peek'
+type MockHost_Peek_Call struct {
+	*mock.Call
+}
+
+// Peek is a helper method to define mock.On call
+//   - ctx context.Context
+//   - actorType string
+//   - actorID string
+//   - method string
+//   - data any
+//   - opts ...actor.InvokeOption
+func (_e *MockHost_Expecter) Peek(ctx any, actorType any, actorID any, method any, data any, opts ...any) *MockHost_Peek_Call {
+	return &MockHost_Peek_Call{Call: _e.mock.On("Peek",
+		append([]any{ctx, actorType, actorID, method, data}, opts...)...)}
+}
+
+func (_c *MockHost_Peek_Call) Run(run func(ctx context.Context, actorType string, actorID string, method string, data any, opts ...actor.InvokeOption)) *MockHost_Peek_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		var arg2 string
+		if args[2] != nil {
+			arg2 = args[2].(string)
+		}
+		var arg3 string
+		if args[3] != nil {
+			arg3 = args[3].(string)
+		}
+		var arg4 any
+		if args[4] != nil {
+			arg4 = args[4].(any)
+		}
+		var arg5 []actor.InvokeOption
+		variadicArgs := make([]actor.InvokeOption, len(args)-5)
+		for i, a := range args[5:] {
+			if a != nil {
+				variadicArgs[i] = a.(actor.InvokeOption)
+			}
+		}
+		arg5 = variadicArgs
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+			arg4,
+			arg5...,
+		)
+	})
+	return _c
+}
+
+func (_c *MockHost_Peek_Call) Return(envelope actor.Envelope, err error) *MockHost_Peek_Call {
+	_c.Call.Return(envelope, err)
+	return _c
+}
+
+func (_c *MockHost_Peek_Call) RunAndReturn(run func(ctx context.Context, actorType string, actorID string, method string, data any, opts ...actor.InvokeOption) (actor.Envelope, error)) *MockHost_Peek_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// PeekStream provides a mock function for the type MockHost
+func (_mock *MockHost) PeekStream(ctx context.Context, actorType string, actorID string, method string, reqContentType string, body io.Reader, opts ...actor.InvokeOption) (string, io.ReadCloser, error) {
+	// actor.InvokeOption
+	_va := make([]any, len(opts))
+	for _i := range opts {
+		_va[_i] = opts[_i]
+	}
+	var _ca []any
+	_ca = append(_ca, ctx, actorType, actorID, method, reqContentType, body)
+	_ca = append(_ca, _va...)
+	ret := _mock.Called(_ca...)
+
+	if len(ret) == 0 {
+		panic("no return value specified for PeekStream")
+	}
+
+	var r0 string
+	var r1 io.ReadCloser
+	var r2 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string, string, io.Reader, ...actor.InvokeOption) (string, io.ReadCloser, error)); ok {
+		return returnFunc(ctx, actorType, actorID, method, reqContentType, body, opts...)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string, string, io.Reader, ...actor.InvokeOption) string); ok {
+		r0 = returnFunc(ctx, actorType, actorID, method, reqContentType, body, opts...)
+	} else {
+		r0 = ret.Get(0).(string)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, string, string, string, io.Reader, ...actor.InvokeOption) io.ReadCloser); ok {
+		r1 = returnFunc(ctx, actorType, actorID, method, reqContentType, body, opts...)
+	} else {
+		if ret.Get(1) != nil {
+			r1 = ret.Get(1).(io.ReadCloser)
+		}
+	}
+	if returnFunc, ok := ret.Get(2).(func(context.Context, string, string, string, string, io.Reader, ...actor.InvokeOption) error); ok {
+		r2 = returnFunc(ctx, actorType, actorID, method, reqContentType, body, opts...)
+	} else {
+		r2 = ret.Error(2)
+	}
+	return r0, r1, r2
+}
+
+// MockHost_PeekStream_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'PeekStream'
+type MockHost_PeekStream_Call struct {
+	*mock.Call
+}
+
+// PeekStream is a helper method to define mock.On call
+//   - ctx context.Context
+//   - actorType string
+//   - actorID string
+//   - method string
+//   - reqContentType string
+//   - body io.Reader
+//   - opts ...actor.InvokeOption
+func (_e *MockHost_Expecter) PeekStream(ctx any, actorType any, actorID any, method any, reqContentType any, body any, opts ...any) *MockHost_PeekStream_Call {
+	return &MockHost_PeekStream_Call{Call: _e.mock.On("PeekStream",
+		append([]any{ctx, actorType, actorID, method, reqContentType, body}, opts...)...)}
+}
+
+func (_c *MockHost_PeekStream_Call) Run(run func(ctx context.Context, actorType string, actorID string, method string, reqContentType string, body io.Reader, opts ...actor.InvokeOption)) *MockHost_PeekStream_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		var arg2 string
+		if args[2] != nil {
+			arg2 = args[2].(string)
+		}
+		var arg3 string
+		if args[3] != nil {
+			arg3 = args[3].(string)
+		}
+		var arg4 string
+		if args[4] != nil {
+			arg4 = args[4].(string)
+		}
+		var arg5 io.Reader
+		if args[5] != nil {
+			arg5 = args[5].(io.Reader)
+		}
+		var arg6 []actor.InvokeOption
+		variadicArgs := make([]actor.InvokeOption, len(args)-6)
+		for i, a := range args[6:] {
+			if a != nil {
+				variadicArgs[i] = a.(actor.InvokeOption)
+			}
+		}
+		arg6 = variadicArgs
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+			arg4,
+			arg5,
+			arg6...,
+		)
+	})
+	return _c
+}
+
+func (_c *MockHost_PeekStream_Call) Return(respContentType string, resp io.ReadCloser, err error) *MockHost_PeekStream_Call {
+	_c.Call.Return(respContentType, resp, err)
+	return _c
+}
+
+func (_c *MockHost_PeekStream_Call) RunAndReturn(run func(ctx context.Context, actorType string, actorID string, method string, reqContentType string, body io.Reader, opts ...actor.InvokeOption) (string, io.ReadCloser, error)) *MockHost_PeekStream_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // RetryJob provides a mock function for the type MockHost
 func (_mock *MockHost) RetryJob(ctx context.Context, jobID string) (string, error) {
 	ret := _mock.Called(ctx, jobID)

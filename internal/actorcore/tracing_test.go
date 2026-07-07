@@ -29,7 +29,7 @@ func TestInvokeProducesSpans(t *testing.T) {
 		placements:  []*Placement{{HostID: "h1", Address: "addr1"}},
 	}
 	peer := &fakePeer{}
-	env, err := m.Invoke(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "x", false)
+	env, err := m.Invoke(t.Context(), resolver, peer, ref.NewActorRef("testactor", "a1"), "ping", "x", false, false)
 	require.NoError(t, err)
 	assert.Equal(t, "echo:ping:x", decodeEnvelope(t, env))
 

@@ -80,6 +80,32 @@ func (c *Cart) Invoke(ctx context.Context, method string, data actor.Envelope) (
 - The return value (`any`) is serialized and returned to the caller, who decodes it from their own `Envelope`. Return `nil` for no response.
 - Returning an error fails the invocation, which returns the error to the caller.
 
+### `Peek`: handle read-only method calls
+
+`Invoke` serializes every call to an actor: only one runs at a time. Implement `actor.ActorPeek` to add a read-only method that many callers can run **concurrently** with each other, while still being mutually exclusive with any in-flight `Invoke`. Use it for reads that don't need to wait behind other invocations:
+
+```go
+func (c *Cart) Peek(ctx context.Context, method string, data actor.Envelope) (any, error) {
+	switch method {
+	case "itemCount":
+		state, err := c.client.GetState(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return len(state.Items), nil
+	default:
+		return nil, fmt.Errorf("unknown method: %s", method)
+	}
+}
+```
+
+`Peek` has the same shape as `Invoke`, but they differ in how state is handled:
+
+- The framework rejects mutating client calls. `SetState`, `DeleteState`, `SetAlarm`, `DeleteAlarm`, and `Dispatch` all return `actor.ErrReadOnly` when called from within `Peek`. `GetState` is always allowed.
+- However, the framework cannot stop you from mutating your own in-memory fields. Since multiple `Peek` calls can run at the same time, mutating a field on the actor struct itself (not just its persisted state) from within `Peek` is a data race. **Treat the actor as read-only in your own code too**, not just through the client.
+
+An actor can implement `Peek`, `Invoke`, both, or neither, as all interfaces are optional.
+
 ### `Alarm`: handle scheduled callbacks
 
 Implement `actor.ActorAlarm` to receive [alarms](/docs/alarms):
@@ -113,6 +139,9 @@ Keep `Deactivate` quick: it runs within a deactivation timeout (5 seconds by def
 ## Concurrency model
 
 An actor processes **one invocation at a time**. Calls to the same actor are serialized (_turn-based concurrency_), so you never need locks to protect the actor's own fields or its state from concurrent access.
+
+`Peek` is an optional method that relaxes this for read-only calls: think of it as the equivalent of Go's `sync.RWMutex` around the actor's turn.  
+`Invoke` takes the write lock (exclusive), and `Peek` takes the read lock (shared) - many `Peek` calls can run at once, but a `Peek` and an `Invoke` never overlap, and callers are served in FIFO order so a waiting `Invoke` is never starved by a steady stream of `Peek` calls.  
 
 Different actors (different IDs, or different types) run concurrently across the cluster, so your app scales by having many actors rather than by making one actor handle parallel work.
 
@@ -163,12 +192,24 @@ if resp != nil {
 By default, invoking an actor activates it if it isn't already. To invoke **only** when the actor is already active, pass `actor.WithInvokeActiveOnly()`. If the actor isn't active, you get `actor.ErrActorNotActive`:
 
 ```go
-resp, err := host.Invoke(ctx, "cart", "user-42", "peek", nil, actor.WithInvokeActiveOnly())
+resp, err := host.Invoke(ctx, "cart", "user-42", "itemCount", nil, actor.WithInvokeActiveOnly())
 ```
+
+### Peeking actors
+
+If your actor implements `actor.ActorPeek` (see [`Peek`](#peek-handle-read-only-method-calls) above), call `service.Peek` instead of `service.Invoke` to run it under the shared (read) lock instead of the exclusive (write) lock:
+
+```go
+resp, err := service.Peek(ctx, "cart", "user-42", "itemCount", nil)
+```
+
+`Peek` takes the same arguments and options as `Invoke`, including `actor.WithInvokeActiveOnly()`, and fails if the actor doesn't implement `ActorPeek`.
 
 ### Calling another actor from an actor
 
-Because the factory hands you the `*actor.Service`, an actor can invoke other actors by calling `service.Invoke(...)`. Avoid re-entrancy (actor A calling actor B, which calls back into A in the same call chain), since each actor handles one invocation at a time.
+Because the factory hands you the `*actor.Service`, an actor can invoke other actors by calling `service.Invoke(...)` (or `service.Peek(...)` for a read-only call).
+
+Avoid **re-entrancy** (actor A calling actor B, which calls back into A in the same call chain), since each actor handles one invocation at a time.
 
 ## Streaming invocations
 
@@ -187,6 +228,8 @@ defer resp.Close()
 ```
 
 The host enforces a maximum request body size (configurable with `WithMaxRequestBodySize`).
+
+Implement `actor.ActorPeekStream` and call `service.PeekStream` for the read-only, streaming analogue of `InvokeStream`: the actor holds the shared (read) lock for the whole call, so multiple `PeekStream` calls can run concurrently with each other, on the same terms as `Peek`.
 
 ## Halting an actor
 
@@ -228,3 +271,4 @@ Methods that invoke actors or manage state and alarms may return these sentinel 
 | `ErrActorHalted` | The actor is halted on the host where it was active, retry after a delay. |
 | `ErrActorTypeUnsupported` | No host in the cluster serves this actor type. |
 | `ErrNoHost` | No host is currently available to place the actor. |
+| `ErrReadOnly` | A `Client` method that mutates state, alarms, or jobs (`SetState`, `DeleteState`, `SetAlarm`, `DeleteAlarm`, `Dispatch`) was called from within `Peek`. |

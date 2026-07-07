@@ -38,6 +38,8 @@ type InvokeActorRequest struct {
 	Mode InvocationMode `msgpack:"mode"`
 	// ActiveOnly tells the owning host to invoke the actor only if it is already active, never activating it
 	ActiveOnly bool `msgpack:"activeOnly,omitempty"`
+	// ReadOnly requests a read-only (Peek) invocation, which the owning host runs under a shared lock
+	ReadOnly bool `msgpack:"readOnly,omitempty"`
 	// Data is the MessagePack-encoded argument for object invocation
 	// It is empty for stream invocation
 	Data []byte `msgpack:"data,omitempty"`

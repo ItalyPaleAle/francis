@@ -10,9 +10,10 @@ import (
 )
 
 // LockAndStream runs a streamed invocation against a local actor and bridges the actor's writer to a reader for the caller.
-// fn must call the actor's InvokeStream with the provided writer, which runs under the actor's turn-based lock for the whole call.
+// fn must call the actor's InvokeStream (or PeekStream, when readOnly) with the provided writer, which runs under the actor's turn-based lock for the whole call.
+// readOnly selects the shared (read) lock, so multiple concurrent PeekStream calls can each hold it for their full duration.
 // The returned reader carries the response body and must be closed by the caller, which also unblocks the actor if the caller stops reading early.
-func (m *Manager) LockAndStream(parentCtx context.Context, r ref.ActorRef, activeOnly bool, fn func(ctx context.Context, act *ActiveActor, w actor.StreamResponseWriter) error) (contentType string, resp io.ReadCloser, err error) {
+func (m *Manager) LockAndStream(parentCtx context.Context, r ref.ActorRef, activeOnly bool, readOnly bool, fn func(ctx context.Context, act *ActiveActor, w actor.StreamResponseWriter) error) (contentType string, resp io.ReadCloser, err error) {
 	// The actor writes the response into the pipe, the caller reads it from the other end
 	pr, pw := io.Pipe()
 	w := &pipeStreamWriter{pw: pw, ready: make(chan string, 1)}
@@ -24,8 +25,13 @@ func (m *Manager) LockAndStream(parentCtx context.Context, r ref.ActorRef, activ
 		// Run the actor under its turn-based lock
 		// The lock is held for the entire streamed call
 		run := m.LockAndInvoke
-		if activeOnly {
+		switch {
+		case activeOnly && readOnly:
+			run = m.LockAndPeekActive
+		case activeOnly:
 			run = m.LockAndInvokeActive
+		case readOnly:
+			run = m.LockAndPeek
 		}
 		_, rErr := run(parentCtx, r, func(ctx context.Context, act *ActiveActor) (any, error) {
 			return nil, fn(ctx, act, w)

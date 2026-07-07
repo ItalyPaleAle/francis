@@ -23,3 +23,11 @@ type ActorStream interface {
 	// The actor holds its turn-based lock for the entire duration of the call.
 	InvokeStream(ctx context.Context, method string, reqContentType string, body io.Reader, w StreamResponseWriter) error
 }
+
+// ActorPeekStream can be implemented by actors that offer the read-only PeekStream method.
+// PeekStream is the streaming, read-side analogue of InvokeStream: the actor holds its shared (read) lock for the entire duration of the call, so multiple PeekStream calls can run concurrently with each other, while still excluding any in-flight InvokeStream.
+type ActorPeekStream interface {
+	// PeekStream is called for a streamed, read-only invocation.
+	// It reads the request body from body and writes the response to w.
+	PeekStream(ctx context.Context, method string, reqContentType string, body io.Reader, w StreamResponseWriter) error
+}

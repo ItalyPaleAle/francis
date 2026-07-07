@@ -15,6 +15,7 @@ import (
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/tracing"
+	"github.com/italypaleale/francis/internal/types"
 	"github.com/italypaleale/francis/protocol"
 )
 
@@ -56,7 +57,8 @@ type PeerInvoker interface {
 }
 
 // Invoke resolves an actor's placement and performs an object invocation, retrying once on a stale placement
-func (m *Manager) Invoke(parentCtx context.Context, resolver PlacementResolver, peer PeerInvoker, r ref.ActorRef, method string, data any, activeOnly bool) (env actor.Envelope, err error) {
+// readOnly requests a Peek rather than an Invoke: the actor is called through its ActorPeek interface, under the shared (read) lock
+func (m *Manager) Invoke(parentCtx context.Context, resolver PlacementResolver, peer PeerInvoker, r ref.ActorRef, method string, data any, activeOnly bool, readOnly bool) (env actor.Envelope, err error) {
 	// Span the whole logical invocation, including placement resolution and the single stale-placement retry
 	ctx, span := tracing.Start(parentCtx, "actor.invoke",
 		trace.WithAttributes(
@@ -83,7 +85,7 @@ func (m *Manager) Invoke(parentCtx context.Context, resolver PlacementResolver, 
 	requestID := requestUUID.String()
 	span.SetAttributes(tracing.RequestID(requestID))
 
-	env, retry, retryAfter, err := m.doInvokeObject(ctx, resolver, peer, r, ap, method, data, activeOnly, requestID)
+	env, retry, retryAfter, err := m.doInvokeObject(ctx, resolver, peer, r, ap, method, data, activeOnly, readOnly, requestID)
 	if !retry {
 		return env, err
 	}
@@ -103,7 +105,7 @@ func (m *Manager) Invoke(parentCtx context.Context, resolver PlacementResolver, 
 		return nil, fmt.Errorf("failed to look up actor: %w", err)
 	}
 
-	env, _, _, err = m.doInvokeObject(ctx, resolver, peer, r, ap, method, data, activeOnly, requestID)
+	env, _, _, err = m.doInvokeObject(ctx, resolver, peer, r, ap, method, data, activeOnly, readOnly, requestID)
 	return env, err
 }
 
@@ -130,37 +132,52 @@ func (m *Manager) waitRetryAfter(ctx context.Context, d time.Duration) error {
 
 // doInvokeObject dispatches a single object invocation attempt to the local actor or a peer, depending on the placement
 // The bool return is true when the attempt failed in a way that warrants re-resolving the placement and retrying, and the duration carries any retry-after hint to wait before that retry
-func (m *Manager) doInvokeObject(ctx context.Context, resolver PlacementResolver, peer PeerInvoker, r ref.ActorRef, ap *Placement, method string, data any, activeOnly bool, requestID string) (actor.Envelope, bool, time.Duration, error) {
+func (m *Manager) doInvokeObject(ctx context.Context, resolver PlacementResolver, peer PeerInvoker, r ref.ActorRef, ap *Placement, method string, data any, activeOnly bool, readOnly bool, requestID string) (actor.Envelope, bool, time.Duration, error) {
 	if resolver.IsLocal(ap) {
-		return m.invokeLocalObject(ctx, resolver, r, method, data, activeOnly, requestID)
+		return m.invokeLocalObject(ctx, resolver, r, method, data, activeOnly, readOnly, requestID)
 	}
 
-	return m.invokePeerObject(ctx, peer, r, ap, method, data, activeOnly, requestID)
+	return m.invokePeerObject(ctx, peer, r, ap, method, data, activeOnly, readOnly, requestID)
 }
 
 // invokeLocalObject invokes an actor owned by this host
 // The bool return is true when the placement looks stale (the actor is inactive or owned elsewhere) so the caller can re-resolve
 // A local miss carries no retry-after hint
-func (m *Manager) invokeLocalObject(ctx context.Context, resolver PlacementResolver, r ref.ActorRef, method string, data any, activeOnly bool, requestID string) (actor.Envelope, bool, time.Duration, error) {
+func (m *Manager) invokeLocalObject(ctx context.Context, resolver PlacementResolver, r ref.ActorRef, method string, data any, activeOnly bool, readOnly bool, requestID string) (actor.Envelope, bool, time.Duration, error) {
 	invoke := func(invokeCtx context.Context, act *ActiveActor) (any, error) {
-		// The actor must implement the Invoke method to be called this way
-		obj, ok := act.Instance.(actor.ActorInvoke)
-		if !ok {
-			return nil, ErrActorMethodUnsupported
-		}
-
 		// Stamp the request ID into the context so the actor can detect duplicates
 		invokeCtx = actor.WithRequestID(invokeCtx, requestID)
 
-		// Invoke the actor, wrapping the data in an envelope as the receiver expects
-		res, err := obj.Invoke(invokeCtx, method, NewObjectEnvelope(data))
+		var (
+			res any
+			err error
+		)
+		if readOnly {
+			// The actor must implement the Peek method to be called this way
+			obj, ok := act.Instance.(actor.ActorPeek)
+			if !ok {
+				return nil, ErrActorMethodUnsupported
+			}
+
+			// Mark the context read-only so the client rejects state-mutating calls made from within the handler
+			invokeCtx = types.WithReadOnly(invokeCtx)
+			res, err = obj.Peek(invokeCtx, method, NewObjectEnvelope(data))
+		} else {
+			// The actor must implement the Invoke method to be called this way
+			obj, ok := act.Instance.(actor.ActorInvoke)
+			if !ok {
+				return nil, ErrActorMethodUnsupported
+			}
+
+			res, err = obj.Invoke(invokeCtx, method, NewObjectEnvelope(data))
+		}
 		if err != nil {
 			return nil, fmt.Errorf("error from actor: %w", err)
 		}
 		return res, nil
 	}
 
-	res, err := m.lockAndInvokeLocal(ctx, resolver, r, activeOnly, invoke)
+	res, err := m.lockAndInvokeLocal(ctx, resolver, r, activeOnly, readOnly, invoke)
 	if err != nil {
 		// A halted, inactive, or elsewhere-owned actor means the actor may now be active on another host, so re-resolve and retry
 		// ErrActorHalted is included because the manager removes the actor from its map after halting, so a re-resolve activates a fresh instance
@@ -179,7 +196,7 @@ func (m *Manager) invokeLocalObject(ctx context.Context, resolver PlacementResol
 
 // invokePeerObject invokes an actor owned by a peer host over the peer transport
 // The bool return is true when the placement looks stale and the caller should re-resolve and retry, and the duration carries the peer's retry-after hint
-func (m *Manager) invokePeerObject(ctx context.Context, peer PeerInvoker, r ref.ActorRef, ap *Placement, method string, data any, activeOnly bool, requestID string) (actor.Envelope, bool, time.Duration, error) {
+func (m *Manager) invokePeerObject(ctx context.Context, peer PeerInvoker, r ref.ActorRef, ap *Placement, method string, data any, activeOnly bool, readOnly bool, requestID string) (actor.Envelope, bool, time.Duration, error) {
 	// Encode the argument as MessagePack for the request body
 	var (
 		argData []byte
@@ -201,6 +218,7 @@ func (m *Manager) invokePeerObject(ctx context.Context, peer PeerInvoker, r ref.
 		Method:       method,
 		Data:         argData,
 		ActiveOnly:   activeOnly,
+		ReadOnly:     readOnly,
 		RequestID:    requestID,
 	})
 	if perr != nil {
@@ -227,7 +245,8 @@ func (m *Manager) invokePeerObject(ctx context.Context, peer PeerInvoker, r ref.
 
 // InvokeStream resolves an actor's placement and performs a streamed invocation
 // Stale-placement and not-active errors are returned to the caller rather than retried, because the request body is a one-shot reader that cannot be replayed
-func (m *Manager) InvokeStream(parentCtx context.Context, resolver PlacementResolver, peer PeerInvoker, r ref.ActorRef, method string, reqContentType string, body io.Reader, activeOnly bool) (string, io.ReadCloser, error) {
+// readOnly requests a PeekStream rather than an InvokeStream: the actor is called through its ActorPeekStream interface, under the shared (read) lock for the whole call
+func (m *Manager) InvokeStream(parentCtx context.Context, resolver PlacementResolver, peer PeerInvoker, r ref.ActorRef, method string, reqContentType string, body io.Reader, activeOnly bool, readOnly bool) (string, io.ReadCloser, error) {
 	// Span the invocation setup: the span ends when the response metadata is ready, before the caller streams the body
 	ctx, span := tracing.Start(parentCtx, "actor.invoke.stream",
 		trace.WithAttributes(
@@ -245,7 +264,7 @@ func (m *Manager) InvokeStream(parentCtx context.Context, resolver PlacementReso
 	}
 
 	if resolver.IsLocal(ap) {
-		ct, resp, err := m.invokeLocalStream(ctx, resolver, r, method, reqContentType, body, activeOnly)
+		ct, resp, err := m.invokeLocalStream(ctx, resolver, r, method, reqContentType, body, activeOnly, readOnly)
 		if err != nil && (errors.Is(err, actor.ErrActorNotActive) || errors.Is(err, actor.ErrActorNotHosted)) {
 			// A stale cached placement routed us here, but the actor is inactive or owned elsewhere: drop the entry so the next call re-resolves
 			// We do not retry the current call because the request body has already been consumed, mirroring the object path's stale-local handling
@@ -256,7 +275,7 @@ func (m *Manager) InvokeStream(parentCtx context.Context, resolver PlacementReso
 	}
 
 	// Stream to the peer that owns the actor
-	ct, resp, retry, err := m.invokePeerStream(ctx, peer, r, ap, method, reqContentType, body, activeOnly)
+	ct, resp, retry, err := m.invokePeerStream(ctx, peer, r, ap, method, reqContentType, body, activeOnly, readOnly)
 
 	// On a stale or unavailable placement, drop the cached entry so the next call re-resolves
 	// We do not retry the current call because the request body has already been consumed
@@ -267,7 +286,7 @@ func (m *Manager) InvokeStream(parentCtx context.Context, resolver PlacementReso
 }
 
 // invokeLocalStream streams an invocation to an actor owned by this host, bridging the actor's writer to a reader for the caller
-func (m *Manager) invokeLocalStream(ctx context.Context, resolver PlacementResolver, r ref.ActorRef, method string, reqContentType string, body io.Reader, activeOnly bool) (string, io.ReadCloser, error) {
+func (m *Manager) invokeLocalStream(ctx context.Context, resolver PlacementResolver, r ref.ActorRef, method string, reqContentType string, body io.Reader, activeOnly bool, readOnly bool) (string, io.ReadCloser, error) {
 	// Claim the actor for this host before activating it, unless this is an active-only invocation
 	if !activeOnly {
 		err := m.claimLocal(ctx, resolver, r)
@@ -276,7 +295,19 @@ func (m *Manager) invokeLocalStream(ctx context.Context, resolver PlacementResol
 		}
 	}
 
-	return m.LockAndStream(ctx, r, activeOnly, func(invokeCtx context.Context, act *ActiveActor, w actor.StreamResponseWriter) error {
+	return m.LockAndStream(ctx, r, activeOnly, readOnly, func(invokeCtx context.Context, act *ActiveActor, w actor.StreamResponseWriter) error {
+		if readOnly {
+			// The actor must implement the PeekStream method to be called this way
+			obj, ok := act.Instance.(actor.ActorPeekStream)
+			if !ok {
+				return ErrActorMethodUnsupported
+			}
+
+			// Mark the context read-only so the client rejects state-mutating calls made from within the handler
+			invokeCtx = types.WithReadOnly(invokeCtx)
+			return obj.PeekStream(invokeCtx, method, reqContentType, body, w)
+		}
+
 		// The actor must implement the InvokeStream method to be called this way
 		obj, ok := act.Instance.(actor.ActorStream)
 		if !ok {
@@ -290,7 +321,7 @@ func (m *Manager) invokeLocalStream(ctx context.Context, resolver PlacementResol
 
 // invokePeerStream streams an invocation to an actor owned by a peer host over the peer transport
 // The bool return is true when the placement looks stale or unavailable and the caller should re-resolve
-func (m *Manager) invokePeerStream(ctx context.Context, peer PeerInvoker, r ref.ActorRef, ap *Placement, method string, reqContentType string, body io.Reader, activeOnly bool) (string, io.ReadCloser, bool, error) {
+func (m *Manager) invokePeerStream(ctx context.Context, peer PeerInvoker, r ref.ActorRef, ap *Placement, method string, reqContentType string, body io.Reader, activeOnly bool, readOnly bool) (string, io.ReadCloser, bool, error) {
 	ct, resp, perr := peer.InvokeStream(ctx, ap.Address, protocol.InvokeActorRequest{
 		TargetHostID: ap.HostID,
 		ActorType:    r.ActorType,
@@ -298,6 +329,7 @@ func (m *Manager) invokePeerStream(ctx context.Context, peer PeerInvoker, r ref.
 		Method:       method,
 		ContentType:  reqContentType,
 		ActiveOnly:   activeOnly,
+		ReadOnly:     readOnly,
 	}, body)
 	if perr != nil {
 		retry := perr.Retryable() || perr.Code == protocol.ErrCodeActorNotActive
@@ -330,13 +362,7 @@ func (m *Manager) PeerInvokeObject(ctx context.Context, resolver PlacementResolv
 func (m *Manager) peerInvokeObjectCore(ctx context.Context, resolver PlacementResolver, req protocol.InvokeActorRequest) (protocol.InvokeActorResponse, *protocol.Error) {
 	r := ref.NewActorRef(req.ActorType, req.ActorID)
 
-	invoke := func(invokeCtx context.Context, act *ActiveActor) (any, error) {
-		// The actor must implement the Invoke method to be called this way
-		obj, ok := act.Instance.(actor.ActorInvoke)
-		if !ok {
-			return nil, ErrActorMethodUnsupported
-		}
-
+	invoke := func(invokeCtx context.Context, act *ActiveActor) (rRes any, rErr error) {
 		// Decode the argument straight off the wire: the MessagePack decoder satisfies the Envelope interface
 		var data actor.Envelope
 		if len(req.Data) > 0 {
@@ -349,15 +375,32 @@ func (m *Manager) peerInvokeObjectCore(ctx context.Context, resolver PlacementRe
 		// Stamp the request ID into the context so the actor can detect duplicates
 		invokeCtx = actor.WithRequestID(invokeCtx, req.RequestID)
 
-		// Invoke the actor
-		res, invokeErr := obj.Invoke(invokeCtx, req.Method, data)
-		if invokeErr != nil {
-			return nil, fmt.Errorf("error from actor: %w", invokeErr)
+		if req.ReadOnly {
+			// The actor must implement the Peek method to be called this way
+			obj, ok := act.Instance.(actor.ActorPeek)
+			if !ok {
+				return nil, ErrActorMethodUnsupported
+			}
+
+			// Mark the context read-only so the client rejects state-mutating calls made from within the handler
+			invokeCtx = types.WithReadOnly(invokeCtx)
+			rRes, rErr = obj.Peek(invokeCtx, req.Method, data)
+		} else {
+			// The actor must implement the Invoke method to be called this way
+			obj, ok := act.Instance.(actor.ActorInvoke)
+			if !ok {
+				return nil, ErrActorMethodUnsupported
+			}
+
+			rRes, rErr = obj.Invoke(invokeCtx, req.Method, data)
 		}
-		return res, nil
+		if rErr != nil {
+			return nil, fmt.Errorf("error from actor: %w", rErr)
+		}
+		return rRes, nil
 	}
 
-	res, err := m.lockAndInvokeLocal(ctx, resolver, r, req.ActiveOnly, invoke)
+	res, err := m.lockAndInvokeLocal(ctx, resolver, r, req.ActiveOnly, req.ReadOnly, invoke)
 	if err != nil {
 		return protocol.InvokeActorResponse{}, InvokeErrorToProtocol(err)
 	}
@@ -388,6 +431,18 @@ func (m *Manager) PeerInvokeStream(ctx context.Context, resolver PlacementResolv
 	}
 
 	invoke := func(invokeCtx context.Context, act *ActiveActor) (any, error) {
+		if req.ReadOnly {
+			// The actor must implement the PeekStream method to be called this way
+			obj, ok := act.Instance.(actor.ActorPeekStream)
+			if !ok {
+				return nil, ErrActorMethodUnsupported
+			}
+
+			// Mark the context read-only so the client rejects state-mutating calls made from within the handler
+			invokeCtx = types.WithReadOnly(invokeCtx)
+			return nil, obj.PeekStream(invokeCtx, req.Method, req.ContentType, body, w)
+		}
+
 		// The actor must implement the InvokeStream method to be called this way
 		obj, ok := act.Instance.(actor.ActorStream)
 		if !ok {
@@ -401,9 +456,14 @@ func (m *Manager) PeerInvokeStream(ctx context.Context, resolver PlacementResolv
 	// An active-only invocation must not activate the actor here
 	// This host is authoritative about whether it is active
 	var err error
-	if req.ActiveOnly {
+	switch {
+	case req.ActiveOnly && req.ReadOnly:
+		_, err = m.LockAndPeekActive(ctx, r, invoke)
+	case req.ActiveOnly:
 		_, err = m.LockAndInvokeActive(ctx, r, invoke)
-	} else {
+	case req.ReadOnly:
+		_, err = m.LockAndPeek(ctx, r, invoke)
+	default:
 		_, err = m.LockAndInvoke(ctx, r, invoke)
 	}
 	if err != nil {
@@ -414,9 +474,14 @@ func (m *Manager) PeerInvokeStream(ctx context.Context, resolver PlacementResolv
 }
 
 // lockAndInvokeLocal runs fn against a local actor, claiming the actor for this host first unless the invocation is active-only
-func (m *Manager) lockAndInvokeLocal(ctx context.Context, resolver PlacementResolver, r ref.ActorRef, activeOnly bool, fn func(ctx context.Context, act *ActiveActor) (any, error)) (any, error) {
+// readOnly selects the shared-lock LockAndPeek(Active) path instead of the exclusive-lock LockAndInvoke(Active) path
+func (m *Manager) lockAndInvokeLocal(ctx context.Context, resolver PlacementResolver, r ref.ActorRef, activeOnly bool, readOnly bool, fn func(ctx context.Context, act *ActiveActor) (any, error)) (any, error) {
 	// An active-only invocation is authoritative locally: only invoke if already active here, never activate or claim
 	if activeOnly {
+		if readOnly {
+			return m.LockAndPeekActive(ctx, r, fn)
+		}
+
 		return m.LockAndInvokeActive(ctx, r, fn)
 	}
 
@@ -424,6 +489,10 @@ func (m *Manager) lockAndInvokeLocal(ctx context.Context, resolver PlacementReso
 	err := m.claimLocal(ctx, resolver, r)
 	if err != nil {
 		return nil, err
+	}
+
+	if readOnly {
+		return m.LockAndPeek(ctx, r, fn)
 	}
 
 	return m.LockAndInvoke(ctx, r, fn)

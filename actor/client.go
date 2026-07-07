@@ -3,14 +3,18 @@ package actor
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"github.com/italypaleale/francis/internal/builtinkey"
 	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/types"
 )
 
 // Client allows interacting with the actor service, and it's pre-configured for the active actor
-// A Client is bound to a single activation and a single invocation turn: it must not be shared across goroutines and must not be reused across activations or turns.
-// GetState caches the fetched value in-memory so repeated calls within the same turn avoid redundant store reads.
+// A Client is bound to a single activation: it must not be shared across goroutines and must not be reused across activations.
+// It is, however, shared across every turn of that activation (including concurrent Peek turns).
+// GetState caches the fetched value in-memory so repeated calls avoid redundant store reads.
+// SetState, DeleteState, SetAlarm, DeleteAlarm, and Dispatch return ErrReadOnly when called from within a Peek/PeekStream invocation, since Peek must not mutate the actor.
 type Client[T any] interface {
 	// SetState saves the actor's state.
 	SetState(ctx context.Context, state T, opts *SetStateOpts) error
@@ -23,8 +27,11 @@ type Client[T any] interface {
 	// DeleteAlarm deletes an alarm.
 	DeleteAlarm(ctx context.Context, alarmName string) error
 	// Invoke synchronously invokes another actor and returns its response envelope.
-	// Note: invoking your own actor from within its own turn deadlocks on the turn lock.
+	// Note: invoking/peeking your own actor from within its own turn deadlocks on the turn lock.
 	Invoke(ctx context.Context, actorType string, actorID string, method string, data any, opts ...InvokeOption) (Envelope, error)
+	// Peek synchronously performs a read-only invocation of another actor and returns its response envelope.
+	// Note: invoking/peeking your own actor from within its own turn can deadlock on the turn lock.
+	Peek(ctx context.Context, actorType string, actorID string, method string, data any, opts ...InvokeOption) (Envelope, error)
 	// Dispatch sends a durable, fire-and-forget job to the current actor.
 	Dispatch(ctx context.Context, method string, input any, opts ...JobOption) (jobID string, err error)
 	// GetJob returns the information for a job by its ID, spanning both live and dead-lettered jobs.
@@ -50,8 +57,9 @@ type client[T any] struct {
 	// A normal client rejects built-in targets with ErrActorTypeReserved, so application actors cannot reach built-in actors through it
 	privileged bool
 
-	// hasState is set once the state has been fetched or written so subsequent GetState calls within the same turn are served from the in-memory copy
-	// This is safe because the turn-based lock guarantees no other caller modifies the actor's state while this turn is executing
+	// stateMu guards hasState/state, since concurrent Peek turns can call GetState on this same client at once
+	stateMu sync.RWMutex
+	// hasState is set once the state has been fetched or written so subsequent GetState calls are served from the in-memory copy
 	hasState bool
 	state    T
 }
@@ -87,6 +95,9 @@ func (c *client[T]) SetState(ctx context.Context, state T, opts *SetStateOpts) e
 	if !c.canTarget(c.actorType) {
 		return ErrActorTypeReserved
 	}
+	if types.IsReadOnly(ctx) {
+		return ErrReadOnly
+	}
 
 	err := c.service.setState(ctx, c.actorType, c.actorID, state, opts)
 	if err != nil {
@@ -94,8 +105,12 @@ func (c *client[T]) SetState(ctx context.Context, state T, opts *SetStateOpts) e
 	}
 
 	// Store the state in the local object
+	// We need a lock for correctness, but it should not be possible for this method to be called concurrently
+	c.stateMu.Lock()
 	c.hasState = true
 	c.state = state
+	c.stateMu.Unlock()
+
 	return nil
 }
 
@@ -105,8 +120,22 @@ func (c *client[T]) GetState(ctx context.Context) (state T, err error) {
 		return state, ErrActorTypeReserved
 	}
 
+	// Fast path: serve the cached value, if another call (possibly a concurrent Peek) already populated it
+	c.stateMu.RLock()
 	if c.hasState {
-		// Return from the local object
+		state = c.state
+		c.stateMu.RUnlock()
+		return state, nil
+	}
+	c.stateMu.RUnlock()
+
+	// Slow path: take the write lock and re-check, since a concurrent caller may have populated the cache while we were waiting for it
+	// This collapses concurrent cache misses (for example from overlapping Peek calls) into a single provider fetch
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+
+	if c.hasState {
+		// We not have a cached value to return
 		return c.state, nil
 	}
 
@@ -128,11 +157,17 @@ func (c *client[T]) DeleteState(ctx context.Context) error {
 	if !c.canTarget(c.actorType) {
 		return ErrActorTypeReserved
 	}
+	if types.IsReadOnly(ctx) {
+		return ErrReadOnly
+	}
 
 	// We set "hasState" to indicate we have the cached state
+	// We need a lock for correctness, but it should not be possible for this method to be called concurrently
 	var zero T
+	c.stateMu.Lock()
 	c.hasState = true
 	c.state = zero
+	c.stateMu.Unlock()
 
 	return c.service.deleteState(ctx, c.actorType, c.actorID)
 }
@@ -142,6 +177,9 @@ func (c *client[T]) SetAlarm(ctx context.Context, alarmName string, properties A
 	if !c.canTarget(c.actorType) {
 		return ErrActorTypeReserved
 	}
+	if types.IsReadOnly(ctx) {
+		return ErrReadOnly
+	}
 
 	return c.service.setAlarm(ctx, c.actorType, c.actorID, alarmName, properties)
 }
@@ -150,6 +188,9 @@ func (c *client[T]) SetAlarm(ctx context.Context, alarmName string, properties A
 func (c *client[T]) DeleteAlarm(ctx context.Context, alarmName string) error {
 	if !c.canTarget(c.actorType) {
 		return ErrActorTypeReserved
+	}
+	if types.IsReadOnly(ctx) {
+		return ErrReadOnly
 	}
 
 	return c.service.deleteAlarm(ctx, c.actorType, c.actorID, alarmName)
@@ -164,10 +205,22 @@ func (c *client[T]) Invoke(ctx context.Context, actorType string, actorID string
 	return c.service.invoke(ctx, actorType, actorID, method, data, opts...)
 }
 
+// Peek synchronously performs a read-only invocation of another actor and returns its response envelope.
+func (c *client[T]) Peek(ctx context.Context, actorType string, actorID string, method string, data any, opts ...InvokeOption) (Envelope, error) {
+	if !c.canTarget(actorType) {
+		return nil, ErrActorTypeReserved
+	}
+
+	return c.service.peek(ctx, actorType, actorID, method, data, opts...)
+}
+
 // Dispatch sends a durable, fire-and-forget job to the current actor.
 func (c *client[T]) Dispatch(ctx context.Context, method string, input any, opts ...JobOption) (jobID string, err error) {
 	if !c.canTarget(c.actorType) {
 		return "", ErrActorTypeReserved
+	}
+	if types.IsReadOnly(ctx) {
+		return "", ErrReadOnly
 	}
 
 	return c.service.dispatch(ctx, c.actorType, c.actorID, method, input, opts...)

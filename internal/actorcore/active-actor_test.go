@@ -298,6 +298,146 @@ func TestLock(t *testing.T) {
 	})
 }
 
+func TestRLock(t *testing.T) {
+	clock := clocktesting.NewFakeClock(time.Now())
+
+	getActiveAct := func() *ActiveActor {
+		actorRef := ref.NewActorRef("testactor", "actor1")
+		instance := &actor_mocks.MockActorDeactivate{}
+
+		processor := eventqueue.NewProcessor(eventqueue.Options[string, *ActiveActor]{
+			ExecuteFn: func(a *ActiveActor) {},
+			Clock:     clock,
+		})
+
+		return NewActiveActor(actorRef, instance, 5*time.Minute, processor, clock)
+	}
+
+	t.Run("successful read lock acquisition", func(t *testing.T) {
+		activeAct := getActiveAct()
+		t.Cleanup(func() { activeAct.RUnlock() })
+
+		haltCh, err := activeAct.RLock(t.Context())
+		require.NoError(t, err)
+		assert.NotNil(t, haltCh)
+		assert.Equal(t, activeAct.haltCh, haltCh)
+	})
+
+	t.Run("multiple concurrent read locks succeed", func(t *testing.T) {
+		activeAct := getActiveAct()
+		t.Cleanup(func() {
+			activeAct.RUnlock()
+			activeAct.RUnlock()
+		})
+
+		haltCh1, err := activeAct.RLock(t.Context())
+		require.NoError(t, err)
+		assert.NotNil(t, haltCh1)
+
+		haltCh2, err := activeAct.RLock(t.Context())
+		require.NoError(t, err)
+		assert.NotNil(t, haltCh2)
+	})
+
+	t.Run("fails when actor is halted", func(t *testing.T) {
+		activeAct := getActiveAct()
+
+		// Halt the actor
+		err := activeAct.Halt(false)
+		require.NoError(t, err)
+
+		// RLock should fail
+		haltCh, err := activeAct.RLock(t.Context())
+		require.ErrorIs(t, err, actor.ErrActorHalted)
+		assert.Nil(t, haltCh)
+	})
+
+	t.Run("excludes a concurrent write lock", func(t *testing.T) {
+		activeAct := getActiveAct()
+		t.Cleanup(func() { activeAct.RUnlock() })
+
+		// Acquire the read lock first
+		haltCh, err := activeAct.RLock(t.Context())
+		require.NoError(t, err)
+		assert.NotNil(t, haltCh)
+
+		// A write lock should not be granted while the read lock is held
+		locked, _, err := activeAct.TryLock()
+		require.NoError(t, err)
+		assert.False(t, locked)
+	})
+
+	t.Run("respects context cancellation", func(t *testing.T) {
+		activeAct := getActiveAct()
+		t.Cleanup(func() { activeAct.Unlock() })
+
+		// First acquire the write lock, so RLock below has to wait
+		haltCh1, err := activeAct.Lock(t.Context())
+		require.NoError(t, err)
+		assert.NotNil(t, haltCh1)
+
+		// Create a cancelled context
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		// RLock should fail with context cancellation
+		haltCh2, err := activeAct.RLock(ctx)
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Nil(t, haltCh2)
+	})
+
+	t.Run("updates idle time on successful read lock", func(t *testing.T) {
+		activeAct := getActiveAct()
+		t.Cleanup(func() { activeAct.RUnlock() })
+
+		oldIdleAt := *activeAct.idleAt.Load()
+
+		// Advance time
+		clock.Step(1 * time.Minute)
+
+		haltCh, err := activeAct.RLock(t.Context())
+		require.NoError(t, err)
+		assert.NotNil(t, haltCh)
+
+		newIdleAt := *activeAct.idleAt.Load()
+		assert.True(t, newIdleAt.After(oldIdleAt))
+	})
+}
+
+func TestRUnlock(t *testing.T) {
+	clock := clocktesting.NewFakeClock(time.Now())
+
+	getActiveAct := func() *ActiveActor {
+		actorRef := ref.NewActorRef("testactor", "actor1")
+		instance := &actor_mocks.MockActorDeactivate{}
+
+		processor := eventqueue.NewProcessor(eventqueue.Options[string, *ActiveActor]{
+			ExecuteFn: func(a *ActiveActor) {},
+			Clock:     clock,
+		})
+
+		return NewActiveActor(actorRef, instance, 5*time.Minute, processor, clock)
+	}
+
+	t.Run("successful read unlock", func(t *testing.T) {
+		activeAct := getActiveAct()
+		t.Cleanup(func() { activeAct.Unlock() })
+
+		// Read-lock first
+		haltCh, err := activeAct.RLock(t.Context())
+		require.NoError(t, err)
+		assert.NotNil(t, haltCh)
+
+		// Now read-unlock
+		activeAct.RUnlock()
+
+		// The write lock should now be available
+		locked, _, err := activeAct.TryLock()
+		require.NoError(t, err)
+		assert.True(t, locked)
+	})
+}
+
 func TestUnlock(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 
@@ -617,7 +757,9 @@ func TestConcurrentLockAndHalt(t *testing.T) {
 	// Halt the actor
 	wg.Go(func() {
 		hErr := activeAct.Halt(true)
-		assert.NoError(t, hErr)
+		if hErr != nil {
+			errCh <- fmt.Errorf("unexpected error halting: %w", hErr)
+		}
 	})
 
 	wg.Wait()
