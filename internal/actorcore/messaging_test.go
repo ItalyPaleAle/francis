@@ -293,7 +293,7 @@ func TestManagerInvokeBootstrap(t *testing.T) {
 
 		env, err := m.Invoke(t.Context(), resolver, &fakePeer{}, ref.NewActorRef("testactor", actor.SingletonActorID), ref.MethodBootstrap, nil, false, false)
 		require.Error(t, err)
-		assert.ErrorContains(t, err, "boom")
+		require.ErrorContains(t, err, "boom")
 		assert.Nil(t, env)
 		assert.Equal(t, int32(1), calls.Load())
 	})
