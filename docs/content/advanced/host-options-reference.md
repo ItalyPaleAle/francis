@@ -87,15 +87,16 @@ Exactly one of `WithPinnedCA` or `WithUnsafeNoPinnedCA` must be set. Exactly one
 
 ## Register-actor options
 
-`RegisterActorOptions` is passed to `host.RegisterActor` and is the same type in both topologies:
+`RegisterActor` and `RegisterSingletonActor` accept functional options `With...` (same type in both topologies):
 
-| Field | Default | Description |
-|-------|---------|-------------|
-| `IdleTimeout` | `5m` | Idle time before an actor is deactivated. Negative disables it. |
-| `DeactivationTimeout` | `5s` | Maximum time allowed for `Deactivate` to run. |
-| `ConcurrencyLimit` | `0` (unlimited) | Maximum active actors of this type per host. |
-| `MaxAttempts` | `3` | Maximum attempts when invoking the actor or running an alarm. |
-| `InitialRetryDelay` | `2s` | Initial retry delay (with backoff) after a failed invocation. |
+| Option | Default | Description |
+|--------|---------|-------------|
+| `WithIdleTimeout(d)` | `5m` | Idle time before an actor is deactivated. Negative disables it |
+| `WithDeactivationTimeout(d)` | `5s` | Maximum time allowed for `Deactivate` to run |
+| `WithConcurrencyLimit(n)` | `0` (unlimited) | Maximum active actors of this type per host |
+| `WithMaxAttempts(n)` | `3` | Maximum attempts when invoking the actor or running an alarm |
+| `WithInitialRetryDelay(d)` | `2s` | Initial retry delay (with backoff) after a failed invocation |
+| `WithBootstrapData(data)` | `nil` | Payload delivered to `Bootstrap` (**Singleton only**) |
 
 ## Provider options
 

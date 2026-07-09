@@ -67,7 +67,7 @@ func CounterReg(idle time.Duration) frameworkhost.ActorReg {
 	return frameworkhost.ActorReg{
 		Type:    CounterActorType,
 		Factory: NewCounterActor,
-		Opts:    actorcore.RegisterActorOptions{IdleTimeout: idle},
+		Opts:    []actorcore.RegisterActorOption{actorcore.WithIdleTimeout(idle)},
 	}
 }
 
@@ -248,7 +248,7 @@ func (a *ProbeActor) InvokeStream(_ context.Context, method string, _ string, bo
 }
 
 // ProbeReg returns the registration for the probe actor with the given options
-func ProbeReg(opts actorcore.RegisterActorOptions) frameworkhost.ActorReg {
+func ProbeReg(opts ...actorcore.RegisterActorOption) frameworkhost.ActorReg {
 	return frameworkhost.ActorReg{
 		Type:    ProbeActorType,
 		Factory: NewProbeActor,

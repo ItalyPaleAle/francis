@@ -55,7 +55,7 @@ func (s *jwtBootstrap) Setup(t *testing.T) []framework.Option {
 		Kind:         cluster.Remote,
 		Variant:      s.variant,
 		Hosts:        2,
-		Actors:       []frameworkhost.ActorReg{shared.ProbeReg(actorcore.RegisterActorOptions{IdleTimeout: time.Minute})},
+		Actors:       []frameworkhost.ActorReg{shared.ProbeReg(actorcore.WithIdleTimeout(time.Minute))},
 		BootstrapJWT: jwtBoot,
 	})
 	return []framework.Option{

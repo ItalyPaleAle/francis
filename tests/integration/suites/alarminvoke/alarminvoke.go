@@ -60,12 +60,10 @@ func (s *alarmInvoke) Name() string {
 
 func (s *alarmInvoke) Setup(t *testing.T) []framework.Option {
 	s.cluster = cluster.New(t, cluster.Options{
-		Kind:    s.kind,
-		Variant: s.variant,
-		Hosts:   1,
-		Actors: []frameworkhost.ActorReg{shared.ProbeReg(actorcore.RegisterActorOptions{
-			IdleTimeout: time.Minute,
-		})},
+		Kind:               s.kind,
+		Variant:            s.variant,
+		Hosts:              1,
+		Actors:             []frameworkhost.ActorReg{shared.ProbeReg(actorcore.WithIdleTimeout(time.Minute))},
 		AlarmsPollInterval: pollInterval,
 	})
 	return []framework.Option{

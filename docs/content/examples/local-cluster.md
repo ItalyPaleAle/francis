@@ -43,9 +43,7 @@ func runWorker(ctx context.Context) error {
 	}
 
 	// Register actors before calling Run
-	err = h.RegisterActor("myactor", NewMyActor, local.RegisterActorOptions{
-		IdleTimeout: 10 * time.Second,
-	})
+	err = h.RegisterActor("myactor", NewMyActor, local.WithIdleTimeout(10*time.Second))
 	if err != nil {
 		return err
 	}

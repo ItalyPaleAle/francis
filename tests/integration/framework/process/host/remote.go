@@ -100,7 +100,7 @@ func (p *Remote) Run(t *testing.T) {
 		require.NoError(t, err, "failed to register built-in actor")
 	}
 	for _, a := range p.opts.Actors {
-		err = h.RegisterActor(a.Type, a.Factory, a.Opts)
+		err = h.RegisterActor(a.Type, a.Factory, a.Opts...)
 		require.NoError(t, err, "failed to register actor %q", a.Type)
 	}
 

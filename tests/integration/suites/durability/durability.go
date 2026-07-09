@@ -49,7 +49,7 @@ func (s *durability) Setup(t *testing.T) []framework.Option {
 		Kind:               cluster.Local,
 		Variant:            s.variant,
 		Hosts:              1,
-		Actors:             []frameworkhost.ActorReg{shared.ProbeReg(actorcore.RegisterActorOptions{IdleTimeout: time.Minute})},
+		Actors:             []frameworkhost.ActorReg{shared.ProbeReg(actorcore.WithIdleTimeout(time.Minute))},
 		AlarmsPollInterval: 250 * time.Millisecond,
 	})
 	return []framework.Option{

@@ -152,12 +152,18 @@ The context passed to your methods is cancelled if the invocation times out or t
 Register each actor type with the host **before** calling `Run`:
 
 ```go
-err := h.RegisterActor("cart", NewCart, local.RegisterActorOptions{
-	IdleTimeout: 10 * time.Minute,
-})
+err := h.RegisterActor("cart", NewCart, local.WithIdleTimeout(10*time.Minute))
 ```
 
-`RegisterActorOptions` controls activation and retry behavior:
+Actor registration uses functional options:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `WithIdleTimeout` | `5m` | How long an actor can stay idle before it's deactivated. A negative value disables the idle timeout|
+| `WithDeactivationTimeout` | `5s` | Maximum time allowed for `Deactivate` to run|
+| `WithConcurrencyLimit` | `0` (unlimited) | Maximum number of actors of this type active on a single host|
+| `WithMaxAttempts` | `3` | Maximum attempts when invoking the actor or running an alarm|
+| `WithInitialRetryDelay` | `2s` | Initial delay before retrying a failed invocation, with backoff|
 
 | Option | Default | Description |
 |--------|---------|-------------|

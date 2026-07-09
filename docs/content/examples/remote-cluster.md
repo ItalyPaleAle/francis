@@ -75,9 +75,7 @@ func runWorker(ctx context.Context) error {
 		return err
 	}
 
-	err = h.RegisterActor("myactor", NewMyActor, remote.RegisterActorOptions{
-		IdleTimeout: 10 * time.Second,
-	})
+	err = h.RegisterActor("myactor", NewMyActor, remote.WithIdleTimeout(10*time.Second))
 	if err != nil {
 		return err
 	}

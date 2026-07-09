@@ -64,7 +64,7 @@ if err != nil {
 }
 
 // Register actor types before running the host
-err = h.RegisterActor("counter", NewCounter, local.RegisterActorOptions{})
+err = h.RegisterActor("counter", NewCounter)
 if err != nil {
 	log.Fatal(err)
 }

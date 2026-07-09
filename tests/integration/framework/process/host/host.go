@@ -44,7 +44,7 @@ type Instance interface {
 type ActorReg struct {
 	Type    string
 	Factory actor.Factory
-	Opts    actorcore.RegisterActorOptions
+	Opts    []actorcore.RegisterActorOption
 }
 
 // waitReady blocks until the host signals readiness, failing fast if Run returns early

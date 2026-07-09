@@ -51,7 +51,7 @@ func (s *runtimeFailover) Setup(t *testing.T) []framework.Option {
 		Variant:         s.variant,
 		Hosts:           1,
 		RuntimeReplicas: 2,
-		Actors:          []frameworkhost.ActorReg{shared.ProbeReg(actorcore.RegisterActorOptions{IdleTimeout: time.Minute})},
+		Actors:          []frameworkhost.ActorReg{shared.ProbeReg(actorcore.WithIdleTimeout(time.Minute))},
 	})
 	return []framework.Option{
 		framework.WithProcesses(s.cluster.Processes()...),

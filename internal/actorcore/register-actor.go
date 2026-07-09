@@ -32,17 +32,56 @@ type RegisterActorOptions struct {
 	// Initial retry delay after failed invocation attempts
 	// Defaults to 2s
 	InitialRetryDelay time.Duration
+	// BootstrapData is optional data passed to ActorBootstrapper.Bootstrap when the host bootstraps the singleton instance
+	// It is delivered as the Bootstrap call's data argument (decoded from the invocation envelope), just like Invokes deliver their data via an Envelope
+	// It is nil when not provided
+	// This option is ignored when passed to RegisterActor
+	BootstrapData any
 }
 
-// RegisterSingletonActorOptions is the type for the options for the RegisterSingletonActor method.
-// It embeds RegisterActorOptions and adds singleton-specific fields such as the optional bootstrap payload that is delivered to ActorBootstrapper.Bootstrap at startup.
-type RegisterSingletonActorOptions struct {
-	RegisterActorOptions
+// RegisterActorOption is a functional option for RegisterActor.
+type RegisterActorOption func(*RegisterActorOptions)
 
-	// BootstrapData is optional data passed to ActorBootstrapper.Bootstrap when the host bootstraps the singleton instance.
-	// It is delivered as the Bootstrap call's data argument (decoded from the invocation envelope), just like Invokes deliver their data via an Envelope.
-	// It is nil when not provided.
-	BootstrapData any
+// WithIdleTimeout sets the maximum idle time before the actor is deactivated
+func WithIdleTimeout(d time.Duration) RegisterActorOption {
+	return func(o *RegisterActorOptions) {
+		o.IdleTimeout = d
+	}
+}
+
+// WithDeactivationTimeout sets the timeout for deactivating actors
+func WithDeactivationTimeout(d time.Duration) RegisterActorOption {
+	return func(o *RegisterActorOptions) {
+		o.DeactivationTimeout = d
+	}
+}
+
+// WithConcurrencyLimit sets the maximum number of actors of the same type active on this host
+func WithConcurrencyLimit(n int) RegisterActorOption {
+	return func(o *RegisterActorOptions) {
+		o.ConcurrencyLimit = n
+	}
+}
+
+// WithMaxAttempts sets the maximum number of attempts when invoking the actor or executing alarms
+func WithMaxAttempts(n int) RegisterActorOption {
+	return func(o *RegisterActorOptions) {
+		o.MaxAttempts = n
+	}
+}
+
+// WithInitialRetryDelay sets the initial retry delay after failed invocation attempts
+func WithInitialRetryDelay(d time.Duration) RegisterActorOption {
+	return func(o *RegisterActorOptions) {
+		o.InitialRetryDelay = d
+	}
+}
+
+// WithBootstrapData sets optional data passed to ActorBootstrapper.Bootstrap when the host bootstraps the singleton instance
+func WithBootstrapData(data any) RegisterActorOption {
+	return func(o *RegisterActorOptions) {
+		o.BootstrapData = data
+	}
 }
 
 func (o *RegisterActorOptions) Validate() error {
