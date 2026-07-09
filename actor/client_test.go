@@ -107,7 +107,7 @@ func (f *fakeHost) DeleteState(context.Context, string, string) error { return n
 func TestClientCanTarget(t *testing.T) {
 	builtInType := ref.BuiltInActorTypePrefix + "cronjob.test"
 
-	// A normal client cannot target built-in actors, but can target ordinary ones
+	// A regular client cannot target built-in actors, but can target ordinary ones
 	pub := &client[any]{}
 	assert.False(t, pub.canTarget(builtInType))
 	assert.True(t, pub.canTarget("ordinary"))
@@ -241,4 +241,21 @@ func TestNewBuiltInActorClientIsPrivileged(t *testing.T) {
 	require.True(t, ok)
 	assert.True(t, cc.privileged)
 	assert.True(t, cc.canTarget(builtInType))
+}
+
+// TestClientRejectsReservedMethod verifies the public client refuses to invoke a reserved framework lifecycle method (such as bootstrap), while the privileged built-in client is allowed to drive it
+func TestClientRejectsReservedMethod(t *testing.T) {
+	ctx := context.Background()
+
+	// A regular client cannot invoke a reserved method, and the guard returns before the nil host is dereferenced
+	pub := NewActorClient[any]("widget", "w1", &Service{})
+	_, err := pub.Invoke(ctx, "other", "id", ref.MethodBootstrap, nil)
+	require.ErrorIs(t, err, ErrMethodReserved)
+	_, err = pub.Peek(ctx, "other", "id", ref.MethodBootstrap, nil)
+	require.ErrorIs(t, err, ErrMethodReserved)
+
+	// The privileged built-in client may drive the reserved lifecycle, so it reaches the host instead of being rejected
+	priv := NewBuiltInActorClient[any](builtinkey.Key{}, "widget", SingletonActorID, NewService(&fakeHost{}))
+	_, err = priv.Invoke(ctx, "other", "id", ref.MethodBootstrap, nil)
+	require.NoError(t, err)
 }

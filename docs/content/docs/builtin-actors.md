@@ -1,9 +1,11 @@
 ---
 title: "Built-in actors"
-weight: 28
+weight: 29
 ---
 
-A built-in actor is a framework-managed actor that a host registers automatically and bootstraps at startup. You opt in with the `WithBuiltInActor(...)` host option (available on both the local and remote hosts), rather than calling `RegisterActor` yourself.
+A built-in actor is a framework-managed actor that a host registers under a reserved type and bootstraps at startup.
+
+You register one by calling `host.RegisterBuiltInActor(...)` before the host starts (available on both the local and remote hosts), similarly to how register your own actors with `RegisterActor`.
 
 Built-in actors are reserved: their type names carry a `francis.builtin.` prefix, and clients **cannot target them directly**.
 
@@ -13,7 +15,7 @@ A cron job actor runs a function you supply on a schedule, **across the cluster 
 
 ### Registering
 
-Build a cron job with `cronjob.New` and pass it to the host:
+Build a cron job with `cronjob.New` and register it on the host, before the host starts:
 
 ```go
 import "github.com/italypaleale/francis/builtin/cronjob"
@@ -29,13 +31,16 @@ if err != nil {
 	return err
 }
 
-host, err := local.NewHost(
-	// ... other options ...
-	local.WithBuiltInActor(cleanupJob),
-)
+host, err := local.NewHost(/* ... options ... */)
+if err != nil {
+	return err
+}
+
+// Register the built-in actor before calling host.Run
+err = host.RegisterBuiltInActor(cleanupJob)
 ```
 
-`WithBuiltInActor` can be repeated to register more than one. Register the same cron job (same name and options) on every host that should be able to run it: at startup each host triggers the registration, but the schedule is set up only once for the cluster.
+`RegisterBuiltInActor` can be called more than once to register several built-in actors, and must be called before `host.Run`. Register the same cron job (same name and options) on every host that should be able to run it: at startup each host triggers the registration, but the schedule is set up only once for the cluster.
 
 ### Options
 
@@ -53,9 +58,9 @@ Exactly one of `WithInterval`, `WithPeriod`, or `WithCron` is required, and `Wit
 
 ### How it works
 
-At startup each host invokes a one-time `register` method on the cron job's scheduler:
+At startup each host bootstraps the cron job's scheduler (the cluster-wide singleton), which sets up the schedule:
 
-1. If the schedule is already registered, `register` does nothing — so it is safe for every host to trigger it, and it stays registered across restarts.
+1. If the schedule is already registered, bootstrapping does nothing — so it is safe for every host to trigger it, and it stays registered across restarts.
 2. Otherwise it dispatches the repeating job that drives the schedule and records its ID. `WithImmediate` additionally runs the job once right away on this first registration.
 
 Because the actor is a single cluster-wide instance with turn-based execution, concurrent registrations from multiple hosts are automatically collapsed to a single recurring job. It is safe to re-register the actor on every instance in the cluster.
@@ -105,10 +110,13 @@ if err != nil {
 	return err
 }
 
-host, err := local.NewHost(
-	// ... other options ...
-	local.WithBuiltInActor(limiter),
-)
+host, err := local.NewHost(/* ... options ... */)
+if err != nil {
+	return err
+}
+
+// Register the built-in actor before calling host.Run
+err = host.RegisterBuiltInActor(limiter)
 ```
 
 As with any built-in actor, register the same rate limiter (same name and options) on every host that should serve it. A given key is always placed on a single host at a time, so its limiter is consistent cluster-wide.

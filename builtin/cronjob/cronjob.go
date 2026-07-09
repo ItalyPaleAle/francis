@@ -1,6 +1,6 @@
 // Package cronjob provides a built-in actor that runs a function on a schedule, cluster-wide on one node at a time
 //
-// Build one with New and pass the result to a host via the host's WithBuiltInActor option
+// Build one with New and register the result on a host with the host's RegisterBuiltInActor method
 // The actor registers a single durable recurring job, so the function runs once per occurrence across the whole cluster rather than once per host
 //
 // The work is split across two actor instances of the same reserved type, each with its own turn lock:
@@ -57,7 +57,7 @@ const (
 // It registers a single durable recurring job that runs the function from WithJob across the cluster on one node at a time, on the schedule given by exactly one of WithInterval, WithPeriod, or WithCron
 // When WithImmediate is set, the job also runs once right away, but only the first time it is registered
 //
-// Pass the returned value to a host via the host's WithBuiltInActor option
+// Register the returned value on a host with the host's RegisterBuiltInActor method
 // Names must be unique within a cluster and must not contain '/'
 func New(name string, opts ...Option) (*CronJob, error) {
 	if name == "" {
@@ -138,7 +138,7 @@ func New(name string, opts ...Option) (*CronJob, error) {
 	}, nil
 }
 
-// CronJob is a built-in cron job actor, returned by New and passed to a host via WithBuiltInActor
+// CronJob is a built-in cron job actor, returned by New and registered on a host with RegisterBuiltInActor
 // It satisfies the framework's built-in actor contract and exposes a Service method for the on-demand Trigger and Unregister operations
 // The actor behavior itself lives in the unexported cronJobScheduler and cronJobRunner instances that Factory builds
 type CronJob struct {
@@ -162,12 +162,10 @@ func (c *CronJob) RegisterOptions() actorcore.RegisterActorOptions {
 	return c.regOpts
 }
 
-// Bootstrap sets up the recurring job by invoking the scheduler's one-time registration
-// The host calls this once it is ready
-// It is idempotent and safe to call from every host
-func (c *CronJob) Bootstrap(ctx context.Context, svc *actor.Service) error {
-	_, err := builtinactor.Invoke(ctx, svc, c.actorType, builtinactor.MethodRegister, nil)
-	return err
+// Singleton reports that the cron job has a cluster-wide singleton instance (the scheduler) the host bootstraps once it is ready
+// The scheduler implements actor.ActorBootstrapper, setting up the recurring job idempotently, which is safe to trigger from every host
+func (c *CronJob) Singleton() bool {
+	return true
 }
 
 // Service binds the cron job to an actor.Service, returning a CronJobService that exposes the on-demand Trigger and Unregister operations pre-configured for that service
@@ -207,7 +205,7 @@ type cronJobState struct {
 }
 
 // cronJobScheduler is the cluster-wide singleton that owns one recurring job for the cluster
-// It implements actor.ActorInvoke for the register, unregister, and trigger lifecycle methods, dispatching the actual runs to the separate runner instance
+// It implements actor.ActorBootstrapper for registration (driven by the host at startup) and actor.ActorInvoke for the unregister and trigger lifecycle methods, dispatching the actual runs to the separate runner instance
 // Clients cannot invoke it directly because the Service rejects built-in actor types
 type cronJobScheduler struct {
 	interval  string
@@ -221,11 +219,16 @@ type cronJobScheduler struct {
 	runner actor.Client[struct{}]
 }
 
-// Invoke handles the register, unregister, and trigger lifecycle methods, which the framework drives synchronously
+// Bootstrap sets up the recurring job, which the host drives once it's ready by invoking the reserved bootstrap lifecycle on the scheduler singleton
+// It is idempotent and safe to trigger from every host: invocations of the singleton are serialized by its turn lock, and the register logic reconciles an already-registered job rather than duplicating it
+func (a *cronJobScheduler) Bootstrap(ctx context.Context, _ actor.Envelope) error {
+	return a.register(ctx)
+}
+
+// Invoke handles the unregister and trigger lifecycle methods, which the framework drives synchronously
+// Registration is not handled here: the host drives it through Bootstrap
 func (a *cronJobScheduler) Invoke(ctx context.Context, method string, _ actor.Envelope) (any, error) {
 	switch method {
-	case builtinactor.MethodRegister:
-		return nil, a.register(ctx)
 	case builtinactor.MethodUnregister:
 		return nil, a.unregister(ctx)
 	case methodTrigger:

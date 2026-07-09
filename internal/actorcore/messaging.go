@@ -152,7 +152,8 @@ func (m *Manager) invokeLocalObject(ctx context.Context, resolver PlacementResol
 			res any
 			err error
 		)
-		if readOnly {
+		switch {
+		case readOnly:
 			// The actor must implement the Peek method to be called this way
 			obj, ok := act.Instance.(actor.ActorPeek)
 			if !ok {
@@ -162,7 +163,15 @@ func (m *Manager) invokeLocalObject(ctx context.Context, resolver PlacementResol
 			// Mark the context read-only so the client rejects state-mutating calls made from within the handler
 			invokeCtx = types.WithReadOnly(invokeCtx)
 			res, err = obj.Peek(invokeCtx, method, NewObjectEnvelope(data))
-		} else {
+		case method == ref.MethodBootstrap:
+			// The reserved bootstrap lifecycle drives the actor's optional ActorBootstrapper hook rather than its Invoke handler
+			// An actor that does not implement it has no durable work to set up, so this is a no-op
+			// The bootstrap payload is delivered like any Invoke argument, wrapped in an envelope
+			bs, ok := act.Instance.(actor.ActorBootstrapper)
+			if ok {
+				err = bs.Bootstrap(invokeCtx, NewObjectEnvelope(data))
+			}
+		default:
 			// The actor must implement the Invoke method to be called this way
 			obj, ok := act.Instance.(actor.ActorInvoke)
 			if !ok {
@@ -375,7 +384,8 @@ func (m *Manager) peerInvokeObjectCore(ctx context.Context, resolver PlacementRe
 		// Stamp the request ID into the context so the actor can detect duplicates
 		invokeCtx = actor.WithRequestID(invokeCtx, req.RequestID)
 
-		if req.ReadOnly {
+		switch {
+		case req.ReadOnly:
 			// The actor must implement the Peek method to be called this way
 			obj, ok := act.Instance.(actor.ActorPeek)
 			if !ok {
@@ -385,7 +395,15 @@ func (m *Manager) peerInvokeObjectCore(ctx context.Context, resolver PlacementRe
 			// Mark the context read-only so the client rejects state-mutating calls made from within the handler
 			invokeCtx = types.WithReadOnly(invokeCtx)
 			rRes, rErr = obj.Peek(invokeCtx, req.Method, data)
-		} else {
+		case req.Method == ref.MethodBootstrap:
+			// The reserved bootstrap lifecycle drives the actor's optional ActorBootstrapper hook rather than its Invoke handler
+			// An actor that does not implement it has no durable work to set up, so this is a no-op
+			// The decoded envelope is forwarded so Bootstrap can access BootstrapData when remote hosts trigger it
+			bs, ok := act.Instance.(actor.ActorBootstrapper)
+			if ok {
+				rErr = bs.Bootstrap(invokeCtx, data)
+			}
+		default:
 			// The actor must implement the Invoke method to be called this way
 			obj, ok := act.Instance.(actor.ActorInvoke)
 			if !ok {

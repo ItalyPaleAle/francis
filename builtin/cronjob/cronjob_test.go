@@ -10,6 +10,7 @@ import (
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/builtinactor"
+	"github.com/italypaleale/francis/internal/ref"
 )
 
 func TestNew(t *testing.T) {
@@ -317,7 +318,7 @@ func TestCronJobUnknownMethod(t *testing.T) {
 	a := &cronJobRunner{}
 
 	// The runner only services run jobs, so lifecycle methods, the trigger message, and bogus names are all unknown
-	for _, method := range []string{"bogus", builtinactor.MethodRegister, builtinactor.MethodUnregister, methodTrigger} {
+	for _, method := range []string{"bogus", ref.MethodBootstrap, builtinactor.MethodUnregister, methodTrigger} {
 		err := a.Job(context.Background(), method, nil)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, actor.ErrJobPermanentFailure, "an unknown job method should dead-letter, not retry forever")
@@ -327,12 +328,12 @@ func TestCronJobUnknownMethod(t *testing.T) {
 func TestCronJobInvoke(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("register routes to register", func(t *testing.T) {
+	t.Run("bootstrap registers the recurring job", func(t *testing.T) {
 		state := &fakeClient[cronJobState]{}
 		runner := &fakeClient[struct{}]{dispatchID: "job-1"}
 		a := &cronJobScheduler{interval: "PT1M", state: state, runner: runner}
 
-		_, err := a.Invoke(ctx, builtinactor.MethodRegister, nil)
+		err := a.Bootstrap(ctx, nil)
 		require.NoError(t, err)
 		require.Len(t, runner.dispatches, 1)
 		require.Len(t, state.setStateCalls, 1)
@@ -479,7 +480,9 @@ func (f *fakeClient[T]) Peek(context.Context, string, string, string, any, ...ac
 	return nil, nil
 }
 
-func (f *fakeClient[T]) SetAlarm(context.Context, string, actor.AlarmProperties) error { return nil }
+func (f *fakeClient[T]) SetAlarm(context.Context, string, actor.AlarmProperties) error {
+	return nil
+}
 
 func (f *fakeClient[T]) DeleteAlarm(context.Context, string) error {
 	return nil
@@ -488,13 +491,23 @@ func (f *fakeClient[T]) DeleteAlarm(context.Context, string) error {
 func (f *fakeClient[T]) GetJob(context.Context, string) (actor.JobInfo, error) {
 	return f.getJobInfo, f.getJobErr
 }
-func (f *fakeClient[T]) ListJobs(context.Context) ([]actor.JobInfo, error) { return nil, nil }
-func (f *fakeClient[T]) RetryJob(context.Context, string) (string, error)  { return "", nil }
-func (f *fakeClient[T]) Halt()                                             {}
+
+func (f *fakeClient[T]) ListJobs(context.Context) ([]actor.JobInfo, error) {
+	return nil, nil
+}
+
+func (f *fakeClient[T]) RetryJob(context.Context, string) (string, error) {
+	return "", nil
+}
+
+func (f *fakeClient[T]) Halt() {
+	// Nop
+}
 
 var (
 	_ actor.Client[cronJobState] = (*fakeClient[cronJobState])(nil)
 	_ actor.Client[struct{}]     = (*fakeClient[struct{}])(nil)
-)
 
-var _ builtinactor.BuiltInActor = (*CronJob)(nil)
+	_ builtinactor.BuiltInActor = (*CronJob)(nil)
+	_ actor.ActorBootstrapper   = (*cronJobScheduler)(nil)
+)

@@ -1,6 +1,6 @@
 // Package ratelimit provides a built-in actor that rate-limits calls per key, keeping all state in memory
 //
-// Build one with New and pass the result to a host via the host's WithBuiltInActor option, then obtain a RateLimitService with Service to call Allow
+// Build one with New and register the result on a host with the host's RegisterBuiltInActor method, then obtain a RateLimitService with Service to call Allow
 // There is one actor instance per rate-limit key (a free-form string such as an IP address or user ID), so each key is throttled independently
 // A key's limiter lives only in the activated actor's memory and is never persisted to storage, so deactivating the actor simply resets that key's throttle state
 //
@@ -37,7 +37,7 @@ const (
 // It admits the rate set by WithRate per period (one second unless changed with WithPer), keyed by a free-form rate-limit key such as an IP address or user ID
 // Each key is a separate actor instance with its own in-memory limiter, so keys are throttled independently and no state is ever persisted to storage
 //
-// Pass the returned value to a host via the host's WithBuiltInActor option, then call RateLimitService.Allow (obtained from Service) to throttle by key
+// Register the returned value on a host with the host's RegisterBuiltInActor method, then call RateLimitService.Allow (obtained from Service) to throttle by key
 // Names must be unique within a cluster and must not contain '/'
 func New(name string, opts ...Option) (*RateLimit, error) {
 	if name == "" {
@@ -104,8 +104,8 @@ func New(name string, opts ...Option) (*RateLimit, error) {
 	}, nil
 }
 
-// RateLimit is a built-in rate limit actor, returned by New and passed to a host via WithBuiltInActor
-// It satisfies the framework's built-in actor contract (ActorType, Factory, RegisterOptions, Bootstrap) and exposes a Service method that returns a RateLimitService for the per-key Allow operation
+// RateLimit is a built-in rate limit actor, returned by New and registered on a host with RegisterBuiltInActor
+// It satisfies the framework's built-in actor contract (ActorType, Factory, RegisterOptions, Singleton) and exposes a Service method that returns a RateLimitService for the per-key Allow operation
 // The actor behavior itself lives in the unexported rateLimitActor instances that Factory builds, one per rate-limit key
 type RateLimit struct {
 	actorType string
@@ -128,11 +128,10 @@ func (r *RateLimit) RegisterOptions() actorcore.RegisterActorOptions {
 	return r.regOpts
 }
 
-// Bootstrap the actor
-// The host calls this once it is ready
-func (r *RateLimit) Bootstrap(context.Context, *actor.Service) error {
-	// No-op: a rate limiter has no durable work to set up, since each key's state is in-memory and created lazily on first use
-	return nil
+// Singleton reports that the rate limiter is not a singleton and needs no bootstrapping
+// It keeps one instance per rate-limit key, and each key's state is in-memory and created lazily on first use, so there is no durable work to set up
+func (r *RateLimit) Singleton() bool {
+	return false
 }
 
 // Service binds the rate limiter to an actor.Service, returning a RateLimitService that exposes Allow pre-configured for that service

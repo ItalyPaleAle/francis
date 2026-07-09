@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -78,6 +79,32 @@ type invokeOnlyActor struct{}
 
 func (a *invokeOnlyActor) Invoke(_ context.Context, _ string, _ actor.Envelope) (any, error) {
 	return "invoked", nil
+}
+
+// bootstrapActor implements only actor.ActorBootstrapper, used to prove the reserved bootstrap method dispatches to Bootstrap rather than Invoke
+// It records whether Bootstrap ran through a shared counter, since the factory builds a fresh instance per activation
+// It also records the bootstrap payload, decoded from the envelope, to prove the data path
+type bootstrapActor struct {
+	calls *atomic.Int32
+	err   error
+
+	gotData atomic.Pointer[string]
+}
+
+func (a *bootstrapActor) Bootstrap(_ context.Context, data actor.Envelope) error {
+	a.calls.Add(1)
+
+	// Record the decoded payload when the caller provided one
+	// data is an actor.Envelope in both local and remote paths, and nil when no bootstrap data was provided
+	if data != nil {
+		var s string
+		_ = data.Decode(&s)
+		if s != "" {
+			a.gotData.Store(&s)
+		}
+	}
+
+	return a.err
 }
 
 // bytesStreamWriter is a minimal in-memory actor.StreamResponseWriter for testing PeerInvokeStream directly
@@ -247,6 +274,104 @@ func TestManagerInvokeLocal(t *testing.T) {
 		assert.Equal(t, 2, resolver.resolveCalls)
 		assert.Equal(t, 1, peer.calls)
 		assert.Equal(t, "addr2", peer.lastAddr)
+	})
+}
+
+func TestManagerInvokeBootstrap(t *testing.T) {
+	t.Run("routes the reserved bootstrap method to ActorBootstrapper", func(t *testing.T) {
+		var calls atomic.Int32
+		m := newMessagingManager(t, func(_ string, _ *actor.Service) actor.Actor {
+			return &bootstrapActor{calls: &calls}
+		})
+		resolver := &fakeResolver{
+			localHostID: "h1",
+			placements:  []*Placement{{HostID: "h1", Address: "addr1"}},
+		}
+
+		// A bootstrapActor implements only ActorBootstrapper, so a wrong route to Invoke would fail with ErrActorMethodUnsupported
+		env, err := m.Invoke(t.Context(), resolver, &fakePeer{}, ref.NewActorRef("testactor", actor.SingletonActorID), ref.MethodBootstrap, nil, false, false)
+		require.NoError(t, err)
+		assert.Nil(t, env)
+		assert.Equal(t, int32(1), calls.Load())
+	})
+
+	t.Run("delivers bootstrap data as an envelope", func(t *testing.T) {
+		var calls atomic.Int32
+		ba := &bootstrapActor{calls: &calls}
+		m := newMessagingManager(t, func(_ string, _ *actor.Service) actor.Actor {
+			return ba
+		})
+		resolver := &fakeResolver{
+			localHostID: "h1",
+			placements:  []*Placement{{HostID: "h1", Address: "addr1"}},
+		}
+
+		env, err := m.Invoke(t.Context(), resolver, &fakePeer{}, ref.NewActorRef("testactor", actor.SingletonActorID), ref.MethodBootstrap, "hello", false, false)
+		require.NoError(t, err)
+		assert.Nil(t, env)
+		assert.Equal(t, int32(1), calls.Load())
+
+		got := ba.gotData.Load()
+		require.NotNil(t, got)
+		assert.Equal(t, "hello", *got)
+	})
+
+	t.Run("peer bootstrap path also delivers data", func(t *testing.T) {
+		// Directly exercise the peer path, which decodes the wire payload into an envelope before calling Bootstrap
+		var calls atomic.Int32
+		ba := &bootstrapActor{calls: &calls}
+		m := newMessagingManager(t, func(_ string, _ *actor.Service) actor.Actor {
+			return ba
+		})
+		resolver := &fakeResolver{
+			localHostID: "h1",
+			placements:  []*Placement{{HostID: "h1", Address: "addr1"}},
+		}
+
+		data, err := msgpack.Marshal("world")
+		require.NoError(t, err)
+		req := protocol.InvokeActorRequest{
+			ActorType: "testactor",
+			ActorID:   actor.SingletonActorID,
+			Method:    ref.MethodBootstrap,
+			Data:      data,
+		}
+		_, perr := m.PeerInvokeObject(t.Context(), resolver, req)
+		require.Nil(t, perr)
+		assert.Equal(t, int32(1), calls.Load())
+		got := ba.gotData.Load()
+		require.NotNil(t, got)
+		assert.Equal(t, "world", *got)
+	})
+
+	t.Run("surfaces the Bootstrap error", func(t *testing.T) {
+		var calls atomic.Int32
+		m := newMessagingManager(t, func(_ string, _ *actor.Service) actor.Actor {
+			return &bootstrapActor{calls: &calls, err: errors.New("boom")}
+		})
+		resolver := &fakeResolver{
+			localHostID: "h1",
+			placements:  []*Placement{{HostID: "h1", Address: "addr1"}},
+		}
+
+		env, err := m.Invoke(t.Context(), resolver, &fakePeer{}, ref.NewActorRef("testactor", actor.SingletonActorID), ref.MethodBootstrap, nil, false, false)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "boom")
+		assert.Nil(t, env)
+		assert.Equal(t, int32(1), calls.Load())
+	})
+
+	t.Run("is a no-op for an actor that is not a ActorBootstrapper", func(t *testing.T) {
+		// invokeOnlyActor does not implement ActorBootstrapper, so the bootstrap method has nothing to run and its Invoke must not be called
+		m := newMessagingManager(t, func(_ string, _ *actor.Service) actor.Actor { return &invokeOnlyActor{} })
+		resolver := &fakeResolver{
+			localHostID: "h1",
+			placements:  []*Placement{{HostID: "h1", Address: "addr1"}},
+		}
+
+		env, err := m.Invoke(t.Context(), resolver, &fakePeer{}, ref.NewActorRef("testactor", "a1"), ref.MethodBootstrap, nil, false, false)
+		require.NoError(t, err)
+		assert.Nil(t, env)
 	})
 }
 

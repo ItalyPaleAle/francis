@@ -167,6 +167,11 @@ err := h.RegisterActor("cart", NewCart, local.RegisterActorOptions{
 | `MaxAttempts` | `3` | Maximum attempts when invoking the actor or running an alarm. |
 | `InitialRetryDelay` | `2s` | Initial delay before retrying a failed invocation, with backoff. |
 
+## Singleton actors
+
+When you need exactly one instance of an actor cluster-wide, register it as a singleton with `RegisterSingletonActor`.  
+See the dedicated guide: [Singleton actors](/docs/singleton-actors).
+
 ## Invoking actors
 
 From outside an actor, e.g. an HTTP handler, use the `actor.Service` you got from `host.Service()`:
