@@ -36,7 +36,7 @@ func (s *activeOnly) Setup(t *testing.T) []framework.Option {
 		Kind:    s.kind,
 		Variant: s.variant,
 		Hosts:   1,
-		Actors:  []frameworkhost.ActorReg{shared.ProbeReg(actorcore.RegisterActorOptions{IdleTimeout: time.Minute})},
+		Actors:  []frameworkhost.ActorReg{shared.ProbeReg(actorcore.WithIdleTimeout(time.Minute))},
 	})
 	return []framework.Option{
 		framework.WithProcesses(s.cluster.Processes()...),

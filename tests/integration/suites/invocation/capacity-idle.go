@@ -38,10 +38,7 @@ func (s *capacityIdle) Setup(t *testing.T) []framework.Option {
 		Kind:    s.kind,
 		Variant: s.variant,
 		Hosts:   1,
-		Actors: []frameworkhost.ActorReg{shared.ProbeReg(actorcore.RegisterActorOptions{
-			IdleTimeout:      idleTimeout,
-			ConcurrencyLimit: 1,
-		})},
+		Actors:  []frameworkhost.ActorReg{shared.ProbeReg(actorcore.WithIdleTimeout(idleTimeout), actorcore.WithConcurrencyLimit(1))},
 	})
 	return []framework.Option{
 		framework.WithProcesses(s.cluster.Processes()...),

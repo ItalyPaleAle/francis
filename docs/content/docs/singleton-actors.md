@@ -41,27 +41,25 @@ if err != nil {
     return err
 }
 
-err = host.RegisterSingletonActor("scheduler", NewScheduler, local.RegisterSingletonActorOptions{})
+err = host.RegisterSingletonActor("scheduler", NewScheduler)
 ```
 
-`RegisterSingletonActorOptions` embeds the regular `RegisterActorOptions` and adds an optional bootstrap payload:
+Singleton registration reuses the same functional options as `RegisterActor`, plus `WithBootstrapData`:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `IdleTimeout` | `time.Duration` | From `RegisterActorOptions`: how long the singleton can stay idle before deactivation. Defaults to `5m`. |
-| `DeactivationTimeout` | `time.Duration` | From `RegisterActorOptions`. |
-| `ConcurrencyLimit` | `int` | From `RegisterActorOptions`. |
-| `MaxAttempts` | `int` | From `RegisterActorOptions`. |
-| `InitialRetryDelay` | `time.Duration` | From `RegisterActorOptions`. |
-| `BootstrapData` | `any` | Optional data delivered to `Bootstrap` as its `data Envelope` argument, like `Invoke`. Encoded by the host and decoded by the actor via `data.Decode(&dest)`. `nil` when not provided. |
+| Option | Description |
+|--------|-------------|
+| `WithIdleTimeout` | How long the singleton can stay idle before deactivation. Defaults to `5m` |
+| `WithDeactivationTimeout` | Deactivation timeout |
+| `WithConcurrencyLimit` | Concurrency limit |
+| `WithMaxAttempts` | Max attempts |
+| `WithInitialRetryDelay` | Initial retry delay |
+| `WithBootstrapData` | Optional data delivered to `Bootstrap` as its `data Envelope` argument, like `Invoke` |
 
 ```go
-err = host.RegisterSingletonActor("scheduler", NewScheduler, local.RegisterSingletonActorOptions{
-    RegisterActorOptions: local.RegisterActorOptions{
-        IdleTimeout: 10 * time.Minute,
-    },
-    BootstrapData: map[string]string{"env": "prod"},
-})
+err = host.RegisterSingletonActor("scheduler", NewScheduler,
+    local.WithIdleTimeout(10*time.Minute),
+    local.WithBootstrapData(map[string]string{"env": "prod"}),
+)
 ```
 
 ## The `ActorBootstrapper` interface

@@ -108,7 +108,7 @@ func main() {
 	}
 
 	// Register the counter actor type
-	err = h.RegisterActor("counter", NewCounter, local.RegisterActorOptions{})
+	err = h.RegisterActor("counter", NewCounter)
 	if err != nil {
 		log.Fatalf("failed to register actor: %v", err)
 	}

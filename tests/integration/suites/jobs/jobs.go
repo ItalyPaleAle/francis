@@ -76,11 +76,13 @@ func (s *jobs) Setup(t *testing.T) []framework.Option {
 		Kind:    s.kind,
 		Variant: s.variant,
 		Hosts:   1,
-		Actors: []frameworkhost.ActorReg{shared.ProbeReg(actorcore.RegisterActorOptions{
-			IdleTimeout:       time.Minute,
-			MaxAttempts:       maxAttempts,
-			InitialRetryDelay: initialRetryDelay,
-		})},
+		Actors: []frameworkhost.ActorReg{
+			shared.ProbeReg(
+				actorcore.WithIdleTimeout(time.Minute),
+				actorcore.WithMaxAttempts(maxAttempts),
+				actorcore.WithInitialRetryDelay(initialRetryDelay),
+			),
+		},
 		AlarmsPollInterval: pollInterval,
 	})
 	return []framework.Option{

@@ -74,13 +74,12 @@ func TestHostLocalMultiHostPeerInvocation(t *testing.T) {
 			WithSQLiteProvider(sqlite.SQLiteProviderOptions{ConnectionString: dbPath}),
 			// Both hosts share the same runtime PSK so they derive the same CA and authenticate each other with mTLS
 			WithRuntimePSKs(localTestRuntimePSK),
-			WithLogger(slog.New(slog.DiscardHandler)),
-		)
+			WithLogger(slog.New(slog.DiscardHandler)))
 		require.NoError(t, err)
 		if register {
 			err = host.RegisterActor("S", func(actorID string, service *actor.Service) actor.Actor {
 				return smokeActor{}
-			}, RegisterActorOptions{})
+			})
 			require.NoError(t, err)
 		}
 		return host
@@ -116,13 +115,12 @@ func TestHostLocalInvocationSmoke(t *testing.T) {
 		WithAddress(localFreeUDPAddr(t)),
 		WithSQLiteProvider(sqlite.SQLiteProviderOptions{ConnectionString: dbPath}),
 		WithRuntimePSKs(localTestRuntimePSK),
-		WithLogger(slog.New(slog.DiscardHandler)),
-	)
+		WithLogger(slog.New(slog.DiscardHandler)))
 	require.NoError(t, err)
 
 	err = host.RegisterActor("T", func(actorID string, service *actor.Service) actor.Actor {
 		return smokeActor{}
-	}, RegisterActorOptions{})
+	})
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(t.Context())

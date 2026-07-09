@@ -143,8 +143,7 @@ func newRemoteHost(t *testing.T, runtimeAddr string) *Host {
 		WithRuntimeAddresses(runtimeAddr),
 		WithHostBootstrapPSK(testHostPSK),
 		WithUnsafeNoPinnedCA(),
-		WithLogger(slog.New(slog.DiscardHandler)),
-	)
+		WithLogger(slog.New(slog.DiscardHandler)))
 	require.NoError(t, err)
 	return host
 }
@@ -224,8 +223,7 @@ func startTestRuntime(t *testing.T, ctx context.Context) (string, *standalone.St
 		runtime.WithBind(addr),
 		runtime.WithAlarmsPollInterval(300*time.Millisecond),
 		runtime.WithRuntimePSKs(testRuntimePSK),
-		runtime.WithHostBootstrapPSK(testHostPSK),
-	)
+		runtime.WithHostBootstrapPSK(testHostPSK))
 	require.NoError(t, err)
 
 	go func() {
@@ -255,8 +253,7 @@ func TestHostRemoteCertRenewal(t *testing.T) {
 		runtime.WithAlarmsPollInterval(time.Hour),
 		runtime.WithRuntimePSKs(testRuntimePSK),
 		runtime.WithHostBootstrapPSK(testHostPSK),
-		runtime.WithWorkloadCertTTL(3*time.Second),
-	)
+		runtime.WithWorkloadCertTTL(3*time.Second))
 	require.NoError(t, err)
 	go func() {
 		_ = rt.Run(hostCtx)
@@ -292,13 +289,12 @@ func TestHostRemoteIntegration(t *testing.T) {
 		WithRuntimeAddresses(runtimeAddr),
 		WithHostBootstrapPSK(testHostPSK),
 		WithUnsafeNoPinnedCA(),
-		WithLogger(slog.New(slog.DiscardHandler)),
-	)
+		WithLogger(slog.New(slog.DiscardHandler)))
 	require.NoError(t, err)
 
 	err = host.RegisterActor("T", func(actorID string, service *actor.Service) actor.Actor {
 		return &testActor{svc: service, id: actorID, alarmCh: alarmCh}
-	}, RegisterActorOptions{})
+	})
 	require.NoError(t, err)
 
 	hostErr := make(chan error, 1)
@@ -382,7 +378,7 @@ func TestHostRemoteMultiHostPeerInvocation(t *testing.T) {
 	invokeCh := make(chan string, 4)
 	err := hostB.RegisterActor("T", func(actorID string, service *actor.Service) actor.Actor {
 		return &testActor{svc: service, id: actorID, label: "B:", invokeCh: invokeCh}
-	}, RegisterActorOptions{})
+	})
 	require.NoError(t, err)
 
 	runRemoteHost(t, hostB)
@@ -423,7 +419,7 @@ func TestHostRemoteMultiHostPeerPeek(t *testing.T) {
 	invokeCh := make(chan string, 4)
 	err := hostB.RegisterActor("T", func(actorID string, service *actor.Service) actor.Actor {
 		return &testActor{svc: service, id: actorID, label: "B:", invokeCh: invokeCh}
-	}, RegisterActorOptions{})
+	})
 	require.NoError(t, err)
 
 	runRemoteHost(t, hostB)
@@ -459,7 +455,7 @@ func TestHostRemoteMultiHostConcurrentPeeksOverlap(t *testing.T) {
 	var maxActive atomic.Int32
 	err := hostB.RegisterActor("T", func(actorID string, service *actor.Service) actor.Actor {
 		return &slowPeekActor{delay: peekDelay, active: &active, maxActive: &maxActive}
-	}, RegisterActorOptions{})
+	})
 	require.NoError(t, err)
 
 	runRemoteHost(t, hostB)
@@ -517,12 +513,12 @@ func TestHostRemoteStalePlacementReResolves(t *testing.T) {
 	hostA := newRemoteHost(t, runtimeAddr)
 	require.NoError(t, hostA.RegisterActor("T", func(actorID string, service *actor.Service) actor.Actor {
 		return &testActor{svc: service, id: actorID, label: "A:"}
-	}, RegisterActorOptions{}))
+	}))
 
 	hostB := newRemoteHost(t, runtimeAddr)
 	require.NoError(t, hostB.RegisterActor("T", func(actorID string, service *actor.Service) actor.Actor {
 		return &testActor{svc: service, id: actorID, label: "B:"}
-	}, RegisterActorOptions{}))
+	}))
 
 	runRemoteHost(t, hostA)
 	runRemoteHost(t, hostB)
@@ -567,10 +563,7 @@ func TestHostRemoteIdleDeactivation(t *testing.T) {
 	deactivateCh := make(chan string, 1)
 	err := host.RegisterActor("T", func(actorID string, service *actor.Service) actor.Actor {
 		return &testActor{svc: service, id: actorID, deactivateCh: deactivateCh}
-	}, RegisterActorOptions{
-		// A short idle timeout so the actor deactivates quickly
-		IdleTimeout: 250 * time.Millisecond,
-	})
+	}, WithIdleTimeout(250*time.Millisecond))
 	require.NoError(t, err)
 
 	runRemoteHost(t, host)
@@ -602,7 +595,7 @@ func TestHostRemoteInvokeErrors(t *testing.T) {
 	host := newRemoteHost(t, runtimeAddr)
 	err := host.RegisterActor("T", func(actorID string, service *actor.Service) actor.Actor {
 		return &testActor{svc: service, id: actorID}
-	}, RegisterActorOptions{})
+	})
 	require.NoError(t, err)
 
 	runRemoteHost(t, host)
@@ -638,7 +631,7 @@ func TestHostRemoteStreamInvocation(t *testing.T) {
 		host := newRemoteHost(t, runtimeAddr)
 		err := host.RegisterActor("T", func(actorID string, service *actor.Service) actor.Actor {
 			return &testActor{svc: service, id: actorID}
-		}, RegisterActorOptions{})
+		})
 		require.NoError(t, err)
 		runRemoteHost(t, host)
 
@@ -660,7 +653,7 @@ func TestHostRemoteStreamInvocation(t *testing.T) {
 		hostB := newRemoteHost(t, runtimeAddr)
 		err := hostB.RegisterActor("S", func(actorID string, service *actor.Service) actor.Actor {
 			return &testActor{svc: service, id: actorID, label: "B:"}
-		}, RegisterActorOptions{})
+		})
 		require.NoError(t, err)
 
 		runRemoteHost(t, hostB)
@@ -685,7 +678,7 @@ func TestHostRemoteStreamInvocation(t *testing.T) {
 		hostB := newRemoteHost(t, runtimeAddr)
 		err := hostB.RegisterActor("S", func(actorID string, service *actor.Service) actor.Actor {
 			return &testActor{svc: service, id: actorID, label: "B:"}
-		}, RegisterActorOptions{})
+		})
 		require.NoError(t, err)
 
 		runRemoteHost(t, hostB)
@@ -719,9 +712,7 @@ func TestHostRemoteGracefulShutdownDrainsAndUnregisters(t *testing.T) {
 				id:           actorID,
 				deactivateCh: deactivateCh,
 			}
-		},
-		RegisterActorOptions{},
-	)
+		})
 	require.NoError(t, err)
 
 	// Run the host under a context we can cancel independently to trigger graceful shutdown
@@ -796,9 +787,7 @@ func TestHostRemoteGracefulDrainRejectsPeerInvocations(t *testing.T) {
 				deactivateCh:    deactivating,
 				deactivateBlock: release,
 			}
-		},
-		RegisterActorOptions{},
-	)
+		})
 	require.NoError(t, err)
 
 	hostBCtx, hostBCancel := context.WithCancel(t.Context())
@@ -867,7 +856,7 @@ func TestHostRemoteGracefulDrainNotifiesRuntimeBeforeDraining(t *testing.T) {
 	hostB := newRemoteHost(t, runtimeAddr)
 	err := hostB.RegisterActor("T", func(actorID string, service *actor.Service) actor.Actor {
 		return &testActor{svc: service, id: actorID, label: "B:", deactivateCh: deactivating, deactivateBlock: release}
-	}, RegisterActorOptions{})
+	})
 	require.NoError(t, err)
 
 	hostBCtx, hostBCancel := context.WithCancel(t.Context())
@@ -926,8 +915,7 @@ func TestHostRemoteRunFailsWhenPeerServerCannotBind(t *testing.T) {
 		WithRuntimeAddresses(runtimeAddr),
 		WithHostBootstrapPSK(testHostPSK),
 		WithUnsafeNoPinnedCA(),
-		WithLogger(slog.New(slog.DiscardHandler)),
-	)
+		WithLogger(slog.New(slog.DiscardHandler)))
 	require.NoError(t, err)
 
 	// Run must return an error promptly rather than hanging when the peer server cannot start

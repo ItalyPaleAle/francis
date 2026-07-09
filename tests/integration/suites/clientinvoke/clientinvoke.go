@@ -118,7 +118,7 @@ func (s *clientInvoke) Setup(t *testing.T) []framework.Option {
 		Actors: []frameworkhost.ActorReg{{
 			Type:    callerActorType,
 			Factory: newCallerActor,
-			Opts:    actorcore.RegisterActorOptions{IdleTimeout: time.Minute},
+			Opts:    []actorcore.RegisterActorOption{actorcore.WithIdleTimeout(time.Minute)},
 		}},
 	})
 	return []framework.Option{
