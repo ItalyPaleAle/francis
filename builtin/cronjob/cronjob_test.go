@@ -480,7 +480,9 @@ func (f *fakeClient[T]) Peek(context.Context, string, string, string, any, ...ac
 	return nil, nil
 }
 
-func (f *fakeClient[T]) SetAlarm(context.Context, string, actor.AlarmProperties) error { return nil }
+func (f *fakeClient[T]) SetAlarm(context.Context, string, actor.AlarmProperties) error {
+	return nil
+}
 
 func (f *fakeClient[T]) DeleteAlarm(context.Context, string) error {
 	return nil
@@ -489,14 +491,23 @@ func (f *fakeClient[T]) DeleteAlarm(context.Context, string) error {
 func (f *fakeClient[T]) GetJob(context.Context, string) (actor.JobInfo, error) {
 	return f.getJobInfo, f.getJobErr
 }
-func (f *fakeClient[T]) ListJobs(context.Context) ([]actor.JobInfo, error) { return nil, nil }
-func (f *fakeClient[T]) RetryJob(context.Context, string) (string, error)  { return "", nil }
-func (f *fakeClient[T]) Halt()                                             {}
+
+func (f *fakeClient[T]) ListJobs(context.Context) ([]actor.JobInfo, error) {
+	return nil, nil
+}
+
+func (f *fakeClient[T]) RetryJob(context.Context, string) (string, error) {
+	return "", nil
+}
+
+func (f *fakeClient[T]) Halt() {
+	// Nop
+}
 
 var (
 	_ actor.Client[cronJobState] = (*fakeClient[cronJobState])(nil)
 	_ actor.Client[struct{}]     = (*fakeClient[struct{}])(nil)
-)
 
-var _ builtinactor.BuiltInActor = (*CronJob)(nil)
-var _ actor.ActorBootstrapper = (*cronJobScheduler)(nil)
+	_ builtinactor.BuiltInActor = (*CronJob)(nil)
+	_ actor.ActorBootstrapper   = (*cronJobScheduler)(nil)
+)
