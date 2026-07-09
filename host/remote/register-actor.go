@@ -23,7 +23,7 @@ func (h *Host) RegisterActor(actorType string, factory actor.Factory, opts Regis
 }
 
 // RegisterSingletonActor registers a singleton actor in the host.
-// A singleton actor is reached at the well-known actor.SingletonActorID from every host, and the host bootstraps that instance once ready: if it implements actor.Bootstrapper, its Bootstrap hook runs, routed to the single owning host and serialized by its turn lock.
+// A singleton actor is reached at the well-known actor.SingletonActorID from every host, and the host bootstraps that instance once ready: if it implements actor.ActorBootstrapper, its Bootstrap hook runs, routed to the single owning host and serialized by its turn lock.
 // Use it for cluster-wide setup that must happen once, such as registering a durable recurring job.
 // Must be called before Run, and can be called multiple times to register more than one singleton actor.
 func (h *Host) RegisterSingletonActor(actorType string, factory actor.Factory, opts RegisterActorOptions) error {
@@ -51,7 +51,8 @@ func (h *Host) RegisterBuiltInActor(b builtinactor.BuiltInActor) error {
 		return errors.New("built-in actor is nil")
 	}
 
-	// Built-in actors carry only their bare type; the host adds the reserved prefix when registering
+	// Built-in actors carry only their bare type
+	// The host adds the reserved prefix when registering
 	actorType := builtinactor.FullActorType(b.ActorType())
 	err := h.core.RegisterActor(actorType, b.Factory(), b.RegisterOptions())
 	if err != nil {

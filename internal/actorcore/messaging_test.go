@@ -81,7 +81,7 @@ func (a *invokeOnlyActor) Invoke(_ context.Context, _ string, _ actor.Envelope) 
 	return "invoked", nil
 }
 
-// bootstrapActor implements only actor.Bootstrapper, used to prove the reserved bootstrap method dispatches to Bootstrap rather than Invoke
+// bootstrapActor implements only actor.ActorBootstrapper, used to prove the reserved bootstrap method dispatches to Bootstrap rather than Invoke
 // It records whether Bootstrap ran through a shared counter, since the factory builds a fresh instance per activation
 type bootstrapActor struct {
 	calls *atomic.Int32
@@ -264,7 +264,7 @@ func TestManagerInvokeLocal(t *testing.T) {
 }
 
 func TestManagerInvokeBootstrap(t *testing.T) {
-	t.Run("routes the reserved bootstrap method to Bootstrapper", func(t *testing.T) {
+	t.Run("routes the reserved bootstrap method to ActorBootstrapper", func(t *testing.T) {
 		var calls atomic.Int32
 		m := newMessagingManager(t, func(_ string, _ *actor.Service) actor.Actor {
 			return &bootstrapActor{calls: &calls}
@@ -274,7 +274,7 @@ func TestManagerInvokeBootstrap(t *testing.T) {
 			placements:  []*Placement{{HostID: "h1", Address: "addr1"}},
 		}
 
-		// A bootstrapActor implements only Bootstrapper, so a wrong route to Invoke would fail with ErrActorMethodUnsupported
+		// A bootstrapActor implements only ActorBootstrapper, so a wrong route to Invoke would fail with ErrActorMethodUnsupported
 		env, err := m.Invoke(t.Context(), resolver, &fakePeer{}, ref.NewActorRef("testactor", actor.SingletonActorID), ref.MethodBootstrap, nil, false, false)
 		require.NoError(t, err)
 		assert.Nil(t, env)
@@ -298,8 +298,8 @@ func TestManagerInvokeBootstrap(t *testing.T) {
 		assert.Equal(t, int32(1), calls.Load())
 	})
 
-	t.Run("is a no-op for an actor that is not a Bootstrapper", func(t *testing.T) {
-		// invokeOnlyActor does not implement Bootstrapper, so the bootstrap method has nothing to run and its Invoke must not be called
+	t.Run("is a no-op for an actor that is not a ActorBootstrapper", func(t *testing.T) {
+		// invokeOnlyActor does not implement ActorBootstrapper, so the bootstrap method has nothing to run and its Invoke must not be called
 		m := newMessagingManager(t, func(_ string, _ *actor.Service) actor.Actor { return &invokeOnlyActor{} })
 		resolver := &fakeResolver{
 			localHostID: "h1",

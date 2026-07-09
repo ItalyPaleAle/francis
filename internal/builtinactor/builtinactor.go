@@ -32,7 +32,7 @@ type BuiltInActor interface {
 	// RegisterOptions returns the registration options the host uses to register the actor
 	RegisterOptions() actorcore.RegisterActorOptions
 	// Singleton reports whether the host bootstraps this actor's cluster-wide singleton instance once it is ready
-	// When true, the instance the Factory produces at SingletonActorID must implement actor.Bootstrapper: the host drives its Bootstrap hook, which is safe to trigger from every host because invocations of the singleton are serialized by its turn lock and Bootstrap is idempotent
+	// When true, the instance the Factory produces at SingletonActorID must implement actor.ActorBootstrapper
 	Singleton() bool
 }
 

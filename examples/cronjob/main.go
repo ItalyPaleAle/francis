@@ -71,7 +71,6 @@ func run(ctx context.Context) error {
 	}
 
 	// Register the cron job as a built-in actor, before the host starts
-	// The host bootstraps it once it is ready
 	err = h.RegisterBuiltInActor(ticker)
 	if err != nil {
 		return fmt.Errorf("failed to register cron job: %w", err)

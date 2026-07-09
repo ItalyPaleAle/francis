@@ -476,20 +476,20 @@ func (h *Host) HaltAll() error {
 // It retries with a short backoff because an invocation can briefly fail right after startup (Bootstrap is idempotent, so retrying is safe)
 func (h *Host) bootstrapSingletonActors(ctx context.Context) {
 	const maxAttempts = 5
-	for _, actorType := range h.singletonActors {
+	for _, at := range h.singletonActors {
 		// The privileged client is allowed to target reserved built-in types and to send the reserved bootstrap method, both of which the public client rejects
-		client := actor.NewBuiltInActorClient[any](builtinkey.Key{}, actorType, actor.SingletonActorID, h.service)
+		client := actor.NewBuiltInActorClient[any](builtinkey.Key{}, at, actor.SingletonActorID, h.service)
 		for i := 1; ; i++ {
 			invokeCtx, cancel := context.WithTimeout(ctx, h.providerRequestTimeout)
-			_, err := client.Invoke(invokeCtx, actorType, actor.SingletonActorID, ref.MethodBootstrap, nil)
+			_, err := client.Invoke(invokeCtx, at, actor.SingletonActorID, ref.MethodBootstrap, nil)
 			cancel()
 			if err == nil {
-				h.log.DebugContext(ctx, "Bootstrapped singleton actor", slog.String("actorType", actorType))
+				h.log.DebugContext(ctx, "Bootstrapped singleton actor", slog.String("actorType", at))
 				break
 			}
 
 			if i >= maxAttempts || ctx.Err() != nil {
-				h.log.WarnContext(ctx, "Failed to bootstrap singleton actor", slog.String("actorType", actorType), slog.Any("error", err))
+				h.log.WarnContext(ctx, "Failed to bootstrap singleton actor", slog.String("actorType", at), slog.Any("error", err))
 				break
 			}
 

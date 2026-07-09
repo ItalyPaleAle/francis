@@ -5,21 +5,12 @@ import (
 )
 
 // SingletonActorID is the well-known actor ID of a singleton actor's cluster-wide instance.
-// A singleton actor is reached at this fixed ID from every host, so all callers target the same instance, and it is the instance the host bootstraps at startup (see Bootstrapper).
+// A singleton actor is reached at this fixed ID from every host, so all callers target the same instance, and it is the instance the host bootstraps at startup (see ActorBootstrapper).
 const SingletonActorID = "singleton"
 
 // Actor is an alias for "any".
 // It's included for convenience.
 type Actor = any
-
-// Bootstrapper can be implemented by an actor that needs one-time setup once the host is ready.
-// It is primarily useful for singleton actors: the host invokes Bootstrap on the actor's SingletonActorID instance at startup, routed through placement so it runs on the single owning host at a time and is serialized by that instance's turn lock, exactly like a normal invocation.
-// Every host triggers it, so Bootstrap must be idempotent (for example, registering a durable recurring job only if one is not already set up).
-// Register such an actor with the host's RegisterSingletonActor so the host knows to bootstrap it.
-type Bootstrapper interface {
-	// Bootstrap is called once the host is ready, to set up the actor's durable work.
-	Bootstrap(ctx context.Context) error
-}
 
 // ActorInvoke can be implemented by actors that offer the Invoke method.
 type ActorInvoke interface {
@@ -41,6 +32,15 @@ type ActorAlarm interface {
 	// The parameter "data" is an envelope that allows decoding the associated data into a custom object
 	// It could be nil if there's no data
 	Alarm(ctx context.Context, name string, data Envelope) error
+}
+
+// ActorBootstrapper can be implemented by an actor that needs one-time setup once the host is ready.
+// It is primarily useful for singleton actors: the host invokes Bootstrap on the actor's SingletonActorID instance at startup, routed through placement so it runs on the single owning host at a time and is serialized by that instance's turn lock, exactly like a normal invocation.
+// Every host triggers it, so Bootstrap must be idempotent (for example, registering a durable recurring job only if one is not already set up).
+// Register such an actor with the host's RegisterSingletonActor so the host knows to bootstrap it.
+type ActorBootstrapper interface {
+	// Bootstrap is called once the host is ready, to set up the actor's durable work.
+	Bootstrap(ctx context.Context) error
 }
 
 // ActorJob can be implemented by actors that receive dispatched jobs.

@@ -163,7 +163,7 @@ func (c *CronJob) RegisterOptions() actorcore.RegisterActorOptions {
 }
 
 // Singleton reports that the cron job has a cluster-wide singleton instance (the scheduler) the host bootstraps once it is ready
-// The scheduler implements actor.Bootstrapper, setting up the recurring job idempotently, which is safe to trigger from every host
+// The scheduler implements actor.ActorBootstrapper, setting up the recurring job idempotently, which is safe to trigger from every host
 func (c *CronJob) Singleton() bool {
 	return true
 }
@@ -204,11 +204,8 @@ type cronJobState struct {
 	JobID string `json:"jobID"`
 }
 
-// The scheduler singleton is bootstrapped by the host, so it must satisfy actor.Bootstrapper
-var _ actor.Bootstrapper = (*cronJobScheduler)(nil)
-
 // cronJobScheduler is the cluster-wide singleton that owns one recurring job for the cluster
-// It implements actor.Bootstrapper for registration (driven by the host at startup) and actor.ActorInvoke for the unregister and trigger lifecycle methods, dispatching the actual runs to the separate runner instance
+// It implements actor.ActorBootstrapper for registration (driven by the host at startup) and actor.ActorInvoke for the unregister and trigger lifecycle methods, dispatching the actual runs to the separate runner instance
 // Clients cannot invoke it directly because the Service rejects built-in actor types
 type cronJobScheduler struct {
 	interval  string
@@ -222,7 +219,7 @@ type cronJobScheduler struct {
 	runner actor.Client[struct{}]
 }
 
-// Bootstrap sets up the recurring job, which the host drives once it is ready by invoking the reserved bootstrap lifecycle on the scheduler singleton
+// Bootstrap sets up the recurring job, which the host drives once it's ready by invoking the reserved bootstrap lifecycle on the scheduler singleton
 // It is idempotent and safe to trigger from every host: invocations of the singleton are serialized by its turn lock, and the register logic reconciles an already-registered job rather than duplicating it
 func (a *cronJobScheduler) Bootstrap(ctx context.Context) error {
 	return a.register(ctx)

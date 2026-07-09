@@ -9,9 +9,9 @@ import (
 const BuiltInActorTypePrefix = "francis.builtin."
 
 // reservedMethodPrefix namespaces framework lifecycle methods so they cannot collide with an application method, and lets the public client and service reject them
-const reservedMethodPrefix = "francis."
+const reservedMethodPrefix = "francis.builtin."
 
-// MethodBootstrap is the reserved lifecycle method the host invokes on a singleton actor's instance to drive its Bootstrapper.Bootstrap hook
+// MethodBootstrap is the reserved lifecycle method the host invokes on a singleton actor's instance to drive its ActorBootstrapper.Bootstrap hook
 // It routes like any other invocation, so the actor core recognizes it and calls Bootstrap instead of the actor's Invoke handler
 const MethodBootstrap = reservedMethodPrefix + "bootstrap"
 

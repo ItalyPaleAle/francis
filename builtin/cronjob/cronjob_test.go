@@ -499,3 +499,4 @@ var (
 )
 
 var _ builtinactor.BuiltInActor = (*CronJob)(nil)
+var _ actor.ActorBootstrapper = (*cronJobScheduler)(nil)

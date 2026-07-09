@@ -164,9 +164,9 @@ func (m *Manager) invokeLocalObject(ctx context.Context, resolver PlacementResol
 			invokeCtx = types.WithReadOnly(invokeCtx)
 			res, err = obj.Peek(invokeCtx, method, NewObjectEnvelope(data))
 		case method == ref.MethodBootstrap:
-			// The reserved bootstrap lifecycle drives the actor's optional Bootstrapper hook rather than its Invoke handler
+			// The reserved bootstrap lifecycle drives the actor's optional ActorBootstrapper hook rather than its Invoke handler
 			// An actor that does not implement it has no durable work to set up, so this is a no-op
-			bs, ok := act.Instance.(actor.Bootstrapper)
+			bs, ok := act.Instance.(actor.ActorBootstrapper)
 			if ok {
 				err = bs.Bootstrap(invokeCtx)
 			}
@@ -395,9 +395,9 @@ func (m *Manager) peerInvokeObjectCore(ctx context.Context, resolver PlacementRe
 			invokeCtx = types.WithReadOnly(invokeCtx)
 			rRes, rErr = obj.Peek(invokeCtx, req.Method, data)
 		case req.Method == ref.MethodBootstrap:
-			// The reserved bootstrap lifecycle drives the actor's optional Bootstrapper hook rather than its Invoke handler
+			// The reserved bootstrap lifecycle drives the actor's optional ActorBootstrapper hook rather than its Invoke handler
 			// An actor that does not implement it has no durable work to set up, so this is a no-op
-			bs, ok := act.Instance.(actor.Bootstrapper)
+			bs, ok := act.Instance.(actor.ActorBootstrapper)
 			if ok {
 				rErr = bs.Bootstrap(invokeCtx)
 			}

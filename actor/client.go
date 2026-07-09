@@ -54,7 +54,7 @@ type client[T any] struct {
 	service *Service
 
 	// privileged marks the framework's built-in actor client, which is allowed to operate on built-in actor types
-	// A normal client rejects built-in targets with ErrActorTypeReserved, so application actors cannot reach built-in actors through it
+	// A regular client rejects built-in targets with ErrActorTypeReserved, so application actors cannot reach built-in actors through it
 	privileged bool
 
 	// stateMu guards hasState/state, since concurrent Peek turns can call GetState on this same client at once
@@ -85,13 +85,13 @@ func NewBuiltInActorClient[T any](_ builtinkey.Key, actorType string, actorID st
 }
 
 // canTarget reports whether this client may operate on the given actor type
-// A normal client cannot target a built-in actor, while the privileged built-in client can
+// A regular client cannot target a built-in actor, while the privileged built-in client can
 func (c *client[T]) canTarget(actorType string) bool {
 	return c.privileged || !ref.IsBuiltInActorType(actorType)
 }
 
 // canInvokeMethod reports whether this client may invoke the given method
-// A normal client cannot invoke a reserved framework lifecycle method (such as bootstrap), while the privileged built-in client can, since the framework drives those methods through it
+// A regular client cannot invoke a reserved framework lifecycle method (such as bootstrap), while the privileged built-in client can, since the framework drives those methods through it
 func (c *client[T]) canInvokeMethod(method string) bool {
 	return c.privileged || !ref.IsReservedMethod(method)
 }

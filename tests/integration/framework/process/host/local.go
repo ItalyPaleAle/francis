@@ -87,10 +87,12 @@ func (p *Local) Run(t *testing.T) {
 
 	// Built-in and regular actors must be registered before Run
 	for _, b := range p.opts.BuiltInActors {
-		require.NoError(t, h.RegisterBuiltInActor(b), "failed to register built-in actor")
+		err = h.RegisterBuiltInActor(b)
+		require.NoError(t, err, "failed to register built-in actor")
 	}
 	for _, a := range p.opts.Actors {
-		require.NoError(t, h.RegisterActor(a.Type, a.Factory, a.Opts), "failed to register actor %q", a.Type)
+		err = h.RegisterActor(a.Type, a.Factory, a.Opts)
+		require.NoError(t, err, "failed to register actor %q", a.Type)
 	}
 
 	// Run the host in the background and wait until it has registered with the provider
