@@ -49,12 +49,16 @@ func run(parentCtx context.Context, log *slog.Logger) error {
 		local.WithStandaloneMemoryProvider(standalone.StandaloneMemoryOptions{}),
 		// The runtime PSK derives the cluster CA used for host-to-host mTLS
 		local.WithRuntimePSKs([]byte(runtimePSK)),
-		// Register the rate limiter as a built-in actor
-		local.WithBuiltInActor(limiter),
 		local.WithShutdownGracePeriod(2*time.Second),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create actor host: %w", err)
+	}
+
+	// Register the rate limiter as a built-in actor, before the host starts
+	err = h.RegisterBuiltInActor(limiter)
+	if err != nil {
+		return fmt.Errorf("failed to register rate limiter: %w", err)
 	}
 
 	// Run the host in the background

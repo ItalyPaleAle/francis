@@ -17,7 +17,7 @@ import (
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/bootstrapauth"
-	"github.com/italypaleale/francis/internal/builtinactor"
+	"github.com/italypaleale/francis/internal/builtinkey"
 	"github.com/italypaleale/francis/internal/ca"
 	"github.com/italypaleale/francis/internal/certholder"
 	"github.com/italypaleale/francis/internal/hosttls"
@@ -46,8 +46,8 @@ type Host struct {
 
 	// core owns the active actors, their turn-based invocation, idle deactivation, and halting
 	core *actorcore.Manager
-	// builtInActors are framework-managed actors registered before start and bootstrapped once the host is ready
-	builtInActors []builtinactor.BuiltInActor
+	// singletonActors holds the reserved actor types of singleton actors registered before start, whose singleton instance the host bootstraps once ready
+	singletonActors []string
 	// resolver adapts this host to the placement resolver the shared messaging logic depends on
 	resolver actorcore.PlacementResolver
 
@@ -241,22 +241,6 @@ func newHost(options *newHostOptions) (*Host, error) {
 		MaxRequestBodySize:  options.MaxRequestBodySize,
 	})
 
-	// Register the built-in actors before the host starts, so their types are advertised to the runtime like any other
-	// They are bootstrapped (their registration method invoked) once the host is ready, in Run
-	for _, b := range options.BuiltInActors {
-		if b == nil {
-			continue
-		}
-		// Built-in actors carry only their bare type
-		// the host adds the reserved prefix when registering
-		actorType := builtinactor.FullActorType(b.ActorType())
-		err = h.core.RegisterActor(actorType, b.Factory(), b.RegisterOptions())
-		if err != nil {
-			return nil, fmt.Errorf("failed to register built-in actor %q: %w", actorType, err)
-		}
-	}
-	h.builtInActors = options.BuiltInActors
-
 	return h, nil
 }
 
@@ -315,13 +299,13 @@ func (h *Host) Run(parentCtx context.Context) error {
 		runErrCh <- h.runtimeClient.Run(ctx)
 	}()
 
-	// Bootstrap the built-in actors once the host has registered with a runtime and can serve invocations
-	// Their registration runs on the cluster-wide singleton instance, so it is harmless for every host to do this
-	if len(h.builtInActors) > 0 {
+	// Bootstrap the singleton actors once the host has registered with a runtime and can serve invocations
+	// Bootstrap runs on the cluster-wide singleton instance, so it is harmless for every host to do this
+	if len(h.singletonActors) > 0 {
 		go func() {
 			select {
 			case <-h.Ready():
-				h.bootstrapBuiltInActors(ctx)
+				h.bootstrapSingletonActors(ctx)
 			case <-ctx.Done():
 			}
 		}()
@@ -363,22 +347,25 @@ func (h *Host) HaltAll() error {
 	return h.core.HaltAll()
 }
 
-// bootstrapBuiltInActors invokes the one-time registration method for each built-in actor once the host is ready
-// It retries with a short backoff because an invocation can briefly fail right after startup (the register handler is idempotent, so retrying is safe)
-func (h *Host) bootstrapBuiltInActors(ctx context.Context) {
+// bootstrapSingletonActors drives the Bootstrap hook of each registered singleton actor once the host is ready
+// It invokes the reserved bootstrap lifecycle on the singleton instance through the privileged client, which routes to the owning host and serializes on that instance's turn lock
+// It retries with a short backoff because an invocation can briefly fail right after startup (Bootstrap is idempotent, so retrying is safe)
+func (h *Host) bootstrapSingletonActors(ctx context.Context) {
 	const maxAttempts = 5
-	for _, b := range h.builtInActors {
+	for _, actorType := range h.singletonActors {
+		// The privileged client is allowed to target reserved built-in types and to send the reserved bootstrap method, both of which the public client rejects
+		client := actor.NewBuiltInActorClient[any](builtinkey.Key{}, actorType, actor.SingletonActorID, h.service)
 		for i := 1; ; i++ {
 			invokeCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
-			err := b.Bootstrap(invokeCtx, h.service)
+			_, err := client.Invoke(invokeCtx, actorType, actor.SingletonActorID, ref.MethodBootstrap, nil)
 			cancel()
 			if err == nil {
-				h.log.DebugContext(ctx, "Bootstrapped built-in actor", slog.String("actorType", b.ActorType()))
+				h.log.DebugContext(ctx, "Bootstrapped singleton actor", slog.String("actorType", actorType))
 				break
 			}
 
 			if i >= maxAttempts || ctx.Err() != nil {
-				h.log.WarnContext(ctx, "Failed to bootstrap built-in actor", slog.String("actorType", b.ActorType()), slog.Any("error", err))
+				h.log.WarnContext(ctx, "Failed to bootstrap singleton actor", slog.String("actorType", actorType), slog.Any("error", err))
 				break
 			}
 

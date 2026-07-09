@@ -20,6 +20,6 @@ level=INFO msg="Cron job tick" at=2026-06-30T12:00:20Z
 
 ## How it works
 
-`cronjob.New` builds the job, and `local.WithBuiltInActor` registers it on the host. Once the host is ready it bootstraps the actor, which sets up a single durable repeating job that drives the schedule.
+`cronjob.New` builds the job, and `host.RegisterBuiltInActor` registers it on the host before it starts. Once the host is ready it bootstraps the actor, which sets up a single durable repeating job that drives the schedule.
 
 See the [built-in actors docs](../../docs/content/docs/builtin-actors.md) for the schedule options (`WithInterval`, `WithPeriod`, `WithCron`, `WithImmediate`) and for triggering a run on demand with `Message`.

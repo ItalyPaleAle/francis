@@ -90,6 +90,12 @@ func (c *client[T]) canTarget(actorType string) bool {
 	return c.privileged || !ref.IsBuiltInActorType(actorType)
 }
 
+// canInvokeMethod reports whether this client may invoke the given method
+// A normal client cannot invoke a reserved framework lifecycle method (such as bootstrap), while the privileged built-in client can, since the framework drives those methods through it
+func (c *client[T]) canInvokeMethod(method string) bool {
+	return c.privileged || !ref.IsReservedMethod(method)
+}
+
 // SetState saves the actor's state.
 func (c *client[T]) SetState(ctx context.Context, state T, opts *SetStateOpts) error {
 	if !c.canTarget(c.actorType) {
@@ -201,6 +207,9 @@ func (c *client[T]) Invoke(ctx context.Context, actorType string, actorID string
 	if !c.canTarget(actorType) {
 		return nil, ErrActorTypeReserved
 	}
+	if !c.canInvokeMethod(method) {
+		return nil, ErrMethodReserved
+	}
 
 	return c.service.invoke(ctx, actorType, actorID, method, data, opts...)
 }
@@ -209,6 +218,9 @@ func (c *client[T]) Invoke(ctx context.Context, actorType string, actorID string
 func (c *client[T]) Peek(ctx context.Context, actorType string, actorID string, method string, data any, opts ...InvokeOption) (Envelope, error) {
 	if !c.canTarget(actorType) {
 		return nil, ErrActorTypeReserved
+	}
+	if !c.canInvokeMethod(method) {
+		return nil, ErrMethodReserved
 	}
 
 	return c.service.peek(ctx, actorType, actorID, method, data, opts...)

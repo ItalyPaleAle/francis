@@ -45,7 +45,7 @@ type Options struct {
 	Hosts int
 	// Actors are registered on every host before it starts
 	Actors []frameworkhost.ActorReg
-	// BuiltInActors are framework-managed actors registered on every host via WithBuiltInActor
+	// BuiltInActors are framework-managed actors registered on every host via RegisterBuiltInActor
 	BuiltInActors []builtinactor.BuiltInActor
 	// AlarmsPollInterval optionally tunes how frequently alarms are polled, so alarm scenarios fire quickly instead of waiting on the multi-second component defaults
 	// On the local topology it is applied to each host, and on the remote topology to the runtime that owns alarm execution, so the same value speeds up either topology

@@ -15,10 +15,8 @@ import (
 
 const (
 	// SingletonActorID is the fixed actor ID used for built-in singleton actors, so every host targets the same cluster-wide instance
-	SingletonActorID = "singleton"
+	SingletonActorID = actor.SingletonActorID
 
-	// MethodRegister is the lifecycle method a host invokes once to set up the actor's durable work, and is a no-op afterwards
-	MethodRegister = "register"
 	// MethodUnregister is the lifecycle method that tears down the actor's durable work
 	MethodUnregister = "unregister"
 )
@@ -33,9 +31,9 @@ type BuiltInActor interface {
 	Factory() actor.Factory
 	// RegisterOptions returns the registration options the host uses to register the actor
 	RegisterOptions() actorcore.RegisterActorOptions
-	// Bootstrap is called by the host once it is ready, to set up the actor's durable work
-	// It is safe to call from every host: invocations of the cluster-wide singleton are serialized by its turn lock, and the register handler is idempotent
-	Bootstrap(ctx context.Context, svc *actor.Service) error
+	// Singleton reports whether the host bootstraps this actor's cluster-wide singleton instance once it is ready
+	// When true, the instance the Factory produces at SingletonActorID must implement actor.Bootstrapper: the host drives its Bootstrap hook, which is safe to trigger from every host because invocations of the singleton are serialized by its turn lock and Bootstrap is idempotent
+	Singleton() bool
 }
 
 // FullActorType returns the reserved actor type a built-in actor is registered under, by prefixing its bare type

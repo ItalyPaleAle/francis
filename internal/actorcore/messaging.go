@@ -162,6 +162,12 @@ func (m *Manager) invokeLocalObject(ctx context.Context, resolver PlacementResol
 			// Mark the context read-only so the client rejects state-mutating calls made from within the handler
 			invokeCtx = types.WithReadOnly(invokeCtx)
 			res, err = obj.Peek(invokeCtx, method, NewObjectEnvelope(data))
+		} else if method == ref.MethodBootstrap {
+			// The reserved bootstrap lifecycle drives the actor's optional Bootstrapper hook rather than its Invoke handler
+			// An actor that does not implement it has no durable work to set up, so this is a no-op
+			if bs, ok := act.Instance.(actor.Bootstrapper); ok {
+				err = bs.Bootstrap(invokeCtx)
+			}
 		} else {
 			// The actor must implement the Invoke method to be called this way
 			obj, ok := act.Instance.(actor.ActorInvoke)
@@ -385,6 +391,12 @@ func (m *Manager) peerInvokeObjectCore(ctx context.Context, resolver PlacementRe
 			// Mark the context read-only so the client rejects state-mutating calls made from within the handler
 			invokeCtx = types.WithReadOnly(invokeCtx)
 			rRes, rErr = obj.Peek(invokeCtx, req.Method, data)
+		} else if req.Method == ref.MethodBootstrap {
+			// The reserved bootstrap lifecycle drives the actor's optional Bootstrapper hook rather than its Invoke handler
+			// An actor that does not implement it has no durable work to set up, so this is a no-op
+			if bs, ok := act.Instance.(actor.Bootstrapper); ok {
+				rErr = bs.Bootstrap(invokeCtx)
+			}
 		} else {
 			// The actor must implement the Invoke method to be called this way
 			obj, ok := act.Instance.(actor.ActorInvoke)

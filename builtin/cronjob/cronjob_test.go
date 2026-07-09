@@ -10,6 +10,7 @@ import (
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/builtinactor"
+	"github.com/italypaleale/francis/internal/ref"
 )
 
 func TestNew(t *testing.T) {
@@ -317,7 +318,7 @@ func TestCronJobUnknownMethod(t *testing.T) {
 	a := &cronJobRunner{}
 
 	// The runner only services run jobs, so lifecycle methods, the trigger message, and bogus names are all unknown
-	for _, method := range []string{"bogus", builtinactor.MethodRegister, builtinactor.MethodUnregister, methodTrigger} {
+	for _, method := range []string{"bogus", ref.MethodBootstrap, builtinactor.MethodUnregister, methodTrigger} {
 		err := a.Job(context.Background(), method, nil)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, actor.ErrJobPermanentFailure, "an unknown job method should dead-letter, not retry forever")
@@ -327,12 +328,12 @@ func TestCronJobUnknownMethod(t *testing.T) {
 func TestCronJobInvoke(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("register routes to register", func(t *testing.T) {
+	t.Run("bootstrap registers the recurring job", func(t *testing.T) {
 		state := &fakeClient[cronJobState]{}
 		runner := &fakeClient[struct{}]{dispatchID: "job-1"}
 		a := &cronJobScheduler{interval: "PT1M", state: state, runner: runner}
 
-		_, err := a.Invoke(ctx, builtinactor.MethodRegister, nil)
+		err := a.Bootstrap(ctx)
 		require.NoError(t, err)
 		require.Len(t, runner.dispatches, 1)
 		require.Len(t, state.setStateCalls, 1)

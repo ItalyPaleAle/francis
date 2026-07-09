@@ -242,3 +242,20 @@ func TestNewBuiltInActorClientIsPrivileged(t *testing.T) {
 	assert.True(t, cc.privileged)
 	assert.True(t, cc.canTarget(builtInType))
 }
+
+// TestClientRejectsReservedMethod verifies the public client refuses to invoke a reserved framework lifecycle method (such as bootstrap), while the privileged built-in client is allowed to drive it
+func TestClientRejectsReservedMethod(t *testing.T) {
+	ctx := context.Background()
+
+	// A normal client cannot invoke a reserved method, and the guard returns before the nil host is dereferenced
+	pub := NewActorClient[any]("widget", "w1", &Service{})
+	_, err := pub.Invoke(ctx, "other", "id", ref.MethodBootstrap, nil)
+	require.ErrorIs(t, err, ErrMethodReserved)
+	_, err = pub.Peek(ctx, "other", "id", ref.MethodBootstrap, nil)
+	require.ErrorIs(t, err, ErrMethodReserved)
+
+	// The privileged built-in client may drive the reserved lifecycle, so it reaches the host instead of being rejected
+	priv := NewBuiltInActorClient[any](builtinkey.Key{}, "widget", SingletonActorID, NewService(&fakeHost{}))
+	_, err = priv.Invoke(ctx, "other", "id", ref.MethodBootstrap, nil)
+	require.NoError(t, err)
+}

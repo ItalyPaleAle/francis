@@ -64,13 +64,17 @@ func run(ctx context.Context) error {
 		}),
 		// The runtime PSK derives the cluster CA used for host-to-host mTLS
 		local.WithRuntimePSKs([]byte(runtimePSK)),
-		// Register the cron job as a built-in actor
-		// The host bootstraps it once it is ready
-		local.WithBuiltInActor(ticker),
 		local.WithShutdownGracePeriod(5*time.Second),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create actor host: %w", err)
+	}
+
+	// Register the cron job as a built-in actor, before the host starts
+	// The host bootstraps it once it is ready
+	err = h.RegisterBuiltInActor(ticker)
+	if err != nil {
+		return fmt.Errorf("failed to register cron job: %w", err)
 	}
 
 	log.Info("Starting cron job example")

@@ -25,7 +25,7 @@ type RemoteOptions struct {
 	BootstrapToken string
 	// Actors to register before the host starts
 	Actors []ActorReg
-	// BuiltInActors are framework-managed actors registered via WithBuiltInActor
+	// BuiltInActors are framework-managed actors registered via RegisterBuiltInActor
 	BuiltInActors []builtinactor.BuiltInActor
 	// Logger is optional and defaults to the host's discarding logger
 	Logger *slog.Logger
@@ -88,16 +88,16 @@ func (p *Remote) Run(t *testing.T) {
 	if p.opts.Logger != nil {
 		hostOpts = append(hostOpts, remote.WithLogger(p.opts.Logger))
 	}
-	for _, b := range p.opts.BuiltInActors {
-		hostOpts = append(hostOpts, remote.WithBuiltInActor(b))
-	}
 	hostOpts = append(hostOpts, p.opts.Extra...)
 
 	h, err := remote.NewHost(hostOpts...)
 	require.NoError(t, err, "failed to create remote host")
 	p.h = h
 
-	// Actors must be registered before Run
+	// Built-in and regular actors must be registered before Run
+	for _, b := range p.opts.BuiltInActors {
+		require.NoError(t, h.RegisterBuiltInActor(b), "failed to register built-in actor")
+	}
 	for _, a := range p.opts.Actors {
 		require.NoError(t, h.RegisterActor(a.Type, a.Factory, a.Opts), "failed to register actor %q", a.Type)
 	}

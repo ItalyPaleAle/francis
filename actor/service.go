@@ -24,6 +24,8 @@ var (
 	ErrActorTypeUnsupported = errors.New("actor type is not supported in the cluster")
 	// ErrActorTypeReserved is returned by the Service methods that target an actor by type when that type is a built-in actor type, which clients cannot invoke or operate on directly.
 	ErrActorTypeReserved = errors.New("cannot target a built-in actor type directly")
+	// ErrMethodReserved is returned by the Service and Client invocation methods when the method name is reserved for a framework lifecycle (such as bootstrap), which clients cannot invoke directly.
+	ErrMethodReserved = errors.New("cannot invoke a reserved framework method directly")
 	// ErrNoHost is returned by methods that perform invocation when no host is currently available to place the actor
 	ErrNoHost = errors.New("no host is available to place the actor")
 	// ErrServiceNotInitialized is returned by Service methods when the Service was not created via NewService and therefore has no host to delegate to
@@ -60,6 +62,9 @@ func (s *Service) Invoke(ctx context.Context, actorType string, actorID string, 
 	if ref.IsBuiltInActorType(actorType) {
 		return nil, ErrActorTypeReserved
 	}
+	if ref.IsReservedMethod(method) {
+		return nil, ErrMethodReserved
+	}
 
 	return s.invoke(ctx, actorType, actorID, method, data, opts...)
 }
@@ -80,6 +85,9 @@ func (s *Service) InvokeStream(ctx context.Context, actorType string, actorID st
 	if ref.IsBuiltInActorType(actorType) {
 		return "", nil, ErrActorTypeReserved
 	}
+	if ref.IsReservedMethod(method) {
+		return "", nil, ErrMethodReserved
+	}
 
 	if !s.ready() {
 		return "", nil, ErrServiceNotInitialized
@@ -95,6 +103,9 @@ func (s *Service) InvokeStream(ctx context.Context, actorType string, actorID st
 func (s *Service) Peek(ctx context.Context, actorType string, actorID string, method string, data any, opts ...InvokeOption) (Envelope, error) {
 	if ref.IsBuiltInActorType(actorType) {
 		return nil, ErrActorTypeReserved
+	}
+	if ref.IsReservedMethod(method) {
+		return nil, ErrMethodReserved
 	}
 
 	return s.peek(ctx, actorType, actorID, method, data, opts...)
@@ -116,6 +127,9 @@ func (s *Service) peek(ctx context.Context, actorType string, actorID string, me
 func (s *Service) PeekStream(ctx context.Context, actorType string, actorID string, method string, reqContentType string, body io.Reader, opts ...InvokeOption) (respContentType string, resp io.ReadCloser, err error) {
 	if ref.IsBuiltInActorType(actorType) {
 		return "", nil, ErrActorTypeReserved
+	}
+	if ref.IsReservedMethod(method) {
+		return "", nil, ErrMethodReserved
 	}
 
 	if !s.ready() {
