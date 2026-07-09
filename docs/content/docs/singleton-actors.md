@@ -29,10 +29,10 @@ func NewScheduler(actorID string, svc *actor.Service) actor.Actor {
     }
 }
 
-func (s *scheduler) Bootstrap(ctx context.Context, data any) error {
+func (s *scheduler) Bootstrap(ctx context.Context, data actor.Envelope) error {
     // Runs once per startup cycle on the single owning host, serialized by the singleton's turn lock
     // Must be idempotent: every host triggers it, so reconcile rather than double-create durable work
-    // Use data.Decode(&dest) when you supplied BootstrapData at registration time
+    // When BootstrapData was set at registration, it arrives here as an Envelope: call `data.Decode(&dest)`
     return nil
 }
 
@@ -53,7 +53,7 @@ err = host.RegisterSingletonActor("scheduler", NewScheduler, local.RegisterSingl
 | `ConcurrencyLimit` | `int` | From `RegisterActorOptions`. |
 | `MaxAttempts` | `int` | From `RegisterActorOptions`. |
 | `InitialRetryDelay` | `time.Duration` | From `RegisterActorOptions`. |
-| `BootstrapData` | `any` | Optional data delivered to `Bootstrap` as its `data` argument, wrapped in an `Envelope` like an `Invoke` payload. `nil` when not provided. |
+| `BootstrapData` | `any` | Optional data delivered to `Bootstrap` as its `data Envelope` argument, like `Invoke`. Encoded by the host and decoded by the actor via `data.Decode(&dest)`. `nil` when not provided. |
 
 ```go
 err = host.RegisterSingletonActor("scheduler", NewScheduler, local.RegisterSingletonActorOptions{
@@ -71,7 +71,7 @@ Implement `actor.ActorBootstrapper` on your actor to receive the startup call:
 ```go
 // ActorBootstrapper is called once the host is ready, on the singleton instance
 type ActorBootstrapper interface {
-    Bootstrap(ctx context.Context, data any) error
+    Bootstrap(ctx context.Context, data actor.Envelope) error
 }
 ```
 
@@ -81,19 +81,17 @@ Details:
 - Under the hood, the call is a normal actor invocation and behaves in the same way: it is routed to the current owning host and serialized by the singleton instance's turn lock.
 - Every host triggers bootstrapping at startup, so `Bootstrap` **must be idempotent**. If it registers durable work, check whether that work already exists first.
 - An actor registered as a singleton that does not implement `ActorBootstrapper` simply has no startup step.
-- The bootstrap payload is available as `data`. When set, it is an `actor.Envelope` whose `Decode` method lets the actor read it into a typed value. In local-path unit tests you may receive the raw value you passed (because the local manager wraps it without wire serialization), so code that decodes `data` through the envelope handles both cases.
+- The bootstrap payload arrives as `data actor.Envelope`, just like `Invoke` and `Alarm`. Call `data.Decode(&dest)` to read it. `data` is `nil` when no bootstrap data was supplied at registration.
 
 ```go
-func (s *scheduler) Bootstrap(ctx context.Context, data any) error {
+func (s *scheduler) Bootstrap(ctx context.Context, data actor.Envelope) error {
     if data != nil {
         var cfg schedulerConfig
-        env, ok := data.(actor.Envelope)
-        if ok {
-            err := env.Decode(&cfg)
-            if err != nil {
-                return err
-            }
+        err := data.Decode(&cfg)
+        if err != nil {
+            return err
         }
+
         // use cfg...
     }
 

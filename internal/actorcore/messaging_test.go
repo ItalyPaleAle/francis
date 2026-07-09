@@ -91,22 +91,14 @@ type bootstrapActor struct {
 	gotData atomic.Pointer[string]
 }
 
-func (a *bootstrapActor) Bootstrap(_ context.Context, data any) error {
+func (a *bootstrapActor) Bootstrap(_ context.Context, data actor.Envelope) error {
 	a.calls.Add(1)
 
 	// Record the decoded payload when the caller provided one
-	// data is an actor.Envelope in both local and remote paths
+	// data is an actor.Envelope in both local and remote paths, and nil when no bootstrap data was provided
 	if data != nil {
 		var s string
-		env, ok := data.(actor.Envelope)
-		if ok {
-			_ = env.Decode(&s)
-		} else {
-			str, ok := data.(string)
-			if ok {
-				s = str
-			}
-		}
+		_ = data.Decode(&s)
 		if s != "" {
 			a.gotData.Store(&s)
 		}

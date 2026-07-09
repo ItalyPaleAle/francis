@@ -9,6 +9,7 @@ package actor_mocks
 import (
 	"context"
 
+	"github.com/italypaleale/francis/actor"
 	mock "github.com/stretchr/testify/mock"
 )
 
@@ -40,7 +41,7 @@ func (_m *MockActorBootstrapper) EXPECT() *MockActorBootstrapper_Expecter {
 }
 
 // Bootstrap provides a mock function for the type MockActorBootstrapper
-func (_mock *MockActorBootstrapper) Bootstrap(ctx context.Context, data any) error {
+func (_mock *MockActorBootstrapper) Bootstrap(ctx context.Context, data actor.Envelope) error {
 	ret := _mock.Called(ctx, data)
 
 	if len(ret) == 0 {
@@ -48,7 +49,7 @@ func (_mock *MockActorBootstrapper) Bootstrap(ctx context.Context, data any) err
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, any) error); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, actor.Envelope) error); ok {
 		r0 = returnFunc(ctx, data)
 	} else {
 		r0 = ret.Error(0)
@@ -63,20 +64,20 @@ type MockActorBootstrapper_Bootstrap_Call struct {
 
 // Bootstrap is a helper method to define mock.On call
 //   - ctx context.Context
-//   - data any
+//   - data actor.Envelope
 func (_e *MockActorBootstrapper_Expecter) Bootstrap(ctx any, data any) *MockActorBootstrapper_Bootstrap_Call {
 	return &MockActorBootstrapper_Bootstrap_Call{Call: _e.mock.On("Bootstrap", ctx, data)}
 }
 
-func (_c *MockActorBootstrapper_Bootstrap_Call) Run(run func(ctx context.Context, data any)) *MockActorBootstrapper_Bootstrap_Call {
+func (_c *MockActorBootstrapper_Bootstrap_Call) Run(run func(ctx context.Context, data actor.Envelope)) *MockActorBootstrapper_Bootstrap_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
 			arg0 = args[0].(context.Context)
 		}
-		var arg1 any
+		var arg1 actor.Envelope
 		if args[1] != nil {
-			arg1 = args[1].(any)
+			arg1 = args[1].(actor.Envelope)
 		}
 		run(
 			arg0,
@@ -91,7 +92,7 @@ func (_c *MockActorBootstrapper_Bootstrap_Call) Return(err error) *MockActorBoot
 	return _c
 }
 
-func (_c *MockActorBootstrapper_Bootstrap_Call) RunAndReturn(run func(ctx context.Context, data any) error) *MockActorBootstrapper_Bootstrap_Call {
+func (_c *MockActorBootstrapper_Bootstrap_Call) RunAndReturn(run func(ctx context.Context, data actor.Envelope) error) *MockActorBootstrapper_Bootstrap_Call {
 	_c.Call.Return(run)
 	return _c
 }
