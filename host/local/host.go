@@ -70,6 +70,13 @@ type (
 	StandalonePostgresProviderOptions = standalone.StandalonePostgresOptions
 )
 
+// singletonActorRegistration is the host-side record for a singleton actor the host will bootstrap at startup
+type singletonActorRegistration struct {
+	// actorType is reserved for built-in actor types
+	actorType     string
+	bootstrapData any
+}
+
 // Host is an actor host.
 type Host struct {
 	// Address the host is reachable at
@@ -84,8 +91,8 @@ type Host struct {
 	actorProvider components.ActorProvider
 	service       *actor.Service
 	core          *actorcore.Manager
-	// singletonActors holds the reserved actor types of singleton actors registered before start, whose singleton instance the host bootstraps once ready
-	singletonActors []string
+	// singletonActors holds singleton actors registered before start, whose singleton instance the host bootstraps once ready
+	singletonActors []singletonActorRegistration
 	// resolver adapts this host to the placement resolver the shared messaging logic depends on
 	resolver actorcore.PlacementResolver
 
@@ -476,12 +483,13 @@ func (h *Host) HaltAll() error {
 // It retries with a short backoff because an invocation can briefly fail right after startup (Bootstrap is idempotent, so retrying is safe)
 func (h *Host) bootstrapSingletonActors(ctx context.Context) {
 	const maxAttempts = 5
-	for _, at := range h.singletonActors {
+	for _, reg := range h.singletonActors {
+		at := reg.actorType
 		// The privileged client is allowed to target reserved built-in types and to send the reserved bootstrap method, both of which the public client rejects
 		client := actor.NewBuiltInActorClient[any](builtinkey.Key{}, at, actor.SingletonActorID, h.service)
 		for i := 1; ; i++ {
 			invokeCtx, cancel := context.WithTimeout(ctx, h.providerRequestTimeout)
-			_, err := client.Invoke(invokeCtx, at, actor.SingletonActorID, ref.MethodBootstrap, nil)
+			_, err := client.Invoke(invokeCtx, at, actor.SingletonActorID, ref.MethodBootstrap, reg.bootstrapData)
 			cancel()
 			if err == nil {
 				h.log.DebugContext(ctx, "Bootstrapped singleton actor", slog.String("actorType", at))

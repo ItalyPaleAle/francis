@@ -40,16 +40,16 @@ func (_m *MockActorBootstrapper) EXPECT() *MockActorBootstrapper_Expecter {
 }
 
 // Bootstrap provides a mock function for the type MockActorBootstrapper
-func (_mock *MockActorBootstrapper) Bootstrap(ctx context.Context) error {
-	ret := _mock.Called(ctx)
+func (_mock *MockActorBootstrapper) Bootstrap(ctx context.Context, data any) error {
+	ret := _mock.Called(ctx, data)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Bootstrap")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context) error); ok {
-		r0 = returnFunc(ctx)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, any) error); ok {
+		r0 = returnFunc(ctx, data)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -63,18 +63,24 @@ type MockActorBootstrapper_Bootstrap_Call struct {
 
 // Bootstrap is a helper method to define mock.On call
 //   - ctx context.Context
-func (_e *MockActorBootstrapper_Expecter) Bootstrap(ctx any) *MockActorBootstrapper_Bootstrap_Call {
-	return &MockActorBootstrapper_Bootstrap_Call{Call: _e.mock.On("Bootstrap", ctx)}
+//   - data any
+func (_e *MockActorBootstrapper_Expecter) Bootstrap(ctx any, data any) *MockActorBootstrapper_Bootstrap_Call {
+	return &MockActorBootstrapper_Bootstrap_Call{Call: _e.mock.On("Bootstrap", ctx, data)}
 }
 
-func (_c *MockActorBootstrapper_Bootstrap_Call) Run(run func(ctx context.Context)) *MockActorBootstrapper_Bootstrap_Call {
+func (_c *MockActorBootstrapper_Bootstrap_Call) Run(run func(ctx context.Context, data any)) *MockActorBootstrapper_Bootstrap_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
 			arg0 = args[0].(context.Context)
 		}
+		var arg1 any
+		if args[1] != nil {
+			arg1 = args[1].(any)
+		}
 		run(
 			arg0,
+			arg1,
 		)
 	})
 	return _c
@@ -85,7 +91,7 @@ func (_c *MockActorBootstrapper_Bootstrap_Call) Return(err error) *MockActorBoot
 	return _c
 }
 
-func (_c *MockActorBootstrapper_Bootstrap_Call) RunAndReturn(run func(ctx context.Context) error) *MockActorBootstrapper_Bootstrap_Call {
+func (_c *MockActorBootstrapper_Bootstrap_Call) RunAndReturn(run func(ctx context.Context, data any) error) *MockActorBootstrapper_Bootstrap_Call {
 	_c.Call.Return(run)
 	return _c
 }

@@ -333,7 +333,7 @@ func TestCronJobInvoke(t *testing.T) {
 		runner := &fakeClient[struct{}]{dispatchID: "job-1"}
 		a := &cronJobScheduler{interval: "PT1M", state: state, runner: runner}
 
-		err := a.Bootstrap(ctx)
+		err := a.Bootstrap(ctx, nil)
 		require.NoError(t, err)
 		require.Len(t, runner.dispatches, 1)
 		require.Len(t, state.setStateCalls, 1)

@@ -221,7 +221,7 @@ type cronJobScheduler struct {
 
 // Bootstrap sets up the recurring job, which the host drives once it's ready by invoking the reserved bootstrap lifecycle on the scheduler singleton
 // It is idempotent and safe to trigger from every host: invocations of the singleton are serialized by its turn lock, and the register logic reconciles an already-registered job rather than duplicating it
-func (a *cronJobScheduler) Bootstrap(ctx context.Context) error {
+func (a *cronJobScheduler) Bootstrap(ctx context.Context, _ any) error {
 	return a.register(ctx)
 }
 

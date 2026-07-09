@@ -12,6 +12,10 @@ import (
 // RegisterActorOptions is the type for the options for the RegisterActor method.
 type RegisterActorOptions = actorcore.RegisterActorOptions
 
+// RegisterSingletonActorOptions controls singleton registration for a user-defined singleton actor.
+// It embeds the regular actor registration options and adds optional bootstrap payload delivered to ActorBootstrapper.Bootstrap.
+type RegisterSingletonActorOptions = actorcore.RegisterSingletonActorOptions
+
 // RegisterActor registers a new actor in the host.
 // Must be called before Run.
 func (h *Host) RegisterActor(actorType string, factory actor.Factory, opts RegisterActorOptions) error {
@@ -26,17 +30,20 @@ func (h *Host) RegisterActor(actorType string, factory actor.Factory, opts Regis
 // A singleton actor is reached at the well-known actor.SingletonActorID from every host, and the host bootstraps that instance once ready: if it implements actor.ActorBootstrapper, its Bootstrap hook runs, routed to the single owning host and serialized by its turn lock.
 // Use it for cluster-wide setup that must happen once, such as registering a durable recurring job.
 // Must be called before Run, and can be called multiple times to register more than one singleton actor.
-func (h *Host) RegisterSingletonActor(actorType string, factory actor.Factory, opts RegisterActorOptions) error {
+func (h *Host) RegisterSingletonActor(actorType string, factory actor.Factory, opts RegisterSingletonActorOptions) error {
 	if h.running.Load() {
 		return errors.New("cannot call RegisterSingletonActor after host has started")
 	}
 
-	err := h.core.RegisterActor(actorType, factory, opts)
+	err := h.core.RegisterActor(actorType, factory, opts.RegisterActorOptions)
 	if err != nil {
 		return err
 	}
 
-	h.singletonActors = append(h.singletonActors, actorType)
+	h.singletonActors = append(h.singletonActors, singletonActorRegistration{
+		actorType:     actorType,
+		bootstrapData: opts.BootstrapData,
+	})
 	return nil
 }
 
@@ -60,7 +67,7 @@ func (h *Host) RegisterBuiltInActor(b builtinactor.BuiltInActor) error {
 	}
 
 	if b.Singleton() {
-		h.singletonActors = append(h.singletonActors, actorType)
+		h.singletonActors = append(h.singletonActors, singletonActorRegistration{actorType: actorType})
 	}
 	return nil
 }

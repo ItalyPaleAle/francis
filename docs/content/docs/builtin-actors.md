@@ -1,6 +1,6 @@
 ---
 title: "Built-in actors"
-weight: 28
+weight: 29
 ---
 
 A built-in actor is a framework-managed actor that a host registers under a reserved type and bootstraps at startup.
@@ -156,40 +156,3 @@ if !allowed {
 
 `Allow` never blocks. When `allowed` is `false`, `retryAfter` tells the caller how long to wait before the key admits another call (it is zero when `allowed` is `true`).  
 The returned `error` is non-nil only when the key is invalid or the underlying actor invocation fails, including context cancellation - it never signals throttling.
-
-## Singleton actors
-
-Singleton actors can be used when you need exactly one instance of an actor cluster-wide, with a one-time setup step that runs on startup. For example, a unit of persistent state that must shared in the cluster, or a coordinator that registers a single durable [job](/docs/jobs) for the whole cluster.
-
-A singleton actor is reached at the well-known ID `actor.SingletonActorID` from every host, so all callers target the same instance. Register it with `RegisterSingletonActor` instead of `RegisterActor`, and implement the `actor.ActorBootstrapper` interface for its startup setup:
-
-```go
-// ActorBootstrapper is called once the host is ready, on the singleton instance
-type ActorBootstrapper interface {
-	Bootstrap(ctx context.Context) error
-}
-```
-
-```go
-host, err := local.NewHost(/* ... options ... */)
-if err != nil {
-	return err
-}
-
-// Register before calling host.Run
-// Can be called multiple times for several singletons
-err = host.RegisterSingletonActor("scheduler", schedulerFactory, host.RegisterActorOptions{})
-```
-
-Once the host is ready, it invokes `Bootstrap` on the singleton instance, serialized with the regular turn-based concurrency, exactly like a normal actor invocation.  
-Because every host triggers it at startup, `Bootstrap` **must be idempotent**. Reconcile existing durable work rather than duplicating it.  
-An actor registered this way that does not implement `Bootstrapper` simply has no startup step.
-
-To reach the singleton from application code, invoke it at `actor.SingletonActorID`:
-
-```go
-_, err := host.Service().Invoke(ctx, "scheduler", actor.SingletonActorID, "someMethod", nil)
-```
-
-> [!NOTE]
-> The reserved `Bootstrap` lifecycle is driven by the framework. Clients cannot invoke it directly, and reserved method names (prefixed with `francis.builtin.`) are rejected.

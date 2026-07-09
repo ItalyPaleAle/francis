@@ -25,9 +25,11 @@ An actor implements behaviors by satisfying optional interfaces:
 | `actor.ActorInvoke` | `Invoke(ctx, method, data)` | Handle a method call |
 | `actor.ActorPeek` | `Peek(ctx, method, data)` | Handle a read-only method call, concurrently with other `Peek`s |
 | `actor.ActorAlarm` | `Alarm(ctx, name, data)` | Handle a fired alarm |
+| `actor.ActorBootstrapper` | `Bootstrap(ctx, data)` | One-time setup for a singleton actor when the host becomes ready |
 | `actor.ActorDeactivate` | `Deactivate(ctx)` | Run cleanup before deactivation |
 
-An actor implements only the interfaces it needs. See [Writing actors](/docs/writing-actors) for details.
+An actor implements only the interfaces it needs. See [Writing actors](/docs/writing-actors) for details.  
+For the `Bootstrap` hook and cluster-wide singletons, see [Singleton actors](/docs/singleton-actors).
 
 ## Factory
 

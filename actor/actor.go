@@ -38,9 +38,10 @@ type ActorAlarm interface {
 // It is primarily useful for singleton actors: the host invokes Bootstrap on the actor's SingletonActorID instance at startup, routed through placement so it runs on the single owning host at a time and is serialized by that instance's turn lock, exactly like a normal invocation.
 // Every host triggers it, so Bootstrap must be idempotent (for example, registering a durable recurring job only if one is not already set up).
 // Register such an actor with the host's RegisterSingletonActor so the host knows to bootstrap it.
+// The data argument carries the optional bootstrap payload supplied when the actor was registered via RegisterSingletonActorOptions.BootstrapData, decoded from the invocation envelope when transported across hosts.
 type ActorBootstrapper interface {
 	// Bootstrap is called once the host is ready, to set up the actor's durable work.
-	Bootstrap(ctx context.Context) error
+	Bootstrap(ctx context.Context, data any) error
 }
 
 // ActorJob can be implemented by actors that receive dispatched jobs.

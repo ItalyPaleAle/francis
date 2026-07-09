@@ -34,6 +34,17 @@ type RegisterActorOptions struct {
 	InitialRetryDelay time.Duration
 }
 
+// RegisterSingletonActorOptions is the type for the options for the RegisterSingletonActor method.
+// It embeds RegisterActorOptions and adds singleton-specific fields such as the optional bootstrap payload that is delivered to ActorBootstrapper.Bootstrap at startup.
+type RegisterSingletonActorOptions struct {
+	RegisterActorOptions
+
+	// BootstrapData is optional data passed to ActorBootstrapper.Bootstrap when the host bootstraps the singleton instance.
+	// It is delivered as the Bootstrap call's data argument (decoded from the invocation envelope), just like Invokes deliver their data via an Envelope.
+	// It is nil when not provided.
+	BootstrapData any
+}
+
 func (o *RegisterActorOptions) Validate() error {
 	switch {
 	case o.IdleTimeout == 0:
