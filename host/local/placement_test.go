@@ -471,6 +471,42 @@ func TestLookupActor(t *testing.T) {
 		assert.Equal(t, "timeout-host", cached.HostID)
 	})
 
+	t.Run("cache TTL behavior with negative idle timeout", func(t *testing.T) {
+		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+
+		host, provider := newHost()
+		defer host.core.Close()
+		defer host.placementCache.Stop()
+
+		actorRef := ref.NewActorRef("testactor", "actor-negative-timeout")
+
+		// A non-positive idle timeout means the actor never idles out
+		providerResponse := components.LookupActorRes{
+			HostID:      "negative-timeout-host",
+			Address:     "negative.example.com:8080",
+			IdleTimeout: -1 * time.Minute,
+		}
+		provider.
+			On("LookupActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.LookupActorOpts{}).
+			Return(providerResponse, nil).
+			Once()
+
+		result, err := host.lookupActor(t.Context(), actorRef, false, false)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Equal(t, "negative-timeout-host", result.HostID)
+		assert.Equal(t, "negative.example.com:8080", result.Address)
+
+		// Verify provider was called
+		provider.AssertExpectations(t)
+
+		// Verify the result was cached with the fallback TTL rather than the negative one
+		cached, ok := host.placementCache.Get(actorRef.String())
+		assert.True(t, ok)
+		assert.Equal(t, "negative-timeout-host", cached.HostID)
+		assert.Equal(t, "negative.example.com:8080", cached.Address)
+	})
+
 	t.Run("multiple concurrent lookups same actor", func(t *testing.T) {
 		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 

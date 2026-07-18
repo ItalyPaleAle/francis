@@ -100,8 +100,8 @@ func (h *Host) lookupActor(parentCtx context.Context, aRef ref.ActorRef, skipCac
 
 	// Save the value in the cache but only up to the idle timeout
 	ttl := lar.IdleTimeout
-	if ttl == 0 {
-		// Make bigger than the max TTL
+	if ttl <= 0 {
+		// A non-positive idle timeout means the actor never idles out, so cache it beyond the max TTL
 		ttl = placementCacheMaxTTL + time.Second
 	}
 	h.placementCache.Set(key, res, ttl)
