@@ -18,6 +18,10 @@ import (
 	"github.com/italypaleale/francis/protocol"
 )
 
+// errCapacityExhausted is returned inside the executeAlarm closure when the actor type's capacity group is full on this host
+// It is mapped to protocol.ErrCodeCapacityExhausted so the runtime re-routes the job rather than retrying or dead-lettering it
+var errCapacityExhausted = errors.New("capacity group is full on this host")
+
 func (h *Host) GetAlarm(ctx context.Context, actorType string, actorID string, name string) (actor.AlarmProperties, error) {
 	err := ref.ValidateComponents(actorType, actorID, name)
 	if err != nil {
@@ -136,6 +140,15 @@ func (h *Host) executeAlarm(ctx context.Context, req protocol.ExecuteAlarmReques
 			if !ok {
 				return nil, actorcore.ErrActorMethodUnsupported
 			}
+
+			// Enforce the actor type's host-local capacity group before running the job
+			// A full group means this host declines the occurrence, which the runtime re-routes to another host without counting an attempt
+			release, admitted := h.core.TryAcquireCapacity(req.ActorType)
+			if !admitted {
+				return nil, errCapacityExhausted
+			}
+			defer release()
+
 			rErr := obj.Job(invokeCtx, req.JobMethod, data)
 			if rErr != nil {
 				return nil, rErr
@@ -157,6 +170,17 @@ func (h *Host) executeAlarm(ctx context.Context, req protocol.ExecuteAlarmReques
 	})
 	if err != nil {
 		tracing.Fail(ctx, err.Error())
+
+		// The host declined this job occurrence, either because its capacity group is full or the handler returned ErrJobRejected
+		// It is signaled with a distinct code so the runtime re-routes it to another host without counting an attempt, and the actor is halted here to clear its placement so the re-route does not return to this host
+		if errors.Is(err, errCapacityExhausted) {
+			h.core.HaltDeferred(req.ActorType, req.ActorID)
+			return protocol.ExecuteAlarmResponse{}, protocol.NewError(protocol.ErrCodeCapacityExhausted, err.Error())
+		}
+		if errors.Is(err, actor.ErrJobRejected) {
+			h.core.HaltDeferred(req.ActorType, req.ActorID)
+			return protocol.ExecuteAlarmResponse{}, protocol.NewError(protocol.ErrCodeJobRejected, err.Error())
+		}
 
 		// A permanent job failure is signaled with a distinct code so the runtime dead-letters it immediately instead of retrying
 		if errors.Is(err, actor.ErrJobPermanentFailure) {

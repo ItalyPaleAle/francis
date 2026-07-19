@@ -49,6 +49,7 @@ type ActorJob interface {
 	// Job is invoked upon execution of a dispatched job.
 	// The parameter "method" identifies the job handler, and "data" is an envelope that allows decoding the associated input into a custom object.
 	// Returning ErrJobPermanentFailure skips the remaining retries and dead-letters the job immediately.
+	// Returning ErrJobRejected declines the occurrence on this host without failing it, so the job is re-routed to another host without counting an attempt.
 	Job(ctx context.Context, method string, data Envelope) error
 }
 

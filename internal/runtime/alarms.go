@@ -168,7 +168,12 @@ const (
 	executeAlarmStatusFatal
 	executeAlarmStatusRetryable
 	executeAlarmStatusAbandoned
+	// executeAlarmStatusReleased means the owning host declined a job occurrence (its capacity group was full, or the handler returned ErrJobRejected) and it must be handed back for another host to run
+	executeAlarmStatusReleased
 )
+
+// rerouteBaseBackoff delays the next due time of a released occurrence so a cluster with no free capacity does not spin re-leasing it
+const rerouteBaseBackoff = 2 * time.Second
 
 // executeAlarm is the alarm processor callback invoked when an alarm is due
 func (rt *Runtime) executeAlarm(lease *ref.AlarmLease) {
@@ -287,6 +292,13 @@ func (rt *Runtime) executeActiveAlarm(lease *ref.AlarmLease) {
 		}
 		return
 
+	case executeAlarmStatusReleased:
+		// The owning host declined this occurrence (capacity group full, or the handler returned ErrJobRejected)
+		// Hand it back so another host runs it, without counting an attempt or dead-lettering
+		log.Debug("Job occurrence released for re-routing", slog.Any("error", err))
+		rt.releaseForReroute(ctx, lease, log)
+		return
+
 	case executeAlarmStatusCompleted:
 		rt.metrics.alarmsExecuted.Add(ctx, 1)
 		var compErr error
@@ -400,6 +412,9 @@ func (rt *Runtime) dispatchAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 // classifyAlarmError decides whether a host's alarm error should be retried or is fatal
 func (rt *Runtime) classifyAlarmError(conn *hostConn, actorType string, lease *ref.AlarmLease, perr *protocol.Error) executeAlarmStatus {
 	switch perr.Code {
+	case protocol.ErrCodeCapacityExhausted, protocol.ErrCodeJobRejected:
+		// The host declined the occurrence: re-route it to another host rather than retrying here or dead-lettering
+		return executeAlarmStatusReleased
 	case protocol.ErrCodeActorTypeUnsupported, protocol.ErrCodeInvokeModeUnsupported, protocol.ErrCodeJobPermanentFailure:
 		// These errors can never succeed on retry
 		// For jobs, a permanent-failure also skips the remaining retries
@@ -449,6 +464,40 @@ func (rt *Runtime) deadLetterJob(parentCtx context.Context, lease *ref.AlarmLeas
 
 	// The dead-letter record is now the source of truth, so the JobFailed hook is best-effort
 	rt.pushJobFailed(parentCtx, lease, info, jobErr, log)
+}
+
+// releaseForReroute hands a declined job occurrence back to the pool so another host can run it
+// It clears the actor's placement so the re-fetch reroutes instead of returning to the same host, then drops the lease with a short backoff so a cluster with no free capacity does not spin re-leasing it
+// It never counts an attempt or dead-letters, since a reject is not a failure
+func (rt *Runtime) releaseForReroute(parentCtx context.Context, lease *ref.AlarmLease, log *slog.Logger) {
+	aRef := lease.ActorRef()
+
+	// Clear the actor's placement so the occurrence is re-allocated to a host with free capacity rather than back to the one that declined it
+	// The declining host also halts the actor, which removes it too, so this is idempotent belt-and-suspenders against the two racing
+	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+	err := rt.provider.RemoveActor(ctx, aRef)
+	cancel()
+	if err != nil && !errors.Is(err, components.ErrNoActor) {
+		log.Warn("Failed to clear actor placement while releasing job for re-route", slog.Any("error", err))
+	}
+
+	// Push the due time out by a jittered backoff and drop the lease
+	// The lease is still held until this update, so no other host claims the occurrence in between
+	ctx, cancel = context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+	next := rt.clock.Now().Add(rerouteBackoff())
+	err = rt.provider.UpdateLeasedAlarm(ctx, lease, components.UpdateLeasedAlarmReq{DueTime: next})
+	cancel()
+	if err != nil && !errors.Is(err, components.ErrNoAlarm) {
+		// Log only: if this fails the lease simply expires on its own and the occurrence is re-fetched later
+		log.Warn("Failed to release lease for re-route", slog.Any("error", err))
+	}
+}
+
+// rerouteBackoff returns the delay before a released occurrence becomes due again, with jitter to spread re-fetches across hosts
+func rerouteBackoff() time.Duration {
+	// #nosec G404 -- not security-sensitive, only used to spread re-route timing
+	jitter := rand.Float64()*0.4 + 0.8
+	return time.Duration(float64(rerouteBaseBackoff) * jitter)
 }
 
 // pushJobFailed asks the host currently owning the actor to run the actor's JobFailed hook, best-effort

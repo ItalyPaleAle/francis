@@ -32,6 +32,13 @@ type RegisterActorOptions struct {
 	// Initial retry delay after failed invocation attempts
 	// Defaults to 2s
 	InitialRetryDelay time.Duration
+	// CapacityGroup, when set, places this actor type into a named host-local capacity group
+	// Every actor type registered on this host with the same group name shares a single strict concurrency budget, enforced in-process when their jobs execute
+	// It is the exact per-host guarantee that complements the best-effort, cluster-wide ConcurrencyLimit placement hint
+	CapacityGroup string
+	// CapacityGroupLimit is the maximum number of jobs that may run at once across all actor types in the capacity group, on this host
+	// It is required when CapacityGroup is set, must be greater than zero, and every actor type sharing a group must declare the same limit
+	CapacityGroupLimit int
 	// BootstrapData is optional data passed to ActorBootstrapper.Bootstrap when the host bootstraps the singleton instance
 	// It is delivered as the Bootstrap call's data argument (decoded from the invocation envelope), just like Invokes deliver their data via an Envelope
 	// It is nil when not provided
@@ -84,6 +91,15 @@ func WithBootstrapData(data any) RegisterActorOption {
 	}
 }
 
+// WithCapacityGroup places the actor type into a named host-local capacity group with a strict per-host limit
+// Actor types sharing a group name draw from one budget of at most limit concurrent jobs on this host, enforced exactly in-process
+func WithCapacityGroup(group string, limit int) RegisterActorOption {
+	return func(o *RegisterActorOptions) {
+		o.CapacityGroup = group
+		o.CapacityGroupLimit = limit
+	}
+}
+
 func (o *RegisterActorOptions) Validate() error {
 	switch {
 	case o.IdleTimeout == 0:
@@ -114,6 +130,11 @@ func (o *RegisterActorOptions) Validate() error {
 
 	if o.InitialRetryDelay <= 0 {
 		o.InitialRetryDelay = defaultAlarmInitialRetryDelay
+	}
+
+	// A capacity group is meaningless without a positive limit to enforce
+	if o.CapacityGroup != "" && o.CapacityGroupLimit <= 0 {
+		return errors.New("option CapacityGroupLimit must be greater than zero when CapacityGroup is set")
 	}
 
 	return nil
