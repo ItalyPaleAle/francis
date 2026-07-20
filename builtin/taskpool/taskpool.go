@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/actorcore"
@@ -32,9 +31,6 @@ const (
 
 	// defaultConcurrency is the strict per-host task limit when WithConcurrency is not set
 	defaultConcurrency = 1
-
-	// defaultTaskIdleTimeout reclaims a finished worker that did not halt itself; workers normally halt on completion, so this is only a safety net
-	defaultTaskIdleTimeout = 30 * time.Second
 )
 
 // Task is a unit of work handed to the pool's handler
@@ -92,11 +88,6 @@ func New(name string, opts ...Option) (*TaskPool, error) {
 		concurrency = defaultConcurrency
 	}
 
-	idleTimeout := o.idleTimeout
-	if idleTimeout == 0 {
-		idleTimeout = defaultTaskIdleTimeout
-	}
-
 	log := o.logger
 	if log != nil {
 		log = log.With(slog.String("taskPool", name))
@@ -123,8 +114,10 @@ func New(name string, opts ...Option) (*TaskPool, error) {
 
 	// Every queue of this pool shares one strict per-host budget, keyed by the pool's full base type so it never collides with another pool's group
 	group := builtinactor.FullActorType(baseType)
+
+	// A worker halts itself once its task reaches a terminal outcome, so a finished worker frees its host slot immediately rather than lingering
+	// The idle timeout is intentionally left at the framework default: it only backstops the rare dead-lettered worker, and it must stay comfortably above the retry backoff, otherwise a worker awaiting a retry would idle out and its lease would stop being renewed
 	regOpts := actorcore.RegisterActorOptions{
-		IdleTimeout: idleTimeout,
 		// The coarse, cluster-wide placement hint mirrors the strict limit so hosts are rarely handed more tasks than they can run
 		ConcurrencyLimit:   concurrency,
 		MaxAttempts:        o.maxAttempts,

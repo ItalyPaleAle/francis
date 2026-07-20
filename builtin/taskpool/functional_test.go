@@ -1,11 +1,8 @@
-//go:build unit
-
 package taskpool_test
 
 import (
 	"context"
 	"log/slog"
-	"net"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -18,27 +15,18 @@ import (
 	"github.com/italypaleale/francis/builtin/taskpool"
 	"github.com/italypaleale/francis/components/sqlite"
 	"github.com/italypaleale/francis/host/local"
+	"github.com/italypaleale/francis/internal/testutil"
 )
 
 // testRuntimePSK is the shared runtime PSK the functional tests derive their cluster CA from
 var testRuntimePSK = []byte("taskpool-test-runtime-psk-0123456789")
-
-// freeUDPAddr returns a localhost address with a currently-free UDP port
-func freeUDPAddr(t *testing.T) string {
-	t.Helper()
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := pc.LocalAddr().String()
-	require.NoError(t, pc.Close())
-	return addr
-}
 
 // startHost builds and runs a local host with the given pool registered, waiting until it is ready and cleaning it up when the test ends
 func startHost(t *testing.T, dbPath string, pool *taskpool.TaskPool) *local.Host {
 	t.Helper()
 
 	host, err := local.NewHost(
-		local.WithAddress(freeUDPAddr(t)),
+		local.WithAddress(testutil.FreeUDPAddr(t)),
 		local.WithSQLiteProvider(sqlite.SQLiteProviderOptions{ConnectionString: dbPath}),
 		local.WithRuntimePSKs(testRuntimePSK),
 		// Poll frequently so submitted tasks start without waiting a full default interval

@@ -1,5 +1,3 @@
-//go:build unit
-
 package taskpool
 
 import (
@@ -97,7 +95,7 @@ func TestCapabilityFromType(t *testing.T) {
 	require.NoError(t, err)
 
 	// The base queue maps back to an empty capability
-	assert.Equal(t, "", p.capabilityFromType(builtinactor.FullActorType(taskPoolActorTypePrefix+"media")))
+	assert.Empty(t, p.capabilityFromType(builtinactor.FullActorType(taskPoolActorTypePrefix+"media")))
 	// A capability queue maps back to its capability
 	assert.Equal(t, "gpu", p.capabilityFromType(builtinactor.FullActorType(taskPoolActorTypePrefix+"media.gpu")))
 }

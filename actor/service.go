@@ -34,7 +34,7 @@ var (
 	ErrJobPermanentFailure = errors.New("job failed permanently")
 	// ErrJobRejected is returned from an actor's Job method to decline the occurrence on this host without failing it, so the framework re-routes it to another host.
 	// Unlike a returned error it does not count as a failed attempt and never dead-letters the job, and unlike ErrJobPermanentFailure the work is not abandoned but retried elsewhere.
-	ErrJobRejected = errors.New("job rejected by host; will be re-routed")
+	ErrJobRejected = errors.New("job rejected by host, will be re-routed")
 	// ErrJobNotFound is returned by job methods when the job cannot be found.
 	ErrJobNotFound = errors.New("job not found")
 	// ErrReadOnly is returned by Client methods that mutate state, alarms, or jobs when called from within a Peek/PeekStream invocation.

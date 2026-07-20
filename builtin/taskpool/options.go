@@ -20,8 +20,6 @@ type options struct {
 	maxAttempts int
 	// initialRetryDelay is the base backoff between retries of a failing task
 	initialRetryDelay time.Duration
-	// idleTimeout is how long a finished worker lingers before deactivating; it is only a safety net, since workers halt themselves after a task
-	idleTimeout time.Duration
 	// logger is an optional logger
 	logger *slog.Logger
 }
@@ -75,14 +73,6 @@ func WithMaxAttempts(n int) Option {
 func WithInitialRetryDelay(d time.Duration) Option {
 	return func(o *options) {
 		o.initialRetryDelay = d
-	}
-}
-
-// WithIdleTimeout sets how long a finished worker lingers before deactivating
-// Workers halt themselves after each task, so this is only a safety net for the rare case a self-halt does not run
-func WithIdleTimeout(d time.Duration) Option {
-	return func(o *options) {
-		o.idleTimeout = d
 	}
 }
 

@@ -120,17 +120,17 @@ func (h *Host) enqueueAlarms(leases []*ref.AlarmLease) (err error) {
 type executeAlarmStatus int
 
 const (
+	// executeAlarmStatusCompleted means the alarm or job ran successfully
 	executeAlarmStatusCompleted = executeAlarmStatus(iota)
+	// executeAlarmStatusFatal means the occurrence failed terminally, so an alarm is deleted and a job is dead-lettered
 	executeAlarmStatusFatal
+	// executeAlarmStatusRetryable means the occurrence failed but may succeed later, so it is retried with backoff on this host
 	executeAlarmStatusRetryable
+	// executeAlarmStatusAbandoned means the lease was lost or the occurrence no longer exists, so there is nothing to do
 	executeAlarmStatusAbandoned
 	// executeAlarmStatusReleased means the host declined a job occurrence (its capacity group was full, or the handler returned ErrJobRejected) and it must be handed back for another host to run
 	executeAlarmStatusReleased
 )
-
-// rerouteBaseBackoff delays the next due time of a released occurrence so a cluster with no free capacity does not spin re-leasing it
-// It is kept just above the alarm poll interval so a re-route reaches a host on its next poll rather than immediately
-const rerouteBaseBackoff = 2 * time.Second
 
 // Callback for the alarm processor
 func (h *Host) executeAlarm(lease *ref.AlarmLease) {
@@ -488,7 +488,7 @@ func (h *Host) releaseForReroute(parentCtx context.Context, lease *ref.AlarmLeas
 	// The lease is still held until this update, so no other host claims the occurrence in between
 	ctx, cancel := context.WithTimeout(parentCtx, h.providerRequestTimeout)
 	defer cancel()
-	next := h.clock.Now().Add(rerouteBackoff())
+	next := h.clock.Now().Add(rerouteBackoff(h.alarmsPollInterval))
 	err = h.actorProvider.UpdateLeasedAlarm(ctx, lease, components.UpdateLeasedAlarmReq{DueTime: next})
 	if err != nil && !errors.Is(err, components.ErrNoAlarm) {
 		// Log only: if this fails the lease simply expires on its own and the occurrence is re-fetched later
@@ -496,11 +496,12 @@ func (h *Host) releaseForReroute(parentCtx context.Context, lease *ref.AlarmLeas
 	}
 }
 
-// rerouteBackoff returns the delay before a released occurrence becomes due again, with jitter to spread re-fetches across hosts
-func rerouteBackoff() time.Duration {
+// rerouteBackoff returns the delay before a released occurrence becomes due again
+// It scales with the configured alarm poll interval so a re-route reaches another host on its next poll rather than immediately, with jitter to spread re-fetches across hosts and avoid a full cluster spinning on the same occurrence
+func rerouteBackoff(pollInterval time.Duration) time.Duration {
 	// #nosec G404 -- not security-sensitive, only used to spread re-route timing
-	jitter := rand.Float64()*0.4 + 0.8
-	return time.Duration(float64(rerouteBaseBackoff) * jitter)
+	jitter := 1.0 + rand.Float64()
+	return time.Duration(float64(pollInterval) * jitter)
 }
 
 // completeAlarm reschedules a repeating alarm or deletes a one-shot alarm after a successful execution
