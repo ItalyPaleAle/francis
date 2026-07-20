@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/clusterstate"
 	"github.com/italypaleale/francis/internal/ref"
 )
 
@@ -42,6 +43,13 @@ func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.Regi
 		)
 		if err != nil {
 			return zero, fmt.Errorf("error removing failed hosts: %w", err)
+		}
+
+		// Enforce cluster admission (exclusive-access lease, host limit, and limit agreement)
+		// This locks the cluster row FOR UPDATE, serializing the count and insert below against other registrations
+		err = p.enforceClusterAdmission(ctx, tx)
+		if err != nil {
+			return zero, err
 		}
 
 		// Let's try to insert the host now
@@ -112,6 +120,13 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 		)
 		if err != nil {
 			return zero, fmt.Errorf("error removing failed hosts: %w", err)
+		}
+
+		// Reject a reattach while an exclusive-access lease is held, so a locked cluster stays empty
+		// A reattach never adds a host beyond the limit, so the host count and limit agreement are not re-checked here
+		err = p.checkClusterNotLocked(ctx, tx)
+		if err != nil {
+			return zero, err
 		}
 
 		// Try to refresh the existing registration in place
@@ -254,9 +269,15 @@ func (p *PostgresProvider) updateActorHostLastHealthCheck(ctx context.Context, h
 			host_last_health_check = now() AT TIME ZONE 'utc'
 		WHERE
 			host_id = $1
-			AND host_last_health_check >= ((now() AT TIME ZONE 'utc') - $2::interval)`,
+			AND host_last_health_check >= ((now() AT TIME ZONE 'utc') - $2::interval)
+			AND NOT EXISTS (
+				SELECT 1 FROM `+p.tablePrefix+`metadata
+				WHERE key = $3
+					AND (value::jsonb #>> '{exclusive,expires_at}')::bigint >= `+nowMsExpr+`
+			)`,
 			hostID,
 			p.cfg.HostHealthCheckDeadline,
+			clusterstate.MetadataKey,
 		)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)
@@ -265,6 +286,7 @@ func (p *PostgresProvider) updateActorHostLastHealthCheck(ctx context.Context, h
 	// Check how many rows were updated.
 	// Because we added a check for the last health check, if the host hadn't been updated in too long,
 	// it may have been considered un-healthy already, and no row would be updated.
+	// A live exclusive-access lease also blocks the update, which is how a locked cluster evicts running hosts: the failed health check surfaces as ErrHostUnregistered and the host shuts down.
 	if res.RowsAffected() == 0 {
 		return components.ErrHostUnregistered
 	}

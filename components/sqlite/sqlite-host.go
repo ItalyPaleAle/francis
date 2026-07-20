@@ -13,6 +13,7 @@ import (
 	sqltransactions "github.com/italypaleale/go-sql-utils/transactions/sql"
 
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/clusterstate"
 	"github.com/italypaleale/francis/internal/ref"
 )
 
@@ -45,6 +46,13 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 		)
 		if err != nil {
 			return zero, fmt.Errorf("error removing failed hosts: %w", err)
+		}
+
+		// Enforce cluster admission (exclusive-access lease, host limit, and limit agreement)
+		// The prune above has taken the database write lock, so the cluster row is read atomically with the count and insert below
+		err = s.enforceClusterAdmission(ctx, tx, now)
+		if err != nil {
+			return zero, err
 		}
 
 		// Let's try to insert the host now
@@ -121,6 +129,16 @@ func (s *SQLiteProvider) reattachHost(ctx context.Context, req components.Regist
 		)
 		if err != nil {
 			return zero, fmt.Errorf("error removing failed hosts: %w", err)
+		}
+
+		// Reject a reattach while an exclusive-access lease is held, so a locked cluster stays empty
+		// A reattach never adds a host beyond the limit, so the host count and limit agreement are not re-checked here
+		state, err := s.readClusterState(ctx, tx)
+		if err != nil {
+			return zero, err
+		}
+		if state.LeaseLive(now) {
+			return zero, components.ErrClusterLocked
 		}
 
 		// Try to refresh the existing registration in place
@@ -271,10 +289,17 @@ func (s *SQLiteProvider) updateActorHostLastHealthCheck(ctx context.Context, hos
 			host_last_health_check = ?
 		WHERE
 			host_id = ?
-			AND host_last_health_check >= ?`,
+			AND host_last_health_check >= ?
+			AND NOT EXISTS (
+				SELECT 1 FROM `+s.tablePrefix+`metadata
+				WHERE key = ?
+					AND json_extract(value, '$.exclusive.expires_at') >= ?
+			)`,
 			now,
 			hostID,
 			now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
+			clusterstate.MetadataKey,
+			now,
 		)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)
@@ -283,6 +308,7 @@ func (s *SQLiteProvider) updateActorHostLastHealthCheck(ctx context.Context, hos
 	// Check how many rows were updated.
 	// Because we added a check for the last health check, if the host hadn't been updated in too long,
 	// it may have been considered un-healthy already, and no row would be updated.
+	// A live exclusive-access lease also blocks the update, which is how a locked cluster evicts running hosts: the failed health check surfaces as ErrHostUnregistered and the host shuts down.
 	affected, err := res.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("error counting affected rows: %w", err)
