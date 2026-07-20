@@ -14,6 +14,7 @@ With Francis, you can build **highly-available** apps that **scale horizontally*
 
 - Build [**stateful services**](https://francis.italypaleale.me/docs/concepts/) where each entity (a user, a device, a shopping cart, a game session…) is an actor with its own durable state
 - Run [**background work on a schedule**](https://francis.italypaleale.me/docs/alarms/) with durable alarms that survive restarts
+- Process a [**distributed pool of long-running tasks**](https://francis.italypaleale.me/docs/builtin-actors/) with a bounded number per host that scales out as you add hosts
 - Add resilience to **microservices** without standing up extra infrastructure beyond a database
 
 ```go

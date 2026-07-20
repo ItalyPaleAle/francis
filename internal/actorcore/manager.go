@@ -66,6 +66,10 @@ type Manager struct {
 	ActorFactories map[string]actor.Factory
 	// ActorsConfig holds the configuration for each registered actor type, keyed by actor type
 	ActorsConfig map[string]components.ActorHostType
+	// capacityGroups holds one strict, host-local concurrency semaphore per capacity group, keyed by group name
+	capacityGroups map[string]*capacitySemaphore
+	// actorTypeCapacityGroup maps an actor type to the capacity group it belongs to, for the types that opted into one
+	actorTypeCapacityGroup map[string]string
 	// Actors holds the actors currently active on this host, keyed by "actorType/actorID"
 	Actors *haxmap.Map[string, *ActiveActor]
 	// IdleProcessor schedules actors for deactivation when they become idle
@@ -96,6 +100,8 @@ func NewManager(opts Options) *Manager {
 		shutdownGracePeriod:    opts.ShutdownGracePeriod,
 		ActorFactories:         map[string]actor.Factory{},
 		ActorsConfig:           map[string]components.ActorHostType{},
+		capacityGroups:         map[string]*capacitySemaphore{},
+		actorTypeCapacityGroup: map[string]string{},
 		Actors:                 haxmap.New[string, *ActiveActor](defaultActorsMapSize),
 	}
 }
@@ -130,7 +136,48 @@ func (m *Manager) RegisterActor(actorType string, factory actor.Factory, opts Re
 	}
 	m.ActorFactories[actorType] = factory
 
+	// Enroll the type in its capacity group, if one was configured, so its executions are gated on this host
+	if opts.CapacityGroup != "" {
+		err = m.registerCapacityGroup(actorType, opts.CapacityGroup, opts.CapacityGroupLimit)
+		if err != nil {
+			return err
+		}
+	}
+
 	return nil
+}
+
+// registerCapacityGroup enrolls an actor type into a host-local capacity group, creating the group's semaphore on first use
+// Every type sharing a group must agree on the limit, since they all draw from the same budget
+func (m *Manager) registerCapacityGroup(actorType string, group string, limit int) error {
+	existing, ok := m.capacityGroups[group]
+	if ok {
+		if existing.limit != limit {
+			return fmt.Errorf("actor type %q joins capacity group %q with limit %d, but the group was already declared with limit %d", actorType, group, limit, existing.limit)
+		}
+	} else {
+		m.capacityGroups[group] = newCapacitySemaphore(limit)
+	}
+
+	m.actorTypeCapacityGroup[actorType] = group
+	return nil
+}
+
+// TryAcquireCapacity reserves a capacity-group slot for one execution of the given actor type, without blocking
+// It returns admitted=true (with a release function to call once the execution finishes) when the type is ungated or a slot was free, and admitted=false when the type's group is full and the caller should decline the work so it re-routes to another host
+func (m *Manager) TryAcquireCapacity(actorType string) (release func(), admitted bool) {
+	// A type that opted into no group is never gated
+	group, ok := m.actorTypeCapacityGroup[actorType]
+	if !ok {
+		return func() {}, true
+	}
+
+	sem := m.capacityGroups[group]
+	if !sem.tryAcquire() {
+		return nil, false
+	}
+
+	return sem.release, true
 }
 
 // ActorConfig returns the configuration for an actor type

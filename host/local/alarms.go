@@ -120,10 +120,16 @@ func (h *Host) enqueueAlarms(leases []*ref.AlarmLease) (err error) {
 type executeAlarmStatus int
 
 const (
+	// executeAlarmStatusCompleted means the alarm or job ran successfully
 	executeAlarmStatusCompleted = executeAlarmStatus(iota)
+	// executeAlarmStatusFatal means the occurrence failed terminally, so an alarm is deleted and a job is dead-lettered
 	executeAlarmStatusFatal
+	// executeAlarmStatusRetryable means the occurrence failed but may succeed later, so it is retried with backoff on this host
 	executeAlarmStatusRetryable
+	// executeAlarmStatusAbandoned means the lease was lost or the occurrence no longer exists, so there is nothing to do
 	executeAlarmStatusAbandoned
+	// executeAlarmStatusReleased means the host declined a job occurrence (its capacity group was full, or the handler returned ErrJobRejected) and it must be handed back for another host to run
+	executeAlarmStatusReleased
 )
 
 // Callback for the alarm processor
@@ -298,6 +304,13 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		}
 		return
 
+	case executeAlarmStatusReleased:
+		// The host declined this occurrence (capacity group full, or the handler returned ErrJobRejected)
+		// Hand it back so another host runs it, without counting an attempt or dead-lettering
+		log.Debug("Job occurrence released for re-routing", slog.Any("error", err))
+		h.releaseForReroute(ctx, lease, aRef, log)
+		return
+
 	case executeAlarmStatusRetryable:
 		// We can retry this
 		h.log.Warn("Error executing alarm - will retry", slog.Any("error", err))
@@ -356,6 +369,14 @@ func (h *Host) executeJob(parentCtx context.Context, lease *ref.AlarmLease, act 
 		return executeAlarmStatusFatal, fmt.Errorf("actor of type '%s' does not implement the Job method", act.ActorType())
 	}
 
+	// Enforce the actor type's host-local capacity group before running the job
+	// A full group means this host declines the occurrence, which the release path hands to another host without counting an attempt
+	release, admitted := h.core.TryAcquireCapacity(aRef.ActorType)
+	if !admitted {
+		return executeAlarmStatusReleased, fmt.Errorf("capacity group is full on this host for actor type '%s'", aRef.ActorType)
+	}
+	defer release()
+
 	var data actor.Envelope
 	if len(a.Data) > 0 {
 		dec := msgpack.GetDecoder()
@@ -370,6 +391,11 @@ func (h *Host) executeJob(parentCtx context.Context, lease *ref.AlarmLease, act 
 	// Invoke the actor's Job method
 	err := obj.Job(ctx, a.JobMethod, data)
 	if err != nil {
+		// ErrJobRejected declines the occurrence on this host without failing it, so it is re-routed to another host
+		if errors.Is(err, actor.ErrJobRejected) {
+			return executeAlarmStatusReleased, fmt.Errorf("job rejected by host: %w", err)
+		}
+
 		// ErrJobPermanentFailure skips the remaining retries and dead-letters the job immediately
 		if errors.Is(err, actor.ErrJobPermanentFailure) {
 			return executeAlarmStatusFatal, fmt.Errorf("job failed permanently: %w", err)
@@ -446,6 +472,36 @@ func (h *Host) fireJobFailed(parentCtx context.Context, lease *ref.AlarmLease, m
 	if err != nil {
 		h.log.Warn("JobFailed hook returned an error; dead-letter record is kept", slog.String("jobId", jobID), slog.Any("error", err))
 	}
+}
+
+// releaseForReroute hands a declined job occurrence back to the pool so another host can run it
+// It first halts the actor to clear its placement, otherwise the re-fetch would route the occurrence straight back here, then drops the lease with a short backoff so a cluster with no free capacity does not spin re-leasing it
+// It never counts an attempt or dead-letters, since a reject is not a failure
+func (h *Host) releaseForReroute(parentCtx context.Context, lease *ref.AlarmLease, aRef ref.ActorRef, log *slog.Logger) {
+	// Clear the actor's placement so the occurrence is re-allocated to a host with free capacity rather than back to this one
+	err := h.core.Halt(aRef.ActorType, aRef.ActorID)
+	if err != nil && !errors.Is(err, actor.ErrActorNotHosted) {
+		log.Warn("Failed to halt actor while releasing job for re-route", slog.Any("error", err))
+	}
+
+	// Push the due time out by a jittered backoff and drop the lease
+	// The lease is still held until this update, so no other host claims the occurrence in between
+	ctx, cancel := context.WithTimeout(parentCtx, h.providerRequestTimeout)
+	defer cancel()
+	next := h.clock.Now().Add(rerouteBackoff(h.alarmsPollInterval))
+	err = h.actorProvider.UpdateLeasedAlarm(ctx, lease, components.UpdateLeasedAlarmReq{DueTime: next})
+	if err != nil && !errors.Is(err, components.ErrNoAlarm) {
+		// Log only: if this fails the lease simply expires on its own and the occurrence is re-fetched later
+		log.Warn("Failed to release lease for re-route", slog.Any("error", err))
+	}
+}
+
+// rerouteBackoff returns the delay before a released occurrence becomes due again
+// It scales with the configured alarm poll interval so a re-route reaches another host on its next poll rather than immediately, with jitter to spread re-fetches across hosts and avoid a full cluster spinning on the same occurrence
+func rerouteBackoff(pollInterval time.Duration) time.Duration {
+	// #nosec G404 -- not security-sensitive, only used to spread re-route timing
+	jitter := 1.0 + rand.Float64()
+	return time.Duration(float64(pollInterval) * jitter)
 }
 
 // completeAlarm reschedules a repeating alarm or deletes a one-shot alarm after a successful execution

@@ -36,6 +36,43 @@ type BuiltInActor interface {
 	Singleton() bool
 }
 
+// BuiltInActorRegistration describes a single actor type a built-in registers on the host
+// A built-in that registers more than one type (such as a work pool with one type per capability) returns several of these from MultiBuiltInActor.Registrations
+type BuiltInActorRegistration struct {
+	// ActorType is the built-in's bare actor type for this registration, without the reserved prefix
+	ActorType string
+	// Factory is the actor factory the host registers for this type
+	Factory actor.Factory
+	// RegisterOptions are the registration options the host uses for this type
+	RegisterOptions actorcore.RegisterActorOptions
+	// Singleton reports whether the host bootstraps this type's cluster-wide singleton instance once ready
+	Singleton bool
+}
+
+// MultiBuiltInActor is an optional contract a BuiltInActor implements when it registers more than one actor type
+// A host checks for it in RegisterBuiltInActor and, when present, registers every type it returns instead of the single BuiltInActor type
+type MultiBuiltInActor interface {
+	BuiltInActor
+	// Registrations returns every actor type this built-in registers on the host
+	Registrations() []BuiltInActorRegistration
+}
+
+// RegistrationsFor returns the actor-type registrations a host must create for a built-in actor
+// It returns every type from a MultiBuiltInActor, or the single type of a plain BuiltInActor, so hosts have one code path for both
+func RegistrationsFor(b BuiltInActor) []BuiltInActorRegistration {
+	multi, ok := b.(MultiBuiltInActor)
+	if ok {
+		return multi.Registrations()
+	}
+
+	return []BuiltInActorRegistration{{
+		ActorType:       b.ActorType(),
+		Factory:         b.Factory(),
+		RegisterOptions: b.RegisterOptions(),
+		Singleton:       b.Singleton(),
+	}}
+}
+
 // FullActorType returns the reserved actor type a built-in actor is registered under, by prefixing its bare type
 // The host applies it when registering, so a built-in actor only ever deals with its own bare type
 func FullActorType(bareActorType string) string {

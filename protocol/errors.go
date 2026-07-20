@@ -58,6 +58,10 @@ const (
 	ErrCodeJobNotFound ErrorCode = "job_not_found"
 	// ErrCodeJobPermanentFailure indicates the actor's Job method requested an immediate dead-letter, skipping the remaining retries
 	ErrCodeJobPermanentFailure ErrorCode = "job_permanent_failure"
+	// ErrCodeCapacityExhausted indicates the host's capacity group for the actor type is full, so the job should be re-routed to another host without counting an attempt
+	ErrCodeCapacityExhausted ErrorCode = "capacity_exhausted"
+	// ErrCodeJobRejected indicates the actor's Job method declined the occurrence on this host, so the job should be re-routed to another host without counting an attempt
+	ErrCodeJobRejected ErrorCode = "job_rejected"
 	// ErrCodeTransportFailure indicates the request was delivered to the peer but the response was not received
 	// The peer actor may have executed the request, so the caller must not auto-retry without an idempotency mechanism to avoid double-execution
 	ErrCodeTransportFailure ErrorCode = "transport_failure"

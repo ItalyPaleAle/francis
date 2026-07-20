@@ -28,6 +28,12 @@ func WithConcurrencyLimit(n int) RegisterActorOption {
 	return actorcore.WithConcurrencyLimit(n)
 }
 
+// WithCapacityGroup places the actor type into a named host-local capacity group with a strict per-host limit
+// Actor types sharing a group name draw from one budget of at most limit concurrent jobs on this host, enforced exactly in-process
+func WithCapacityGroup(group string, limit int) RegisterActorOption {
+	return actorcore.WithCapacityGroup(group, limit)
+}
+
 // WithMaxAttempts sets the maximum number of attempts when invoking the actor or executing alarms
 func WithMaxAttempts(n int) RegisterActorOption {
 	return actorcore.WithMaxAttempts(n)
@@ -95,16 +101,18 @@ func (h *Host) RegisterBuiltInActor(b builtinactor.BuiltInActor) error {
 		return errors.New("built-in actor is nil")
 	}
 
-	// Built-in actors carry only their bare type
-	// The host adds the reserved prefix when registering
-	actorType := builtinactor.FullActorType(b.ActorType())
-	err := h.core.RegisterActor(actorType, b.Factory(), b.RegisterOptions())
-	if err != nil {
-		return fmt.Errorf("failed to register built-in actor %q: %w", actorType, err)
-	}
+	// A built-in may register more than one actor type (for example a work pool with one type per capability)
+	// Built-in actors carry only their bare type; the host adds the reserved prefix when registering
+	for _, reg := range builtinactor.RegistrationsFor(b) {
+		actorType := builtinactor.FullActorType(reg.ActorType)
+		err := h.core.RegisterActor(actorType, reg.Factory, reg.RegisterOptions)
+		if err != nil {
+			return fmt.Errorf("failed to register built-in actor %q: %w", actorType, err)
+		}
 
-	if b.Singleton() {
-		h.singletonActors = append(h.singletonActors, singletonActorRegistration{actorType: actorType})
+		if reg.Singleton {
+			h.singletonActors = append(h.singletonActors, singletonActorRegistration{actorType: actorType})
+		}
 	}
 	return nil
 }
