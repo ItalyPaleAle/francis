@@ -1,5 +1,13 @@
 -- Ensure required extensions
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+-- CREATE EXTENSION IF NOT EXISTS is not safe under concurrency: two sessions can both observe the extension as missing and then both insert into pg_catalog.pg_extension, so one fails with a unique-constraint violation
+-- Several hosts can initialize the schema against the same fresh database at once, so the concurrent-creation error is swallowed here
+DO $$
+BEGIN
+    CREATE EXTENSION IF NOT EXISTS pgcrypto;
+EXCEPTION WHEN unique_violation OR duplicate_object THEN
+    NULL;
+END
+$$;
 
 -- Contains the active actor hosts
 CREATE TABLE %shosts (
