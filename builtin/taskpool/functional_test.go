@@ -139,13 +139,24 @@ func TestRejectReroute(t *testing.T) {
 	require.NoError(t, err)
 
 	// Host B accepts and runs every task
-	var completed sync.WaitGroup
-	completed.Add(numTasks)
+	// Tasks are delivered at least once, so a task's handler can run more than once; dedupe by task ID so re-deliveries do not over-count
+	var (
+		mu       sync.Mutex
+		seen     = make(map[string]struct{}, numTasks)
+		done     = make(chan struct{})
+		doneOnce sync.Once
+	)
 	poolB, err := taskpool.New("reroute",
 		taskpool.WithConcurrency(numTasks),
 		taskpool.WithAccept(func(context.Context, taskpool.Task) bool { return true }),
-		taskpool.WithHandler(func(context.Context, taskpool.Task) error {
-			completed.Done()
+		taskpool.WithHandler(func(_ context.Context, task taskpool.Task) error {
+			mu.Lock()
+			seen[task.ID()] = struct{}{}
+			complete := len(seen) == numTasks
+			mu.Unlock()
+			if complete {
+				doneOnce.Do(func() { close(done) })
+			}
 			return nil
 		}),
 	)
@@ -161,14 +172,9 @@ func TestRejectReroute(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	done := make(chan struct{})
-	go func() {
-		completed.Wait()
-		close(done)
-	}()
 	select {
 	case <-done:
-		// Every task ran on host B, which means the ones placed on host A were re-routed rather than failed
+		// Every distinct task ran on host B, which means the ones placed on host A were re-routed rather than failed
 	case <-time.After(40 * time.Second):
 		t.Fatal("not all tasks were re-routed and run on the accepting host")
 	}
