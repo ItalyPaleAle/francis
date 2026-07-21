@@ -25,7 +25,8 @@ func (s *SQLiteProvider) readClusterState(ctx context.Context, tx *sql.Tx) (clus
 		clusterstate.MetadataKey,
 	).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		// The row is seeded by a migration, so it should always exist; treat a missing row as an empty (unclaimed, unlocked) state
+		// The row is seeded by a migration, so it should always exist
+		// Treat a missing row as an empty (unclaimed, unlocked) state
 		return clusterstate.State{}, nil
 	} else if err != nil {
 		return clusterstate.State{}, fmt.Errorf("error reading cluster state: %w", err)
@@ -80,7 +81,8 @@ func (s *SQLiteProvider) enforceClusterAdmission(ctx context.Context, tx *sql.Tx
 	}
 
 	// Reconcile the configured limit with the cluster's effective limit
-	// An unset limit, or an empty cluster, lets this host claim (or re-claim) the limit, which is what allows changing it after a full cluster shutdown; otherwise the values must match
+	// An unset limit, or an empty cluster, lets this host claim (or re-claim) the limit, which is what allows changing it after a full cluster shutdown
+	// Otherwise the values must match
 	switch {
 	case state.MaxHosts == nil || healthy == 0:
 		err = s.setClusterMaxHosts(ctx, tx, s.cfg.MaxHosts)
@@ -105,12 +107,14 @@ func (s *SQLiteProvider) AcquireExclusiveLease(ctx context.Context, owner string
 	now := s.clock.Now()
 	expiresAt := now.Add(ttl)
 
-	leaseJSON, err := json.Marshal(clusterstate.Lease{Owner: owner, ExpiresAt: expiresAt.UnixMilli()})
+	leaseJSON, err := json.Marshal(clusterstate.Lease{
+		Owner: owner,
+		ExpiresAt: expiresAt.UnixMilli(),
+	})
 	if err != nil {
 		return time.Time{}, fmt.Errorf("error encoding lease: %w", err)
 	}
 
-	// A single conditional update is race-free: SQLite serializes writers, so at most one caller can set the lease when it is free
 	// The lease may be taken when it is absent, expired, or already owned by this same owner (a re-acquire)
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()

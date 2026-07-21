@@ -83,7 +83,6 @@ func (p *PostgresProvider) enforceClusterAdmission(ctx context.Context, tx pgx.T
 }
 
 // checkClusterNotLocked returns ErrClusterLocked if an exclusive-access lease is currently held
-// It locks the cluster row FOR UPDATE so a concurrent AcquireExclusiveLease cannot slip in, and is used by the reattach path, which never adds a host beyond the limit
 func (p *PostgresProvider) checkClusterNotLocked(ctx context.Context, tx pgx.Tx) error {
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
@@ -91,6 +90,8 @@ func (p *PostgresProvider) checkClusterNotLocked(ctx context.Context, tx pgx.Tx)
 		raw     string
 		dbNowMs int64
 	)
+	// Lock the cluster row FOR UPDATE so a concurrent AcquireExclusiveLease cannot slip in
+	// This method is used by the reattach path, which never adds a host beyond the limit
 	// #nosec G202 -- the only concatenated values are the static table prefix and a static expression, not user input
 	err := tx.QueryRow(queryCtx,
 		`SELECT value, `+nowMsExpr+` FROM `+p.tablePrefix+`metadata WHERE key = $1 FOR UPDATE`,

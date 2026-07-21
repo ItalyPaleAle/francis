@@ -112,7 +112,7 @@ func WithMaxInFlightRequests(n int) HostOption {
 // WithMaxHosts caps the number of hosts allowed in the cluster at the same time
 // A value of 0 (the default) means no limit
 // The limit is enforced when a host registers, so a host that would exceed it fails to start with components.ErrClusterFull
-// All hosts in a cluster must be configured with the same value; changing it requires shutting the whole cluster down first
+// All hosts in a cluster must be configured with the same value (to change the limit, shut down the whole cluster first)
 func WithMaxHosts(n int) HostOption {
 	return func(o *newHostOptions) { o.MaxHosts = n }
 }

@@ -17,7 +17,6 @@ import (
 
 const (
 	// defaultExclusiveLeaseDuration is the default TTL of the exclusive-access lease
-	// It is deliberately generous: the lease only needs to outlast a pause of the holder process, since it is renewed while the holder is alive
 	defaultExclusiveLeaseDuration = 5 * time.Minute
 	// defaultExclusiveRenewInterval is the default interval at which the lease is renewed while held
 	defaultExclusiveRenewInterval = 2 * time.Minute
@@ -54,7 +53,6 @@ type ExclusiveOpts struct {
 }
 
 // ClusterAdmin performs cluster-wide administrative operations that run outside of a host, such as taking exclusive access for a data restore
-// It is built from the same provider options a host uses and talks directly to the shared database
 type ClusterAdmin struct {
 	provider  components.ActorProvider
 	exclusive components.ExclusiveController
@@ -87,7 +85,7 @@ func NewClusterAdmin(ctx context.Context, providerOptions components.ProviderOpt
 	}
 
 	// Build the provider from a config whose only meaningful value is the health check deadline
-	// The other values just need to be valid; the admin never registers hosts or runs alarms
+	// The admin never registers hosts or runs alarms
 	cfg := components.NewProviderConfig()
 	cfg.HostHealthCheckDeadline = opts.HostHealthCheckDeadline
 
