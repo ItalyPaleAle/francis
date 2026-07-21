@@ -26,7 +26,9 @@ func newTestAdmin(t *testing.T) *ClusterAdmin {
 		},
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = admin.Close() })
+	t.Cleanup(func() { 
+		_ = admin.Close()
+	})
 	return admin
 }
 

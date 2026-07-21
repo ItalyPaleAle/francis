@@ -133,7 +133,8 @@ func (a *ClusterAdmin) AcquireExclusive(ctx context.Context, opts ExclusiveOpts)
 		return nil, err
 	}
 
-	// Start the renewal loop; leaseCtx is canceled when the lease is lost or the admin is released or closed
+	// Start the renewal loop
+	// leaseCtx is canceled when the lease is lost or the admin is released or closed
 	leaseCtx, cancelLease := context.WithCancel(context.Background())
 	a.mu.Lock()
 	a.cancelRenew = cancelLease
@@ -198,12 +199,13 @@ func (a *ClusterAdmin) renewLoop(ctx context.Context, cancelLease context.Cancel
 				lastRenew = time.Now()
 			case errors.Is(err, components.ErrExclusiveHeld):
 				// The lease is definitively lost, so cancel the lease context to abort the caller's operation
-				a.log.Error("Exclusive-access lease lost; aborting")
+				a.log.Error("Exclusive-access lease lost, aborting")
 				cancelLease()
 				return
 			default:
-				// A transient error; keep trying, but give up before the lease could expire out from under us
-				a.log.Warn("Failed to renew exclusive-access lease; will retry", slog.Any("error", err))
+				// A transient error
+				// Keep trying, but give up before the lease could expire out from under us
+				a.log.Warn("Failed to renew exclusive-access lease, will retry", slog.Any("error", err))
 				if time.Since(lastRenew) >= a.leaseTTL-a.renewInterval {
 					a.log.Error("Exclusive-access lease could no longer be guaranteed; aborting")
 					cancelLease()

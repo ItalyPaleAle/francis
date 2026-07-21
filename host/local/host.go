@@ -208,7 +208,6 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 	}
 
 	// Get the provider
-	// The provider construction is shared with the ClusterAdmin through the provider factory
 	actorProvider, err := providerfactory.New(options.Logger, options.ProviderOptions, options.getProviderConfig())
 	if err != nil {
 		return nil, err
