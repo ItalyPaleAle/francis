@@ -147,6 +147,11 @@ func (s *SQLiteProvider) AdvanceClock(d time.Duration) error {
 	return nil
 }
 
+// SetMaxHosts overrides the configured host limit; used by the shared cluster-admission suite
+func (s *SQLiteProvider) SetMaxHosts(n int) {
+	s.cfg.MaxHosts = n
+}
+
 func (s *SQLiteProvider) Seed(ctx context.Context, spec comptesting.Spec) error {
 	_, tErr := sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (z struct{}, err error) {
 		now := s.clock.Now()

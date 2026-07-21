@@ -1,4 +1,4 @@
-package francis
+package clusteradmin
 
 import (
 	"context"
@@ -14,19 +14,19 @@ import (
 	"github.com/italypaleale/francis/internal/testutil"
 )
 
-func newTestAdmin(t *testing.T) *ClusterAdmin {
+func newTestAdmin(t *testing.T) *Admin {
 	t.Helper()
 
-	admin, err := NewClusterAdmin(t.Context(),
+	admin, err := New(t.Context(),
 		sqlite.SQLiteProviderOptions{ConnectionString: testutil.SQLiteConnString(t)},
-		ClusterAdminOptions{
+		Options{
 			// Short lease so the test does not depend on the long defaults
 			ExclusiveLeaseDuration: 2 * time.Second,
 			ExclusiveRenewInterval: time.Second,
 		},
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { 
+	t.Cleanup(func() {
 		_ = admin.Close()
 	})
 	return admin
@@ -39,61 +39,81 @@ func adminRegisterReq(address string) components.RegisterHostReq {
 	}
 }
 
-func TestClusterAdminExclusiveNotSupported(t *testing.T) {
-	_, err := NewClusterAdmin(t.Context(), standalone.StandaloneMemoryOptions{}, ClusterAdminOptions{})
+func TestExclusiveNotSupported(t *testing.T) {
+	_, err := New(t.Context(), standalone.StandaloneMemoryOptions{}, Options{})
 	require.ErrorIs(t, err, components.ErrExclusiveNotSupported)
 }
 
-func TestClusterAdminForceFalseWithHosts(t *testing.T) {
+func TestAcquireForceFalseWithHosts(t *testing.T) {
 	admin := newTestAdmin(t)
 
 	res, err := admin.provider.RegisterHost(t.Context(), adminRegisterReq("10.0.0.1:1000"))
 	require.NoError(t, err)
 
 	// Without force, a connected host makes AcquireExclusive fail fast
-	_, err = admin.AcquireExclusive(t.Context(), ExclusiveOpts{Force: false})
+	_, err = admin.AcquireExclusive(t.Context(), AcquireOptions{Force: false})
 	require.ErrorIs(t, err, components.ErrHostsConnected)
 
 	// The lease must have been released on the failure path, so removing the host and retrying succeeds
 	err = admin.provider.UnregisterHost(t.Context(), res.HostID)
 	require.NoError(t, err)
 
-	_, err = admin.AcquireExclusive(t.Context(), ExclusiveOpts{Force: false})
+	_, err = admin.AcquireExclusive(t.Context(), AcquireOptions{Force: false})
 	require.NoError(t, err)
 }
 
-func TestClusterAdminAcquireFencesAndReleases(t *testing.T) {
+func TestAcquireBlocksRegistrationAndReleases(t *testing.T) {
 	admin := newTestAdmin(t)
 
-	leaseCtx, err := admin.AcquireExclusive(t.Context(), ExclusiveOpts{Force: false})
+	lost, err := admin.AcquireExclusive(t.Context(), AcquireOptions{Force: false})
 	require.NoError(t, err)
-	require.NoError(t, leaseCtx.Err(), "lease context should be live")
+	select {
+	case <-lost:
+		t.Fatal("lease should still be held")
+	default:
+	}
 
-	// While the lease is held, registration is fenced
+	// While the lease is held, registration is blocked
 	_, err = admin.provider.RegisterHost(t.Context(), adminRegisterReq("10.0.0.1:1000"))
 	require.ErrorIs(t, err, components.ErrClusterLocked)
 
-	// Releasing re-opens the cluster and cancels the lease context
+	// Releasing re-opens the cluster; the lost channel is not closed on a voluntary release
 	err = admin.ReleaseExclusive(t.Context())
 	require.NoError(t, err)
-
 	select {
-	case <-leaseCtx.Done():
-	case <-time.After(2 * time.Second):
-		t.Fatal("lease context was not canceled after release")
+	case <-lost:
+		t.Fatal("lost channel must not close on a voluntary release")
+	default:
 	}
 
 	_, err = admin.provider.RegisterHost(t.Context(), adminRegisterReq("10.0.0.1:1000"))
 	require.NoError(t, err)
 }
 
-func TestClusterAdminForceDrains(t *testing.T) {
+func TestAcquireSignalsLostLease(t *testing.T) {
+	admin := newTestAdmin(t)
+
+	lost, err := admin.AcquireExclusive(t.Context(), AcquireOptions{Force: false})
+	require.NoError(t, err)
+
+	// Simulate the lease being taken away out-of-band; the next renewal fails and closes the channel
+	err = admin.exclusive.ReleaseExclusiveLease(t.Context(), admin.owner)
+	require.NoError(t, err)
+
+	select {
+	case <-lost:
+	case <-time.After(5 * time.Second):
+		t.Fatal("lost channel was not closed after the lease was lost")
+	}
+}
+
+func TestAcquireForceDrains(t *testing.T) {
 	admin := newTestAdmin(t)
 
 	res, err := admin.provider.RegisterHost(t.Context(), adminRegisterReq("10.0.0.1:1000"))
 	require.NoError(t, err)
 
-	// Simulate the fenced host self-terminating shortly after
+	// Simulate the evicted host self-terminating shortly after
 	go func() {
 		time.Sleep(500 * time.Millisecond)
 		_ = admin.provider.UnregisterHost(context.Background(), res.HostID)
@@ -102,9 +122,13 @@ func TestClusterAdminForceDrains(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
-	leaseCtx, err := admin.AcquireExclusive(ctx, ExclusiveOpts{Force: true})
+	lost, err := admin.AcquireExclusive(ctx, AcquireOptions{Force: true})
 	require.NoError(t, err)
-	assert.NoError(t, leaseCtx.Err())
+	select {
+	case <-lost:
+		t.Fatal("lease should still be held after draining")
+	default:
+	}
 
 	hosts, err := admin.provider.ListHosts(t.Context())
 	require.NoError(t, err)

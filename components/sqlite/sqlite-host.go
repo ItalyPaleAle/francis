@@ -49,7 +49,7 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 		}
 
 		// Enforce cluster admission (exclusive-access lease, host limit, and limit agreement)
-		// The prune above has taken the database write lock, so the cluster row is read atomically with the count and insert below
+		// The transaction holds the database write lock for its whole duration (txlock=immediate), so the cluster row is read atomically with the count and insert below
 		err = s.enforceClusterAdmission(ctx, tx, now)
 		if err != nil {
 			return zero, err

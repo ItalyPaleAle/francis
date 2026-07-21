@@ -51,6 +51,8 @@ func (s Suite) RunTests(t *testing.T) {
 	t.Run("jobs", s.TestJobs)
 
 	t.Run("backup and restore", s.TestBackupRestore)
+
+	t.Run("cluster admission", s.TestClusterAdmission)
 }
 
 func (s Suite) RunConcurrencyTests(t *testing.T) {

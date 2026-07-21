@@ -1,5 +1,5 @@
-// Package francis provides top-level entry points for administering a Francis cluster from outside of a host
-package francis
+// Package clusteradmin administers a Francis cluster from outside of a host, such as taking exclusive access for a data restore
+package clusteradmin
 
 import (
 	"context"
@@ -17,17 +17,18 @@ import (
 
 const (
 	// defaultExclusiveLeaseDuration is the default TTL of the exclusive-access lease
+	// It is deliberately generous: the lease only needs to outlast a pause of the holder process, since it is renewed while the holder is alive
 	defaultExclusiveLeaseDuration = 5 * time.Minute
 	// defaultExclusiveRenewInterval is the default interval at which the lease is renewed while held
 	defaultExclusiveRenewInterval = 2 * time.Minute
-	// clusterAdminOpTimeout bounds each individual provider call the admin makes
-	clusterAdminOpTimeout = 15 * time.Second
+	// adminOpTimeout bounds each individual provider call the admin makes
+	adminOpTimeout = 15 * time.Second
 	// drainPollInterval is how often AcquireExclusive re-checks the host count while waiting for the cluster to drain
 	drainPollInterval = time.Second
 )
 
-// ClusterAdminOptions configures a ClusterAdmin
-type ClusterAdminOptions struct {
+// Options configures an Admin
+type Options struct {
 	// HostHealthCheckDeadline should match the value used by the cluster's hosts
 	// It determines when a host that stopped health-checking is considered gone, which bounds how long AcquireExclusive waits for the cluster to drain
 	// Defaults to components.DefaultHostHealthCheckDeadline when zero
@@ -45,15 +46,16 @@ type ClusterAdminOptions struct {
 	Logger *slog.Logger
 }
 
-// ExclusiveOpts configures a call to AcquireExclusive
-type ExclusiveOpts struct {
+// AcquireOptions configures a call to AcquireExclusive
+type AcquireOptions struct {
 	// Force evicts running hosts and waits for the cluster to drain
 	// When false, AcquireExclusive returns components.ErrHostsConnected immediately if any host is currently connected
 	Force bool
 }
 
-// ClusterAdmin performs cluster-wide administrative operations that run outside of a host, such as taking exclusive access for a data restore
-type ClusterAdmin struct {
+// Admin performs cluster-wide administrative operations that run outside of a host, such as taking exclusive access for a data restore
+// It is built from the same provider options a host uses and talks directly to the shared database
+type Admin struct {
 	provider  components.ActorProvider
 	exclusive components.ExclusiveController
 	owner     string
@@ -62,15 +64,16 @@ type ClusterAdmin struct {
 	leaseTTL      time.Duration
 	renewInterval time.Duration
 
-	mu          sync.Mutex
-	cancelRenew context.CancelFunc
+	mu   sync.Mutex
+	stop chan struct{}
+	lost chan struct{}
 }
 
-// NewClusterAdmin builds a ClusterAdmin from the given provider options
+// New builds an Admin from the given provider options
 // The provider options are the same value passed to a host (for example a sqlite.SQLiteProviderOptions or postgres.PostgresProviderOptions)
 // It initializes the provider, which applies any pending schema migrations, so it also works against a brand-new database
 // It returns components.ErrExclusiveNotSupported if the provider does not support exclusive-access leases (the standalone providers do not)
-func NewClusterAdmin(ctx context.Context, providerOptions components.ProviderOptions, opts ClusterAdminOptions) (*ClusterAdmin, error) {
+func New(ctx context.Context, providerOptions components.ProviderOptions, opts Options) (*Admin, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
 	}
@@ -101,14 +104,14 @@ func NewClusterAdmin(ctx context.Context, providerOptions components.ProviderOpt
 	}
 
 	// Initialize the provider so its schema (including the cluster-admission row) exists
-	initCtx, cancel := context.WithTimeout(ctx, clusterAdminOpTimeout)
+	initCtx, cancel := context.WithTimeout(ctx, adminOpTimeout)
 	defer cancel()
 	err = provider.Init(initCtx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize provider: %w", err)
 	}
 
-	return &ClusterAdmin{
+	return &Admin{
 		provider:      provider,
 		exclusive:     exclusive,
 		owner:         uuid.NewString(),
@@ -119,14 +122,13 @@ func NewClusterAdmin(ctx context.Context, providerOptions components.ProviderOpt
 }
 
 // AcquireExclusive takes an exclusive-access lease on the cluster
-// It fences new host registrations and causes running hosts to self-terminate on their next health check, then blocks until no host is connected
+// It blocks new host registrations and causes running hosts to self-terminate on their next health check, then blocks until no host is connected
 // With Force false, it returns components.ErrHostsConnected immediately if any host is currently connected
 // With Force true, it waits until the cluster is empty (bounded by ctx and the health check deadline)
-// On success it starts a background renewal loop and returns leaseCtx, a context that is canceled if the lease is ever lost or when ReleaseExclusive or Close is called
-// The caller MUST run its maintenance operation under leaseCtx so that a lost lease aborts it
-func (a *ClusterAdmin) AcquireExclusive(ctx context.Context, opts ExclusiveOpts) (leaseCtx context.Context, err error) {
+// On success it starts a background renewal loop and returns a channel that is closed if the lease is ever lost, so the caller can abort its maintenance operation; the channel is not closed on a normal ReleaseExclusive or Close
+func (a *Admin) AcquireExclusive(ctx context.Context, opts AcquireOptions) (lost <-chan struct{}, err error) {
 	// Take the lease
-	acquireCtx, cancel := context.WithTimeout(ctx, clusterAdminOpTimeout)
+	acquireCtx, cancel := context.WithTimeout(ctx, adminOpTimeout)
 	_, err = a.exclusive.AcquireExclusiveLease(acquireCtx, a.owner, a.leaseTTL)
 	cancel()
 	if err != nil {
@@ -134,30 +136,34 @@ func (a *ClusterAdmin) AcquireExclusive(ctx context.Context, opts ExclusiveOpts)
 	}
 
 	// Start the renewal loop
-	// leaseCtx is canceled when the lease is lost or the admin is released or closed
-	leaseCtx, cancelLease := context.WithCancel(context.Background())
+	// The stop channel ends it on release or close, and the lost channel is closed if the lease can no longer be guaranteed
+	stop := make(chan struct{})
+	lostCh := make(chan struct{})
 	a.mu.Lock()
-	a.cancelRenew = cancelLease
+	a.stop = stop
+	a.lost = lostCh
 	a.mu.Unlock()
-	go a.renewLoop(leaseCtx, cancelLease)
+
+	// The renewal loop outlives this call, so it detaches from ctx's cancellation while keeping its values
+	go a.renewLoop(context.WithoutCancel(ctx), stop, lostCh)
 
 	// Wait for the cluster to drain
 	err = a.waitForEmpty(ctx, opts.Force)
 	if err != nil {
-		// Undo the lease and stop the renewal loop so a failed acquire does not wedge the cluster or leak a goroutine
-		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), clusterAdminOpTimeout)
+		// Undo the lease and stop the renewal loop so a failed acquire does not hold the cluster or leak a goroutine
+		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), adminOpTimeout)
 		_ = a.ReleaseExclusive(releaseCtx)
 		releaseCancel()
 		return nil, err
 	}
 
-	return leaseCtx, nil
+	return lostCh, nil
 }
 
 // waitForEmpty blocks until no host is connected, or returns ErrHostsConnected when hosts are present and force is false
-func (a *ClusterAdmin) waitForEmpty(ctx context.Context, force bool) error {
+func (a *Admin) waitForEmpty(ctx context.Context, force bool) error {
 	for {
-		listCtx, cancel := context.WithTimeout(ctx, clusterAdminOpTimeout)
+		listCtx, cancel := context.WithTimeout(ctx, adminOpTimeout)
 		hosts, err := a.provider.ListHosts(listCtx)
 		cancel()
 		if err != nil {
@@ -170,7 +176,7 @@ func (a *ClusterAdmin) waitForEmpty(ctx context.Context, force bool) error {
 			return components.ErrHostsConnected
 		}
 
-		// Wait for the fenced hosts to notice the lease and drop out, re-checking on each tick
+		// Wait for the evicted hosts to notice the lease and drop out, re-checking on each tick
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -179,18 +185,18 @@ func (a *ClusterAdmin) waitForEmpty(ctx context.Context, force bool) error {
 	}
 }
 
-// renewLoop keeps the lease alive until the lease context is canceled, cancelling it if the lease is lost
-func (a *ClusterAdmin) renewLoop(ctx context.Context, cancelLease context.CancelFunc) {
+// renewLoop keeps the lease alive until it is stopped, closing lost if the lease can no longer be guaranteed
+func (a *Admin) renewLoop(ctx context.Context, stop <-chan struct{}, lost chan struct{}) {
 	ticker := time.NewTicker(a.renewInterval)
 	defer ticker.Stop()
 
 	lastRenew := time.Now()
 	for {
 		select {
-		case <-ctx.Done():
+		case <-stop:
 			return
 		case <-ticker.C:
-			renewCtx, cancel := context.WithTimeout(context.Background(), clusterAdminOpTimeout)
+			renewCtx, cancel := context.WithTimeout(ctx, adminOpTimeout)
 			_, err := a.exclusive.RenewExclusiveLease(renewCtx, a.owner, a.leaseTTL)
 			cancel()
 
@@ -198,17 +204,17 @@ func (a *ClusterAdmin) renewLoop(ctx context.Context, cancelLease context.Cancel
 			case err == nil:
 				lastRenew = time.Now()
 			case errors.Is(err, components.ErrExclusiveHeld):
-				// The lease is definitively lost, so cancel the lease context to abort the caller's operation
+				// The lease is definitively lost, so signal the caller to abort its operation
 				a.log.Error("Exclusive-access lease lost, aborting")
-				cancelLease()
+				close(lost)
 				return
 			default:
 				// A transient error
 				// Keep trying, but give up before the lease could expire out from under us
 				a.log.Warn("Failed to renew exclusive-access lease, will retry", slog.Any("error", err))
 				if time.Since(lastRenew) >= a.leaseTTL-a.renewInterval {
-					a.log.Error("Exclusive-access lease could no longer be guaranteed; aborting")
-					cancelLease()
+					a.log.Error("Exclusive-access lease could no longer be guaranteed, aborting")
+					close(lost)
 					return
 				}
 			}
@@ -218,13 +224,9 @@ func (a *ClusterAdmin) renewLoop(ctx context.Context, cancelLease context.Cancel
 
 // ReleaseExclusive stops renewal and clears the lease if it is still held by this admin
 // It is idempotent and safe to call in a deferred cleanup
-func (a *ClusterAdmin) ReleaseExclusive(ctx context.Context) error {
+func (a *Admin) ReleaseExclusive(ctx context.Context) error {
 	a.stopRenew()
-	return a.releaseExclusive(ctx)
-}
 
-// releaseExclusive clears the lease without touching the renewal loop
-func (a *ClusterAdmin) releaseExclusive(ctx context.Context) error {
 	err := a.exclusive.ReleaseExclusiveLease(ctx, a.owner)
 	if err != nil {
 		return fmt.Errorf("failed to release exclusive lease: %w", err)
@@ -232,20 +234,21 @@ func (a *ClusterAdmin) releaseExclusive(ctx context.Context) error {
 	return nil
 }
 
-// stopRenew cancels the renewal loop and the lease context if one is running
-func (a *ClusterAdmin) stopRenew() {
+// stopRenew ends the renewal loop if one is running
+func (a *Admin) stopRenew() {
 	a.mu.Lock()
-	cancel := a.cancelRenew
-	a.cancelRenew = nil
+	stop := a.stop
+	a.stop = nil
+	a.lost = nil
 	a.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	if stop != nil {
+		close(stop)
 	}
 }
 
 // Close stops any renewal loop
 // It does not close the underlying database connection, which is owned by the caller through the provider options
-func (a *ClusterAdmin) Close() error {
+func (a *Admin) Close() error {
 	a.stopRenew()
 	return nil
 }

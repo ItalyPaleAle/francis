@@ -13,7 +13,7 @@ import (
 )
 
 // readClusterState reads and parses the singleton cluster-admission row using the given transaction
-// Callers must already hold the database write lock (for example by having performed a write earlier in the same transaction) so the value is read atomically with the rest of the registration
+// SQLite opens write transactions with txlock=immediate, so the transaction already holds the database write lock and the value is read atomically with the rest of the registration
 func (s *SQLiteProvider) readClusterState(ctx context.Context, tx *sql.Tx) (clusterstate.State, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
@@ -52,8 +52,8 @@ func (s *SQLiteProvider) setClusterMaxHosts(ctx context.Context, tx *sql.Tx, max
 	return nil
 }
 
-// enforceClusterAdmission applies the exclusive-access lease fence and the host limit before a new host is inserted
-// Callers must run this inside the registration transaction, after the stale-host prune has taken the database write lock, so the cluster row, host count, and insert are all serialized together
+// enforceClusterAdmission checks the exclusive-access lease and the host limit before a new host is inserted
+// It runs inside the registration transaction, which holds the database write lock for its whole duration (txlock=immediate), so the cluster row, host count, and insert are all serialized together
 func (s *SQLiteProvider) enforceClusterAdmission(ctx context.Context, tx *sql.Tx, nowMs int64) error {
 	state, err := s.readClusterState(ctx, tx)
 	if err != nil {
@@ -108,7 +108,7 @@ func (s *SQLiteProvider) AcquireExclusiveLease(ctx context.Context, owner string
 	expiresAt := now.Add(ttl)
 
 	leaseJSON, err := json.Marshal(clusterstate.Lease{
-		Owner: owner,
+		Owner:     owner,
 		ExpiresAt: expiresAt.UnixMilli(),
 	})
 	if err != nil {

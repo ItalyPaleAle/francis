@@ -16,7 +16,7 @@ import (
 // The lease and the host health checks both live in the database clock, so all comparisons stay in the same frame
 const nowMsExpr = `(extract(epoch from (now() at time zone 'utc')) * 1000)::bigint`
 
-// enforceClusterAdmission applies the exclusive-access lease fence and the host limit before a new host is inserted
+// enforceClusterAdmission checks the exclusive-access lease and the host limit before a new host is inserted
 // It locks the singleton cluster row FOR UPDATE, which serializes concurrent registrations and excludes AcquireExclusiveLease, so the lease check, host count, limit reconciliation, and insert are all atomic
 func (p *PostgresProvider) enforceClusterAdmission(ctx context.Context, tx pgx.Tx) error {
 	// Lock and read the cluster row, plus the database's current time so the lease check stays in the database clock
