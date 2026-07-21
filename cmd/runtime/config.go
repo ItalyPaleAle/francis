@@ -28,7 +28,6 @@ type config struct {
 	AlarmsPollInterval  string `yaml:"alarmsPollInterval"`
 	AlarmsLeaseDuration string `yaml:"alarmsLeaseDuration"`
 	ShutdownGracePeriod string `yaml:"shutdownGracePeriod"`
-	// MaxHosts caps the number of hosts allowed in the cluster at the same time; 0 (the default) means no limit
 	MaxHosts int `yaml:"maxHosts"`
 
 	Log logConfig `yaml:"log"`

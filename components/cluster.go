@@ -7,7 +7,7 @@ import (
 
 // ExclusiveController is implemented by providers that support cluster exclusive-access leases
 // The ClusterAdmin uses it to take exclusive access to a cluster for a maintenance operation such as a data restore
-// Only the providers that coordinate through a shared database (SQLite and PostgreSQL) implement it; the single-instance standalone providers do not
+// This isn't supported by the standalone provider
 type ExclusiveController interface {
 	// AcquireExclusiveLease acquires or re-acquires the cluster exclusive-access lease for owner, extending it to now+ttl
 	// It returns ErrExclusiveHeld if a different owner currently holds a live (non-expired) lease

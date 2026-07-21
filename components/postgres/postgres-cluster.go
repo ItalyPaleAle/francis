@@ -32,7 +32,8 @@ func (p *PostgresProvider) enforceClusterAdmission(ctx context.Context, tx pgx.T
 		clusterstate.MetadataKey,
 	).Scan(&raw, &dbNowMs)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// The row is seeded by a migration, so it should always exist; treat a missing row as an empty (unclaimed, unlocked) state
+		// The row is seeded by a migration, so it should always exist
+		// Treat a missing row as an empty (unclaimed, unlocked) state
 		raw = ""
 	} else if err != nil {
 		return fmt.Errorf("error reading cluster state: %w", err)
