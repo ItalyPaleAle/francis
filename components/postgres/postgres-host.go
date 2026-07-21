@@ -12,7 +12,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/italypaleale/francis/components"
-	"github.com/italypaleale/francis/internal/clusterstate"
 	"github.com/italypaleale/francis/internal/ref"
 )
 
@@ -271,13 +270,12 @@ func (p *PostgresProvider) updateActorHostLastHealthCheck(ctx context.Context, h
 			host_id = $1
 			AND host_last_health_check >= ((now() AT TIME ZONE 'utc') - $2::interval)
 			AND NOT EXISTS (
-				SELECT 1 FROM `+p.tablePrefix+`metadata
-				WHERE key = $3
-					AND (value::jsonb #>> '{exclusive,expires_at}')::bigint >= `+nowMsExpr+`
+				SELECT 1 FROM `+p.tablePrefix+`cluster_config
+				WHERE cluster_config_id = 1
+					AND exclusive_expires_at >= `+nowMsExpr+`
 			)`,
 			hostID,
 			p.cfg.HostHealthCheckDeadline,
-			clusterstate.MetadataKey,
 		)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)

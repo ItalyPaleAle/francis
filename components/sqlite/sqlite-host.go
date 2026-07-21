@@ -13,7 +13,6 @@ import (
 	sqltransactions "github.com/italypaleale/go-sql-utils/transactions/sql"
 
 	"github.com/italypaleale/francis/components"
-	"github.com/italypaleale/francis/internal/clusterstate"
 	"github.com/italypaleale/francis/internal/ref"
 )
 
@@ -291,14 +290,13 @@ func (s *SQLiteProvider) updateActorHostLastHealthCheck(ctx context.Context, hos
 			host_id = ?
 			AND host_last_health_check >= ?
 			AND NOT EXISTS (
-				SELECT 1 FROM `+s.tablePrefix+`metadata
-				WHERE key = ?
-					AND json_extract(value, '$.exclusive.expires_at') >= ?
+				SELECT 1 FROM `+s.tablePrefix+`cluster_config
+				WHERE cluster_config_id = 1
+					AND exclusive_expires_at >= ?
 			)`,
 			now,
 			hostID,
 			now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
-			clusterstate.MetadataKey,
 			now,
 		)
 	if err != nil {

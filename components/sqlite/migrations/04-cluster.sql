@@ -1,5 +1,13 @@
--- Seed the singleton cluster-admission row in the metadata table
--- This row holds the cluster-wide max hosts limit and the exclusive-access lease, both managed through the provider and the ClusterAdmin, never written directly by embedders
--- max_hosts is null until the first host claims it, and exclusive is null when no exclusive-access lease is held
-INSERT INTO %smetadata (key, value) VALUES ('cluster', '{"max_hosts":null,"exclusive":null}')
-ON CONFLICT (key) DO NOTHING;
+-- cluster_config holds the cluster-wide admission state in typed columns, so the hot-path health check compares plain integers instead of parsing JSON
+-- It is a single-row table, managed through the provider and the ClusterAdmin, and never written directly by embedders
+-- max_hosts is null until the first host claims it (a claimed value of 0 means no limit)
+-- exclusive_owner and exclusive_expires_at are null when no exclusive-access lease is held
+CREATE TABLE %scluster_config (
+    -- Enforces a single row
+    cluster_config_id integer NOT NULL PRIMARY KEY CHECK (cluster_config_id = 1),
+    max_hosts integer,
+    exclusive_owner text,
+    exclusive_expires_at integer
+) STRICT;
+
+INSERT INTO %scluster_config (cluster_config_id) VALUES (1);

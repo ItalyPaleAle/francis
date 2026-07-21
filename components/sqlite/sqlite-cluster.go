@@ -3,7 +3,6 @@ package sqlite
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -12,18 +11,21 @@ import (
 	"github.com/italypaleale/francis/internal/clusterstate"
 )
 
-// readClusterState reads and parses the singleton cluster-admission row using the given transaction
+// readClusterState reads the singleton cluster_config row using the given transaction
 // SQLite opens write transactions with txlock=immediate, so the transaction already holds the database write lock and the value is read atomically with the rest of the registration
 func (s *SQLiteProvider) readClusterState(ctx context.Context, tx *sql.Tx) (clusterstate.State, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	var raw string
+	var (
+		maxHosts sql.NullInt64
+		owner    sql.NullString
+		expires  sql.NullInt64
+	)
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	err := tx.QueryRowContext(queryCtx,
-		`SELECT value FROM `+s.tablePrefix+`metadata WHERE key = ?`,
-		clusterstate.MetadataKey,
-	).Scan(&raw)
+		`SELECT max_hosts, exclusive_owner, exclusive_expires_at FROM `+s.tablePrefix+`cluster_config WHERE cluster_config_id = 1`,
+	).Scan(&maxHosts, &owner, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
 		// The row is seeded by a migration, so it should always exist
 		// Treat a missing row as an empty (unclaimed, unlocked) state
@@ -32,10 +34,18 @@ func (s *SQLiteProvider) readClusterState(ctx context.Context, tx *sql.Tx) (clus
 		return clusterstate.State{}, fmt.Errorf("error reading cluster state: %w", err)
 	}
 
-	return clusterstate.Parse(raw)
+	state := clusterstate.State{
+		ExclusiveOwner:     owner.String,
+		ExclusiveExpiresAt: expires.Int64,
+	}
+	if maxHosts.Valid {
+		v := int(maxHosts.Int64)
+		state.MaxHosts = &v
+	}
+	return state, nil
 }
 
-// setClusterMaxHosts records the effective cluster host limit in the cluster row using the given transaction
+// setClusterMaxHosts records the effective cluster host limit in the cluster_config row using the given transaction
 // This is called when a host claims the limit for a cluster that is empty or has not had one set yet
 func (s *SQLiteProvider) setClusterMaxHosts(ctx context.Context, tx *sql.Tx, maxHosts int) error {
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
@@ -43,8 +53,8 @@ func (s *SQLiteProvider) setClusterMaxHosts(ctx context.Context, tx *sql.Tx, max
 
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	_, err := tx.ExecContext(queryCtx,
-		`UPDATE `+s.tablePrefix+`metadata SET value = json_set(value, '$.max_hosts', ?) WHERE key = ?`,
-		maxHosts, clusterstate.MetadataKey,
+		`UPDATE `+s.tablePrefix+`cluster_config SET max_hosts = ? WHERE cluster_config_id = 1`,
+		maxHosts,
 	)
 	if err != nil {
 		return fmt.Errorf("error setting cluster max hosts: %w", err)
@@ -53,7 +63,7 @@ func (s *SQLiteProvider) setClusterMaxHosts(ctx context.Context, tx *sql.Tx, max
 }
 
 // enforceClusterAdmission checks the exclusive-access lease and the host limit before a new host is inserted
-// It runs inside the registration transaction, which holds the database write lock for its whole duration (txlock=immediate), so the cluster row, host count, and insert are all serialized together
+// It runs inside the registration transaction, which holds the database write lock for its whole duration (txlock=immediate), so the cluster_config row, host count, and insert are all serialized together
 func (s *SQLiteProvider) enforceClusterAdmission(ctx context.Context, tx *sql.Tx, nowMs int64) error {
 	state, err := s.readClusterState(ctx, tx)
 	if err != nil {
@@ -107,28 +117,21 @@ func (s *SQLiteProvider) AcquireExclusiveLease(ctx context.Context, owner string
 	now := s.clock.Now()
 	expiresAt := now.Add(ttl)
 
-	leaseJSON, err := json.Marshal(clusterstate.Lease{
-		Owner:     owner,
-		ExpiresAt: expiresAt.UnixMilli(),
-	})
-	if err != nil {
-		return time.Time{}, fmt.Errorf("error encoding lease: %w", err)
-	}
-
+	// A single conditional update is race-free: SQLite serializes writers, so at most one caller can set the lease when it is free
 	// The lease may be taken when it is absent, expired, or already owned by this same owner (a re-acquire)
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := s.db.ExecContext(queryCtx,
-		`UPDATE `+s.tablePrefix+`metadata
-		SET value = json_set(value, '$.exclusive', json(?))
-		WHERE key = ?
+		`UPDATE `+s.tablePrefix+`cluster_config
+		SET exclusive_owner = ?, exclusive_expires_at = ?
+		WHERE cluster_config_id = 1
 			AND (
-				json_extract(value, '$.exclusive') IS NULL
-				OR json_extract(value, '$.exclusive.expires_at') < ?
-				OR json_extract(value, '$.exclusive.owner') = ?
+				exclusive_expires_at IS NULL
+				OR exclusive_expires_at < ?
+				OR exclusive_owner = ?
 			)`,
-		string(leaseJSON), clusterstate.MetadataKey, now.UnixMilli(), owner,
+		owner, expiresAt.UnixMilli(), now.UnixMilli(), owner,
 	)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("error acquiring exclusive lease: %w", err)
@@ -151,22 +154,17 @@ func (s *SQLiteProvider) RenewExclusiveLease(ctx context.Context, owner string, 
 	now := s.clock.Now()
 	expiresAt := now.Add(ttl)
 
-	leaseJSON, err := json.Marshal(clusterstate.Lease{Owner: owner, ExpiresAt: expiresAt.UnixMilli()})
-	if err != nil {
-		return time.Time{}, fmt.Errorf("error encoding lease: %w", err)
-	}
-
 	// Only renew when this owner still holds a live lease
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := s.db.ExecContext(queryCtx,
-		`UPDATE `+s.tablePrefix+`metadata
-		SET value = json_set(value, '$.exclusive', json(?))
-		WHERE key = ?
-			AND json_extract(value, '$.exclusive.owner') = ?
-			AND json_extract(value, '$.exclusive.expires_at') >= ?`,
-		string(leaseJSON), clusterstate.MetadataKey, owner, now.UnixMilli(),
+		`UPDATE `+s.tablePrefix+`cluster_config
+		SET exclusive_expires_at = ?
+		WHERE cluster_config_id = 1
+			AND exclusive_owner = ?
+			AND exclusive_expires_at >= ?`,
+		expiresAt.UnixMilli(), owner, now.UnixMilli(),
 	)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("error renewing exclusive lease: %w", err)
@@ -190,11 +188,11 @@ func (s *SQLiteProvider) ReleaseExclusiveLease(ctx context.Context, owner string
 	defer cancel()
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	_, err := s.db.ExecContext(queryCtx,
-		`UPDATE `+s.tablePrefix+`metadata
-		SET value = json_set(value, '$.exclusive', json('null'))
-		WHERE key = ?
-			AND json_extract(value, '$.exclusive.owner') = ?`,
-		clusterstate.MetadataKey, owner,
+		`UPDATE `+s.tablePrefix+`cluster_config
+		SET exclusive_owner = NULL, exclusive_expires_at = NULL
+		WHERE cluster_config_id = 1
+			AND exclusive_owner = ?`,
+		owner,
 	)
 	if err != nil {
 		return fmt.Errorf("error releasing exclusive lease: %w", err)

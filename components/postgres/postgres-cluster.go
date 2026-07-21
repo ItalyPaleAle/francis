@@ -16,30 +16,44 @@ import (
 // The lease and the host health checks both live in the database clock, so all comparisons stay in the same frame
 const nowMsExpr = `(extract(epoch from (now() at time zone 'utc')) * 1000)::bigint`
 
-// enforceClusterAdmission checks the exclusive-access lease and the host limit before a new host is inserted
-// It locks the singleton cluster row FOR UPDATE, which serializes concurrent registrations and excludes AcquireExclusiveLease, so the lease check, host count, limit reconciliation, and insert are all atomic
-func (p *PostgresProvider) enforceClusterAdmission(ctx context.Context, tx pgx.Tx) error {
-	// Lock and read the cluster row, plus the database's current time so the lease check stays in the database clock
+// readClusterStateForUpdate locks and reads the singleton cluster_config row, returning the state and the database's current time in Unix milliseconds
+// Locking the row FOR UPDATE serializes concurrent registrations and excludes AcquireExclusiveLease
+func (p *PostgresProvider) readClusterStateForUpdate(ctx context.Context, tx pgx.Tx) (clusterstate.State, int64, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 	var (
-		raw     string
-		dbNowMs int64
+		maxHosts *int
+		owner    *string
+		expires  *int64
+		dbNowMs  int64
 	)
 	// #nosec G202 -- the only concatenated values are the static table prefix and a static expression, not user input
 	err := tx.QueryRow(queryCtx,
-		`SELECT value, `+nowMsExpr+` FROM `+p.tablePrefix+`metadata WHERE key = $1 FOR UPDATE`,
-		clusterstate.MetadataKey,
-	).Scan(&raw, &dbNowMs)
+		`SELECT max_hosts, exclusive_owner, exclusive_expires_at, `+nowMsExpr+`
+		FROM `+p.tablePrefix+`cluster_config WHERE cluster_config_id = 1 FOR UPDATE`,
+	).Scan(&maxHosts, &owner, &expires, &dbNowMs)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// The row is seeded by a migration, so it should always exist
 		// Treat a missing row as an empty (unclaimed, unlocked) state
-		raw = ""
+		return clusterstate.State{}, 0, nil
 	} else if err != nil {
-		return fmt.Errorf("error reading cluster state: %w", err)
+		return clusterstate.State{}, 0, fmt.Errorf("error reading cluster state: %w", err)
 	}
 
-	state, err := clusterstate.Parse(raw)
+	state := clusterstate.State{MaxHosts: maxHosts}
+	if owner != nil {
+		state.ExclusiveOwner = *owner
+	}
+	if expires != nil {
+		state.ExclusiveExpiresAt = *expires
+	}
+	return state, dbNowMs, nil
+}
+
+// enforceClusterAdmission checks the exclusive-access lease and the host limit before a new host is inserted
+// It locks the singleton cluster_config row FOR UPDATE, so the lease check, host count, limit reconciliation, and insert are all atomic
+func (p *PostgresProvider) enforceClusterAdmission(ctx context.Context, tx pgx.Tx) error {
+	state, dbNowMs, err := p.readClusterStateForUpdate(ctx, tx)
 	if err != nil {
 		return err
 	}
@@ -50,7 +64,7 @@ func (p *PostgresProvider) enforceClusterAdmission(ctx context.Context, tx pgx.T
 	}
 
 	// Count the hosts that are currently healthy
-	queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 	var healthy int
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
@@ -83,27 +97,9 @@ func (p *PostgresProvider) enforceClusterAdmission(ctx context.Context, tx pgx.T
 }
 
 // checkClusterNotLocked returns ErrClusterLocked if an exclusive-access lease is currently held
+// It locks the cluster_config row FOR UPDATE so a concurrent AcquireExclusiveLease cannot slip in, and is used by the reattach path, which never adds a host beyond the limit
 func (p *PostgresProvider) checkClusterNotLocked(ctx context.Context, tx pgx.Tx) error {
-	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
-	defer cancel()
-	var (
-		raw     string
-		dbNowMs int64
-	)
-	// Lock the cluster row FOR UPDATE so a concurrent AcquireExclusiveLease cannot slip in
-	// This method is used by the reattach path, which never adds a host beyond the limit
-	// #nosec G202 -- the only concatenated values are the static table prefix and a static expression, not user input
-	err := tx.QueryRow(queryCtx,
-		`SELECT value, `+nowMsExpr+` FROM `+p.tablePrefix+`metadata WHERE key = $1 FOR UPDATE`,
-		clusterstate.MetadataKey,
-	).Scan(&raw, &dbNowMs)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("error reading cluster state: %w", err)
-	}
-
-	state, err := clusterstate.Parse(raw)
+	state, dbNowMs, err := p.readClusterStateForUpdate(ctx, tx)
 	if err != nil {
 		return err
 	}
@@ -113,14 +109,14 @@ func (p *PostgresProvider) checkClusterNotLocked(ctx context.Context, tx pgx.Tx)
 	return nil
 }
 
-// setClusterMaxHosts records the effective cluster host limit in the cluster row using the given transaction
+// setClusterMaxHosts records the effective cluster host limit in the cluster_config row using the given transaction
 func (p *PostgresProvider) setClusterMaxHosts(ctx context.Context, tx pgx.Tx, maxHosts int) error {
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	_, err := tx.Exec(queryCtx,
-		`UPDATE `+p.tablePrefix+`metadata SET value = jsonb_set(value::jsonb, '{max_hosts}', to_jsonb($1::int))::text WHERE key = $2`,
-		maxHosts, clusterstate.MetadataKey,
+		`UPDATE `+p.tablePrefix+`cluster_config SET max_hosts = $1 WHERE cluster_config_id = 1`,
+		maxHosts,
 	)
 	if err != nil {
 		return fmt.Errorf("error setting cluster max hosts: %w", err)
@@ -132,23 +128,22 @@ func (p *PostgresProvider) setClusterMaxHosts(ctx context.Context, tx pgx.Tx, ma
 // It returns ErrExclusiveHeld if a different owner currently holds a live (non-expired) lease
 func (p *PostgresProvider) AcquireExclusiveLease(ctx context.Context, owner string, ttl time.Duration) (time.Time, error) {
 	// A single conditional update is race-free: the row-level lock means at most one caller can set the lease when it is free
-	// The lease may be taken when it is absent or JSON null, expired, or already owned by this same owner (a re-acquire)
+	// The lease may be taken when it is absent, expired, or already owned by this same owner (a re-acquire)
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 	var expiresMs int64
 	// #nosec G202 -- the only concatenated values are the static table prefix and static expressions, not user input
 	err := p.db.QueryRow(queryCtx,
-		`UPDATE `+p.tablePrefix+`metadata
-		SET value = jsonb_set(value::jsonb, '{exclusive}', jsonb_build_object('owner', $1::text, 'expires_at', `+nowMsExpr+` + $2::bigint))::text
-		WHERE key = $3
+		`UPDATE `+p.tablePrefix+`cluster_config
+		SET exclusive_owner = $1, exclusive_expires_at = `+nowMsExpr+` + $2::bigint
+		WHERE cluster_config_id = 1
 			AND (
-				(value::jsonb -> 'exclusive') IS NULL
-				OR jsonb_typeof(value::jsonb -> 'exclusive') = 'null'
-				OR (value::jsonb #>> '{exclusive,expires_at}')::bigint < `+nowMsExpr+`
-				OR (value::jsonb #>> '{exclusive,owner}') = $1::text
+				exclusive_expires_at IS NULL
+				OR exclusive_expires_at < `+nowMsExpr+`
+				OR exclusive_owner = $1
 			)
-		RETURNING (value::jsonb #>> '{exclusive,expires_at}')::bigint`,
-		owner, ttl.Milliseconds(), clusterstate.MetadataKey,
+		RETURNING exclusive_expires_at`,
+		owner, ttl.Milliseconds(),
 	).Scan(&expiresMs)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return time.Time{}, components.ErrExclusiveHeld
@@ -167,13 +162,13 @@ func (p *PostgresProvider) RenewExclusiveLease(ctx context.Context, owner string
 	var expiresMs int64
 	// #nosec G202 -- the only concatenated values are the static table prefix and static expressions, not user input
 	err := p.db.QueryRow(queryCtx,
-		`UPDATE `+p.tablePrefix+`metadata
-		SET value = jsonb_set(value::jsonb, '{exclusive}', jsonb_build_object('owner', $1::text, 'expires_at', `+nowMsExpr+` + $2::bigint))::text
-		WHERE key = $3
-			AND (value::jsonb #>> '{exclusive,owner}') = $1::text
-			AND (value::jsonb #>> '{exclusive,expires_at}')::bigint >= `+nowMsExpr+`
-		RETURNING (value::jsonb #>> '{exclusive,expires_at}')::bigint`,
-		owner, ttl.Milliseconds(), clusterstate.MetadataKey,
+		`UPDATE `+p.tablePrefix+`cluster_config
+		SET exclusive_expires_at = `+nowMsExpr+` + $2::bigint
+		WHERE cluster_config_id = 1
+			AND exclusive_owner = $1
+			AND exclusive_expires_at >= `+nowMsExpr+`
+		RETURNING exclusive_expires_at`,
+		owner, ttl.Milliseconds(),
 	).Scan(&expiresMs)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return time.Time{}, components.ErrExclusiveHeld
@@ -191,11 +186,11 @@ func (p *PostgresProvider) ReleaseExclusiveLease(ctx context.Context, owner stri
 	defer cancel()
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	_, err := p.db.Exec(queryCtx,
-		`UPDATE `+p.tablePrefix+`metadata
-		SET value = jsonb_set(value::jsonb, '{exclusive}', 'null'::jsonb)::text
-		WHERE key = $1
-			AND (value::jsonb #>> '{exclusive,owner}') = $2`,
-		clusterstate.MetadataKey, owner,
+		`UPDATE `+p.tablePrefix+`cluster_config
+		SET exclusive_owner = NULL, exclusive_expires_at = NULL
+		WHERE cluster_config_id = 1
+			AND exclusive_owner = $1`,
+		owner,
 	)
 	if err != nil {
 		return fmt.Errorf("error releasing exclusive lease: %w", err)
