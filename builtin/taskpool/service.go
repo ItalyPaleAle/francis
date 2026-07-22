@@ -102,7 +102,8 @@ func WithTaskKey(key string) SubmitOption {
 // Submit enqueues a task for the pool and returns its task ID
 //
 // The task runs once, on any host with free capacity that serves the required capability (or any host, when none is required)
-// The input is the task's payload, decoded by the handler with Task.Decode; pass nil when the task carries no input
+// The input is the task's payload, decoded by the handler with Task.Decode
+// Pass nil when the task carries no input
 // A task pool does not return a result: the handler is responsible for communicating the outcome
 func (s *TaskPoolService) Submit(ctx context.Context, input any, opts ...SubmitOption) (taskID string, err error) {
 	var so submitOptions
@@ -110,7 +111,8 @@ func (s *TaskPoolService) Submit(ctx context.Context, input any, opts ...SubmitO
 		opt(&so)
 	}
 
-	// Resolve the queue (actor type) from the required capability; the empty capability is the base queue every host serves
+	// Resolve the queue (actor type) from the required capability
+	// The empty capability is the base queue every host serves
 	// The capability is not validated against this host's advertised capabilities on purpose: a task may require a capability only other hosts have, and it stays pending until a host that advertises it picks it up
 	bareType := s.pool.baseType
 	if so.capability != "" {

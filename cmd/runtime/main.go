@@ -92,6 +92,7 @@ func run(ctx context.Context, cfg *config) error {
 		AlarmsLeaseDuration:       alarmsLeaseDuration,
 		AlarmsFetchAheadInterval:  components.DefaultAlarmsFetchAheadInterval,
 		AlarmsFetchAheadBatchSize: components.DefaultAlarmsFetchAheadBatchSize,
+		MaxHosts:                  cfg.MaxHosts,
 	}
 
 	provider, err := buildProvider(cfg.Provider.ConnectionString, providerCfg, log)

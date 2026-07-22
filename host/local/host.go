@@ -32,6 +32,7 @@ import (
 	"github.com/italypaleale/francis/internal/certholder"
 	"github.com/italypaleale/francis/internal/hosttls"
 	"github.com/italypaleale/francis/internal/peer"
+	"github.com/italypaleale/francis/internal/providerfactory"
 	"github.com/italypaleale/francis/internal/ref"
 )
 
@@ -139,6 +140,7 @@ func (o newHostOptions) getProviderConfig() components.ProviderConfig {
 		AlarmsLeaseDuration:       o.AlarmsLeaseDuration,
 		AlarmsFetchAheadInterval:  o.AlarmsFetchAheadInterval,
 		AlarmsFetchAheadBatchSize: o.AlarmsFetchAheadBatchSize,
+		MaxHosts:                  o.MaxHosts,
 	}
 }
 
@@ -206,47 +208,9 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 	}
 
 	// Get the provider
-	var actorProvider components.ActorProvider
-	switch x := options.ProviderOptions.(type) {
-	case sqlite.SQLiteProviderOptions:
-		actorProvider, err = sqlite.NewSQLiteProvider(options.Logger, x, options.getProviderConfig())
-		if err != nil {
-			return nil, fmt.Errorf("failed to create SQLite provider: %w", err)
-		}
-	case *sqlite.SQLiteProviderOptions:
-		actorProvider, err = sqlite.NewSQLiteProvider(options.Logger, *x, options.getProviderConfig())
-		if err != nil {
-			return nil, fmt.Errorf("failed to create SQLite provider: %w", err)
-		}
-	case postgres.PostgresProviderOptions:
-		actorProvider, err = postgres.NewPostgresProvider(options.Logger, x, options.getProviderConfig())
-		if err != nil {
-			return nil, fmt.Errorf("failed to create Postgres provider: %w", err)
-		}
-	case *postgres.PostgresProviderOptions:
-		actorProvider, err = postgres.NewPostgresProvider(options.Logger, *x, options.getProviderConfig())
-		if err != nil {
-			return nil, fmt.Errorf("failed to create Postgres provider: %w", err)
-		}
-	case standalone.StandaloneMemoryOptions:
-		actorProvider, err = standalone.NewStandaloneMemory(options.Logger, x, options.getProviderConfig())
-		if err != nil {
-			return nil, fmt.Errorf("failed to create standalone memory provider: %w", err)
-		}
-	case standalone.StandaloneSQLiteOptions:
-		actorProvider, err = standalone.NewStandaloneSQLiteBacked(options.Logger, x, options.getProviderConfig())
-		if err != nil {
-			return nil, fmt.Errorf("failed to create standalone SQLite provider: %w", err)
-		}
-	case standalone.StandalonePostgresOptions:
-		actorProvider, err = standalone.NewStandalonePostgresBacked(options.Logger, x, options.getProviderConfig())
-		if err != nil {
-			return nil, fmt.Errorf("failed to create standalone Postgres provider: %w", err)
-		}
-	case nil:
-		return nil, errors.New("option ProviderOptions is required")
-	default:
-		return nil, fmt.Errorf("unsupported value for ProviderOptions: %T", options.ProviderOptions)
+	actorProvider, err := providerfactory.New(options.Logger, options.ProviderOptions, options.getProviderConfig())
+	if err != nil {
+		return nil, err
 	}
 
 	// Derive the cluster CA from the runtime PSKs so hosts that share the PSKs authenticate each other with mTLS

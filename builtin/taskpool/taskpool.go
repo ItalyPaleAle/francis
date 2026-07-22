@@ -61,7 +61,8 @@ type TaskPool struct {
 // The function set with WithHandler runs each task and is required
 //
 // Register the returned value on a host with the host's RegisterBuiltInActor method, then submit tasks through the service returned by Service
-// Register the same pool on every host that should run its tasks, advertising each host's own capabilities; names must be unique within a cluster and must not contain '/'
+// Register the same pool on every host that should run its tasks, advertising each host's own capabilities
+// Names must be unique within a cluster and must not contain '/'
 func New(name string, opts ...Option) (*TaskPool, error) {
 	if name == "" {
 		return nil, errors.New("task pool name is required")

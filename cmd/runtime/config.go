@@ -28,6 +28,7 @@ type config struct {
 	AlarmsPollInterval  string `yaml:"alarmsPollInterval"`
 	AlarmsLeaseDuration string `yaml:"alarmsLeaseDuration"`
 	ShutdownGracePeriod string `yaml:"shutdownGracePeriod"`
+	MaxHosts            int    `yaml:"maxHosts"`
 
 	Log logConfig `yaml:"log"`
 

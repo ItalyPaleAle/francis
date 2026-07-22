@@ -47,7 +47,7 @@ Actor:
 
 ```go
 func (c *Cart) Invoke(ctx context.Context, method string, data actor.Envelope) (any, error) {
-	// Load state; the first time, GetState returns the zero value (not an error)
+	// Load state: the first time, GetState returns the zero value (not an error)
 	state, err := c.client.GetState(ctx)
 	if err != nil {
 		return nil, err
@@ -68,7 +68,8 @@ func (c *Cart) Invoke(ctx context.Context, method string, data actor.Envelope) (
 		return nil, fmt.Errorf("unknown method: %s", method)
 	}
 
-	// State is durable only after SetState returns; mutating the struct alone persists nothing
+	// State is durable only after SetState returns
+	// Mutating the struct alone persists nothing
 	err = c.client.SetState(ctx, state, nil)
 	if err != nil {
 		return nil, err

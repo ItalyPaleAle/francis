@@ -102,7 +102,7 @@ func (h *Host) RegisterBuiltInActor(b builtinactor.BuiltInActor) error {
 	}
 
 	// A built-in may register more than one actor type (for example a work pool with one type per capability)
-	// Built-in actors carry only their bare type; the host adds the reserved prefix when registering
+	// Built-in actors carry only their bare type (host adds the reserved prefix when registering)
 	for _, reg := range builtinactor.RegistrationsFor(b) {
 		actorType := builtinactor.FullActorType(reg.ActorType)
 		err := h.core.RegisterActor(actorType, reg.Factory, reg.RegisterOptions)
