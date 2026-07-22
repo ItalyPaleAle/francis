@@ -77,7 +77,8 @@ func TestAcquireBlocksRegistrationAndReleases(t *testing.T) {
 	_, err = admin.provider.RegisterHost(t.Context(), adminRegisterReq("10.0.0.1:1000"))
 	require.ErrorIs(t, err, components.ErrClusterLocked)
 
-	// Releasing re-opens the cluster; the lost channel is not closed on a voluntary release
+	// Releasing re-opens the cluster
+	// The lost channel is not closed on a voluntary release
 	err = admin.ReleaseExclusive(t.Context())
 	require.NoError(t, err)
 	select {
@@ -96,7 +97,8 @@ func TestAcquireSignalsLostLease(t *testing.T) {
 	lost, err := admin.AcquireExclusive(t.Context(), AcquireOptions{Force: false})
 	require.NoError(t, err)
 
-	// Simulate the lease being taken away out-of-band; the next renewal fails and closes the channel
+	// Simulate the lease being taken away out-of-band
+	// The next renewal fails and closes the channel
 	err = admin.exclusive.ReleaseExclusiveLease(t.Context(), admin.owner)
 	require.NoError(t, err)
 

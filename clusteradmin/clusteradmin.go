@@ -42,7 +42,7 @@ type Options struct {
 	// Defaults to 2 minutes when zero
 	ExclusiveRenewInterval time.Duration
 
-	// Logger is the slog logger; logs are discarded when nil
+	// Logger is the slog logger (optional)
 	Logger *slog.Logger
 }
 
@@ -125,7 +125,8 @@ func New(ctx context.Context, providerOptions components.ProviderOptions, opts O
 // It blocks new host registrations and causes running hosts to self-terminate on their next health check, then blocks until no host is connected
 // With Force false, it returns components.ErrHostsConnected immediately if any host is currently connected
 // With Force true, it waits until the cluster is empty (bounded by ctx and the health check deadline)
-// On success it starts a background renewal loop and returns a channel that is closed if the lease is ever lost, so the caller can abort its maintenance operation; the channel is not closed on a normal ReleaseExclusive or Close
+// On success it starts a background renewal loop and returns a channel that is closed if the lease is ever lost, so the caller can abort its maintenance operation
+// The channel is not closed on a normal ReleaseExclusive or Close
 func (a *Admin) AcquireExclusive(ctx context.Context, opts AcquireOptions) (lost <-chan struct{}, err error) {
 	// Take the lease
 	acquireCtx, cancel := context.WithTimeout(ctx, adminOpTimeout)

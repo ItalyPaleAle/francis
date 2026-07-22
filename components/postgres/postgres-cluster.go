@@ -77,7 +77,7 @@ func (p *PostgresProvider) enforceClusterAdmission(ctx context.Context, tx pgx.T
 	}
 
 	// Reconcile the configured limit with the cluster's effective limit
-	// An unset limit, or an empty cluster, lets this host claim (or re-claim) the limit, which is what allows changing it after a full cluster shutdown; otherwise the values must match
+	// An unset limit, or an empty cluster, lets this host claim (or re-claim) the limit, which is what allows changing it after a full cluster shutdown, otherwise the values must match
 	switch {
 	case state.MaxHosts == nil || healthy == 0:
 		err = p.setClusterMaxHosts(ctx, tx, p.cfg.MaxHosts)

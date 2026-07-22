@@ -228,7 +228,8 @@ func (p *PostgresProvider) AdvanceClock(d time.Duration) error {
 	return p.setCurrentFrozenTime()
 }
 
-// SetMaxHosts overrides the configured host limit; used by the shared cluster-admission suite
+// SetMaxHosts overrides the configured host limit
+// This is used by the shared cluster-admission suite
 func (p *PostgresProvider) SetMaxHosts(n int) {
 	p.cfg.MaxHosts = n
 }

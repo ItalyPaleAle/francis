@@ -139,7 +139,7 @@ func TestRejectReroute(t *testing.T) {
 	require.NoError(t, err)
 
 	// Host B accepts and runs every task
-	// Tasks are delivered at least once, so a task's handler can run more than once; dedupe by task ID so re-deliveries do not over-count
+	// Tasks are delivered at least once, so a task's handler can run more than once - dedupe by task ID so re-deliveries do not over-count
 	var (
 		mu       sync.Mutex
 		seen     = make(map[string]struct{}, numTasks)
@@ -165,7 +165,8 @@ func TestRejectReroute(t *testing.T) {
 	hostA := startHost(t, dbPath, poolA)
 	startHost(t, dbPath, poolB)
 
-	// Submit through host A's service; placement spreads tasks across both hosts, and any that land on A must re-route to B
+	// Submit through host A's service
+	// Placement spreads tasks across both hosts, and any that land on A must re-route to B
 	svc := poolA.Service(hostA.Service())
 	for range numTasks {
 		_, err = svc.Submit(t.Context(), nil)

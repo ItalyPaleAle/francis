@@ -43,7 +43,8 @@ func run(ctx context.Context) error {
 
 	// Build a task pool that "converts" videos, running at most two at a time on this host
 	// This host also advertises the "gpu" capability, so it can run tasks that require a GPU
-	// Run more hosts (sharing the same database and runtime PSK) to process more videos in parallel; each host runs at most its own WithConcurrency tasks at once
+	// Run more hosts (sharing the same database and runtime PSK) to process more videos in parallel
+	// Each host runs at most its own WithConcurrency tasks at once
 	pool, err := taskpool.New("video-convert",
 		taskpool.WithConcurrency(2),
 		taskpool.WithCapability("gpu"),

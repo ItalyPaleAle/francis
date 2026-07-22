@@ -223,7 +223,8 @@ The operations are bound to an `actor.Service` via `Service(...)`, which you obt
 ```go
 svc := pool.Service(host.Service())
 
-// Submit a task; input is decoded by the handler with Task.Decode
+// Submit a task
+// Input is decoded by the handler with Task.Decode
 taskID, err := svc.Submit(ctx, ConvertRequest{Source: "a.mov"})
 
 // Require a capability: only hosts advertising "gpu" will run it
