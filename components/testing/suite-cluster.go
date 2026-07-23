@@ -25,7 +25,6 @@ func clusterRegisterReq(address string) components.RegisterHostReq {
 }
 
 // TestClusterAdmission exercises the host limit and exclusive-access lease
-// The exclusive-access lease methods are part of the ActorProvider contract, so every provider implements them
 func (s Suite) TestClusterAdmission(t *testing.T) {
 	maxHosts, ok := s.p.(maxHostsSetter)
 	if !ok {

@@ -35,21 +35,26 @@ func newTestAdmin(t *testing.T) *Admin {
 func adminRegisterReq(address string) components.RegisterHostReq {
 	return components.RegisterHostReq{
 		Address:    address,
-		ActorTypes: []components.ActorHostType{{ActorType: "test", IdleTimeout: time.Minute}},
+		ActorTypes: []components.ActorHostType{
+			{ActorType: "test", IdleTimeout: time.Minute},
+		},
 	}
 }
 
 func TestStandaloneProviderSupportsExclusive(t *testing.T) {
-	// The standalone providers now implement exclusive-access leases too, so building an admin from one succeeds
 	admin, err := New(t.Context(), standalone.StandaloneMemoryOptions{}, Options{
 		ExclusiveLeaseDuration: 2 * time.Second,
 		ExclusiveRenewInterval: time.Second,
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = admin.Close() })
+	t.Cleanup(func() { 
+		_ = admin.Close()
+	})
 
 	// With no hosts connected, acquiring and releasing exclusive access works end to end
-	_, err = admin.AcquireExclusive(t.Context(), AcquireOptions{Force: false})
+	_, err = admin.AcquireExclusive(t.Context(), AcquireOptions{
+		Force: false,
+	})
 	require.NoError(t, err)
 
 	err = admin.ReleaseExclusive(t.Context())

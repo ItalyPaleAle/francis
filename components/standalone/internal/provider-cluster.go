@@ -8,11 +8,11 @@ import (
 	"github.com/italypaleale/francis/internal/clusterstate"
 )
 
-// The cluster-admission state is kept only in memory: a standalone deployment runs a single runtime, and its host limit is fixed for the lifetime of that runtime, so there is nothing to persist or coordinate across processes.
+// The cluster-admission state is kept only in-memory: a standalone deployment runs a single runtime, and its host limit is fixed for the lifetime of that runtime, so there is nothing to persist or coordinate across processes.
 
 // checkClusterAdmission enforces the exclusive-access lease and the host limit before a new host is registered
 // It must be called while holding at least a read lock on Mu
-// When the host may claim (or re-claim) the cluster's effective host limit, it returns the new cluster state that the caller must apply in memory; otherwise it returns a nil claim
+// When the host may claim (or re-claim) the cluster's effective host limit, it returns the new cluster state that the caller must apply in memory (otherwise it returns a nil claim)
 func (p *Provider) checkClusterAdmission(nowMs int64) (claim *clusterstate.State, err error) {
 	// Reject registration while an exclusive-access lease is held
 	if p.Cluster.LeaseLive(nowMs) {
