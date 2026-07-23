@@ -61,6 +61,10 @@ type Backend interface {
 	// NewProvider builds a provider instance against the shared store for a runtime to own
 	// It is valid only after Run
 	NewProvider(t *testing.T, log *slog.Logger) components.ActorProvider
+
+	// ProviderOptions returns the raw provider options for the shared store, so a scenario can build a second provider against the same backend, such as a clusteradmin.Admin
+	// It is valid only after Run
+	ProviderOptions(t *testing.T) components.ProviderOptions
 }
 
 // New builds the Backend for the given variant

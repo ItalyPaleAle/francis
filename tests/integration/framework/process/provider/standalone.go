@@ -49,6 +49,12 @@ func (b *standaloneMemoryBackend) NewProvider(t *testing.T, log *slog.Logger) co
 	return p
 }
 
+func (b *standaloneMemoryBackend) ProviderOptions(*testing.T) components.ProviderOptions {
+	return standalone.StandaloneMemoryOptions{
+		CleanupInterval: -1,
+	}
+}
+
 // standaloneSQLiteBackend is the single-host, in-memory provider with SQLite persistence
 // It owns one shared in-memory SQLite connection
 type standaloneSQLiteBackend struct {
@@ -93,6 +99,16 @@ func (b *standaloneSQLiteBackend) NewProvider(t *testing.T, log *slog.Logger) co
 	}, providerConfig())
 	require.NoError(t, err, "failed to create standalone SQLite provider")
 	return p
+}
+
+func (b *standaloneSQLiteBackend) ProviderOptions(t *testing.T) components.ProviderOptions {
+	t.Helper()
+	require.NotNil(t, b.db, "standalone SQLite backend used before Run")
+
+	return standalone.StandaloneSQLiteOptions{
+		DB:              b.db,
+		CleanupInterval: -1,
+	}
 }
 
 func (b *standaloneSQLiteBackend) Cleanup(t *testing.T) {
