@@ -47,7 +47,7 @@ func TestStandaloneProviderSupportsExclusive(t *testing.T) {
 		ExclusiveRenewInterval: time.Second,
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { 
+	t.Cleanup(func() {
 		_ = admin.Close()
 	})
 
