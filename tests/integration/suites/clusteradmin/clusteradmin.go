@@ -155,6 +155,8 @@ func (s *clusterAdmin) startHost(t *testing.T, extra ...local.HostOption) *hostH
 	port := ports.Reserve(t, 1)[0]
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 
+	// This is test-only setup code run once per host, so the small fixed base plus a few extra options is not worth preallocating
+	//nolint:prealloc // test helper: tiny, one-shot slice where preallocation adds noise without measurable benefit
 	opts := []local.HostOption{
 		local.WithAddress(addr),
 		// Every local host derives the same CA from the shared runtime PSK, so hosts sharing the store authenticate each other
