@@ -535,6 +535,12 @@ func (p *StandaloneMemory) AdvanceClock(d time.Duration) error {
 	return nil
 }
 
+// SetMaxHosts overrides the configured host limit
+// This is used by the shared cluster-admission suite
+func (p *StandaloneMemory) SetMaxHosts(n int) {
+	p.Cfg.MaxHosts = n
+}
+
 // GetAllActorState returns all stored actor state.
 func (p *StandaloneMemory) GetAllActorState(ctx context.Context) (comptesting.ActorStateSpecCollection, error) {
 	p.Mu.RLock()
@@ -747,6 +753,12 @@ func (p *StandaloneSQLiteBacked) AdvanceClock(d time.Duration) error {
 	return nil
 }
 
+// SetMaxHosts overrides the configured host limit
+// This is used by the shared cluster-admission suite
+func (p *StandaloneSQLiteBacked) SetMaxHosts(n int) {
+	p.Cfg.MaxHosts = n
+}
+
 // GetAllActorState returns all stored actor state.
 func (p *StandaloneSQLiteBacked) GetAllActorState(ctx context.Context) (comptesting.ActorStateSpecCollection, error) {
 	p.Mu.RLock()
@@ -956,6 +968,12 @@ func (p *StandalonePostgresBacked) Now() time.Time {
 func (p *StandalonePostgresBacked) AdvanceClock(d time.Duration) error {
 	p.Clock.Sleep(d)
 	return nil
+}
+
+// SetMaxHosts overrides the configured host limit
+// This is used by the shared cluster-admission suite
+func (p *StandalonePostgresBacked) SetMaxHosts(n int) {
+	p.Cfg.MaxHosts = n
 }
 
 // GetAllActorState returns all stored actor state.

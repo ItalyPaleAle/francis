@@ -21,7 +21,6 @@ type ProviderConfig struct {
 
 	// Maximum number of hosts allowed to join the cluster at the same time
 	// A value of 0 (the default) means there is no limit
-	// This is not supported by the standalone provider
 	// The first host to join a cluster establishes the effective value, and a host configured with a different value is rejected (to change the limit, shut down the whole cluster first)
 	MaxHosts int
 }

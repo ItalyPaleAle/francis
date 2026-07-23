@@ -34,14 +34,31 @@ func newTestAdmin(t *testing.T) *Admin {
 
 func adminRegisterReq(address string) components.RegisterHostReq {
 	return components.RegisterHostReq{
-		Address:    address,
-		ActorTypes: []components.ActorHostType{{ActorType: "test", IdleTimeout: time.Minute}},
+		Address: address,
+		ActorTypes: []components.ActorHostType{
+			{ActorType: "test", IdleTimeout: time.Minute},
+		},
 	}
 }
 
-func TestExclusiveNotSupported(t *testing.T) {
-	_, err := New(t.Context(), standalone.StandaloneMemoryOptions{}, Options{})
-	require.ErrorIs(t, err, components.ErrExclusiveNotSupported)
+func TestStandaloneProviderSupportsExclusive(t *testing.T) {
+	admin, err := New(t.Context(), standalone.StandaloneMemoryOptions{}, Options{
+		ExclusiveLeaseDuration: 2 * time.Second,
+		ExclusiveRenewInterval: time.Second,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = admin.Close()
+	})
+
+	// With no hosts connected, acquiring and releasing exclusive access works end to end
+	_, err = admin.AcquireExclusive(t.Context(), AcquireOptions{
+		Force: false,
+	})
+	require.NoError(t, err)
+
+	err = admin.ReleaseExclusive(t.Context())
+	require.NoError(t, err)
 }
 
 func TestAcquireForceFalseWithHosts(t *testing.T) {
@@ -99,7 +116,7 @@ func TestAcquireSignalsLostLease(t *testing.T) {
 
 	// Simulate the lease being taken away out-of-band
 	// The next renewal fails and closes the channel
-	err = admin.exclusive.ReleaseExclusiveLease(t.Context(), admin.owner)
+	err = admin.provider.ReleaseExclusiveLease(t.Context(), admin.owner)
 	require.NoError(t, err)
 
 	select {

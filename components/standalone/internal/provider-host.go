@@ -24,10 +24,16 @@ func (p *Provider) RegisterHost(ctx context.Context, req components.RegisterHost
 	changes := NewChanges()
 	defer changes.Release()
 
+	nowMs := p.Clock.Now().UnixMilli()
+
 	p.Mu.RLock()
 	// Clean up unhealthy hosts first
 	// The deletions are applied together with the new host
 	cleanupApply := p.CleanupUnhealthyHosts(changes)
+
+	// Enforce cluster admission (exclusive-access lease, host limit, and limit agreement) before adding the host
+	// This reads the cluster state atomically with the host count under the same lock
+	clusterClaim, admissionErr := p.checkClusterAdmission(nowMs)
 
 	// Check if there's already a healthy host at this address
 	// Unhealthy hosts at the same address are cleaned up above, so they don't block registration
@@ -40,6 +46,10 @@ func (p *Provider) RegisterHost(ctx context.Context, req components.RegisterHost
 	}
 	p.Mu.RUnlock()
 
+	// A failed admission (or address conflict) returns before anything is applied, so a rejected registration leaves the cluster state untouched
+	if admissionErr != nil {
+		return components.RegisterHostRes{}, admissionErr
+	}
 	if alreadyRegistered {
 		return components.RegisterHostRes{}, components.ErrHostAlreadyRegistered
 	}
@@ -82,6 +92,9 @@ func (p *Provider) RegisterHost(ctx context.Context, req components.RegisterHost
 		if hats != nil {
 			p.HostActorTypes[hostID] = hats
 		}
+		if clusterClaim != nil {
+			p.Cluster = *clusterClaim
+		}
 	})
 	if err != nil {
 		return components.RegisterHostRes{}, err
@@ -100,8 +113,14 @@ func (p *Provider) reattachHost(ctx context.Context, req components.RegisterHost
 	changes := NewChanges()
 	defer changes.Release()
 
+	nowMs := p.Clock.Now().UnixMilli()
+
 	p.Mu.RLock()
 	existing, exists := p.Hosts[req.ExistingHostID]
+
+	// Reject a reattach while an exclusive-access lease is held, so a locked cluster stays empty
+	// A reattach never adds a host beyond the limit, so the host count and limit agreement are not re-checked here
+	leaseLive := p.Cluster.LeaseLive(nowMs)
 
 	// Detect an address conflict with a different, healthy host
 	// Unhealthy hosts at the same address are cleaned up below, so they do not block reattachment
@@ -168,6 +187,10 @@ func (p *Provider) reattachHost(ctx context.Context, req components.RegisterHost
 		newHats = buildHostActorTypes(req.ExistingHostID, req.ActorTypes, changes)
 	}
 	p.Mu.RUnlock()
+
+	if leaseLive {
+		return components.RegisterHostRes{}, components.ErrClusterLocked
+	}
 
 	if conflict {
 		return components.RegisterHostRes{}, components.ErrHostAlreadyRegistered
@@ -273,9 +296,14 @@ func (p *Provider) UpdateActorHost(ctx context.Context, hostID string, req compo
 	changes := NewChanges()
 	defer changes.Release()
 
+	nowMs := p.Clock.Now().UnixMilli()
+
 	p.Mu.RLock()
 	h, ok := p.Hosts[hostID]
 	healthy := ok && p.IsHostHealthy(h)
+
+	// A live exclusive-access lease blocks the health-check update, which is how a locked cluster evicts running hosts: the failed health check surfaces as ErrHostUnregistered and the host shuts down
+	leaseBlocksHealthCheck := req.UpdateLastHealthCheck && p.Cluster.LeaseLive(nowMs)
 
 	var (
 		updatedHost *Host
@@ -315,8 +343,8 @@ func (p *Provider) UpdateActorHost(ctx context.Context, hostID string, req compo
 	}
 	p.Mu.RUnlock()
 
-	if !healthy {
-		// Host doesn't exist, or exists but is un-healthy
+	if !healthy || leaseBlocksHealthCheck {
+		// Host doesn't exist, exists but is un-healthy, or is being evicted by a live exclusive-access lease
 		return components.ErrHostUnregistered
 	}
 

@@ -56,10 +56,9 @@ type AcquireOptions struct {
 // Admin performs cluster-wide administrative operations that run outside of a host, such as taking exclusive access for a data restore
 // It is built from the same provider options a host uses and talks directly to the shared database
 type Admin struct {
-	provider  components.ActorProvider
-	exclusive components.ExclusiveController
-	owner     string
-	log       *slog.Logger
+	provider components.ActorProvider
+	owner    string
+	log      *slog.Logger
 
 	leaseTTL      time.Duration
 	renewInterval time.Duration
@@ -72,7 +71,6 @@ type Admin struct {
 // New builds an Admin from the given provider options
 // The provider options are the same value passed to a host (for example a sqlite.SQLiteProviderOptions or postgres.PostgresProviderOptions)
 // It initializes the provider, which applies any pending schema migrations, so it also works against a brand-new database
-// It returns components.ErrExclusiveNotSupported if the provider does not support exclusive-access leases (the standalone providers do not)
 func New(ctx context.Context, providerOptions components.ProviderOptions, opts Options) (*Admin, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
@@ -97,12 +95,6 @@ func New(ctx context.Context, providerOptions components.ProviderOptions, opts O
 		return nil, err
 	}
 
-	// The admin needs a provider that supports exclusive-access leases
-	exclusive, ok := provider.(components.ExclusiveController)
-	if !ok {
-		return nil, components.ErrExclusiveNotSupported
-	}
-
 	// Initialize the provider so its schema (including the cluster-admission row) exists
 	initCtx, cancel := context.WithTimeout(ctx, adminOpTimeout)
 	defer cancel()
@@ -113,7 +105,6 @@ func New(ctx context.Context, providerOptions components.ProviderOptions, opts O
 
 	return &Admin{
 		provider:      provider,
-		exclusive:     exclusive,
 		owner:         uuid.NewString(),
 		log:           opts.Logger,
 		leaseTTL:      opts.ExclusiveLeaseDuration,
@@ -130,7 +121,7 @@ func New(ctx context.Context, providerOptions components.ProviderOptions, opts O
 func (a *Admin) AcquireExclusive(ctx context.Context, opts AcquireOptions) (lost <-chan struct{}, err error) {
 	// Take the lease
 	acquireCtx, cancel := context.WithTimeout(ctx, adminOpTimeout)
-	_, err = a.exclusive.AcquireExclusiveLease(acquireCtx, a.owner, a.leaseTTL)
+	_, err = a.provider.AcquireExclusiveLease(acquireCtx, a.owner, a.leaseTTL)
 	cancel()
 	if err != nil {
 		return nil, err
@@ -198,7 +189,7 @@ func (a *Admin) renewLoop(ctx context.Context, stop <-chan struct{}, lost chan s
 			return
 		case <-ticker.C:
 			renewCtx, cancel := context.WithTimeout(ctx, adminOpTimeout)
-			_, err := a.exclusive.RenewExclusiveLease(renewCtx, a.owner, a.leaseTTL)
+			_, err := a.provider.RenewExclusiveLease(renewCtx, a.owner, a.leaseTTL)
 			cancel()
 
 			switch {
@@ -228,7 +219,7 @@ func (a *Admin) renewLoop(ctx context.Context, stop <-chan struct{}, lost chan s
 func (a *Admin) ReleaseExclusive(ctx context.Context) error {
 	a.stopRenew()
 
-	err := a.exclusive.ReleaseExclusiveLease(ctx, a.owner)
+	err := a.provider.ReleaseExclusiveLease(ctx, a.owner)
 	if err != nil {
 		return fmt.Errorf("failed to release exclusive lease: %w", err)
 	}

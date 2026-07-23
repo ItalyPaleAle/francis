@@ -11,6 +11,7 @@ import (
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/clusterstate"
 )
 
 // Provider is the internal core provider.
@@ -44,6 +45,10 @@ type Provider struct {
 	AlarmsByID     map[string]*Alarm           // alarm_id -> alarm
 	DeadJobs       map[string]*DeadJob         // job_id -> dead job
 	ActorState     map[ActorKey]*StateEntry    // actor_type/actor_id -> state
+
+	// Cluster is the single-row cluster-admission state (host limit and exclusive-access lease)
+	// It is guarded by Mu, like the rest of the host domain, so host registration reads it atomically with the host maps
+	Cluster clusterstate.State
 }
 
 // DefaultCleanupInterval is the default interval at which the provider purges expired state.
