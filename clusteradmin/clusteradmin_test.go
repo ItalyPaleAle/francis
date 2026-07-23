@@ -34,7 +34,7 @@ func newTestAdmin(t *testing.T) *Admin {
 
 func adminRegisterReq(address string) components.RegisterHostReq {
 	return components.RegisterHostReq{
-		Address:    address,
+		Address: address,
 		ActorTypes: []components.ActorHostType{
 			{ActorType: "test", IdleTimeout: time.Minute},
 		},
