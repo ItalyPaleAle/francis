@@ -111,7 +111,7 @@ func TestAcquireSignalsLostLease(t *testing.T) {
 
 	// Simulate the lease being taken away out-of-band
 	// The next renewal fails and closes the channel
-	err = admin.exclusive.ReleaseExclusiveLease(t.Context(), admin.owner)
+	err = admin.provider.ReleaseExclusiveLease(t.Context(), admin.owner)
 	require.NoError(t, err)
 
 	select {

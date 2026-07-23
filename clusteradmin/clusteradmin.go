@@ -56,10 +56,9 @@ type AcquireOptions struct {
 // Admin performs cluster-wide administrative operations that run outside of a host, such as taking exclusive access for a data restore
 // It is built from the same provider options a host uses and talks directly to the shared database
 type Admin struct {
-	provider  components.ActorProvider
-	exclusive components.ExclusiveController
-	owner     string
-	log       *slog.Logger
+	provider components.ActorProvider
+	owner    string
+	log      *slog.Logger
 
 	leaseTTL      time.Duration
 	renewInterval time.Duration
@@ -96,9 +95,6 @@ func New(ctx context.Context, providerOptions components.ProviderOptions, opts O
 		return nil, err
 	}
 
-	// Every provider implements the exclusive-access lease methods (ExclusiveController is embedded in ActorProvider)
-	exclusive := components.ExclusiveController(provider)
-
 	// Initialize the provider so its schema (including the cluster-admission row) exists
 	initCtx, cancel := context.WithTimeout(ctx, adminOpTimeout)
 	defer cancel()
@@ -109,7 +105,6 @@ func New(ctx context.Context, providerOptions components.ProviderOptions, opts O
 
 	return &Admin{
 		provider:      provider,
-		exclusive:     exclusive,
 		owner:         uuid.NewString(),
 		log:           opts.Logger,
 		leaseTTL:      opts.ExclusiveLeaseDuration,
@@ -126,7 +121,7 @@ func New(ctx context.Context, providerOptions components.ProviderOptions, opts O
 func (a *Admin) AcquireExclusive(ctx context.Context, opts AcquireOptions) (lost <-chan struct{}, err error) {
 	// Take the lease
 	acquireCtx, cancel := context.WithTimeout(ctx, adminOpTimeout)
-	_, err = a.exclusive.AcquireExclusiveLease(acquireCtx, a.owner, a.leaseTTL)
+	_, err = a.provider.AcquireExclusiveLease(acquireCtx, a.owner, a.leaseTTL)
 	cancel()
 	if err != nil {
 		return nil, err
@@ -194,7 +189,7 @@ func (a *Admin) renewLoop(ctx context.Context, stop <-chan struct{}, lost chan s
 			return
 		case <-ticker.C:
 			renewCtx, cancel := context.WithTimeout(ctx, adminOpTimeout)
-			_, err := a.exclusive.RenewExclusiveLease(renewCtx, a.owner, a.leaseTTL)
+			_, err := a.provider.RenewExclusiveLease(renewCtx, a.owner, a.leaseTTL)
 			cancel()
 
 			switch {
@@ -224,7 +219,7 @@ func (a *Admin) renewLoop(ctx context.Context, stop <-chan struct{}, lost chan s
 func (a *Admin) ReleaseExclusive(ctx context.Context) error {
 	a.stopRenew()
 
-	err := a.exclusive.ReleaseExclusiveLease(ctx, a.owner)
+	err := a.provider.ReleaseExclusiveLease(ctx, a.owner)
 	if err != nil {
 		return fmt.Errorf("failed to release exclusive lease: %w", err)
 	}

@@ -25,10 +25,8 @@ func clusterRegisterReq(address string) components.RegisterHostReq {
 }
 
 // TestClusterAdmission exercises the host limit and exclusive-access lease
-// Every provider implements cluster admission (ExclusiveController is part of the ActorProvider contract)
+// The exclusive-access lease methods are part of the ActorProvider contract, so every provider implements them
 func (s Suite) TestClusterAdmission(t *testing.T) {
-	// The exclusive-access lease methods are part of the ActorProvider interface, so they are always available
-	exclusive := components.ExclusiveController(s.p)
 	maxHosts, ok := s.p.(maxHostsSetter)
 	if !ok {
 		t.Skip("provider does not support setting MaxHosts in tests")
@@ -94,7 +92,7 @@ func (s Suite) TestClusterAdmission(t *testing.T) {
 		res, err := s.p.RegisterHost(t.Context(), clusterRegisterReq("10.0.0.1:1000"))
 		require.NoError(t, err)
 
-		_, err = exclusive.AcquireExclusiveLease(t.Context(), "admin-1", 5*time.Minute)
+		_, err = s.p.AcquireExclusiveLease(t.Context(), "admin-1", 5*time.Minute)
 		require.NoError(t, err)
 
 		// New registrations are blocked
@@ -106,7 +104,7 @@ func (s Suite) TestClusterAdmission(t *testing.T) {
 		require.ErrorIs(t, err, components.ErrHostUnregistered)
 
 		// Releasing re-opens the cluster
-		err = exclusive.ReleaseExclusiveLease(t.Context(), "admin-1")
+		err = s.p.ReleaseExclusiveLease(t.Context(), "admin-1")
 		require.NoError(t, err)
 
 		err = s.p.UpdateActorHost(t.Context(), res.HostID, components.UpdateActorHostReq{UpdateLastHealthCheck: true})
@@ -119,44 +117,44 @@ func (s Suite) TestClusterAdmission(t *testing.T) {
 	t.Run("exclusive lease held by another owner", func(t *testing.T) {
 		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
 
-		_, err := exclusive.AcquireExclusiveLease(t.Context(), "admin-1", 5*time.Minute)
+		_, err := s.p.AcquireExclusiveLease(t.Context(), "admin-1", 5*time.Minute)
 		require.NoError(t, err)
-		defer func() { _ = exclusive.ReleaseExclusiveLease(t.Context(), "admin-1") }()
+		defer func() { _ = s.p.ReleaseExclusiveLease(t.Context(), "admin-1") }()
 
-		_, err = exclusive.AcquireExclusiveLease(t.Context(), "admin-2", 5*time.Minute)
+		_, err = s.p.AcquireExclusiveLease(t.Context(), "admin-2", 5*time.Minute)
 		require.ErrorIs(t, err, components.ErrExclusiveHeld)
 
 		// The same owner can re-acquire (idempotent)
-		_, err = exclusive.AcquireExclusiveLease(t.Context(), "admin-1", 5*time.Minute)
+		_, err = s.p.AcquireExclusiveLease(t.Context(), "admin-1", 5*time.Minute)
 		require.NoError(t, err)
 	})
 
 	t.Run("exclusive lease expires without renewal", func(t *testing.T) {
 		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
 
-		_, err := exclusive.AcquireExclusiveLease(t.Context(), "admin-1", 2*time.Minute)
+		_, err := s.p.AcquireExclusiveLease(t.Context(), "admin-1", 2*time.Minute)
 		require.NoError(t, err)
 
 		// After the TTL passes, a different owner can take it
 		require.NoError(t, s.p.AdvanceClock(3*time.Minute))
-		_, err = exclusive.AcquireExclusiveLease(t.Context(), "admin-2", 2*time.Minute)
+		_, err = s.p.AcquireExclusiveLease(t.Context(), "admin-2", 2*time.Minute)
 		require.NoError(t, err)
-		defer func() { _ = exclusive.ReleaseExclusiveLease(t.Context(), "admin-2") }()
+		defer func() { _ = s.p.ReleaseExclusiveLease(t.Context(), "admin-2") }()
 	})
 
 	t.Run("exclusive lease renew", func(t *testing.T) {
 		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
 
-		_, err := exclusive.AcquireExclusiveLease(t.Context(), "admin-1", 2*time.Minute)
+		_, err := s.p.AcquireExclusiveLease(t.Context(), "admin-1", 2*time.Minute)
 		require.NoError(t, err)
-		defer func() { _ = exclusive.ReleaseExclusiveLease(t.Context(), "admin-1") }()
+		defer func() { _ = s.p.ReleaseExclusiveLease(t.Context(), "admin-1") }()
 
-		exp, err := exclusive.RenewExclusiveLease(t.Context(), "admin-1", 2*time.Minute)
+		exp, err := s.p.RenewExclusiveLease(t.Context(), "admin-1", 2*time.Minute)
 		require.NoError(t, err)
 		assert.False(t, exp.IsZero())
 
 		// A different owner cannot renew
-		_, err = exclusive.RenewExclusiveLease(t.Context(), "admin-2", 2*time.Minute)
+		_, err = s.p.RenewExclusiveLease(t.Context(), "admin-2", 2*time.Minute)
 		require.ErrorIs(t, err, components.ErrExclusiveHeld)
 	})
 }

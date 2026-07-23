@@ -206,42 +206,6 @@ func (s *StandalonePostgresBacked) loadFromDB(ctx context.Context) error {
 		return fmt.Errorf("failed to load actor state: %w", err)
 	}
 
-	// Load the cluster-admission state
-	err = s.loadClusterConfig(queryCtx)
-	if err != nil {
-		return fmt.Errorf("failed to load cluster config: %w", err)
-	}
-
-	return nil
-}
-
-func (s *StandalonePostgresBacked) loadClusterConfig(ctx context.Context) error {
-	var (
-		maxHosts *int
-		owner    *string
-		expires  *int64
-	)
-	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	err := s.db.QueryRow(ctx,
-		"SELECT max_hosts, exclusive_owner, exclusive_expires_at FROM "+s.tablePrefix+"cluster_config WHERE cluster_config_id = 1",
-	).Scan(&maxHosts, &owner, &expires)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// The row is seeded by a migration, so this is only reached if it was removed; treat it as an empty state
-		return nil
-	} else if err != nil {
-		return err
-	}
-
-	if maxHosts != nil {
-		v := *maxHosts
-		s.Cluster.MaxHosts = &v
-	}
-	if owner != nil {
-		s.Cluster.ExclusiveOwner = *owner
-	}
-	if expires != nil {
-		s.Cluster.ExclusiveExpiresAt = *expires
-	}
 	return nil
 }
 
@@ -529,52 +493,12 @@ func (s *StandalonePostgresBacked) PersistChanges(ctx context.Context, changes *
 		return err
 	}
 
-	// Process the cluster-admission state change
-	err = s.persistClusterChanges(queryCtx, tx, changes)
-	if err != nil {
-		return err
-	}
-
 	err = tx.Commit(queryCtx)
 	if err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	committed = true
 
-	return nil
-}
-
-func (s *StandalonePostgresBacked) persistClusterChanges(ctx context.Context, tx pgx.Tx, changes *internal.Changes) error {
-	if changes.Cluster.Set == nil {
-		return nil
-	}
-	st := changes.Cluster.Set
-
-	var (
-		maxHosts *int
-		owner    *string
-		expires  *int64
-	)
-	if st.MaxHosts != nil {
-		v := *st.MaxHosts
-		maxHosts = &v
-	}
-	// The lease columns are written together: both hold a value while a lease is held, and both are null otherwise
-	if st.ExclusiveOwner != "" {
-		owner = &st.ExclusiveOwner
-		expires = &st.ExclusiveExpiresAt
-	}
-
-	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	_, err := tx.Exec(ctx,
-		`UPDATE `+s.tablePrefix+`cluster_config
-		SET max_hosts = $1, exclusive_owner = $2, exclusive_expires_at = $3
-		WHERE cluster_config_id = 1`,
-		maxHosts, owner, expires,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to upsert cluster config: %w", err)
-	}
 	return nil
 }
 

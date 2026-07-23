@@ -53,9 +53,6 @@ func (p *Provider) RegisterHost(ctx context.Context, req components.RegisterHost
 	if alreadyRegistered {
 		return components.RegisterHostRes{}, components.ErrHostAlreadyRegistered
 	}
-	if clusterClaim != nil {
-		changes.Cluster.Set = clusterClaim
-	}
 
 	// Generate a new host ID
 	hostIDObj, err := uuid.NewV7()

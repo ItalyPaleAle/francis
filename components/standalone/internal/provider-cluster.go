@@ -8,9 +8,11 @@ import (
 	"github.com/italypaleale/francis/internal/clusterstate"
 )
 
+// The cluster-admission state is kept only in memory: a standalone deployment runs a single runtime, and its host limit is fixed for the lifetime of that runtime, so there is nothing to persist or coordinate across processes.
+
 // checkClusterAdmission enforces the exclusive-access lease and the host limit before a new host is registered
 // It must be called while holding at least a read lock on Mu
-// When the host may claim (or re-claim) the cluster's effective host limit, it returns the new cluster state that the caller must record in the change set and apply; otherwise it returns a nil claim
+// When the host may claim (or re-claim) the cluster's effective host limit, it returns the new cluster state that the caller must apply in memory; otherwise it returns a nil claim
 func (p *Provider) checkClusterAdmission(nowMs int64) (claim *clusterstate.State, err error) {
 	// Reject registration while an exclusive-access lease is held
 	if p.Cluster.LeaseLive(nowMs) {
@@ -27,7 +29,7 @@ func (p *Provider) checkClusterAdmission(nowMs int64) (claim *clusterstate.State
 	}
 
 	// Reconcile the configured limit with the cluster's effective limit
-	// An unset limit, or an empty cluster, lets this host claim (or re-claim) the limit, which is what allows changing it after a full cluster shutdown
+	// An unset limit, or an empty cluster, lets this host claim (or re-claim) the limit
 	// Otherwise the values must match
 	switch {
 	case p.Cluster.MaxHosts == nil || healthy == 0:
@@ -49,7 +51,8 @@ func (p *Provider) checkClusterAdmission(nowMs int64) (claim *clusterstate.State
 
 // AcquireExclusiveLease acquires or re-acquires the cluster exclusive-access lease for owner, extending it to now+ttl
 // It returns components.ErrExclusiveHeld if a different owner currently holds a live (non-expired) lease
-func (p *Provider) AcquireExclusiveLease(ctx context.Context, owner string, ttl time.Duration) (time.Time, error) {
+func (p *Provider) AcquireExclusiveLease(_ context.Context, owner string, ttl time.Duration) (time.Time, error) {
+	// writeMu serializes this against host registration, so the lease and the host count cannot change out from under each other
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 
@@ -57,29 +60,22 @@ func (p *Provider) AcquireExclusiveLease(ctx context.Context, owner string, ttl 
 	nowMs := now.UnixMilli()
 	expiresAt := now.Add(ttl)
 
-	p.Mu.RLock()
-	state := p.Cluster
-	p.Mu.RUnlock()
+	p.Mu.Lock()
+	defer p.Mu.Unlock()
 
 	// The lease may be taken when it is absent, expired, or already owned by this same owner (a re-acquire)
-	if state.ExclusiveOwner != "" && state.ExclusiveOwner != owner && state.ExclusiveExpiresAt >= nowMs {
+	if p.Cluster.ExclusiveOwner != "" && p.Cluster.ExclusiveOwner != owner && p.Cluster.ExclusiveExpiresAt >= nowMs {
 		return time.Time{}, components.ErrExclusiveHeld
 	}
 
-	next := state
-	next.ExclusiveOwner = owner
-	next.ExclusiveExpiresAt = expiresAt.UnixMilli()
-
-	err := p.applyClusterChange(ctx, next)
-	if err != nil {
-		return time.Time{}, err
-	}
+	p.Cluster.ExclusiveOwner = owner
+	p.Cluster.ExclusiveExpiresAt = expiresAt.UnixMilli()
 	return expiresAt, nil
 }
 
 // RenewExclusiveLease extends the exclusive-access lease for owner to now+ttl
 // It returns components.ErrExclusiveHeld if owner no longer holds a live lease, so the caller can treat the lease as lost
-func (p *Provider) RenewExclusiveLease(ctx context.Context, owner string, ttl time.Duration) (time.Time, error) {
+func (p *Provider) RenewExclusiveLease(_ context.Context, owner string, ttl time.Duration) (time.Time, error) {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 
@@ -87,56 +83,33 @@ func (p *Provider) RenewExclusiveLease(ctx context.Context, owner string, ttl ti
 	nowMs := now.UnixMilli()
 	expiresAt := now.Add(ttl)
 
-	p.Mu.RLock()
-	state := p.Cluster
-	p.Mu.RUnlock()
+	p.Mu.Lock()
+	defer p.Mu.Unlock()
 
 	// Only renew when this owner still holds a live lease
-	if state.ExclusiveOwner != owner || state.ExclusiveExpiresAt < nowMs {
+	if p.Cluster.ExclusiveOwner != owner || p.Cluster.ExclusiveExpiresAt < nowMs {
 		return time.Time{}, components.ErrExclusiveHeld
 	}
 
-	next := state
-	next.ExclusiveExpiresAt = expiresAt.UnixMilli()
-
-	err := p.applyClusterChange(ctx, next)
-	if err != nil {
-		return time.Time{}, err
-	}
+	p.Cluster.ExclusiveExpiresAt = expiresAt.UnixMilli()
 	return expiresAt, nil
 }
 
 // ReleaseExclusiveLease clears the exclusive-access lease if it is held by owner
 // It is idempotent: releasing a lease this owner does not hold is not an error
-func (p *Provider) ReleaseExclusiveLease(ctx context.Context, owner string) error {
+func (p *Provider) ReleaseExclusiveLease(_ context.Context, owner string) error {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 
-	p.Mu.RLock()
-	state := p.Cluster
-	p.Mu.RUnlock()
+	p.Mu.Lock()
+	defer p.Mu.Unlock()
 
 	// Nothing to do if this owner does not hold the lease
-	if state.ExclusiveOwner != owner {
+	if p.Cluster.ExclusiveOwner != owner {
 		return nil
 	}
 
-	next := state
-	next.ExclusiveOwner = ""
-	next.ExclusiveExpiresAt = 0
-
-	return p.applyClusterChange(ctx, next)
-}
-
-// applyClusterChange persists the new cluster state and, on success, applies it in memory
-// The caller must hold writeMu for the whole read-compute-apply sequence, so the state cannot change underneath it
-func (p *Provider) applyClusterChange(ctx context.Context, next clusterstate.State) error {
-	changes := NewChanges()
-	defer changes.Release()
-
-	changes.Cluster.Set = &next
-
-	return p.persistThenApply(ctx, &p.Mu, changes, func() {
-		p.Cluster = next
-	})
+	p.Cluster.ExclusiveOwner = ""
+	p.Cluster.ExclusiveExpiresAt = 0
+	return nil
 }
