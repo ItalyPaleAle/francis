@@ -25,12 +25,10 @@ func clusterRegisterReq(address string) components.RegisterHostReq {
 }
 
 // TestClusterAdmission exercises the host limit and exclusive-access lease
-// It is skipped for providers that do not support cluster admission (the standalone providers)
+// Every provider implements cluster admission (ExclusiveController is part of the ActorProvider contract)
 func (s Suite) TestClusterAdmission(t *testing.T) {
-	exclusive, ok := s.p.(components.ExclusiveController)
-	if !ok {
-		t.Skip("provider does not support exclusive-access leases")
-	}
+	// The exclusive-access lease methods are part of the ActorProvider interface, so they are always available
+	exclusive := components.ExclusiveController(s.p)
 	maxHosts, ok := s.p.(maxHostsSetter)
 	if !ok {
 		t.Skip("provider does not support setting MaxHosts in tests")

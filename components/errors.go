@@ -19,5 +19,4 @@ var (
 	ErrClusterLocked            = errors.New("the cluster is locked for exclusive access")
 	ErrMaxHostsMismatch         = errors.New("host was configured with a different max hosts value than the rest of the cluster")
 	ErrExclusiveHeld            = errors.New("another exclusive-access lease is currently held")
-	ErrExclusiveNotSupported    = errors.New("the provider does not support exclusive-access leases")
 )

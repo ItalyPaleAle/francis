@@ -72,7 +72,6 @@ type Admin struct {
 // New builds an Admin from the given provider options
 // The provider options are the same value passed to a host (for example a sqlite.SQLiteProviderOptions or postgres.PostgresProviderOptions)
 // It initializes the provider, which applies any pending schema migrations, so it also works against a brand-new database
-// It returns components.ErrExclusiveNotSupported if the provider does not support exclusive-access leases (the standalone providers do not)
 func New(ctx context.Context, providerOptions components.ProviderOptions, opts Options) (*Admin, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
@@ -97,11 +96,8 @@ func New(ctx context.Context, providerOptions components.ProviderOptions, opts O
 		return nil, err
 	}
 
-	// The admin needs a provider that supports exclusive-access leases
-	exclusive, ok := provider.(components.ExclusiveController)
-	if !ok {
-		return nil, components.ErrExclusiveNotSupported
-	}
+	// Every provider implements the exclusive-access lease methods (ExclusiveController is embedded in ActorProvider)
+	exclusive := components.ExclusiveController(provider)
 
 	// Initialize the provider so its schema (including the cluster-admission row) exists
 	initCtx, cancel := context.WithTimeout(ctx, adminOpTimeout)

@@ -39,9 +39,21 @@ func adminRegisterReq(address string) components.RegisterHostReq {
 	}
 }
 
-func TestExclusiveNotSupported(t *testing.T) {
-	_, err := New(t.Context(), standalone.StandaloneMemoryOptions{}, Options{})
-	require.ErrorIs(t, err, components.ErrExclusiveNotSupported)
+func TestStandaloneProviderSupportsExclusive(t *testing.T) {
+	// The standalone providers now implement exclusive-access leases too, so building an admin from one succeeds
+	admin, err := New(t.Context(), standalone.StandaloneMemoryOptions{}, Options{
+		ExclusiveLeaseDuration: 2 * time.Second,
+		ExclusiveRenewInterval: time.Second,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = admin.Close() })
+
+	// With no hosts connected, acquiring and releasing exclusive access works end to end
+	_, err = admin.AcquireExclusive(t.Context(), AcquireOptions{Force: false})
+	require.NoError(t, err)
+
+	err = admin.ReleaseExclusive(t.Context())
+	require.NoError(t, err)
 }
 
 func TestAcquireForceFalseWithHosts(t *testing.T) {

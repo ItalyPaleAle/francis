@@ -3,6 +3,8 @@ package internal
 import (
 	"context"
 	"sync"
+
+	"github.com/italypaleale/francis/internal/clusterstate"
 )
 
 // changesPool is a pool of *Changes objects to reduce allocations.
@@ -70,6 +72,10 @@ type Changes struct {
 		Set    []ActorStateChange // Upsert actor state
 		Delete []ActorKey
 	}
+	// Cluster holds the new cluster-admission state to write to the single cluster_config row, or nil when unchanged
+	Cluster struct {
+		Set *clusterstate.State
+	}
 }
 
 // NewChanges returns a Changes instance from the pool.
@@ -95,6 +101,7 @@ func (c *Changes) Release() {
 	c.DeadJobs.Delete = c.DeadJobs.Delete[:0]
 	c.ActorState.Set = c.ActorState.Set[:0]
 	c.ActorState.Delete = c.ActorState.Delete[:0]
+	c.Cluster.Set = nil
 
 	changesPool.Put(c)
 }
@@ -112,7 +119,8 @@ func (c *Changes) IsEmpty() bool {
 		len(c.DeadJobs.Set) == 0 &&
 		len(c.DeadJobs.Delete) == 0 &&
 		len(c.ActorState.Set) == 0 &&
-		len(c.ActorState.Delete) == 0
+		len(c.ActorState.Delete) == 0 &&
+		c.Cluster.Set == nil
 }
 
 // Clone creates a deep clone of the Changes struct.
@@ -189,6 +197,16 @@ func (c *Changes) Clone() *Changes {
 	if len(c.ActorState.Delete) > 0 {
 		clone.ActorState.Delete = make([]ActorKey, len(c.ActorState.Delete))
 		copy(clone.ActorState.Delete, c.ActorState.Delete)
+	}
+
+	// Clone Cluster
+	if c.Cluster.Set != nil {
+		clusterCopy := *c.Cluster.Set
+		if c.Cluster.Set.MaxHosts != nil {
+			maxHosts := *c.Cluster.Set.MaxHosts
+			clusterCopy.MaxHosts = &maxHosts
+		}
+		clone.Cluster.Set = &clusterCopy
 	}
 
 	return clone

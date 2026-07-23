@@ -5,9 +5,9 @@ import (
 	"time"
 )
 
-// ExclusiveController is implemented by providers that support cluster exclusive-access leases
-// The ClusterAdmin uses it to take exclusive access to a cluster for a maintenance operation such as a data restore
-// This isn't supported by the standalone provider
+// ExclusiveController groups the cluster exclusive-access lease methods
+// The ClusterAdmin uses them to take exclusive access to a cluster for a maintenance operation such as a data restore
+// It is embedded in ActorProvider, so every provider implements it
 type ExclusiveController interface {
 	// AcquireExclusiveLease acquires or re-acquires the cluster exclusive-access lease for owner, extending it to now+ttl
 	// It returns ErrExclusiveHeld if a different owner currently holds a live (non-expired) lease

@@ -142,6 +142,9 @@ type ActorProvider interface {
 
 	// HealthCheckInterval returns the recommended lease renewal interval for hosts.
 	RenewLeaseInterval() time.Duration
+
+	// ExclusiveController groups the cluster exclusive-access lease methods, which every provider implements
+	ExclusiveController
 }
 
 // ProviderOptions is an empty interface implemented by all options structs for providers
