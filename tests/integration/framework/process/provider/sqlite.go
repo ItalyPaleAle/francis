@@ -63,6 +63,16 @@ func (b *sqliteBackend) NewProvider(t *testing.T, log *slog.Logger) components.A
 	return p
 }
 
+func (b *sqliteBackend) ProviderOptions(t *testing.T) components.ProviderOptions {
+	t.Helper()
+	require.NotEmpty(t, b.connStr, "SQLite backend used before Run")
+
+	return sqlite.SQLiteProviderOptions{
+		ConnectionString: b.connStr,
+		CleanupInterval:  -1,
+	}
+}
+
 func (b *sqliteBackend) Cleanup(t *testing.T) {
 	t.Helper()
 

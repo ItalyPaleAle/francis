@@ -129,6 +129,22 @@ func (b *postgresBackend) NewProvider(t *testing.T, log *slog.Logger) components
 	return p
 }
 
+func (b *postgresBackend) ProviderOptions(t *testing.T) components.ProviderOptions {
+	t.Helper()
+	require.NotNil(t, b.pool, "Postgres backend used before Run")
+
+	if b.standalone {
+		return standalone.StandalonePostgresOptions{
+			DB: b.pool,
+		}
+	}
+
+	return postgres.PostgresProviderOptions{
+		DB:              b.pool,
+		CleanupInterval: -1,
+	}
+}
+
 func (b *postgresBackend) Cleanup(t *testing.T) {
 	t.Helper()
 	if b.pool == nil {
