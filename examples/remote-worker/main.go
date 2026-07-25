@@ -93,7 +93,7 @@ func initLogger(level slog.Level) *slog.Logger {
 	var handler slog.Handler
 	if isatty.IsTerminal(os.Stdout.Fd()) {
 		// Enable colors if we have a TTY
-		handler = tint.NewHandler(os.Stdout, &tint.Options{
+		handler = tint.NewTextHandler(os.Stdout, &tint.Options{
 			TimeFormat: time.StampMilli,
 			Level:      level,
 		})
