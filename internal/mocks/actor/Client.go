@@ -624,6 +624,72 @@ func (_c *MockClient_ListJobs_Call[T]) RunAndReturn(run func(ctx context.Context
 	return _c
 }
 
+// ListStates provides a mock function for the type MockClient
+func (_mock *MockClient[T]) ListStates(ctx context.Context, opts *actor.ListStatesOpts) (actor.TypedStateList[T], error) {
+	ret := _mock.Called(ctx, opts)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListStates")
+	}
+
+	var r0 actor.TypedStateList[T]
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, *actor.ListStatesOpts) (actor.TypedStateList[T], error)); ok {
+		return returnFunc(ctx, opts)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, *actor.ListStatesOpts) actor.TypedStateList[T]); ok {
+		r0 = returnFunc(ctx, opts)
+	} else {
+		r0 = ret.Get(0).(actor.TypedStateList[T])
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, *actor.ListStatesOpts) error); ok {
+		r1 = returnFunc(ctx, opts)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockClient_ListStates_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListStates'
+type MockClient_ListStates_Call[T any] struct {
+	*mock.Call
+}
+
+// ListStates is a helper method to define mock.On call
+//   - ctx context.Context
+//   - opts *actor.ListStatesOpts
+func (_e *MockClient_Expecter[T]) ListStates(ctx any, opts any) *MockClient_ListStates_Call[T] {
+	return &MockClient_ListStates_Call[T]{Call: _e.mock.On("ListStates", ctx, opts)}
+}
+
+func (_c *MockClient_ListStates_Call[T]) Run(run func(ctx context.Context, opts *actor.ListStatesOpts)) *MockClient_ListStates_Call[T] {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 *actor.ListStatesOpts
+		if args[1] != nil {
+			arg1 = args[1].(*actor.ListStatesOpts)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockClient_ListStates_Call[T]) Return(typedStateList actor.TypedStateList[T], err error) *MockClient_ListStates_Call[T] {
+	_c.Call.Return(typedStateList, err)
+	return _c
+}
+
+func (_c *MockClient_ListStates_Call[T]) RunAndReturn(run func(ctx context.Context, opts *actor.ListStatesOpts) (actor.TypedStateList[T], error)) *MockClient_ListStates_Call[T] {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Peek provides a mock function for the type MockClient
 func (_mock *MockClient[T]) Peek(ctx context.Context, actorType string, actorID string, method string, data any, opts ...actor.InvokeOption) (actor.Envelope, error) {
 	// actor.InvokeOption

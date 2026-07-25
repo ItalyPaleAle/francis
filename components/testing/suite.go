@@ -36,6 +36,7 @@ func (s Suite) RunTests(t *testing.T) {
 	t.Run("remove actor", s.TestRemoveActor)
 
 	t.Run("actor state", s.TestState)
+	t.Run("list actor states", s.TestListStates)
 
 	t.Run("get alarm", s.TestGetAlarm)
 	t.Run("set alarm", s.TestSetAlarm)
@@ -2404,6 +2405,187 @@ func (s Suite) TestState(t *testing.T) {
 		// A second delete reports ErrNoState
 		err = s.p.DeleteState(ctx, ref4)
 		require.ErrorIs(t, err, components.ErrNoState)
+	})
+}
+
+func (s Suite) TestListStates(t *testing.T) {
+	// setState stores state for an actor of the given type
+	setState := func(t *testing.T, ctx context.Context, actorType string, actorID string, data []byte, opts components.SetStateOpts) {
+		t.Helper()
+		err := s.p.SetState(ctx, ref.ActorRef{ActorType: actorType, ActorID: actorID}, data, opts)
+		require.NoError(t, err)
+	}
+
+	// listIDs returns the actor IDs in a page, so tests can assert on the ordering without repeating the mapping
+	listIDs := func(t *testing.T, ctx context.Context, req components.ListStatesReq) ([]string, bool) {
+		t.Helper()
+		res, err := s.p.ListStates(ctx, req)
+		require.NoError(t, err)
+
+		ids := make([]string, len(res.States))
+		for i, state := range res.States {
+			ids[i] = state.ActorID
+		}
+		return ids, res.HasMore
+	}
+
+	// Seed with empty database
+	require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+
+	t.Run("returns an empty list when no state is stored", func(t *testing.T) {
+		res, err := s.p.ListStates(t.Context(), components.ListStatesReq{ActorType: "ListEmpty"})
+		require.NoError(t, err)
+		assert.Empty(t, res.States)
+		assert.False(t, res.HasMore)
+	})
+
+	t.Run("lists only the actors of the requested type", func(t *testing.T) {
+		ctx := t.Context()
+
+		setState(t, ctx, "ListTypeA", "actor-02", []byte("a2"), components.SetStateOpts{})
+		setState(t, ctx, "ListTypeA", "actor-01", []byte("a1"), components.SetStateOpts{})
+		setState(t, ctx, "ListTypeB", "actor-03", []byte("b3"), components.SetStateOpts{})
+
+		// The result is ordered by actor ID, regardless of the order the states were written in
+		ids, hasMore := listIDs(t, ctx, components.ListStatesReq{ActorType: "ListTypeA"})
+		assert.Equal(t, []string{"actor-01", "actor-02"}, ids)
+		assert.False(t, hasMore)
+
+		ids, hasMore = listIDs(t, ctx, components.ListStatesReq{ActorType: "ListTypeB"})
+		assert.Equal(t, []string{"actor-03"}, ids)
+		assert.False(t, hasMore)
+	})
+
+	t.Run("omits the data unless it is requested", func(t *testing.T) {
+		ctx := t.Context()
+
+		res, err := s.p.ListStates(ctx, components.ListStatesReq{ActorType: "ListTypeA"})
+		require.NoError(t, err)
+		require.Len(t, res.States, 2)
+		for _, state := range res.States {
+			assert.Empty(t, state.Data, "data must not be returned for actor %s", state.ActorID)
+		}
+	})
+
+	t.Run("returns the data when requested", func(t *testing.T) {
+		ctx := t.Context()
+
+		// State stored as an empty value is listed like any other, just with no data to return
+		setState(t, ctx, "ListData", "actor-01", []byte("hello world"), components.SetStateOpts{})
+		setState(t, ctx, "ListData", "actor-02", []byte{}, components.SetStateOpts{})
+
+		res, err := s.p.ListStates(ctx, components.ListStatesReq{ActorType: "ListData", IncludeData: true})
+		require.NoError(t, err)
+		require.Len(t, res.States, 2)
+
+		assert.Equal(t, "actor-01", res.States[0].ActorID)
+		assert.True(t, bytes.Equal([]byte("hello world"), res.States[0].Data))
+		assert.Equal(t, "actor-02", res.States[1].ActorID)
+		assert.Empty(t, res.States[1].Data)
+	})
+
+	t.Run("excludes deleted state", func(t *testing.T) {
+		ctx := t.Context()
+
+		setState(t, ctx, "ListDeleted", "actor-01", []byte("gone"), components.SetStateOpts{})
+		setState(t, ctx, "ListDeleted", "actor-02", []byte("stays"), components.SetStateOpts{})
+
+		err := s.p.DeleteState(ctx, ref.ActorRef{ActorType: "ListDeleted", ActorID: "actor-01"})
+		require.NoError(t, err)
+
+		ids, _ := listIDs(t, ctx, components.ListStatesReq{ActorType: "ListDeleted"})
+		assert.Equal(t, []string{"actor-02"}, ids)
+	})
+
+	t.Run("excludes expired state before it is garbage collected", func(t *testing.T) {
+		ctx := t.Context()
+
+		setState(t, ctx, "ListExpired", "actor-01", []byte("short"), components.SetStateOpts{TTL: time.Second})
+		setState(t, ctx, "ListExpired", "actor-02", []byte("long"), components.SetStateOpts{TTL: time.Hour})
+		setState(t, ctx, "ListExpired", "actor-03", []byte("forever"), components.SetStateOpts{})
+
+		ids, _ := listIDs(t, ctx, components.ListStatesReq{ActorType: "ListExpired"})
+		assert.Equal(t, []string{"actor-01", "actor-02", "actor-03"}, ids)
+
+		// The expired row is still in the database at this point, so this asserts that listing filters on the expiration rather than relying on the cleanup
+		_ = s.p.AdvanceClock(1200 * time.Millisecond) //nolint:errcheck
+		ids, _ = listIDs(t, ctx, components.ListStatesReq{ActorType: "ListExpired"})
+		assert.Equal(t, []string{"actor-02", "actor-03"}, ids)
+	})
+
+	t.Run("pages through the collection with after and limit", func(t *testing.T) {
+		ctx := t.Context()
+
+		const count = 5
+		for i := 1; i <= count; i++ {
+			setState(t, ctx, "ListPaged", fmt.Sprintf("actor-%02d", i), fmt.Appendf(nil, "data-%02d", i), components.SetStateOpts{})
+		}
+
+		// Walk the collection two at a time, using the last ID of each page as the cursor for the next one
+		var (
+			seen   []string
+			cursor string
+		)
+		for range count {
+			res, err := s.p.ListStates(ctx, components.ListStatesReq{ActorType: "ListPaged", After: cursor, Limit: 2, IncludeData: true})
+			require.NoError(t, err)
+			require.NotEmpty(t, res.States)
+			require.LessOrEqual(t, len(res.States), 2)
+
+			for _, state := range res.States {
+				seen = append(seen, state.ActorID)
+				// Paging must not affect the data, so each page carries the payload of the actors it contains
+				assert.Equal(t, "data-"+strings.TrimPrefix(state.ActorID, "actor-"), string(state.Data))
+			}
+
+			cursor = res.States[len(res.States)-1].ActorID
+			if !res.HasMore {
+				break
+			}
+		}
+
+		// Every actor is visited exactly once, in order, and the final page reports no more results
+		assert.Equal(t, []string{"actor-01", "actor-02", "actor-03", "actor-04", "actor-05"}, seen)
+
+		// A cursor past the end of the collection returns nothing
+		ids, hasMore := listIDs(t, ctx, components.ListStatesReq{ActorType: "ListPaged", After: "actor-05"})
+		assert.Empty(t, ids)
+		assert.False(t, hasMore)
+
+		// The cursor doesn't have to be an existing actor ID: listing resumes at the next ID after it
+		ids, _ = listIDs(t, ctx, components.ListStatesReq{ActorType: "ListPaged", After: "actor-02a"})
+		assert.Equal(t, []string{"actor-03", "actor-04", "actor-05"}, ids)
+	})
+
+	t.Run("limits the page to the default when no limit is requested", func(t *testing.T) {
+		ctx := t.Context()
+
+		// One state more than the default page size, so the first page is full and reports that more exist
+		count := components.DefaultListStatesLimit + 1
+		for i := 1; i <= count; i++ {
+			setState(t, ctx, "ListDefaultLimit", fmt.Sprintf("actor-%04d", i), []byte("d"), components.SetStateOpts{})
+		}
+
+		res, err := s.p.ListStates(ctx, components.ListStatesReq{ActorType: "ListDefaultLimit"})
+		require.NoError(t, err)
+		assert.Len(t, res.States, components.DefaultListStatesLimit)
+		assert.True(t, res.HasMore)
+
+		// The last page holds the remainder and reports the end of the collection
+		res, err = s.p.ListStates(ctx, components.ListStatesReq{ActorType: "ListDefaultLimit", After: res.States[len(res.States)-1].ActorID})
+		require.NoError(t, err)
+		assert.Len(t, res.States, count-components.DefaultListStatesLimit)
+		assert.False(t, res.HasMore)
+	})
+
+	t.Run("caps a limit above the maximum", func(t *testing.T) {
+		ctx := t.Context()
+
+		// Asking for more than the provider allows is not an error: the request is served with the capped page size
+		res, err := s.p.ListStates(ctx, components.ListStatesReq{ActorType: "ListDefaultLimit", Limit: components.MaxListStatesLimit + 1})
+		require.NoError(t, err)
+		assert.Len(t, res.States, components.DefaultListStatesLimit+1)
+		assert.False(t, res.HasMore)
 	})
 }
 

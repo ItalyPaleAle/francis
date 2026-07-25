@@ -199,6 +199,26 @@ func (s *Service) deleteState(ctx context.Context, actorType string, actorID str
 	return s.host.DeleteState(ctx, actorType, actorID)
 }
 
+// ListStates returns the actors of a given type that have state stored, ordered by actor ID.
+// Results are paginated: pass the ID of the last actor received as opts.After to retrieve the next page, for as long as the returned StateList reports HasMore.
+// The state of each actor is only included when opts.IncludeData is set.
+func (s *Service) ListStates(ctx context.Context, actorType string, opts *ListStatesOpts) (StateList, error) {
+	if ref.IsBuiltInActorType(actorType) {
+		return StateList{}, ErrActorTypeReserved
+	}
+
+	return s.listStates(ctx, actorType, opts)
+}
+
+// listStates is the unguarded ListStates used by the in-actor client, which is allowed to target built-in actors
+func (s *Service) listStates(ctx context.Context, actorType string, opts *ListStatesOpts) (StateList, error) {
+	if !s.ready() {
+		return StateList{}, ErrServiceNotInitialized
+	}
+
+	return s.host.ListStates(ctx, actorType, opts)
+}
+
 // SetAlarm creates or replaces an alarm for an actor.
 func (s *Service) SetAlarm(ctx context.Context, actorType string, actorID string, alarmName string, properties AlarmProperties) error {
 	if ref.IsBuiltInActorType(actorType) {

@@ -988,6 +988,78 @@ func (_c *MockHost_ListJobs_Call) RunAndReturn(run func(ctx context.Context, act
 	return _c
 }
 
+// ListStates provides a mock function for the type MockHost
+func (_mock *MockHost) ListStates(ctx context.Context, actorType string, opts *actor.ListStatesOpts) (actor.StateList, error) {
+	ret := _mock.Called(ctx, actorType, opts)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListStates")
+	}
+
+	var r0 actor.StateList
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, *actor.ListStatesOpts) (actor.StateList, error)); ok {
+		return returnFunc(ctx, actorType, opts)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, *actor.ListStatesOpts) actor.StateList); ok {
+		r0 = returnFunc(ctx, actorType, opts)
+	} else {
+		r0 = ret.Get(0).(actor.StateList)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, *actor.ListStatesOpts) error); ok {
+		r1 = returnFunc(ctx, actorType, opts)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockHost_ListStates_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListStates'
+type MockHost_ListStates_Call struct {
+	*mock.Call
+}
+
+// ListStates is a helper method to define mock.On call
+//   - ctx context.Context
+//   - actorType string
+//   - opts *actor.ListStatesOpts
+func (_e *MockHost_Expecter) ListStates(ctx any, actorType any, opts any) *MockHost_ListStates_Call {
+	return &MockHost_ListStates_Call{Call: _e.mock.On("ListStates", ctx, actorType, opts)}
+}
+
+func (_c *MockHost_ListStates_Call) Run(run func(ctx context.Context, actorType string, opts *actor.ListStatesOpts)) *MockHost_ListStates_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		var arg2 *actor.ListStatesOpts
+		if args[2] != nil {
+			arg2 = args[2].(*actor.ListStatesOpts)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockHost_ListStates_Call) Return(stateList actor.StateList, err error) *MockHost_ListStates_Call {
+	_c.Call.Return(stateList, err)
+	return _c
+}
+
+func (_c *MockHost_ListStates_Call) RunAndReturn(run func(ctx context.Context, actorType string, opts *actor.ListStatesOpts) (actor.StateList, error)) *MockHost_ListStates_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Peek provides a mock function for the type MockHost
 func (_mock *MockHost) Peek(ctx context.Context, actorType string, actorID string, method string, data any, opts ...actor.InvokeOption) (actor.Envelope, error) {
 	// actor.InvokeOption

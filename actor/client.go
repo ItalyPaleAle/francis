@@ -3,6 +3,7 @@ package actor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/italypaleale/francis/internal/builtinkey"
@@ -22,6 +23,8 @@ type Client[T any] interface {
 	GetState(ctx context.Context) (state T, err error)
 	// DeleteState deletes the actor's state.
 	DeleteState(ctx context.Context) error
+	// ListStates returns the actors of the current actor's type that have state stored, with the data decoded into T when requested.
+	ListStates(ctx context.Context, opts *ListStatesOpts) (TypedStateList[T], error)
 	// SetAlarm creates or replaces an alarm.
 	SetAlarm(ctx context.Context, alarmName string, properties AlarmProperties) error
 	// DeleteAlarm deletes an alarm.
@@ -176,6 +179,41 @@ func (c *client[T]) DeleteState(ctx context.Context) error {
 	c.stateMu.Unlock()
 
 	return c.service.deleteState(ctx, c.actorType, c.actorID)
+}
+
+// ListStates returns the actors of the current actor's type that have state stored.
+func (c *client[T]) ListStates(ctx context.Context, opts *ListStatesOpts) (TypedStateList[T], error) {
+	if !c.canTarget(c.actorType) {
+		return TypedStateList[T]{}, ErrActorTypeReserved
+	}
+
+	// Listing is a read, so unlike the state mutators it is allowed during a Peek invocation
+	// It also bypasses the client's state cache entirely, which only ever holds this actor's own state
+	list, err := c.service.listStates(ctx, c.actorType, opts)
+	if err != nil {
+		return TypedStateList[T]{}, err
+	}
+
+	// Decode each state into T
+	// An actor whose state is absent from the page (because the data wasn't requested, or because it's empty) keeps the zero value of T
+	res := TypedStateList[T]{
+		States:  make([]TypedStateInfo[T], len(list.States)),
+		HasMore: list.HasMore,
+	}
+	for i := range list.States {
+		res.States[i].ActorID = list.States[i].ActorID
+
+		if list.States[i].Data == nil {
+			continue
+		}
+
+		err = list.States[i].Data.Decode(&res.States[i].Data)
+		if err != nil {
+			return TypedStateList[T]{}, fmt.Errorf("failed to decode state for actor '%s': %w", list.States[i].ActorID, err)
+		}
+	}
+
+	return res, nil
 }
 
 // SetAlarm creates or replaces an alarm.

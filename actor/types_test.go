@@ -130,3 +130,50 @@ func TestAlarmProperties_UnmarshalJSON(t *testing.T) {
 		require.ErrorContains(t, err, "invalid ttl")
 	})
 }
+
+func TestStateListAfterID(t *testing.T) {
+	t.Run("returns the last actor ID when more states follow", func(t *testing.T) {
+		list := StateList{
+			States:  []StateInfo{{ActorID: "a1"}, {ActorID: "a2"}},
+			HasMore: true,
+		}
+		assert.Equal(t, "a2", list.AfterID())
+	})
+
+	t.Run("returns an empty cursor on the last page", func(t *testing.T) {
+		// The cursor is what ends a pagination loop, so it must be empty as soon as there is nothing left to fetch
+		list := StateList{
+			States: []StateInfo{{ActorID: "a1"}, {ActorID: "a2"}},
+		}
+		assert.Empty(t, list.AfterID())
+	})
+
+	t.Run("returns an empty cursor for an empty page", func(t *testing.T) {
+		assert.Empty(t, StateList{}.AfterID())
+
+		// HasMore without any state is not a response a provider should produce, but it must not panic on the missing last element
+		assert.Empty(t, StateList{HasMore: true}.AfterID())
+	})
+}
+
+func TestTypedStateListAfterID(t *testing.T) {
+	t.Run("returns the last actor ID when more states follow", func(t *testing.T) {
+		list := TypedStateList[int]{
+			States:  []TypedStateInfo[int]{{ActorID: "a1", Data: 1}, {ActorID: "a2", Data: 2}},
+			HasMore: true,
+		}
+		assert.Equal(t, "a2", list.AfterID())
+	})
+
+	t.Run("returns an empty cursor on the last page", func(t *testing.T) {
+		list := TypedStateList[int]{
+			States: []TypedStateInfo[int]{{ActorID: "a1", Data: 1}},
+		}
+		assert.Empty(t, list.AfterID())
+	})
+
+	t.Run("returns an empty cursor for an empty page", func(t *testing.T) {
+		assert.Empty(t, TypedStateList[int]{}.AfterID())
+		assert.Empty(t, TypedStateList[int]{HasMore: true}.AfterID())
+	})
+}

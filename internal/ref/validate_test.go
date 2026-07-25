@@ -15,4 +15,10 @@ func TestValidateComponents(t *testing.T) {
 	require.ErrorIs(t, ValidateComponents("my/type", "id"), ErrInvalidRefComponent)
 	require.ErrorIs(t, ValidateComponents("type", "my/id"), ErrInvalidRefComponent)
 	require.ErrorIs(t, ValidateComponents("type", "id", "alarm/name"), ErrInvalidRefComponent)
+
+	// An empty component names nothing, so it is rejected in every position
+	require.ErrorIs(t, ValidateComponents(""), ErrInvalidRefComponent)
+	require.ErrorIs(t, ValidateComponents("", "id"), ErrInvalidRefComponent)
+	require.ErrorIs(t, ValidateComponents("type", ""), ErrInvalidRefComponent)
+	require.ErrorIs(t, ValidateComponents("type", "id", ""), ErrInvalidRefComponent)
 }

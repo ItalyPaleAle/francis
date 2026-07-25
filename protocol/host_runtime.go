@@ -307,3 +307,28 @@ type SetStateRequest struct {
 type DeleteStateRequest struct {
 	ActorRef
 }
+
+// ListStatesRequest lists the actors of a given type that have persistent state stored
+type ListStatesRequest struct {
+	ActorType string `msgpack:"type"`
+	// IncludeData requests the stored state data alongside each actor ID
+	IncludeData bool `msgpack:"includeData,omitempty"`
+	// After is the pagination cursor, and only actor IDs sorting strictly after it are returned
+	After string `msgpack:"after,omitempty"`
+	// Limit is the maximum number of states to return, where zero means the provider's default
+	Limit int `msgpack:"limit,omitempty"`
+}
+
+// ListStatesResponse carries a page of actor states
+type ListStatesResponse struct {
+	States []ActorStateInfo `msgpack:"states,omitempty"`
+	// HasMore is true when more states exist after the last one in this page
+	HasMore bool `msgpack:"hasMore,omitempty"`
+}
+
+// ActorStateInfo carries the stored state of a single actor
+type ActorStateInfo struct {
+	ActorID string `msgpack:"id"`
+	// Data is the MessagePack-encoded actor state, set only when it was requested
+	Data []byte `msgpack:"data,omitempty"`
+}

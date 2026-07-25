@@ -13,6 +13,7 @@ import (
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/tracing"
+	"github.com/italypaleale/francis/internal/types"
 )
 
 func (h *Host) SetState(ctx context.Context, actorType string, actorID string, state any, opts *actor.SetStateOpts) (err error) {
@@ -85,6 +86,38 @@ func (h *Host) GetState(ctx context.Context, actorType string, actorID string, d
 	return nil
 }
 
+func (h *Host) ListStates(ctx context.Context, actorType string, opts *actor.ListStatesOpts) (res actor.StateList, err error) {
+	ctx, span := tracing.Start(ctx, "state.list",
+		trace.WithAttributes(
+			tracing.ActorType(actorType),
+		),
+	)
+	defer func() {
+		tracing.End(span, err)
+	}()
+
+	err = ref.ValidateComponents(actorType)
+	if err != nil {
+		return res, err
+	}
+
+	req := components.ListStatesReq{
+		ActorType: actorType,
+	}
+	if opts != nil {
+		req.IncludeData = opts.IncludeData
+		req.After = opts.After
+		req.Limit = opts.Limit
+	}
+
+	provRes, err := h.actorProvider.ListStates(ctx, req)
+	if err != nil {
+		return res, fmt.Errorf("failed listing states: %w", err)
+	}
+
+	return stateListToActor(provRes), nil
+}
+
 func (h *Host) DeleteState(ctx context.Context, actorType string, actorID string) (err error) {
 	ctx, span := tracing.Start(ctx, "state.delete",
 		trace.WithAttributes(
@@ -111,4 +144,25 @@ func (h *Host) DeleteState(ctx context.Context, actorType string, actorID string
 	}
 
 	return nil
+}
+
+// stateListToActor maps a provider state listing to the public actor one.
+func stateListToActor(in components.ListStatesRes) actor.StateList {
+	out := actor.StateList{
+		States:  make([]actor.StateInfo, len(in.States)),
+		HasMore: in.HasMore,
+	}
+
+	for i := range in.States {
+		out.States[i] = actor.StateInfo{
+			ActorID: in.States[i].ActorID,
+		}
+
+		// An empty payload is left as a nil envelope, since there is nothing to decode from it
+		if len(in.States[i].Data) > 0 {
+			out.States[i].Data = types.MsgpackEnvelope(in.States[i].Data)
+		}
+	}
+
+	return out
 }

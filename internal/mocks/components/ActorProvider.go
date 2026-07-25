@@ -1235,6 +1235,72 @@ func (_c *MockActorProvider_ListJobs_Call) RunAndReturn(run func(ctx context.Con
 	return _c
 }
 
+// ListStates provides a mock function for the type MockActorProvider
+func (_mock *MockActorProvider) ListStates(ctx context.Context, req components.ListStatesReq) (components.ListStatesRes, error) {
+	ret := _mock.Called(ctx, req)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListStates")
+	}
+
+	var r0 components.ListStatesRes
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, components.ListStatesReq) (components.ListStatesRes, error)); ok {
+		return returnFunc(ctx, req)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, components.ListStatesReq) components.ListStatesRes); ok {
+		r0 = returnFunc(ctx, req)
+	} else {
+		r0 = ret.Get(0).(components.ListStatesRes)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, components.ListStatesReq) error); ok {
+		r1 = returnFunc(ctx, req)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockActorProvider_ListStates_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListStates'
+type MockActorProvider_ListStates_Call struct {
+	*mock.Call
+}
+
+// ListStates is a helper method to define mock.On call
+//   - ctx context.Context
+//   - req components.ListStatesReq
+func (_e *MockActorProvider_Expecter) ListStates(ctx any, req any) *MockActorProvider_ListStates_Call {
+	return &MockActorProvider_ListStates_Call{Call: _e.mock.On("ListStates", ctx, req)}
+}
+
+func (_c *MockActorProvider_ListStates_Call) Run(run func(ctx context.Context, req components.ListStatesReq)) *MockActorProvider_ListStates_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 components.ListStatesReq
+		if args[1] != nil {
+			arg1 = args[1].(components.ListStatesReq)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockActorProvider_ListStates_Call) Return(listStatesRes components.ListStatesRes, err error) *MockActorProvider_ListStates_Call {
+	_c.Call.Return(listStatesRes, err)
+	return _c
+}
+
+func (_c *MockActorProvider_ListStates_Call) RunAndReturn(run func(ctx context.Context, req components.ListStatesReq) (components.ListStatesRes, error)) *MockActorProvider_ListStates_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // LookupActor provides a mock function for the type MockActorProvider
 func (_mock *MockActorProvider) LookupActor(ctx context.Context, ref1 ref.ActorRef, opts components.LookupActorOpts) (components.LookupActorRes, error) {
 	ret := _mock.Called(ctx, ref1, opts)

@@ -59,6 +59,72 @@ func (s *SQLiteProvider) SetState(ctx context.Context, ref ref.ActorRef, data []
 	return nil
 }
 
+func (s *SQLiteProvider) ListStates(ctx context.Context, req components.ListStatesReq) (components.ListStatesRes, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+
+	// The state data is only selected when the caller asked for it, so listing actor IDs doesn't have to read every blob
+	dataCol := "NULL"
+	if req.IncludeData {
+		dataCol = "actor_state_data"
+	}
+
+	// We fetch one row more than the limit: if it comes back, there's at least one more state after this page
+	// This avoids a second query just to compute HasMore
+	limit := req.EffectiveLimit()
+
+	// The (actor_type, actor_id) primary key serves both the range scan and the ordering
+	// An empty cursor selects the first page, since every actor ID sorts after the empty string
+	// #nosec G202 -- the only concatenated values are the static table prefix and a fixed column name, not user input
+	rows, err := s.db.QueryContext(queryCtx,
+		`SELECT actor_id, `+dataCol+`
+		FROM `+s.tablePrefix+`actor_state
+		WHERE
+			actor_type = ?
+			AND actor_id > ?
+			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > ?)
+		ORDER BY actor_id
+		LIMIT ?`,
+		req.ActorType, req.After, s.clock.Now().UnixMilli(), limit+1,
+	)
+	if err != nil {
+		return components.ListStatesRes{}, fmt.Errorf("error executing query: %w", err)
+	}
+	defer rows.Close()
+
+	res := components.ListStatesRes{
+		States: make([]components.ActorStateInfo, 0, limit),
+	}
+	for rows.Next() {
+		// Stop consuming at the limit: the extra row only tells us more states exist
+		if len(res.States) == limit {
+			res.HasMore = true
+			break
+		}
+
+		var (
+			actorID string
+			data    []byte
+		)
+		err = rows.Scan(&actorID, &data)
+		if err != nil {
+			return components.ListStatesRes{}, fmt.Errorf("error scanning actor state: %w", err)
+		}
+
+		res.States = append(res.States, components.ActorStateInfo{
+			ActorID: actorID,
+			Data:    data,
+		})
+	}
+
+	err = rows.Err()
+	if err != nil {
+		return components.ListStatesRes{}, fmt.Errorf("error iterating actor states: %w", err)
+	}
+
+	return res, nil
+}
+
 func (s *SQLiteProvider) DeleteState(ctx context.Context, ref ref.ActorRef) error {
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()

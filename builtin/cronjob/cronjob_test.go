@@ -454,6 +454,10 @@ func (f *fakeClient[T]) DeleteState(context.Context) error {
 	return nil
 }
 
+func (f *fakeClient[T]) ListStates(context.Context, *actor.ListStatesOpts) (actor.TypedStateList[T], error) {
+	return actor.TypedStateList[T]{}, nil
+}
+
 func (f *fakeClient[T]) Dispatch(_ context.Context, method string, _ any, opts ...actor.JobOption) (string, error) {
 	var p actor.JobProperties
 	for _, o := range opts {

@@ -49,6 +49,7 @@ const (
 	KindGetState         = "host.state.get"
 	KindSetState         = "host.state.set"
 	KindDeleteState      = "host.state.delete"
+	KindListStates       = "host.state.list"
 
 	// Host -> Runtime responses
 
@@ -70,6 +71,7 @@ const (
 	KindGetStateResponse          = "host.state.get.response"
 	KindSetStateResponse          = "host.state.set.response"
 	KindDeleteStateResponse       = "host.state.delete.response"
+	KindListStatesResponse        = "host.state.list.response"
 
 	// Runtime -> Host requests
 

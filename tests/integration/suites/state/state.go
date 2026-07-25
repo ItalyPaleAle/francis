@@ -5,6 +5,7 @@ package state
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/actorcore"
+	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/tests/integration/framework"
 	"github.com/italypaleale/francis/tests/integration/framework/cluster"
 	frameworkhost "github.com/italypaleale/francis/tests/integration/framework/process/host"
@@ -36,6 +38,11 @@ func init() {
 			k = cluster.Remote
 		}
 		suite.Register(&crud{kind: k, variant: v})
+
+		// Listing is cheap and has no timing waits, and the remote topology is the only place the list RPC is exercised end-to-end, so it runs on the full matrix
+		for _, k := range []cluster.Kind{cluster.Local, cluster.Remote} {
+			suite.Register(&list{kind: k, variant: v})
+		}
 	}
 }
 
@@ -266,5 +273,112 @@ func (s *crud) Run(t *testing.T) {
 		err = svc.GetState(ctx, shared.ProbeActorType, "inv-1", &got)
 		require.NoError(t, err)
 		assert.Equal(t, int64(1), got.N)
+	})
+}
+
+// list exercises listing the actors of a type that have state stored, which on the remote topology travels through the runtime as its own RPC
+type list struct {
+	kind    cluster.Kind
+	variant provider.Variant
+
+	cluster *cluster.Cluster
+}
+
+func (s *list) Name() string {
+	return "statelist/" + string(s.kind) + "/" + string(s.variant)
+}
+
+func (s *list) Setup(t *testing.T) []framework.Option {
+	s.cluster = cluster.New(t, cluster.Options{
+		Kind:    s.kind,
+		Variant: s.variant,
+		Hosts:   1,
+		Actors:  []frameworkhost.ActorReg{shared.ProbeReg(actorcore.WithIdleTimeout(time.Minute))},
+	})
+	return []framework.Option{
+		framework.WithProcesses(s.cluster.Processes()...),
+	}
+}
+
+func (s *list) Run(t *testing.T) {
+	svc := s.cluster.Service(0)
+	ctx := t.Context()
+
+	// listIDs returns the actor IDs in a page, so the assertions below don't have to repeat the mapping
+	listIDs := func(t *testing.T, opts *actor.ListStatesOpts) ([]string, bool) {
+		t.Helper()
+		res, err := svc.ListStates(ctx, shared.ProbeActorType, opts)
+		require.NoError(t, err)
+
+		ids := make([]string, len(res.States))
+		for i, state := range res.States {
+			ids[i] = state.ActorID
+		}
+		return ids, res.HasMore
+	}
+
+	// A type with no stored state lists as empty rather than failing
+	t.Run("empty before any state is written", func(t *testing.T) {
+		ids, hasMore := listIDs(t, nil)
+		assert.Empty(t, ids)
+		assert.False(t, hasMore)
+	})
+
+	// Seed a handful of actors, deliberately out of order, so the listing has to establish the ordering itself
+	const count = 4
+	for i := count; i >= 1; i-- {
+		err := svc.SetState(ctx, shared.ProbeActorType, fmt.Sprintf("list-%02d", i), shared.ProbeState{N: int64(i)}, nil)
+		require.NoError(t, err)
+	}
+
+	t.Run("lists the actor IDs in order", func(t *testing.T) {
+		ids, hasMore := listIDs(t, nil)
+		assert.Equal(t, []string{"list-01", "list-02", "list-03", "list-04"}, ids)
+		assert.False(t, hasMore)
+	})
+
+	t.Run("returns the decoded state when requested", func(t *testing.T) {
+		res, err := svc.ListStates(ctx, shared.ProbeActorType, &actor.ListStatesOpts{IncludeData: true})
+		require.NoError(t, err)
+		require.Len(t, res.States, count)
+
+		for i, state := range res.States {
+			require.NotNil(t, state.Data, "actor %s should carry its state", state.ActorID)
+
+			var got shared.ProbeState
+			require.NoError(t, state.Data.Decode(&got))
+			assert.Equal(t, int64(i+1), got.N)
+		}
+	})
+
+	t.Run("pages through the collection", func(t *testing.T) {
+		// The first page is full and hands back a cursor, since more actors follow
+		first, err := svc.ListStates(ctx, shared.ProbeActorType, &actor.ListStatesOpts{Limit: 3})
+		require.NoError(t, err)
+		assert.True(t, first.HasMore)
+		assert.Equal(t, "list-03", first.AfterID())
+
+		// Resuming from that cursor returns the remainder, and the last page hands back no cursor so a paging loop terminates
+		second, err := svc.ListStates(ctx, shared.ProbeActorType, &actor.ListStatesOpts{Limit: 3, After: first.AfterID()})
+		require.NoError(t, err)
+		require.Len(t, second.States, 1)
+		assert.Equal(t, "list-04", second.States[0].ActorID)
+		assert.False(t, second.HasMore)
+		assert.Empty(t, second.AfterID())
+	})
+
+	// Deleting state removes the actor from the listing
+	t.Run("reflects a deleted state", func(t *testing.T) {
+		err := svc.DeleteState(ctx, shared.ProbeActorType, "list-01")
+		require.NoError(t, err)
+
+		ids, _ := listIDs(t, nil)
+		assert.Equal(t, []string{"list-02", "list-03", "list-04"}, ids)
+	})
+
+	// Built-in actor types are not addressable through the service
+	t.Run("rejects a built-in actor type", func(t *testing.T) {
+		_, err := svc.ListStates(ctx, ref.BuiltInActorTypePrefix+"cronjob", nil)
+		require.ErrorIs(t, err, actor.ErrActorTypeReserved)
 	})
 }

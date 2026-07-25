@@ -36,12 +36,78 @@ type Host interface {
 	SetState(ctx context.Context, actorType string, actorID string, state any, opts *SetStateOpts) error
 	GetState(ctx context.Context, actorType string, actorID string, dest any) error
 	DeleteState(ctx context.Context, actorType string, actorID string) error
+	ListStates(ctx context.Context, actorType string, opts *ListStatesOpts) (StateList, error)
 }
 
 // SetStateOpts is the options for the SetState method
 type SetStateOpts struct {
 	// Optional TTL for the state
 	TTL time.Duration
+}
+
+// ListStatesOpts is the options for the ListStates method
+type ListStatesOpts struct {
+	// When true, the stored state is returned alongside each actor ID
+	IncludeData bool
+	// Pagination cursor: only actor IDs sorting strictly after this value are returned
+	After string
+	// Maximum number of states to return
+	// If empty, requests the default page size
+	Limit int
+}
+
+// StateList is a page of actor states returned by ListStates.
+type StateList struct {
+	// States in this page, ordered by actor ID in ascending order
+	States []StateInfo
+	// HasMore is true when more states exist after the last one in this page
+	HasMore bool
+}
+
+// AfterID returns the cursor to set as ListStatesOpts.After to retrieve the page following this one.
+// It is empty when this page is the last one, so a loop that pages until it gets an empty cursor visits every state exactly once.
+func (l StateList) AfterID() string {
+	if !l.HasMore || len(l.States) == 0 {
+		return ""
+	}
+
+	return l.States[len(l.States)-1].ActorID
+}
+
+// StateInfo describes the stored state of a single actor.
+type StateInfo struct {
+	// ID of the actor the state belongs to
+	ActorID string
+	// Data decodes the stored state
+	// It is nil when the actor's stored state is empty or when the listing didn't request the data
+	Data Envelope
+}
+
+// TypedStateList is a page of actor states whose data has been decoded into T, returned by the ListStates method of Client.
+type TypedStateList[T any] struct {
+	// States in this page, ordered by actor ID in ascending order
+	States []TypedStateInfo[T]
+	// HasMore is true when more states exist after the last one in this page
+	HasMore bool
+}
+
+// AfterID returns the cursor to set as ListStatesOpts.After to retrieve the page following this one.
+// It is empty when this page is the last one, so a loop that pages until it gets an empty cursor visits every state exactly once.
+func (l TypedStateList[T]) AfterID() string {
+	if !l.HasMore || len(l.States) == 0 {
+		return ""
+	}
+
+	return l.States[len(l.States)-1].ActorID
+}
+
+// TypedStateInfo describes the stored state of a single actor, decoded into T.
+type TypedStateInfo[T any] struct {
+	// ID of the actor the state belongs to
+	ActorID string
+	// Decoded state of the actor
+	// It is the zero value when when the actor's stored state is empty or when the listing didn't request the data
+	Data T
 }
 
 // AlarmProperties contains the options for a new alarm.

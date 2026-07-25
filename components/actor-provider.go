@@ -15,6 +15,11 @@ const (
 	DefaultAlarmsLeaseDuration       = 20 * time.Second
 	DefaultAlarmsFetchAheadInterval  = 2500 * time.Millisecond
 	DefaultAlarmsFetchAheadBatchSize = 25
+
+	// DefaultListStatesLimit is the number of actor states returned by ListStates when the request does not specify a limit
+	DefaultListStatesLimit = 100
+	// MaxListStatesLimit is the largest page ListStates will return
+	MaxListStatesLimit = 1000
 )
 
 // ActorProvider is the interface implemented by all actor providers
@@ -128,6 +133,10 @@ type ActorProvider interface {
 	// DeleteState deletes the persistent state of an actor.
 	// If there's no state, returns ErrNoState.
 	DeleteState(ctx context.Context, ref ref.ActorRef) error
+
+	// ListStates returns the actors of a given type that have persistent state stored.
+	// Results are ordered by actor ID in ascending order (expired state is omitted).
+	ListStates(ctx context.Context, req ListStatesReq) (ListStatesRes, error)
 
 	// Backup writes a portable, versioned snapshot of all persistent data (actor state, alarms, and dead-lettered jobs) to w.
 	// It takes a consistent snapshot inside a transaction, so it can run while the cluster is online.
@@ -322,6 +331,47 @@ type UpdateLeasedAlarmReq struct {
 // SetStateOpts contains options for SetState
 type SetStateOpts struct {
 	TTL time.Duration
+}
+
+// ListStatesReq is the request object for the ListStates method.
+type ListStatesReq struct {
+	// Actor type whose stored states are listed
+	ActorType string
+	// When true, the stored state data is returned alongside each actor ID
+	IncludeData bool
+	// Pagination cursor: only actor IDs sorting strictly after this value are returned
+	After string
+	// Maximum number of states to return
+	// Zero means DefaultListStatesLimit, and values above MaxListStatesLimit are capped
+	Limit int
+}
+
+// EffectiveLimit returns the number of states the provider should return for this request, applying the default when the caller didn't set a limit and the cap when it asked for too many.
+func (r ListStatesReq) EffectiveLimit() int {
+	switch {
+	case r.Limit <= 0:
+		return DefaultListStatesLimit
+	case r.Limit > MaxListStatesLimit:
+		return MaxListStatesLimit
+	default:
+		return r.Limit
+	}
+}
+
+// ListStatesRes is the response object for the ListStates method.
+type ListStatesRes struct {
+	// States in this page, ordered by actor ID in ascending order
+	States []ActorStateInfo
+	// HasMore is true when the collection contains more states after the last one in this page
+	HasMore bool
+}
+
+// ActorStateInfo describes the stored state of a single actor returned by ListStates.
+type ActorStateInfo struct {
+	// ID of the actor the state belongs to
+	ActorID string
+	// Stored state data, populated only when the request set IncludeData
+	Data []byte
 }
 
 // JobStatus is the provider-level lifecycle stage of a job.

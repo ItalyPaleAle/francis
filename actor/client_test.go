@@ -2,6 +2,7 @@ package actor
 
 import (
 	"context"
+	"errors"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	msgpack "github.com/vmihailenco/msgpack/v5"
 
 	"github.com/italypaleale/francis/internal/builtinkey"
 	"github.com/italypaleale/francis/internal/ref"
@@ -22,6 +24,11 @@ type fakeHost struct {
 	getStateDelay time.Duration
 	getStateValue int
 	getStateErr   error
+
+	listStatesRes  StateList
+	listStatesErr  error
+	listStatesType string
+	listStatesOpts *ListStatesOpts
 }
 
 func (f *fakeHost) Invoke(context.Context, string, string, string, any, ...InvokeOption) (Envelope, error) {
@@ -104,6 +111,12 @@ func (f *fakeHost) GetState(_ context.Context, _ string, _ string, dest any) err
 
 func (f *fakeHost) DeleteState(context.Context, string, string) error { return nil }
 
+func (f *fakeHost) ListStates(_ context.Context, actorType string, opts *ListStatesOpts) (StateList, error) {
+	f.listStatesType = actorType
+	f.listStatesOpts = opts
+	return f.listStatesRes, f.listStatesErr
+}
+
 func TestClientCanTarget(t *testing.T) {
 	builtInType := ref.BuiltInActorTypePrefix + "cronjob.test"
 
@@ -144,6 +157,9 @@ func TestClientRejectsBuiltInTarget(t *testing.T) {
 
 	_, listErr := c.ListJobs(ctx)
 	require.ErrorIs(t, listErr, ErrActorTypeReserved)
+
+	_, listStatesErr := c.ListStates(ctx, nil)
+	require.ErrorIs(t, listStatesErr, ErrActorTypeReserved)
 
 	err = c.CancelJob(ctx, "job")
 	require.ErrorIs(t, err, ErrActorTypeReserved)
@@ -258,4 +274,106 @@ func TestClientRejectsReservedMethod(t *testing.T) {
 	priv := NewBuiltInActorClient[any](builtinkey.Key{}, "widget", SingletonActorID, NewService(&fakeHost{}))
 	_, err = priv.Invoke(ctx, "other", "id", ref.MethodBootstrap, nil)
 	require.NoError(t, err)
+}
+
+// encodeState is a test helper that returns the envelope a host would produce for a state value
+func encodeState(t *testing.T, v any) Envelope {
+	t.Helper()
+
+	data, err := msgpack.Marshal(v)
+	require.NoError(t, err)
+
+	return types.MsgpackEnvelope(data)
+}
+
+// TestClientListStates verifies the client lists its own actor type, decodes each state into T, and forwards the options untouched
+func TestClientListStates(t *testing.T) {
+	host := &fakeHost{
+		listStatesRes: StateList{
+			States: []StateInfo{
+				{ActorID: "w1", Data: encodeState(t, 11)},
+				{ActorID: "w2", Data: encodeState(t, 22)},
+				// An actor listed without data keeps the zero value of T
+				{ActorID: "w3"},
+			},
+			HasMore: true,
+		},
+	}
+	svc := NewService(host)
+	c := NewActorClient[int]("widget", "w1", svc)
+
+	opts := &ListStatesOpts{IncludeData: true, After: "w0", Limit: 3}
+	res, err := c.ListStates(t.Context(), opts)
+	require.NoError(t, err)
+
+	// The listing is always scoped to the actor type the client is bound to, and the options reach the host unchanged
+	assert.Equal(t, "widget", host.listStatesType)
+	assert.Same(t, opts, host.listStatesOpts)
+
+	assert.True(t, res.HasMore)
+	require.Len(t, res.States, 3)
+	assert.Equal(t, TypedStateInfo[int]{ActorID: "w1", Data: 11}, res.States[0])
+	assert.Equal(t, TypedStateInfo[int]{ActorID: "w2", Data: 22}, res.States[1])
+	assert.Equal(t, TypedStateInfo[int]{ActorID: "w3", Data: 0}, res.States[2])
+}
+
+// TestClientListStatesDoesNotUseStateCache verifies that listing neither populates nor is served from the client's own state cache
+func TestClientListStatesDoesNotUseStateCache(t *testing.T) {
+	host := &fakeHost{
+		getStateValue: 7,
+		listStatesRes: StateList{
+			States: []StateInfo{{ActorID: "w1", Data: encodeState(t, 99)}},
+		},
+	}
+	svc := NewService(host)
+	c := NewActorClient[int]("widget", "w1", svc)
+
+	_, err := c.ListStates(t.Context(), &ListStatesOpts{IncludeData: true})
+	require.NoError(t, err)
+
+	// The listing included this actor's own state, but GetState must still read through to the host rather than serve the listed value
+	state, err := c.GetState(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, 7, state)
+	assert.EqualValues(t, 1, host.getStateCalls.Load())
+}
+
+// TestClientListStatesReadOnly verifies listing is allowed during a Peek invocation, since it does not mutate the actor
+func TestClientListStatesReadOnly(t *testing.T) {
+	host := &fakeHost{
+		listStatesRes: StateList{
+			States: []StateInfo{{ActorID: "w1", Data: encodeState(t, 5)}},
+		},
+	}
+	c := NewActorClient[int]("widget", "w1", NewService(host))
+
+	res, err := c.ListStates(types.WithReadOnly(t.Context()), nil)
+	require.NoError(t, err)
+	require.Len(t, res.States, 1)
+	assert.Equal(t, 5, res.States[0].Data)
+}
+
+// TestClientListStatesErrors verifies host errors and undecodable state are both surfaced to the caller
+func TestClientListStatesErrors(t *testing.T) {
+	t.Run("host error", func(t *testing.T) {
+		listErr := errors.New("provider is down")
+		c := NewActorClient[int]("widget", "w1", NewService(&fakeHost{listStatesErr: listErr}))
+
+		_, err := c.ListStates(t.Context(), nil)
+		require.ErrorIs(t, err, listErr)
+	})
+
+	t.Run("undecodable state", func(t *testing.T) {
+		// A state that cannot be decoded into T fails the whole listing, and the error names the actor it came from
+		host := &fakeHost{
+			listStatesRes: StateList{
+				States: []StateInfo{{ActorID: "w2", Data: encodeState(t, "not-a-number")}},
+			},
+		}
+		c := NewActorClient[int]("widget", "w1", NewService(host))
+
+		_, err := c.ListStates(t.Context(), &ListStatesOpts{IncludeData: true})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "w2")
+	})
 }

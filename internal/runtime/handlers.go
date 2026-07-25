@@ -211,6 +211,8 @@ func (rt *Runtime) route(ctx context.Context, c *hostConn, req *protocol.Envelop
 		return rt.handleSetState(ctx, c, req)
 	case protocol.KindDeleteState:
 		return rt.handleDeleteState(ctx, c, req)
+	case protocol.KindListStates:
+		return rt.handleListStates(ctx, c, req)
 	default:
 		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeBadRequest, "unknown message kind %q", req.Kind))
 	}
@@ -448,10 +450,6 @@ func (rt *Runtime) handleLookupActor(parentCtx context.Context, _ *hostConn, req
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode lookup request"))
 	}
-	if payload.ActorType == "" || payload.ActorID == "" {
-		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "lookup is missing the actor type or ID"))
-	}
-
 	err = ref.ValidateComponents(payload.ActorType, payload.ActorID)
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
@@ -523,10 +521,6 @@ func (rt *Runtime) handleRemoveActor(parentCtx context.Context, _ *hostConn, req
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode remove actor request"))
 	}
-	if payload.ActorType == "" || payload.ActorID == "" {
-		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "remove actor is missing the actor type or ID"))
-	}
-
 	err = ref.ValidateComponents(payload.ActorType, payload.ActorID)
 	if err != nil {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
@@ -860,6 +854,49 @@ func (rt *Runtime) handleDeleteState(parentCtx context.Context, _ *hostConn, req
 	}
 
 	return req.Reply(protocol.KindDeleteStateResponse, nil)
+}
+
+// handleListStates lists the actors of a given type that have persistent state stored
+func (rt *Runtime) handleListStates(parentCtx context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
+	var payload protocol.ListStatesRequest
+	err := req.DecodePayload(&payload)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode list states request"))
+	}
+
+	// Only the actor type is validated here because After is a cursor rather than an actor reference, and an un-parseable one simply yields no results
+	err = ref.ValidateComponents(payload.ActorType)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
+	}
+
+	// The provider applies the default and maximum page size, so an unset or oversized limit is not an error here
+	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+	defer cancel()
+	res, err := rt.provider.ListStates(ctx, components.ListStatesReq{
+		ActorType:   payload.ActorType,
+		IncludeData: payload.IncludeData,
+		After:       payload.After,
+		Limit:       payload.Limit,
+	})
+	if err != nil {
+		rt.log.ErrorContext(ctx, "Failed to list states", slog.Any("error", err))
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to list states"))
+	}
+
+	// Convert each state to its wire DTO
+	states := make([]protocol.ActorStateInfo, len(res.States))
+	for i := range res.States {
+		states[i] = protocol.ActorStateInfo{
+			ActorID: res.States[i].ActorID,
+			Data:    res.States[i].Data,
+		}
+	}
+
+	return rt.reply(req, protocol.KindListStatesResponse, protocol.ListStatesResponse{
+		States:  states,
+		HasMore: res.HasMore,
+	})
 }
 
 // reply builds a response envelope of the given kind, falling back to an internal error if encoding fails

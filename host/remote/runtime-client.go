@@ -844,6 +844,13 @@ func (rc *runtimeClient) DeleteState(ctx context.Context, req protocol.DeleteSta
 	return rc.doRequest(ctx, protocol.KindDeleteState, req, nil)
 }
 
+// ListStates lists the actors of a type that have persistent state stored, through the runtime
+func (rc *runtimeClient) ListStates(ctx context.Context, req protocol.ListStatesRequest) (protocol.ListStatesResponse, error) {
+	var out protocol.ListStatesResponse
+	err := rc.doRequest(ctx, protocol.KindListStates, req, &out)
+	return out, err
+}
+
 // GetAlarm retrieves an alarm through the runtime
 func (rc *runtimeClient) GetAlarm(ctx context.Context, req protocol.GetAlarmRequest) (protocol.GetAlarmResponse, error) {
 	var out protocol.GetAlarmResponse

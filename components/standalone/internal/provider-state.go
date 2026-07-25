@@ -1,8 +1,10 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
+	"slices"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
@@ -48,6 +50,55 @@ func (p *Provider) SetState(ctx context.Context, r ref.ActorRef, data []byte, op
 	return p.persistThenApply(ctx, &p.StateMu, changes, func() {
 		p.ActorState[key] = entry
 	})
+}
+
+func (p *Provider) ListStates(ctx context.Context, req components.ListStatesReq) (components.ListStatesRes, error) {
+	limit := req.EffectiveLimit()
+	now := p.Clock.Now()
+
+	p.StateMu.RLock()
+	defer p.StateMu.RUnlock()
+
+	// Collect the actor IDs that match the type and cursor, skipping expired state so the listing agrees with GetState even before the background cleanup runs
+	// An empty cursor selects the first page, since every actor ID sorts after the empty string
+	matches := make([]string, 0, len(p.ActorState))
+	for key, state := range p.ActorState {
+		if key.ActorType != req.ActorType || state.IsExpired(now) {
+			continue
+		}
+
+		if key.ActorID <= req.After {
+			continue
+		}
+
+		matches = append(matches, key.ActorID)
+	}
+
+	// The map has no order of its own, so the ascending order the API promises has to be established here
+	slices.Sort(matches)
+
+	// Anything past the limit is dropped from the page, but its existence is reported through HasMore
+	hasMore := len(matches) > limit
+	if hasMore {
+		matches = matches[:limit]
+	}
+
+	res := components.ListStatesRes{
+		States:  make([]components.ActorStateInfo, len(matches)),
+		HasMore: hasMore,
+	}
+	for i, actorID := range matches {
+		res.States[i] = components.ActorStateInfo{
+			ActorID: actorID,
+		}
+
+		// The data is cloned because the entry stays live in the map, where a concurrent SetState could otherwise hand the caller a shared slice
+		if req.IncludeData {
+			res.States[i].Data = bytes.Clone(p.ActorState[NewActorKey(req.ActorType, actorID)].Data)
+		}
+	}
+
+	return res, nil
 }
 
 func (p *Provider) DeleteState(ctx context.Context, r ref.ActorRef) error {
