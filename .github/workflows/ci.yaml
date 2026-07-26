@@ -61,3 +61,23 @@ jobs:
       - name: "Integration tests"
         run: |
           go test -tags integration -v -count=1 -timeout 15m ./tests/integration/...
+
+  windows-tests:
+    runs-on: "windows-latest"
+
+    steps:
+      - name: "Check out code"
+        uses: actions/checkout@v6
+
+      - name: "Set up Go"
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: "go.mod"
+
+      - name: "Test"
+        run: |
+          go test -v -tags unit ./...
+
+      - name: "Integration tests"
+        run: |
+          go test -tags integration -v -count=1 -timeout 15m ./tests/integration/...
