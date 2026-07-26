@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
+	"path"
 	"slices"
 	"time"
 
@@ -135,7 +135,7 @@ func (s *StandalonePostgresBacked) runMigrations(ctx context.Context) error {
 
 	migrationFns := make([]migrations.MigrationFn, len(names))
 	for i, name := range names {
-		data, err := postgresMigrations.ReadFile(filepath.Join("migrations/postgres", name))
+		data, err := postgresMigrations.ReadFile(path.Join("migrations/postgres", name))
 		if err != nil {
 			return fmt.Errorf("error reading migration script '%s': %w", name, err)
 		}

@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
+	"path"
 	"slices"
 	"time"
 
@@ -154,7 +154,7 @@ func (s *StandaloneSQLiteBacked) runMigrations(ctx context.Context) error {
 
 	migrationFns := make([]migrations.MigrationFn, len(names))
 	for i, name := range names {
-		data, err := sqliteMigrations.ReadFile(filepath.Join("migrations/sqlite", name))
+		data, err := sqliteMigrations.ReadFile(path.Join("migrations/sqlite", name))
 		if err != nil {
 			return fmt.Errorf("error reading migration script '%s': %w", name, err)
 		}
