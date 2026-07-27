@@ -17,7 +17,9 @@ import (
 
 // standaloneMemoryBackend is the pure in-memory, single-host provider
 // It owns no external store, so Run and Cleanup are no-ops
-type standaloneMemoryBackend struct{}
+type standaloneMemoryBackend struct {
+	opts Options
+}
 
 func (b *standaloneMemoryBackend) Variant() Variant {
 	return StandaloneMemory
@@ -43,7 +45,7 @@ func (b *standaloneMemoryBackend) NewProvider(t *testing.T, log *slog.Logger) co
 
 	p, err := standalone.NewStandaloneMemory(log, standalone.StandaloneMemoryOptions{
 		CleanupInterval: -1,
-	}, providerConfig())
+	}, providerConfig(b.opts))
 
 	require.NoError(t, err, "failed to create standalone memory provider")
 	return p
@@ -58,6 +60,8 @@ func (b *standaloneMemoryBackend) ProviderOptions(*testing.T) components.Provide
 // standaloneSQLiteBackend is the single-host, in-memory provider with SQLite persistence
 // It owns one shared in-memory SQLite connection
 type standaloneSQLiteBackend struct {
+	opts Options
+
 	db *sql.DB
 }
 
@@ -96,7 +100,7 @@ func (b *standaloneSQLiteBackend) NewProvider(t *testing.T, log *slog.Logger) co
 	p, err := standalone.NewStandaloneSQLiteBacked(log, standalone.StandaloneSQLiteOptions{
 		DB:              b.db,
 		CleanupInterval: -1,
-	}, providerConfig())
+	}, providerConfig(b.opts))
 	require.NoError(t, err, "failed to create standalone SQLite provider")
 	return p
 }

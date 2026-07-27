@@ -63,3 +63,13 @@ func (c *myCase) Run(t *testing.T) {
 ```
 
 To run the same scenario across topologies or providers, give the case `kind` and `variant` fields plus an explicit `Name()` (implementing `suite.Named`), and register one instance per combination — see `suites/state/state.go`.
+
+## Injecting failures
+
+`suites/faults` covers what happens when parts of the cluster break rather than shut down cleanly. Three knobs on `cluster.Options` make that possible, and they compose with everything else:
+
+- **`RuntimeLinks` / `PeerLinks`** put a severable UDP relay (`framework/process/netfault`) in front of an endpoint. `RuntimeLinks` gives every host its own link to the runtime, so `c.RuntimeLink(t, i).Sever(t)` cuts host `i` off from the control plane while the runtime and the other hosts keep running. `PeerLinks` puts one in front of each host's peer server (the host binds one port and advertises the link's), so `c.PeerLink(t, i).Sever(t)` cuts host-to-host invocations to host `i` without touching its connection to the database or runtime. A severed link is a black hole — no resets, no refusals — which is what QUIC sees when a network is cut. `Restore(t)` puts it back.
+- **`StallableProvider`** (SQLite only) hands every host its own database handle, so `c.StallProvider(t, i)` parks host `i`'s only connection and makes all of its provider calls block until `c.UnstallProvider(t, i)`. That is a busy database from one host's point of view, with every other host still reading and writing the same file. Combined with `Host(i).Stop(t)`, it is also how a scenario kills a host *silently*: the deregistration on the shutdown path never lands, so the cluster is left with a registration for a host that no longer exists.
+- **`HostHealthCheckDeadline`, `AlarmsLeaseDuration`, `ProviderQueryTimeout`, `HostRequestTimeout`** shorten the timers that failure detection hangs off, so a scenario waits seconds rather than the production defaults. They are applied consistently to the provider, the hosts, and the runtime.
+
+`Host(i).WaitExit(t, timeout)` completes the picture: it blocks until a host's `Run` returns *on its own*, which is how a scenario asserts that a host noticed its own failure and stopped instead of lingering.

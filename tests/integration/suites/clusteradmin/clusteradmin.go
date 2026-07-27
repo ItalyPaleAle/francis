@@ -65,7 +65,7 @@ func (s *clusterAdmin) Name() string {
 
 func (s *clusterAdmin) Setup(t *testing.T) []framework.Option {
 	// Only the shared store is a managed process: the hosts and the Admin are built by Run so it can control their lifecycles precisely
-	s.backend = provider.New(s.variant)
+	s.backend = provider.New(s.variant, provider.Options{})
 	return []framework.Option{
 		framework.WithProcesses(s.backend),
 	}
