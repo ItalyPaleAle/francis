@@ -32,6 +32,11 @@ type ActorProvider interface {
 	// If the provider is already running, returns ErrAlreadyRunning
 	Run(ctx context.Context) error
 
+	// Close releases the resources owned by the provider, including the connection to the database if the provider established it.
+	// A connection passed in by the caller through the provider's options is not closed, since it remains owned by the caller.
+	// The provider cannot be used after being closed, and calling Close more than once is a no-op.
+	Close() error
+
 	// RegisterHost registers a new actor host, or reattaches to an existing registration when req.ExistingHostID is set.
 	// If a different, healthy host is already registered at the same address, returns ErrHostAlreadyRegistered.
 	RegisterHost(ctx context.Context, req RegisterHostReq) (RegisterHostRes, error)

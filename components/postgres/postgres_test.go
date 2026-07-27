@@ -191,6 +191,11 @@ func initTestProviderWithPrefix(t *testing.T, tablePrefix string, cleanup bool) 
 	p, err = NewPostgresProvider(log, providerOpts, providerConfig)
 	require.NoError(t, err, "Error creating provider")
 
+	t.Cleanup(func() {
+		cleanupErr := p.Close()
+		assert.NoError(t, cleanupErr)
+	})
+
 	// Set the current frozen time in the database
 	err = p.setCurrentFrozenTime()
 	require.NoError(t, err, "Error setting current frozen time in the database")
