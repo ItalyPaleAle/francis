@@ -89,10 +89,7 @@ func run(parentCtx context.Context, log *slog.Logger) error {
 	log.Info("Starting waiters", slog.String("deploymentID", deploymentID))
 	var waiters sync.WaitGroup
 	for i := 1; i <= 5; i++ {
-		waiters.Add(1)
-		go func() {
-			defer waiters.Done()
-
+		waiters.Go(func() {
 			// This blocks for as long as it takes: a signal has no timeout of its own, so bound it with the context when a caller should give up
 			env, waitErr := sig.Wait(ctx, deploymentID)
 			if waitErr != nil {
@@ -109,7 +106,7 @@ func run(parentCtx context.Context, log *slog.Logger) error {
 				}
 			}
 			log.Info("Waiter released", slog.Int("waiter", i), slog.String("version", res.Version), slog.Bool("healthy", res.Healthy))
-		}()
+		})
 	}
 
 	// Give the waiters a moment to park, so the completion really does have to release them
