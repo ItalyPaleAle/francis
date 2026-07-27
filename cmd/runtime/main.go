@@ -100,6 +100,14 @@ func run(ctx context.Context, cfg *config) error {
 		return fmt.Errorf("failed to build provider: %w", err)
 	}
 
+	// The runtime does not own the provider it is given, so this function closes it once the runtime has drained
+	defer func() {
+		closeErr := provider.Close()
+		if closeErr != nil {
+			log.Error("Error closing provider on shutdown", slog.Any("error", closeErr))
+		}
+	}()
+
 	// Derive the runtime PSKs the cluster CA is built from
 	psks, err := cfg.parsePSKs()
 	if err != nil {

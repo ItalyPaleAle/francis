@@ -11,8 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/italypaleale/francis/components"
 	runtimepkg "github.com/italypaleale/francis/internal/runtime"
 	"github.com/italypaleale/francis/tests/integration/framework/process/clustersecret"
 	"github.com/italypaleale/francis/tests/integration/framework/process/provider"
@@ -46,6 +48,7 @@ type Options struct {
 type Runtime struct {
 	opts    Options
 	rt      *runtimepkg.Runtime
+	prov    components.ActorProvider
 	runErrC chan error
 	cancel  context.CancelFunc
 }
@@ -72,7 +75,9 @@ func (p *Runtime) Run(t *testing.T) {
 	}
 
 	// Build the provider the runtime owns from the shared backend
+	// The runtime does not close what it is given, so shutdown does it, releasing the store's handles before the backend removes it
 	prov := p.opts.Backend.NewProvider(t, logger)
+	p.prov = prov
 
 	// The runtime always derives its CA from the shared runtime PSK
 	// The host bootstrap method is either the shared host PSK or, when configured, a JWT validated against an inline JWKS
@@ -139,4 +144,10 @@ func (p *Runtime) shutdown(t *testing.T) {
 		t.Fatalf("runtime %s did not shut down within %s", p.opts.Bind, shutdownTimeout)
 	}
 	p.cancel = nil
+
+	if p.prov != nil {
+		err := p.prov.Close()
+		assert.NoError(t, err, "failed to close the provider of runtime %s", p.opts.Bind)
+		p.prov = nil
+	}
 }

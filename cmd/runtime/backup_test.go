@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -19,7 +20,9 @@ func writeProviderConfig(t *testing.T, connString string) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	err := os.WriteFile(path, []byte(`{"provider":{"connectionString": "`+connString+`"}}`), 0o600)
+
+	connStringEnc, _ := json.Marshal(connString)
+	err := os.WriteFile(path, []byte(`{"provider":{"connectionString": `+string(connStringEnc)+`}}`), 0o600)
 	require.NoError(t, err)
 	return path
 }
@@ -64,6 +67,9 @@ func TestBackupRestoreRoundTripSQLite(t *testing.T) {
 	err = seed.SetState(t.Context(), actor, want, components.SetStateOpts{})
 	require.NoError(t, err)
 
+	// The seeding connection is closed before the backup runs: Windows refuses to remove the temporary database while a connection to it is open
+	require.NoError(t, seed.Close())
+
 	backupFile := filepath.Join(t.TempDir(), "backup.francis")
 
 	// Back up the source cluster
@@ -83,7 +89,14 @@ func TestBackupRestoreRoundTripSQLite(t *testing.T) {
 	// The destination now holds the seeded state
 	dst, err := buildProvider(dstConn, testProviderConfig(), slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
-	require.NoError(t, dst.Init(t.Context()))
+
+	t.Cleanup(func() {
+		cleanupErr := dst.Close()
+		assert.NoError(t, cleanupErr)
+	})
+
+	err = dst.Init(t.Context())
+	require.NoError(t, err)
 
 	got, err := dst.GetState(t.Context(), actor)
 	require.NoError(t, err)

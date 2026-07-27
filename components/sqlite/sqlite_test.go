@@ -115,6 +115,12 @@ func initTestProviderWithPrefix(t *testing.T, connString string, tablePrefix str
 	s, err := NewSQLiteProvider(log, providerOpts, providerConfig)
 	require.NoError(t, err, "Error creating provider")
 
+	// Close the database connection when the test ends, or Windows refuses to remove an on-disk database that is still open
+	t.Cleanup(func() {
+		cleanupErr := p.Close()
+		assert.NoError(t, cleanupErr)
+	})
+
 	// Init the provider
 	err = s.Init(t.Context())
 	require.NoError(t, err, "Error initializing provider")
