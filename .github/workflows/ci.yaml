@@ -13,7 +13,7 @@ permissions:
   contents: "read"
 
 jobs:
-  ci:
+  tests:
     runs-on: "ubuntu-latest"
 
     services:
@@ -38,10 +38,10 @@ jobs:
 
     steps:
       - name: "Check out code"
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: "Set up Go"
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version-file: "go.mod"
 
@@ -62,15 +62,15 @@ jobs:
         run: |
           go test -tags integration -v -count=1 -timeout 15m ./tests/integration/...
 
-  windows-tests:
+  tests-windows:
     runs-on: "windows-latest"
 
     steps:
       - name: "Check out code"
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: "Set up Go"
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version-file: "go.mod"
 
