@@ -346,3 +346,14 @@ func envelopeOf(t *testing.T, v any) actor.Envelope {
 
 	return actorcore.NewObjectEnvelope(v)
 }
+
+func TestServiceIsMemoized(t *testing.T) {
+	s := mustSignal(t)
+
+	// The fan-in registry lives on the SignalService, so handing out a fresh one per call would silently defeat it
+	svc := &actor.Service{}
+	assert.Same(t, s.Service(svc), s.Service(svc))
+
+	// A different actor.Service is a different host binding, and gets its own
+	assert.NotSame(t, s.Service(svc), s.Service(&actor.Service{}))
+}

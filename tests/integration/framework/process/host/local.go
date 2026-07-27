@@ -65,6 +65,12 @@ func (p *Local) ListJobs(ctx context.Context, actorType string, actorID string) 
 	return p.h.ListJobs(ctx, actorType, actorID)
 }
 
+// Halt deactivates an actor straight through the host, bypassing the Service guard so tests can halt built-in actors
+// It returns actor.ErrActorNotHosted when the actor is not active on this host, which doubles as a placement probe
+func (p *Local) Halt(actorType string, actorID string) error {
+	return p.h.Halt(actorType, actorID)
+}
+
 func (p *Local) Run(t *testing.T) {
 	t.Helper()
 

@@ -121,6 +121,12 @@ type Signal struct {
 	maxPayloadSize int
 	factory        actor.Factory
 	regOpts        actorcore.RegisterActorOptions
+
+	// servicesMu guards services
+	servicesMu sync.Mutex
+	// services memoizes the SignalService bound to each actor.Service, so repeated calls to Service hand back the same instance
+	// Each one owns the registry that collapses a signal's local waiters onto a single invocation, which a fresh instance per call would defeat
+	services map[*actor.Service]*SignalService
 }
 
 // ActorType returns the reserved actor type registered for this signal set

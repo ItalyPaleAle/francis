@@ -24,13 +24,30 @@ const (
 
 // Service binds the signal set to an actor.Service, returning a SignalService that exposes Wait, Complete, and Check pre-configured for that service
 // Obtain the service from a host with host.Service()
+//
+// Calling it more than once with the same actor.Service returns the same SignalService
+// The waiters of one signal are aggregated onto a single invocation by the service they were started from, so handing every caller the same instance is what makes that aggregation hold no matter where in an application Service is called
 func (s *Signal) Service(svc *actor.Service) *SignalService {
-	return &SignalService{
+	s.servicesMu.Lock()
+	defer s.servicesMu.Unlock()
+
+	existing, ok := s.services[svc]
+	if ok {
+		return existing
+	}
+
+	sigSvc := &SignalService{
 		actorType:      s.actorType,
 		maxPayloadSize: s.maxPayloadSize,
 		svc:            svc,
 		waits:          map[string]*sharedWait{},
 	}
+	if s.services == nil {
+		s.services = map[*actor.Service]*SignalService{}
+	}
+	s.services[svc] = sigSvc
+
+	return sigSvc
 }
 
 // SignalService exposes the operations of a signal set (Wait, Complete, and Check), bound to a specific actor.Service
