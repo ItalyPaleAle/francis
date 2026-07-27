@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/italypaleale/francis/components"
@@ -102,6 +103,12 @@ func newSQLite(t *testing.T) *sqlite.SQLiteProvider {
 	}
 	p, err := sqlite.NewSQLiteProvider(log, opts, comptesting.GetProviderConfig())
 	require.NoError(t, err)
+
+	// Close the database connection when the test ends, or Windows refuses to remove an on-disk database that is still open
+	t.Cleanup(func() {
+		cleanupErr := p.Close()
+		assert.NoError(t, cleanupErr)
+	})
 
 	err = p.Init(t.Context())
 	require.NoError(t, err)

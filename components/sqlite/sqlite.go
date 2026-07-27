@@ -46,6 +46,8 @@ const (
 type SQLiteProvider struct {
 	cfg             components.ProviderConfig
 	db              *sql.DB
+	ownsDB          bool
+	closed          atomic.Bool
 	running         atomic.Bool
 	log             *slog.Logger
 	timeout         time.Duration
@@ -130,6 +132,9 @@ func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, provi
 			return nil, fmt.Errorf("failed to open SQLite database: %w", err)
 		}
 
+		// The provider owns this connection, so Close is responsible for closing it
+		s.ownsDB = true
+
 		// For in-memory databases, we must limit to 1 open connection at the same time, or they won't see the whole data
 		// The other workaround, of using shared caches, doesn't work well with multiple write transactions trying to happen at once
 		if isMemoryDB {
@@ -201,6 +206,25 @@ func (s *SQLiteProvider) Run(ctx context.Context) error {
 	err = s.gc.Close()
 	if err != nil {
 		return fmt.Errorf("failed to stop garbage collector: %w", err)
+	}
+
+	return nil
+}
+
+// Close releases the resources owned by the provider
+func (s *SQLiteProvider) Close() error {
+	if !s.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+
+	if !s.ownsDB || s.db == nil {
+		return nil
+	}
+
+	// The database connection is closed only if the provider established it
+	err := s.db.Close()
+	if err != nil {
+		return fmt.Errorf("failed to close SQLite database: %w", err)
 	}
 
 	return nil

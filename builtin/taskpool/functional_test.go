@@ -67,17 +67,18 @@ func TestStrictConcurrencyPerHost(t *testing.T) {
 		numTasks    = 6
 	)
 
+	// Tasks are delivered at least once, so a task's handler can run more than once: completion is tracked by distinct task ID rather than by counting invocations
 	var (
-		running   atomic.Int32
-		maxSeen   atomic.Int32
-		completed sync.WaitGroup
+		running  atomic.Int32
+		maxSeen  atomic.Int32
+		mu       sync.Mutex
+		ran      = make(map[string]struct{}, numTasks)
+		done     = make(chan struct{})
+		doneOnce sync.Once
 	)
-	completed.Add(numTasks)
 
 	// The handler tracks how many run at once, holding the slot briefly so tasks overlap
 	handler := func(ctx context.Context, task taskpool.Task) error {
-		defer completed.Done()
-
 		now := running.Add(1)
 		for {
 			prev := maxSeen.Load()
@@ -88,6 +89,17 @@ func TestStrictConcurrencyPerHost(t *testing.T) {
 
 		time.Sleep(500 * time.Millisecond)
 		running.Add(-1)
+
+		mu.Lock()
+		ran[task.ID()] = struct{}{}
+		complete := len(ran) == numTasks
+		mu.Unlock()
+		if complete {
+			doneOnce.Do(func() {
+				close(done)
+			})
+		}
+
 		return nil
 	}
 
@@ -104,11 +116,6 @@ func TestStrictConcurrencyPerHost(t *testing.T) {
 	}
 
 	// Wait for every task to finish
-	done := make(chan struct{})
-	go func() {
-		completed.Wait()
-		close(done)
-	}()
 	select {
 	case <-done:
 	case <-time.After(30 * time.Second):

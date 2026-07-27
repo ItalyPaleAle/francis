@@ -213,6 +213,13 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 		return nil, err
 	}
 
+	// The provider is owned by the host from here on, so it must be released if the host cannot be created
+	defer func() {
+		if err != nil {
+			_ = actorProvider.Close()
+		}
+	}()
+
 	// Derive the cluster CA from the runtime PSKs so hosts that share the PSKs authenticate each other with mTLS
 	if len(options.RuntimePSKs) == 0 {
 		return nil, errors.New("option RuntimePSKs is required")
@@ -309,6 +316,15 @@ func (h *Host) Run(parentCtx context.Context) error {
 
 	// Tear down pooled outbound peer sessions once the host stops serving
 	defer h.peerClient.Close()
+
+	// Release the provider's resources, including the database connection it established, once the host stops
+	// The host built the provider in NewHost, so it owns it
+	defer func() {
+		closeErr := h.actorProvider.Close()
+		if closeErr != nil {
+			h.logSource.Warn("Error closing actor provider", slog.Any("error", closeErr))
+		}
+	}()
 
 	// Perform provider initialization steps
 	initCtx, initCancel := context.WithTimeout(parentCtx, h.providerRequestTimeout)

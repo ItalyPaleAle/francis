@@ -137,6 +137,13 @@ func (p *Provider) Run(ctx context.Context) error {
 	return nil
 }
 
+// Close releases the resources owned by the provider.
+func (p *Provider) Close() error {
+	// This is a no-op
+	// The standalone providers keep all data in memory and require any database connection to be passed in through their options, so there is nothing for them to release: the caller owns the connection it supplied
+	return nil
+}
+
 // stateCleanupLoop periodically purges expired state from memory.
 func (p *Provider) stateCleanupLoop(ctx context.Context) {
 	ticker := p.Clock.NewTicker(p.CleanupInterval)

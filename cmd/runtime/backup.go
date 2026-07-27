@@ -36,6 +36,8 @@ func runBackup(ctx context.Context, args []string) int {
 		return 1
 	}
 	defer func() {
+		// The provider is closed before logging shuts down, since closing it can log
+		_ = provider.Close()
 		_ = shutdownFn(context.WithoutCancel(ctx))
 	}()
 
@@ -120,6 +122,8 @@ func runRestore(ctx context.Context, args []string) int {
 		return 1
 	}
 	defer func() {
+		// The provider is closed before logging shuts down, since closing it can log
+		_ = provider.Close()
 		_ = shutdownFn(context.WithoutCancel(ctx))
 	}()
 

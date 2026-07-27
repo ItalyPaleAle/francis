@@ -37,6 +37,8 @@ const (
 type PostgresProvider struct {
 	cfg             components.ProviderConfig
 	db              *pgxpool.Pool
+	ownsDB          bool
+	closed          atomic.Bool
 	running         atomic.Bool
 	log             *slog.Logger
 	timeout         time.Duration
@@ -109,6 +111,9 @@ func NewPostgresProvider(log *slog.Logger, postgresOpts PostgresProviderOptions,
 		if err != nil {
 			return nil, fmt.Errorf("failed to connect to Postgres database: %w", err)
 		}
+
+		// The provider owns this pool, so Close is responsible for closing it
+		p.ownsDB = true
 	}
 
 	return p, nil
@@ -144,6 +149,22 @@ func (p *PostgresProvider) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to stop garbage collector: %w", err)
 	}
+
+	return nil
+}
+
+// Close releases the resources owned by the provider
+func (p *PostgresProvider) Close() error {
+	if !p.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+
+	if !p.ownsDB || p.db == nil {
+		return nil
+	}
+
+	// The connection pool is closed only if the provider established it
+	p.db.Close()
 
 	return nil
 }

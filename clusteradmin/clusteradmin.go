@@ -100,6 +100,7 @@ func New(ctx context.Context, providerOptions components.ProviderOptions, opts O
 	defer cancel()
 	err = provider.Init(initCtx)
 	if err != nil {
+		_ = provider.Close()
 		return nil, fmt.Errorf("failed to initialize provider: %w", err)
 	}
 
@@ -238,9 +239,9 @@ func (a *Admin) stopRenew() {
 	}
 }
 
-// Close stops any renewal loop
-// It does not close the underlying database connection, which is owned by the caller through the provider options
+// Close stops any renewal loop and releases the provider the Admin built from the provider options
+// A database connection passed in through those options is not closed, since it remains owned by the caller
 func (a *Admin) Close() error {
 	a.stopRenew()
-	return nil
+	return a.provider.Close()
 }
