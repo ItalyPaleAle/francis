@@ -81,7 +81,7 @@ func TestLookupActor(t *testing.T) {
 
 		// Create and register an active actor locally
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := actorcore.NewActiveActor(actorRef, instance, 5*time.Minute, host.core.IdleProcessor, clock)
+		activeAct := actorcore.NewActiveActor(actorRef, instance, 5*time.Minute, actorcore.LockModeExclusive, host.core.IdleProcessor, clock)
 		host.core.Actors.Set(actorRef.String(), activeAct)
 
 		// No provider calls should be made when actor is local
@@ -635,7 +635,7 @@ func TestLookupActor(t *testing.T) {
 
 		// Create and register an active actor locally
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := actorcore.NewActiveActor(actorRef, instance, 5*time.Minute, host.core.IdleProcessor, clock)
+		activeAct := actorcore.NewActiveActor(actorRef, instance, 5*time.Minute, actorcore.LockModeExclusive, host.core.IdleProcessor, clock)
 		host.core.Actors.Set(actorRef.String(), activeAct)
 
 		// No provider calls should be made when actor is local

@@ -1,6 +1,6 @@
 # Design: the `signal` built-in actor
 
-Status: proposal
+Status: implemented
 Scope: one new framework primitive (`RegisterActorOptions.LockMode`) plus one new built-in actor (`builtin/signal`)
 
 ## 1. Summary
@@ -75,7 +75,9 @@ Gating comes for free: `host/local/register-actor.go` and `host/remote/register-
 
 ### 5.3 Changes to `ActiveActor`
 
-`NewActiveActor` takes the mode (plumbed from `createActorFn`, which already reads `IdleTimeout` from `ActorsConfig`) and stores it. `ActiveActor.LockMode()` exposes it to the manager.
+`NewActiveActor` takes the mode and stores it, plumbed from `createActorFn`. `ActiveActor.LockMode()` exposes it to the manager.
+
+The per-type mode lives in a new `Manager.actorTypeLockMode` map rather than in `ActorsConfig`: that struct is `components.ActorHostType`, the placement store's view of an actor type, and the lock mode is purely host-local.
 
 No changes to `Lock`, `RLock`, `TryLock`, `Unlock`, `RUnlock`, or `Halt`.
 
@@ -316,6 +318,11 @@ Worth adding: a gauge of locally attached waiters per signal, and a counter of u
 
 ## 12. Implementation plan
 
+All five steps are implemented. Two things changed from the plan while building it, both recorded in the sections above:
+
+- **Already-completed travels as a result, not an error.** The actor returns `completeResult{AlreadyCompleted: true}` and the service translates it into `ErrAlreadyCompleted`. An error returned from the actor is flattened into an opaque protocol error when it crosses a peer boundary, so `errors.Is(err, ErrAlreadyCompleted)` would have worked on the owning host and failed everywhere else.
+- **The payload cap is enforced in the service**, before the invocation is sent, so an oversized payload fails fast and never reaches a host. The service is the only caller, since built-in types are reserved from public clients.
+
 1. **`LockMode` in the actor core.** `RegisterActorOptions.LockMode`, `ActiveActor` plumbing, the `lockAndInvokeActor` branch, `Peek` rejection for shared types, and the same branch in `LockAndStream`. No public API surface
 2. **`HaltingFromContext`.** Stamp `haltCh` into the invocation context; document it on the long-running-handler path
 3. **`builtin/signal`.** The actor, options, and `SignalService` without fan-in — correct but bounded by `MaxInFlightRequests`
@@ -336,6 +343,8 @@ Steps 1 and 2 are independently useful and independently reviewable. Step 4 chan
 - **Drain.** Halt a host with waiters parked; shutdown completes without waiting out `ShutdownGracePeriod`
 - **Fan-in.** M local waiters produce exactly one upstream invocation; cancelling M-1 of them does not disturb the last; cancelling all M ends the upstream call
 - **Payload cap.** An oversized payload is rejected at `Complete` and never persisted
+
+The deadlock regression test earns its name: pointing it at a turn-based actor type instead of a shared-lock one hangs until the test's timeout, and it passes in well under a second against the shared-lock type.
 
 ## 14. Open questions
 

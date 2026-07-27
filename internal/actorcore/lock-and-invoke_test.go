@@ -127,7 +127,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 
 		// Create and register an active actor, then lock it
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Acquire the lock first
@@ -165,7 +165,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 
 		// Create and register an active actor
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Halt the actor first
@@ -192,7 +192,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 
 		// Create and register an active actor
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Acquire the lock first
@@ -263,7 +263,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 		// Create and register an active actor
 		// The idle timeout is disabled (0) so the graceful-shutdown timer is the only waiter the halt registers on the shared fake clock
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := NewActiveActor(actorRef, instance, 0, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 0, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Launch LockAndInvoke in a separate goroutine
@@ -335,7 +335,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 		// removes the actor's idle-deactivation timer, leaving the waiter count unchanged, so
 		// the wait below could never observe the new waiter.
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := NewActiveActor(actorRef, instance, 0, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 0, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Launch LockAndInvoke in a separate goroutine
@@ -397,7 +397,7 @@ func TestLockAndInvokeFn(t *testing.T) {
 
 		// Create and register an active actor
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Create a function that completes quickly
@@ -601,7 +601,7 @@ func TestLockAndInvokeActive(t *testing.T) {
 
 		// Pre-activate the actor
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		called := false
@@ -874,7 +874,7 @@ func TestLockAndPeekActive(t *testing.T) {
 		actorRef := ref.NewActorRef("testactor", "active1")
 
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		called := false
