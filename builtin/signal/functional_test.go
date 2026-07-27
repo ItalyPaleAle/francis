@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -78,18 +79,19 @@ func TestBroadcastToWaiters(t *testing.T) {
 	started.Add(waiters)
 	for range waiters {
 		go func() {
+			// Note: no "defer" here
 			started.Done()
 
-			env, waitErr := svc.Wait(t.Context(), "deploy-1")
-			if waitErr != nil {
-				errs <- waitErr
+			env, rErr := svc.Wait(t.Context(), "deploy-1")
+			if rErr != nil {
+				errs <- rErr
 				return
 			}
 
 			var got payload
-			decodeErr := env.Decode(&got)
-			if decodeErr != nil {
-				errs <- decodeErr
+			rErr = env.Decode(&got)
+			if rErr != nil {
+				errs <- rErr
 				return
 			}
 			results <- got
@@ -98,6 +100,7 @@ func TestBroadcastToWaiters(t *testing.T) {
 	started.Wait()
 
 	// Give the waiters a moment to reach the actor, so the completion really does have to release parked callers
+	runtime.Gosched()
 	time.Sleep(500 * time.Millisecond)
 
 	err = svc.Complete(t.Context(), "deploy-1", payload{Version: "v2"})
@@ -107,8 +110,8 @@ func TestBroadcastToWaiters(t *testing.T) {
 		select {
 		case got := <-results:
 			assert.Equal(t, "v2", got.Version)
-		case waitErr := <-errs:
-			t.Fatalf("a waiter failed: %v", waitErr)
+		case err = <-errs:
+			t.Fatalf("a waiter failed: %v", err)
 		case <-time.After(30 * time.Second):
 			t.Fatal("not every waiter was released")
 		}
@@ -130,7 +133,8 @@ func TestWaitAfterCompletion(t *testing.T) {
 	env, err := svc.Wait(t.Context(), "deploy-1")
 	require.NoError(t, err)
 	var got string
-	require.NoError(t, env.Decode(&got))
+	err = env.Decode(&got)
+	require.NoError(t, err)
 	assert.Equal(t, "done", got)
 
 	// Halting the actor drops that memory, so the next wait has to come from the durable record
@@ -142,7 +146,8 @@ func TestWaitAfterCompletion(t *testing.T) {
 	env, err = svc.Wait(ctx, "deploy-1")
 	require.NoError(t, err)
 	got = ""
-	require.NoError(t, env.Decode(&got))
+	err = env.Decode(&got)
+	require.NoError(t, err)
 	assert.Equal(t, "done", got, "a deactivated signal was not answered from its durable record")
 }
 
@@ -164,7 +169,8 @@ func TestCompleteIsIdempotent(t *testing.T) {
 	env, err := svc.Wait(t.Context(), "deploy-1")
 	require.NoError(t, err)
 	var got string
-	require.NoError(t, env.Decode(&got))
+	err = env.Decode(&got)
+	require.NoError(t, err)
 	assert.Equal(t, "first", got)
 }
 
@@ -180,14 +186,16 @@ func TestCheck(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, completed)
 
-	require.NoError(t, svc.Complete(t.Context(), "deploy-1", "done"))
+	err = svc.Complete(t.Context(), "deploy-1", "done")
+	require.NoError(t, err)
 
 	env, completed, err := svc.Check(t.Context(), "deploy-1")
 	require.NoError(t, err)
 	require.True(t, completed)
 
 	var got string
-	require.NoError(t, env.Decode(&got))
+	err = env.Decode(&got)
+	require.NoError(t, err)
 	assert.Equal(t, "done", got)
 }
 
@@ -210,7 +218,8 @@ func TestCompleteWithoutPayload(t *testing.T) {
 	}()
 
 	time.Sleep(500 * time.Millisecond)
-	require.NoError(t, svc.Complete(t.Context(), "deploy-1", nil))
+	err = svc.Complete(t.Context(), "deploy-1", nil)
+	require.NoError(t, err)
 
 	select {
 	case got := <-outcomes:
@@ -232,8 +241,8 @@ func TestWaitRespectsCallerContext(t *testing.T) {
 	// One caller stays for the whole test, the other gives up early
 	stayed := make(chan error, 1)
 	go func() {
-		_, waitErr := svc.Wait(t.Context(), "deploy-1")
-		stayed <- waitErr
+		_, rErr := svc.Wait(t.Context(), "deploy-1")
+		stayed <- rErr
 	}()
 
 	leavingCtx, cancelLeaving := context.WithCancel(t.Context())
@@ -247,20 +256,21 @@ func TestWaitRespectsCallerContext(t *testing.T) {
 	cancelLeaving()
 
 	select {
-	case waitErr := <-left:
-		require.ErrorIs(t, waitErr, context.Canceled)
+	case err = <-left:
+		require.ErrorIs(t, err, context.Canceled)
 	case <-time.After(15 * time.Second):
 		t.Fatal("the caller that gave up did not return")
 	}
 
 	// The caller that stayed must still be waiting, and must still be released by the completion
 	select {
-	case waitErr := <-stayed:
-		t.Fatalf("the caller that stayed returned early: %v", waitErr)
+	case err = <-stayed:
+		t.Fatalf("the caller that stayed returned early: %v", err)
 	case <-time.After(500 * time.Millisecond):
 	}
 
-	require.NoError(t, svc.Complete(t.Context(), "deploy-1", "done"))
+	err = svc.Complete(t.Context(), "deploy-1", "done")
+	require.NoError(t, err)
 
 	select {
 	case waitErr := <-stayed:
@@ -279,10 +289,12 @@ func TestRetentionExpiry(t *testing.T) {
 	host := startHost(t, filepath.Join(t.TempDir(), "retention.db"), sig)
 	svc := sig.Service(host.Service())
 
-	require.NoError(t, svc.Complete(t.Context(), "deploy-1", "done"))
+	err = svc.Complete(t.Context(), "deploy-1", "done")
+	require.NoError(t, err)
 
 	// Drop the in-memory activation, so what a later caller sees comes only from the stored record
-	require.NoError(t, host.Halt("francis.builtin.signal.shortlived", "deploy-1"))
+	err = host.Halt("francis.builtin.signal.shortlived", "deploy-1")
+	require.NoError(t, err)
 
 	// Within the window the completion is still there
 	_, completed, err := svc.Check(t.Context(), "deploy-1")
@@ -290,10 +302,13 @@ func TestRetentionExpiry(t *testing.T) {
 	assert.True(t, completed)
 
 	require.Eventually(t, func() bool {
-		require.NoError(t, host.Halt("francis.builtin.signal.shortlived", "deploy-1"))
+		haltErr := host.Halt("francis.builtin.signal.shortlived", "deploy-1")
+		if haltErr != nil {
+			return false
+		}
+
 		_, stillCompleted, checkErr := svc.Check(t.Context(), "deploy-1")
-		require.NoError(t, checkErr)
-		return !stillCompleted
+		return checkErr == nil && !stillCompleted
 	}, 30*time.Second, 500*time.Millisecond, "the completion outlived its retention window")
 
 	// Past the window the signal is indistinguishable from one that never fired, so a wait parks rather than returning
@@ -349,13 +364,12 @@ func TestWaitIsAggregatedPerProcess(t *testing.T) {
 	// The signal never fires during this phase, so every caller stays parked and attached
 	waitCtx, cancelWaiters := context.WithCancel(t.Context())
 	var wg sync.WaitGroup
-	wg.Add(waiters)
+	errCh := make(chan error, waiters)
 	for range waiters {
-		go func() {
-			defer wg.Done()
-			_, waitErr := svc.Wait(waitCtx, "deploy-1")
-			assert.ErrorIs(t, waitErr, context.Canceled)
-		}()
+		wg.Go(func() {
+			_, rErr := svc.Wait(waitCtx, "deploy-1")
+			errCh <- rErr
+		})
 	}
 
 	// All of them must end up on the same entry, however many callers there are
@@ -381,4 +395,7 @@ func TestWaitIsAggregatedPerProcess(t *testing.T) {
 		defer svc.mu.Unlock()
 		return len(svc.waits) == 0
 	}, 15*time.Second, 50*time.Millisecond, "the shared wait outlived its last caller")
+
+	// Error should be a context canceled
+	assert.ErrorIs(t, <-errCh, context.Canceled)
 }

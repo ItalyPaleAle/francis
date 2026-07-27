@@ -21,7 +21,7 @@ const (
 	LockModeExclusive LockMode = 0
 	// LockModeShared runs every invocation of the type under the shared lock and never takes the exclusive one, so invocations never block each other
 	// An actor type registered this way synchronizes itself, including around its own durable state writes, and it rejects Peek because none of its invocations are read-only
-	// It exists for built-in actors whose calls block for a long time, such as the waiters of a signal, where a call that parks cannot hold a lock that the call releasing it must acquire
+	// This is limited to built-in actors only for now
 	LockModeShared LockMode = 1
 )
 
@@ -63,7 +63,7 @@ type RegisterActorOptions struct {
 	CapacityGroupLimit int
 	// LockMode selects how the framework serializes the invocations of this actor type
 	// It defaults to LockModeExclusive, the turn-based model every application actor uses
-	// LockModeShared is reserved for built-in actors: the hosts' public RegisterActor builds its options only from the exported With* helpers, none of which sets this
+	// LockModeShared is currently reserved for built-in actors
 	LockMode LockMode
 	// BootstrapData is optional data passed to ActorBootstrapper.Bootstrap when the host bootstraps the singleton instance
 	// It is delivered as the Bootstrap call's data argument (decoded from the invocation envelope), just like Invokes deliver their data via an Envelope

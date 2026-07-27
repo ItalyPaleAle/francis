@@ -276,7 +276,7 @@ func (m *Manager) lockAndInvokeActor(parentCtx context.Context, act *ActiveActor
 	}
 
 	// Determine the methods to use
-	// A shared-mode actor takes the shared lock for every invocation and never the exclusive one, which is what lets a call that parks (such as waiting on a signal) coexist with the call that releases it
+	// A shared-mode actor takes the shared lock for every invocation and never the exclusive one
 	acquire := act.Lock
 	release := act.Unlock
 	if readOnly || sharedLock {

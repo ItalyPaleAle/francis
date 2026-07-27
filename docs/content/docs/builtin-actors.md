@@ -269,18 +269,20 @@ A declined task is handed back to the pool and run elsewhere, **without counting
 
 ## Signal
 
-A signal actor broadcasts a **one-shot notification** to any number of waiting callers, addressed by a **signal ID** — a free-form string you choose (e.g. a deployment ID, a job ID, a request ID).
+A signal actor broadcasts a **one-shot notification** to any number of waiting callers, addressed by a **signal ID**: a free-form string you choose (e.g. a deployment ID, a job ID, a request ID).
 
-Callers block in `Wait` until the signal fires. One caller fires it with `Complete`, optionally attaching a payload, and **every waiter is released at that moment** with that payload. A caller that arrives *after* the completion does not block at all: it is answered from the durable completion record.
+Callers block in `Wait` until the signal fires. One caller fires it with `Complete`, optionally attaching a payload, then every waiter is released at that moment with that payload. A caller that arrives *after* the completion does not block: it is answered from the durable completion record.
 
-That last property is what makes signals safe over unreliable connections. A signal is **level-triggered**, not edge-triggered: a client that disconnects and calls `Wait` again is answered correctly whether the signal fired while it was away or has yet to fire. Nothing about a waiter is tracked anywhere, so callers may come and go freely.
+Because of that, a client that disconnects and calls `Wait` again is answered correctly whether the signal fired while it was away or has yet to fire.
 
 ### Registering
 
 Build a signal set with `signal.New` and pass it to the host:
 
 ```go
-import "github.com/italypaleale/francis/builtin/signal"
+import (
+	"github.com/italypaleale/francis/builtin/signal"
+)
 
 deploys, err := signal.New("deploys",
 	signal.WithRetention(24*time.Hour),
@@ -298,7 +300,7 @@ if err != nil {
 err = host.RegisterBuiltInActor(deploys)
 ```
 
-As with any built-in actor, register the same signal set (same name and options) on every host that should be able to wait on or complete its signals. A given signal ID is always placed on a single host at a time, so all of its waiters converge on one instance.
+As with any built-in actor, register the same signal set (same name and options) on every host that should be able to wait on or complete its signals.
 
 ### Options
 
@@ -343,7 +345,7 @@ if errors.Is(err, signal.ErrAlreadyCompleted) {
 }
 ```
 
-Pass `nil` as the payload for a signal that only needs to say "it happened"; waiters then receive a `nil` envelope.
+Pass `nil` as the payload for a signal that only needs to say "it happened". In this case, waiters receive a `nil` envelope.
 
 `Check` is the non-blocking version of `Wait`, for callers that want to decide for themselves whether to wait:
 
@@ -351,27 +353,12 @@ Pass `nil` as the payload for a signal that only needs to say "it happened"; wai
 env, completed, err := sig.Check(ctx, deploymentID)
 ```
 
-Bound the wait with a context deadline when a caller should give up after a while — `Wait` itself never times out, by design.
+Bound the wait with a context deadline when a caller should give up after a while. By itself, `Wait` never times out.
 
 ### Retention
 
-Retention is the promise that **within the window, a `Wait` arriving after the completion returns immediately and correctly**.
+Retention is the promise that within the window, a `Wait` arriving after the completion returns immediately and correctly.
 
-Once the window passes, the completion record is gone, and the signal becomes **indistinguishable from one that never fired**: a `Wait` arriving after that blocks, and `Check` reports it as not completed. There is nothing left for the actor to answer from, so this is inherent rather than an implementation limit.
+Once the window passes, the completion record is gone, and the signal becomes indistinguishable from one that never fired: a `Wait` arriving after that blocks, and `Check` reports it as not completed.
 
-Set retention longer than the longest lateness you expect from any caller. If callers may arrive arbitrarily late, use `WithRetention(-1)` to keep completions forever, and garbage-collect the signal IDs you no longer need out of band.
-
-### How it works
-
-Each signal ID is its own actor instance, so signals never contend with each other. Unlike other actors, a signal actor runs its invocations **concurrently** rather than one at a time: a `Wait` that parks for an hour must not block the `Complete` that has to release it. The actor synchronizes itself internally, and completions are serialized so the first one wins.
-
-A completion is **persisted before it becomes observable**. If a host dies between the write and the broadcast, the waiters reconnect and are answered from the stored record; if the write fails, `Complete` reports the failure and the signal has genuinely not fired.
-
-Waiters are aggregated per process: every local caller waiting on the same signal shares **one** invocation to the owning host, so a process with thousands of waiters holds one stream rather than thousands. That shared wait also survives placement changes and host failures on its own — it re-resolves and resumes, so callers only ever see the signal firing or their own context ending.
-
-### Delivery semantics
-
-- **One shot**: a signal fires once and cannot be re-armed. Repeated `Complete` calls return `ErrAlreadyCompleted` and the first payload stands.
-- **Level-triggered**: waiters are answered from current state, so disconnecting and re-waiting is always correct and needs no per-caller bookkeeping.
-- **Durable completion**: a completion survives restarts and host failures for its retention window.
-- **No delivery to absent callers**: a signal notifies whoever is waiting or asking. It is not a queue — use [jobs](/docs/jobs) when you need durable, at-least-once delivery to a known recipient.
+Set retention longer than the longest lateness you expect from any caller. If callers may arrive arbitrarily late, use `WithRetention(-1)` to keep completions forever, and garbage-collect the signal IDs you no longer need yourself, out of band.

@@ -26,6 +26,10 @@ func TestSharedLockMode(t *testing.T) {
 	log := slog.New(slog.DiscardHandler)
 
 	// newHost returns a minimal manager with one shared-mode actor type and one ordinary turn-based one, so tests can compare the two
+	const (
+		sharedActor    = "shared-actor"
+		exclusiveActor = "exclusive-actor"
+	)
 	newHost := func() *Manager {
 		host := &Manager{
 			Actors:              haxmap.New[string, *ActiveActor](8),
@@ -33,20 +37,20 @@ func TestSharedLockMode(t *testing.T) {
 			clock:               clock,
 			shutdownGracePeriod: 5 * time.Second,
 			ActorsConfig: map[string]components.ActorHostType{
-				"sharedactor":    {IdleTimeout: 5 * time.Minute},
-				"exclusiveactor": {IdleTimeout: 5 * time.Minute},
+				sharedActor:    {IdleTimeout: 5 * time.Minute},
+				exclusiveActor: {IdleTimeout: 5 * time.Minute},
 			},
 			ActorFactories: map[string]actor.Factory{
-				"sharedactor": func(actorID string, service *actor.Service) actor.Actor {
+				sharedActor: func(actorID string, service *actor.Service) actor.Actor {
 					return &actor_mocks.MockActorDeactivate{}
 				},
-				"exclusiveactor": func(actorID string, service *actor.Service) actor.Actor {
+				exclusiveActor: func(actorID string, service *actor.Service) actor.Actor {
 					return &actor_mocks.MockActorDeactivate{}
 				},
 			},
 			actorTypeLockMode: map[string]LockMode{
-				"sharedactor":    LockModeShared,
-				"exclusiveactor": LockModeExclusive,
+				sharedActor:    LockModeShared,
+				exclusiveActor: LockModeExclusive,
 			},
 		}
 		host.IdleProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ActiveActor]{
@@ -62,30 +66,32 @@ func TestSharedLockMode(t *testing.T) {
 		host := newHost()
 		defer host.IdleProcessor.Close()
 
-		actorRef := ref.NewActorRef("sharedactor", "actor1")
+		actorRef := ref.NewActorRef(sharedActor, "actor1")
 
 		// Every invocation waits on the barrier, so they can only all return if they are all running at the same time
 		const count = 20
 		var wg sync.WaitGroup
 		barrier := make(chan struct{})
+		errs := make([]error, 50)
 		var running atomic.Int32
 
-		wg.Add(count)
-		for range count {
-			go func() {
-				defer wg.Done()
-				_, err := host.LockAndInvoke(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
+		for i := range count {
+			wg.Go(func() {
+				_, errs[i] = host.LockAndInvoke(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
 					if running.Add(1) == count {
 						close(barrier)
 					}
 					<-barrier
 					return nil, nil
 				})
-				assert.NoError(t, err)
-			}()
+			})
 		}
 
 		waitOrFail(t, wgDone(&wg), 5*time.Second, "invocations did not all run concurrently")
+
+		for i, err := range errs {
+			require.NoErrorf(t, err, "goroutine %d errored", i)
+		}
 	})
 
 	t.Run("a parked invocation does not block the invocation that releases it", func(t *testing.T) {
@@ -95,25 +101,23 @@ func TestSharedLockMode(t *testing.T) {
 		host := newHost()
 		defer host.IdleProcessor.Close()
 
-		actorRef := ref.NewActorRef("sharedactor", "actor2")
+		actorRef := ref.NewActorRef(sharedActor, "actor2")
 
 		const waiters = 50
 		release := make(chan struct{})
+		errs := make([]error, 50)
 		var wg sync.WaitGroup
 
 		// Park the waiters, and make sure they are all holding the lock before the release runs
 		var parked atomic.Int32
-		wg.Add(waiters)
-		for range waiters {
-			go func() {
-				defer wg.Done()
-				_, err := host.LockAndInvoke(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
+		for i := range waiters {
+			wg.Go(func() {
+				_, errs[i] = host.LockAndInvoke(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
 					parked.Add(1)
 					<-release
 					return nil, nil
 				})
-				assert.NoError(t, err)
-			}()
+			})
 		}
 
 		require.Eventually(t, func() bool {
@@ -133,6 +137,10 @@ func TestSharedLockMode(t *testing.T) {
 
 		waitOrFail(t, done, 5*time.Second, "the releasing invocation was blocked by the parked ones")
 		waitOrFail(t, wgDone(&wg), 5*time.Second, "the parked invocations were not released")
+
+		for i, err := range errs {
+			require.NoErrorf(t, err, "goroutine %d errored", i)
+		}
 	})
 
 	t.Run("Peek is rejected", func(t *testing.T) {
@@ -141,7 +149,7 @@ func TestSharedLockMode(t *testing.T) {
 		host := newHost()
 		defer host.IdleProcessor.Close()
 
-		actorRef := ref.NewActorRef("sharedactor", "actor3")
+		actorRef := ref.NewActorRef(sharedActor, "actor3")
 
 		_, err := host.LockAndPeek(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
 			return nil, nil
@@ -155,22 +163,23 @@ func TestSharedLockMode(t *testing.T) {
 		host := newHost()
 		defer host.IdleProcessor.Close()
 
-		actorRef := ref.NewActorRef("sharedactor", "actor4")
+		actorRef := ref.NewActorRef(sharedActor, "actor4")
 
-		release := make(chan struct{})
-		invoked := make(chan struct{})
-		done := make(chan struct{})
+		releaseCh := make(chan struct{})
+		invokedCh := make(chan struct{})
+		doneCh := make(chan struct{})
+		errCh := make(chan error, 1)
 		go func() {
-			defer close(done)
+			defer close(doneCh)
 			_, err := host.LockAndInvoke(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
-				close(invoked)
-				<-release
+				close(invokedCh)
+				<-releaseCh
 				return nil, nil
 			})
-			assert.NoError(t, err)
+			errCh <- err
 		}()
 
-		waitOrFail(t, invoked, 5*time.Second, "the invocation did not start")
+		waitOrFail(t, invokedCh, 5*time.Second, "the invocation did not start")
 
 		// The idle processor must see the actor as busy while the invocation holds the shared lock, exactly as it does for the exclusive one
 		act, ok := host.Actors.Get(actorRef.String())
@@ -180,8 +189,10 @@ func TestSharedLockMode(t *testing.T) {
 		_, stillActive := host.Actors.Get(actorRef.String())
 		assert.True(t, stillActive, "the actor was deactivated while an invocation was in flight")
 
-		close(release)
-		waitOrFail(t, done, 5*time.Second, "the invocation did not return")
+		close(releaseCh)
+		waitOrFail(t, doneCh, 5*time.Second, "the invocation did not return")
+
+		assert.NoError(t, <-errCh)
 	})
 
 	t.Run("halting is signaled to the invocation through the context", func(t *testing.T) {
@@ -190,14 +201,15 @@ func TestSharedLockMode(t *testing.T) {
 		host := newHost()
 		defer host.IdleProcessor.Close()
 
-		actorRef := ref.NewActorRef("sharedactor", "actor5")
+		actorRef := ref.NewActorRef(sharedActor, "actor5")
 
-		invoked := make(chan struct{})
-		done := make(chan struct{})
+		invokedCh := make(chan struct{})
+		doneCh := make(chan struct{})
+		errCh := make(chan error, 1)
 		go func() {
-			defer close(done)
+			defer close(doneCh)
 			_, err := host.LockAndInvoke(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
-				close(invoked)
+				close(invokedCh)
 
 				// A handler that parks selects on the halt signal so it can return without waiting out the shutdown grace period
 				select {
@@ -207,17 +219,19 @@ func TestSharedLockMode(t *testing.T) {
 					return nil, ctx.Err()
 				}
 			})
-			assert.ErrorIs(t, err, actor.ErrActorHalted)
+			errCh <- err
 		}()
 
-		waitOrFail(t, invoked, 5*time.Second, "the invocation did not start")
+		waitOrFail(t, invokedCh, 5*time.Second, "the invocation did not start")
 
 		act, ok := host.Actors.Get(actorRef.String())
 		require.True(t, ok)
 		require.NoError(t, act.Halt(false))
 
 		// The shutdown grace period is 5s, so returning quickly is what proves the halt signal was observed rather than the context cancellation that follows it
-		waitOrFail(t, done, 2*time.Second, "the invocation did not observe the halt signal")
+		waitOrFail(t, doneCh, 2*time.Second, "the invocation did not observe the halt signal")
+
+		assert.ErrorIs(t, <-errCh, actor.ErrActorHalted)
 	})
 
 	t.Run("an exclusive-mode actor still serializes its invocations", func(t *testing.T) {
@@ -226,17 +240,17 @@ func TestSharedLockMode(t *testing.T) {
 		host := newHost()
 		defer host.IdleProcessor.Close()
 
-		actorRef := ref.NewActorRef("exclusiveactor", "actor1")
+		actorRef := ref.NewActorRef(exclusiveActor, "actor1")
 
-		var concurrent atomic.Int32
-		var maxConcurrent atomic.Int32
-		var wg sync.WaitGroup
-
-		wg.Add(10)
-		for range 10 {
-			go func() {
-				defer wg.Done()
-				_, err := host.LockAndInvoke(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
+		var (
+			concurrent    atomic.Int32
+			maxConcurrent atomic.Int32
+			wg            sync.WaitGroup
+		)
+		errs := make([]error, 10)
+		for i := range 10 {
+			wg.Go(func() {
+				_, errs[i] = host.LockAndInvoke(t.Context(), actorRef, func(ctx context.Context, act *ActiveActor) (any, error) {
 					cur := concurrent.Add(1)
 					for {
 						observed := maxConcurrent.Load()
@@ -248,12 +262,15 @@ func TestSharedLockMode(t *testing.T) {
 					concurrent.Add(-1)
 					return nil, nil
 				})
-				assert.NoError(t, err)
-			}()
+			})
 		}
 
 		waitOrFail(t, wgDone(&wg), 5*time.Second, "invocations did not complete")
 		assert.Equal(t, int32(1), maxConcurrent.Load(), "turn-based concurrency was not preserved for the default lock mode")
+
+		for i, err := range errs {
+			assert.NoErrorf(t, err, "goroutine %d errored", i)
+		}
 	})
 }
 

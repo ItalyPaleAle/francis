@@ -43,7 +43,6 @@ func WithRetention(d time.Duration) Option {
 // WithIdleTimeout overrides how long a signal's actor is kept in memory after its last call before it is deactivated
 // It defaults to 5 minutes
 //
-// Deactivating a completed signal costs nothing: a later call re-activates it and is answered from the durable completion record
 // An actor with callers parked on it is never deactivated, however long it sits there, since the framework only deactivates an actor that has no invocation in flight
 func WithIdleTimeout(d time.Duration) Option {
 	return func(o *signalOptions) {

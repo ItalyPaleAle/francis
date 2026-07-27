@@ -28,7 +28,6 @@ import (
 
 const (
 	// signalActorTypePrefix namespaces signal actor types within the signal's own bare type space
-	// The reserved built-in prefix is added by the host when registering, so it is not included here
 	signalActorTypePrefix = "signal."
 
 	// methodWait blocks until the signal completes and returns its payload
@@ -49,13 +48,12 @@ var (
 )
 
 // New builds a signal built-in actor identified by name
-//
 // It serves one signal per signal ID, each with its own actor instance, so signals never contend with each other
 // A completed signal's payload is kept for the window set by WithRetention, which is how long a caller can arrive late and still be answered immediately
 //
 // Register the returned value on a host with the host's RegisterBuiltInActor method, then call Wait, Complete, and Check on the SignalService obtained from Service
 // Register the same signal set (same name and options) on every host that should be able to wait on or complete its signals
-// Names must be unique within a cluster and must not contain '/'
+// Names must be unique within a cluster
 func New(name string, opts ...Option) (*Signal, error) {
 	if name == "" {
 		return nil, errors.New("signal name is required")
@@ -72,12 +70,12 @@ func New(name string, opts ...Option) (*Signal, error) {
 	}
 
 	// The retention window follows the framework's convention for durations: zero takes the default, and a negative value means no expiration
-	// A state TTL of zero is what the providers read as "never expires", which is why a negative retention maps onto it
 	retention := o.retention
 	switch {
 	case retention == 0:
 		retention = defaultRetention
 	case retention < 0:
+		// A state TTL of zero means never expires
 		retention = 0
 	}
 
@@ -118,8 +116,7 @@ func New(name string, opts ...Option) (*Signal, error) {
 // It satisfies the framework's built-in actor contract (ActorType, Factory, RegisterOptions, Singleton) and exposes a Service method that returns a SignalService for the Wait, Complete, and Check operations
 // The actor behavior itself lives in the unexported signalActor instances that Factory builds, one per signal ID
 type Signal struct {
-	actorType string
-	// retention is the TTL applied to a completion record, already resolved from the options
+	actorType      string
 	retention      time.Duration
 	maxPayloadSize int
 	factory        actor.Factory
@@ -142,7 +139,6 @@ func (s *Signal) RegisterOptions() actorcore.RegisterActorOptions {
 }
 
 // Singleton reports that a signal set is not a singleton and needs no bootstrapping
-// It keeps one instance per signal ID, activated on demand by the first call that touches it, so there is no durable work to set up
 func (s *Signal) Singleton() bool {
 	return false
 }
@@ -246,7 +242,9 @@ func (a *signalActor) wait(ctx context.Context) (any, error) {
 		a.mu.Unlock()
 		return nil, err
 	}
-	completed, data, done := a.completed, a.data, a.done
+	completed := a.completed
+	data := a.data
+	done := a.done
 	a.mu.Unlock()
 
 	if completed {
@@ -288,6 +286,7 @@ func (a *signalActor) complete(ctx context.Context, data actor.Envelope) (any, e
 	if err != nil {
 		return nil, err
 	}
+
 	if a.completed {
 		return completeResult{AlreadyCompleted: true}, nil
 	}
