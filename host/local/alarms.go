@@ -186,9 +186,29 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		jobProps  ref.AlarmProperties
 	)
 
+	// Set when the alarm repeats and its lease was kept for the next occurrence, so the deferred cleanup below re-enqueues it
+	reEnqueue := false
+
 	// Get and lock the actor
 	aRef := lease.ActorRef()
-	statusAny, err := h.core.LockAndInvoke(ctx, aRef, func(parentCtx context.Context, act *actorcore.ActiveActor) (any, error) {
+	statusAny, err := h.core.LockAndInvoke(ctx, aRef, func(parentCtx context.Context, act *actorcore.ActiveActor) (status any, err error) {
+		// A successfully-executed occurrence is finalized in the provider before the actor's turn lock is released
+		// An actor that halts itself from its own handler is removed from the placement store as soon as the lock is released, and the provider drops the leases of a deactivated actor's alarms
+		// Finalizing here keeps the deletion ahead of that, so the occurrence is not left behind to be delivered a second time
+		defer func() {
+			if status != executeAlarmStatusCompleted {
+				return
+			}
+
+			// The completion uses the outer context on purpose: parentCtx is canceled once the actor's halt grace period elapses
+			var completeErr error
+			reEnqueue, completeErr = h.completeAlarm(ctx, lease, log)
+			if completeErr != nil {
+				// Log the error only - we are in a background goroutine
+				log.ErrorContext(ctx, "Error completing alarm", slog.Any("error", completeErr))
+			}
+		}()
+
 		// Before we execute an alarm we need to fetch it again using the lease
 		// This is because alarms we have in-memory could have been here for a few seconds, and they may not represent the accurate
 		// state of the data in the provider. For example, it could have been edited or deleted, or the lease could have been broken.
@@ -250,7 +270,6 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 
 	// Remove from the list of active alarms upon returning
 	isRetrying := false
-	reEnqueue := false
 	defer func() {
 		h.activeAlarmsLock.Lock()
 		delete(h.activeAlarms, key)
@@ -334,12 +353,8 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		return
 
 	case executeAlarmStatusCompleted:
-		// Complete the alarm, re-enqueuing it from the deferred cleanup when its lease was kept for the next occurrence
-		reEnqueue, err = h.completeAlarm(ctx, lease, log)
-		if err != nil {
-			// Log the error only - we are in background goroutine
-			log.Error("Error completing alarm", slog.Any("error", err))
-		}
+		// The alarm was already completed while the actor's turn lock was held
+		// The deferred cleanup above re-enqueues it when its lease was kept for the next occurrence
 		return
 
 	default:
