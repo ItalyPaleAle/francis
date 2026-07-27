@@ -352,8 +352,11 @@ func TestServiceIsMemoized(t *testing.T) {
 
 	// The fan-in registry lives on the SignalService, so handing out a fresh one per call would silently defeat it
 	svc := &actor.Service{}
-	assert.Same(t, s.Service(svc), s.Service(svc))
+	first := s.Service(svc)
+	second := s.Service(svc)
+	assert.Same(t, first, second)
 
 	// A different actor.Service is a different host binding, and gets its own
-	assert.NotSame(t, s.Service(svc), s.Service(&actor.Service{}))
+	other := s.Service(&actor.Service{})
+	assert.NotSame(t, first, other)
 }

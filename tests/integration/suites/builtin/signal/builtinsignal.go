@@ -244,10 +244,7 @@ func (s *builtinSignal) parkWaiters(t *testing.T, signalID string, perHost int) 
 	for i := range s.cluster.Len() {
 		svc := s.svc(i)
 		for range perHost {
-			g.wg.Add(1)
-			go func() {
-				defer g.wg.Done()
-
+			g.wg.Go(func() {
 				waitCtx, cancel := context.WithTimeout(t.Context(), waitTimeout)
 				defer cancel()
 
@@ -264,7 +261,7 @@ func (s *builtinSignal) parkWaiters(t *testing.T, signalID string, perHost int) 
 					return
 				}
 				g.results <- got
-			}()
+			})
 		}
 	}
 
@@ -400,10 +397,7 @@ func (s *signalFailover) Run(t *testing.T) {
 	errs := make(chan error, waiters)
 	var wg sync.WaitGroup
 	for range waiters {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-
+		wg.Go(func() {
 			waitCtx, cancel := context.WithTimeout(ctx, waitTimeout)
 			defer cancel()
 
@@ -420,7 +414,7 @@ func (s *signalFailover) Run(t *testing.T) {
 				return
 			}
 			results <- got
-		}()
+		})
 	}
 
 	// Let the waiters settle wherever the signal was placed before the topology changes under them
