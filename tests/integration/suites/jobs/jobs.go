@@ -100,7 +100,7 @@ func (s *jobs) Run(t *testing.T) {
 		_, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil)
 		require.NoError(t, err)
 
-		got := settleJob(t, actorID)
+		got := settleJob(t, actorID, 1)
 		assert.GreaterOrEqual(t, got, 1, "an immediate job should run")
 	})
 
@@ -110,7 +110,7 @@ func (s *jobs) Run(t *testing.T) {
 		_, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "send", "hello")
 		require.NoError(t, err)
 
-		settleJob(t, actorID)
+		settleJob(t, actorID, 1)
 		fires := shared.ProbeObserver.JobFires(actorID)
 		require.NotEmpty(t, fires)
 		assert.Equal(t, "send", fires[0].Method)
@@ -123,7 +123,7 @@ func (s *jobs) Run(t *testing.T) {
 		_, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobDelay(800*time.Millisecond))
 		require.NoError(t, err)
 
-		got := settleJob(t, actorID)
+		got := settleJob(t, actorID, 1)
 		assert.GreaterOrEqual(t, got, 1, "a delayed job should eventually run")
 	})
 
@@ -168,7 +168,7 @@ func (s *jobs) Run(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, id1, id2, "re-dispatching with the same key returns the same job")
 
-		got := settleJob(t, actorID)
+		got := settleJob(t, actorID, 1)
 		assert.Equal(t, 1, got, "an idempotency key must coalesce to a single execution")
 	})
 
@@ -181,7 +181,7 @@ func (s *jobs) Run(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotEqual(t, id1, id2, "each dispatch without a key is a distinct job")
 
-		got := settleJob(t, actorID)
+		got := settleJob(t, actorID, 2)
 		assert.GreaterOrEqual(t, got, 2, "two keyless dispatches should run twice")
 	})
 
@@ -192,7 +192,7 @@ func (s *jobs) Run(t *testing.T) {
 		jobID, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil)
 		require.NoError(t, err)
 
-		got := settleJob(t, actorID)
+		got := settleJob(t, actorID, maxAttempts)
 		assert.GreaterOrEqual(t, got, maxAttempts, "a persistently failing job should be retried up to its attempt budget")
 
 		// The job lands in the dead-letter store and the JobFailed hook fires
@@ -210,7 +210,7 @@ func (s *jobs) Run(t *testing.T) {
 		jobID, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil)
 		require.NoError(t, err)
 
-		got := settleJob(t, actorID)
+		got := settleJob(t, actorID, 1)
 		assert.Equal(t, 1, got, "a permanent failure should not be retried")
 
 		require.Eventually(t, func() bool {
@@ -232,7 +232,7 @@ func (s *jobs) Run(t *testing.T) {
 		err = svc.CancelJob(ctx, shared.ProbeActorType, actorID, jobID)
 		require.ErrorIs(t, err, actor.ErrJobNotFound)
 
-		got := settleJob(t, actorID)
+		got := settleJob(t, actorID, 0)
 		assert.Equal(t, 0, got, "a cancelled job must not run")
 	})
 
@@ -305,7 +305,7 @@ func (s *jobs) Run(t *testing.T) {
 
 // settleJob waits until an actor's job count stops changing for a full stabilize window and returns the settled count
 // Waiting for the count to quiesce tolerates the at-least-once nature of job delivery and any retry still in flight
-func settleJob(t *testing.T, actorID string) int {
+func settleJob(t *testing.T, actorID string, atLeast int) int {
 	t.Helper()
 
 	last := shared.ProbeObserver.JobCount(actorID)
@@ -321,11 +321,17 @@ func settleJob(t *testing.T, actorID string) int {
 			continue
 		}
 
+		// A count short of what the caller expects is still pending, however steady it looks
+		// Without this a job that has not started yet is indistinguishable from one that has finished, so a slow host reads as a job that never ran
+		if last < atLeast {
+			continue
+		}
+
 		if time.Since(stableSince) >= stabilizeWindow {
 			return last
 		}
 	}
 
-	t.Fatalf("job for %q did not settle within %s (last count %d)", actorID, eventuallyTimeout, last)
+	t.Fatalf("job for %q did not settle on at least %d executions within %s (last count %d)", actorID, atLeast, eventuallyTimeout, last)
 	return last
 }

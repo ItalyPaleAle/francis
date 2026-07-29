@@ -85,6 +85,15 @@ func splitHostPort(t *testing.T, addr string) (string, int) {
 	return host, port
 }
 
+// drainExit clears any exit error left behind by a previous run, so a host that stopped on its own can be started again
+// waitExit and waitReady both put what they read back, which would otherwise make the stale value look like an immediate exit of the new run
+func drainExit(runErrC chan error) {
+	select {
+	case <-runErrC:
+	default:
+	}
+}
+
 // waitExit blocks until Run returns of its own accord and reports the error it exited with
 // The error is put back so a later Stop or Cleanup still observes the exit and returns immediately
 func waitExit(t *testing.T, address string, runErrC chan error, timeout time.Duration) error {
