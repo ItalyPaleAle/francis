@@ -308,6 +308,11 @@ func (s *SQLiteProvider) GetAllActorState(ctx context.Context) (comptesting.Acto
 		res = append(res, r)
 	}
 
+	err = rows.Err()
+	if err != nil {
+		return nil, fmt.Errorf("rows error: %w", err)
+	}
+
 	return res, nil
 }
 

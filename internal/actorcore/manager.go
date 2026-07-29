@@ -19,6 +19,7 @@ import (
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/tracing"
+	"github.com/italypaleale/francis/internal/types"
 )
 
 const (
@@ -390,13 +391,23 @@ func (m *Manager) createActorFn(r ref.ActorRef) (func() *ActiveActor, error) {
 
 // HaltAll halts all actors active on the host, gracefully
 func (m *Manager) HaltAll() error {
+	return m.haltAll(false)
+}
+
+// AbandonAll drops every actor active on the host without clearing any placement record
+// It is meant for a host that has learned it no longer owns what it is holding
+func (m *Manager) AbandonAll() error {
+	return m.haltAll(true)
+}
+
+func (m *Manager) haltAll(abandon bool) error {
 	// Deactivate all actors, each in its own goroutine
 	errCh := make(chan error)
 	var count int
 	for _, act := range m.Actors.Iterator() {
 		count++
 		go func(act *ActiveActor) {
-			haltErr := m.HaltActiveActor(act, true)
+			haltErr := m.haltActiveActor(act, true, abandon)
 			if haltErr != nil {
 				haltErr = fmt.Errorf("failed to halt actor '%s': %w", act.Key(), haltErr)
 			}
@@ -485,6 +496,12 @@ func (m *Manager) HandleIdleActor(act *ActiveActor) {
 
 // HaltActiveActor gracefully halts an actor's instance and removes it from the placement store
 func (m *Manager) HaltActiveActor(act *ActiveActor, drain bool) (err error) {
+	return m.haltActiveActor(act, drain, false)
+}
+
+// haltActiveActor gracefully halts an actor's instance, and unless abandon is set also removes it from the placement store
+// An abandoned actor is one this host no longer owns, so its placement record is left alone and its Deactivate hook runs read-only
+func (m *Manager) haltActiveActor(act *ActiveActor, drain bool, abandon bool) (err error) {
 	key := act.Key()
 
 	// Deactivation runs off the idle processor or shutdown, not a caller request, so it begins its own trace
@@ -508,7 +525,7 @@ func (m *Manager) HaltActiveActor(act *ActiveActor, drain bool) (err error) {
 	}
 
 	// Send the actor a message it has been deactivated
-	err = m.deactivateActor(act)
+	err = m.deactivateActor(act, abandon)
 	if err != nil {
 		// Even though the call to the actor's Deactivate method failed, we still need to continue with the deactivation process
 		// Otherwise, we are in a state where the object is still in-memory and that will cause many issues
@@ -520,6 +537,11 @@ func (m *Manager) HaltActiveActor(act *ActiveActor, drain bool) (err error) {
 	act, ok := m.Actors.GetAndDel(key)
 	if !ok || act == nil {
 		// If nothing was loaded, the actor was already deactivated
+		return nil
+	}
+
+	// An abandoned actor stops here: the placement record is no longer ours to clear, and may already name the host that took the actor over
+	if abandon {
 		return nil
 	}
 
@@ -540,7 +562,9 @@ func (m *Manager) HaltActiveActor(act *ActiveActor, drain bool) (err error) {
 	return nil
 }
 
-func (m *Manager) deactivateActor(act *ActiveActor) error {
+// deactivateActor drives the actor's optional Deactivate hook
+// readOnly marks the context so the actor's client rejects state writes, used when the actor is being dropped because this host no longer owns it and its state now belongs to an instance elsewhere
+func (m *Manager) deactivateActor(act *ActiveActor, readOnly bool) error {
 	m.log.Debug("Deactivated actor", slog.String("actorRef", act.Key()))
 
 	// Check if the actor implements the Deactivate method
@@ -560,6 +584,9 @@ func (m *Manager) deactivateActor(act *ActiveActor) error {
 	// Once the decision to deactivate an actor has been made, we must go through with it or we could have an inconsistent state
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	if readOnly {
+		ctx = types.WithReadOnly(ctx)
+	}
 
 	// Call the Deactivate method on the actor
 	err := obj.Deactivate(ctx)

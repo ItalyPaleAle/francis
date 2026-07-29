@@ -31,6 +31,7 @@ import (
 	_ "github.com/italypaleale/francis/tests/integration/suites/durability"
 	_ "github.com/italypaleale/francis/tests/integration/suites/errorprop"
 	_ "github.com/italypaleale/francis/tests/integration/suites/failover"
+	_ "github.com/italypaleale/francis/tests/integration/suites/faults"
 	_ "github.com/italypaleale/francis/tests/integration/suites/invocation"
 	_ "github.com/italypaleale/francis/tests/integration/suites/jobs"
 	_ "github.com/italypaleale/francis/tests/integration/suites/lifecycle"

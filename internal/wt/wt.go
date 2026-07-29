@@ -57,8 +57,8 @@ func NewServer(addr string, tlsConfig *tls.Config, handler http.Handler, opts ..
 
 // NewDialer builds a WebTransport client dialer with the required QUIC settings
 // The provided tlsConfig must already advertise the HTTP/3 ALPN
-func NewDialer(tlsConfig *tls.Config, opts ...Option) *webtransport.Dialer {
-	return &webtransport.Dialer{
+func NewDialer(tlsConfig *tls.Config, opts ...Option) *webtransport.Transport {
+	return &webtransport.Transport{
 		TLSClientConfig: tlsConfig,
 		QUICConfig:      quicConfig(opts...),
 	}

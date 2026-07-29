@@ -94,8 +94,9 @@ func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.Regi
 }
 
 // reattachHost reattaches a reconnecting host to its existing registration, identified by req.ExistingHostID
-// It refreshes the registration in place even if its health record is stale, so a host can reclaim it after a runtime failover without waiting for the previous health record to expire
-// If the registration no longer exists, a brand-new one is created instead
+// It refreshes the registration in place only while its health record is still live, so a host that reconnects quickly (e.g. after a runtime failover) keeps its identity and its actors
+// A registration whose health record has expired is not reclaimable: the cluster has already written that host off and may have placed its actors elsewhere, so it is cleaned up like any other dead host and the caller is given a brand-new registration, whose Reattached of false tells it to drop everything it was still holding
+// A brand-new registration is also created when the previous one no longer exists at all
 func (p *PostgresProvider) reattachHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {
 	newHostIDObj, oErr := uuid.NewV7()
 	if oErr != nil {
@@ -108,14 +109,14 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 		reattached bool
 	)
 	_, oErr = postgrestransactions.ExecuteInTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (zero struct{}, err error) {
-		// Clean up unhealthy hosts, but never the registration we are reattaching to
+		// Clean up unhealthy hosts
 		queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 		defer cancel()
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err = tx.Exec(queryCtx,
 			`DELETE FROM `+p.tablePrefix+`hosts
-			WHERE host_last_health_check < ((now() AT TIME ZONE 'utc') - $1::interval) AND host_id != $2`,
-			p.cfg.HostHealthCheckDeadline, req.ExistingHostID,
+			WHERE host_last_health_check < ((now() AT TIME ZONE 'utc') - $1::interval)`,
+			p.cfg.HostHealthCheckDeadline,
 		)
 		if err != nil {
 			return zero, fmt.Errorf("error removing failed hosts: %w", err)
@@ -151,7 +152,7 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 			activeHostID = req.ExistingHostID
 			reattached = true
 		} else {
-			// The existing registration was not found (already garbage-collected): create a new one
+			// The existing registration was not found (already cleaned up): create a new one
 			queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
 			defer cancel()
 			// #nosec G202 -- the only concatenated value is the static table prefix, not user input

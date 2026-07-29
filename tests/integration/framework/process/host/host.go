@@ -8,8 +8,12 @@ package host
 
 import (
 	"context"
+	"net"
+	"strconv"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/actorcore"
@@ -36,6 +40,9 @@ type Instance interface {
 	// Stop gracefully shuts the host down mid-test, leaving the rest of the topology running
 	// It is idempotent with Cleanup, and the host can be brought back up by calling Run again on the same address
 	Stop(t *testing.T)
+	// WaitExit blocks until the host's Run returns on its own and reports the error it exited with
+	// A host exits by itself when one of its background services fails unrecoverably, such as when its health checks stop reaching the provider, and a scenario uses this to assert the host noticed
+	WaitExit(t *testing.T, timeout time.Duration) error
 	// ListJobs lists an actor's jobs straight through the host, bypassing the Service guard so tests can inspect built-in actors
 	ListJobs(ctx context.Context, actorType string, actorID string) ([]actor.JobInfo, error)
 	// Halt deactivates an actor straight through the host, bypassing the Service guard so tests can halt built-in actors
@@ -63,6 +70,33 @@ func waitReady(t *testing.T, address string, ready <-chan struct{}, runErrC chan
 		t.Fatalf("host %s exited during startup: %v", address, err)
 	case <-time.After(readinessTimeout):
 		t.Fatalf("host %s did not become ready within %s", address, readinessTimeout)
+	}
+}
+
+// splitHostPort breaks a "host:port" bind address into the parts the host options take separately
+func splitHostPort(t *testing.T, addr string) (string, int) {
+	t.Helper()
+
+	host, portStr, err := net.SplitHostPort(addr)
+	require.NoError(t, err, "bind address %s is not valid", addr)
+	port, err := strconv.Atoi(portStr)
+	require.NoError(t, err, "bind address %s does not carry a numeric port", addr)
+
+	return host, port
+}
+
+// waitExit blocks until Run returns of its own accord and reports the error it exited with
+// The error is put back so a later Stop or Cleanup still observes the exit and returns immediately
+func waitExit(t *testing.T, address string, runErrC chan error, timeout time.Duration) error {
+	t.Helper()
+
+	select {
+	case err := <-runErrC:
+		runErrC <- err
+		return err
+	case <-time.After(timeout):
+		t.Fatalf("host %s did not exit within %s", address, timeout)
+		return nil
 	}
 }
 

@@ -110,9 +110,6 @@ func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, provi
 	if s.timeout >= s.cfg.HostHealthCheckDeadline {
 		return nil, fmt.Errorf("the configured host health check deadline ('%v') must be bigger than the query timeout ('%v')", s.timeout, s.cfg.HostHealthCheckDeadline)
 	}
-	if s.cfg.HostHealthCheckDeadline-s.timeout < 5*time.Second {
-		s.log.Warn("The configured host health check deadline is less than 5s more than the query timeout: this could cause issues", "healthCheckDeadline", s.cfg.HostHealthCheckDeadline, "queryTimeout", s.timeout)
-	}
 
 	// Open a database connection unless we have one passed in already
 	if s.db == nil {
@@ -231,12 +228,7 @@ func (s *SQLiteProvider) Close() error {
 }
 
 func (s *SQLiteProvider) HealthCheckInterval() time.Duration {
-	// The recommended health check interval is the deadline, less the query timeout, less 1s, then rounded down to the closest 5s
-	interval := (s.cfg.HostHealthCheckDeadline - s.timeout - time.Second).Truncate(time.Second)
-	interval -= time.Duration(int64(interval.Seconds())%5) * time.Second
-
-	// ...however, there's a minimum of 1s
-	return max(interval, time.Second)
+	return s.cfg.HealthCheckInterval()
 }
 
 func (s *SQLiteProvider) RenewLeaseInterval() time.Duration {

@@ -38,21 +38,9 @@ func (r placementResolver) IsLocal(p *actorcore.Placement) bool {
 	return r.h.isLocal(p)
 }
 
-// lookupActor resolves where an actor is placed, checking the local host first, then the cache, then the provider
+// lookupActor resolves where an actor is placed, checking the cache first and then the provider
 func (h *Host) lookupActor(parentCtx context.Context, aRef ref.ActorRef, skipCache bool, activeOnly bool) (*actorcore.Placement, error) {
 	key := aRef.String()
-
-	// First, check if the actor is active locally
-	// This check can be performed in-memory
-	_, ok := h.core.Actors.Get(key)
-	if ok {
-		// Actor is running on the current host, so we can just return that
-		// Note we don't need to do anything with activeOnly, since the actor is definitely active
-		return &actorcore.Placement{
-			HostID:  h.hostID,
-			Address: h.address,
-		}, nil
-	}
 
 	// Check if we have a cached response, assuming the caller doesn't want to skip the cache
 	// Active-only lookups always consult the provider

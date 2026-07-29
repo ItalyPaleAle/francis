@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"k8s.io/utils/clock"
+
+	"github.com/italypaleale/francis/components"
 )
 
 type HostOption func(*newHostOptions)
@@ -91,6 +93,12 @@ func WithRequestTimeout(d time.Duration) HostOption {
 	return func(o *newHostOptions) { o.RequestTimeout = d }
 }
 
+// WithHealthCheckPolicy sets how the host bounds the health checks it sends the runtime
+// A nil policy, or any field left unset, falls back to the defaults
+func WithHealthCheckPolicy(p *components.HealthCheckPolicy) HostOption {
+	return func(o *newHostOptions) { o.HealthCheck = p }
+}
+
 // WithMaxInFlightRequests sets how many peer invocations this host's peer server processes concurrently per session
 // Invocations past the limit are rejected with a retryable overloaded error so callers back off and re-resolve
 func WithMaxInFlightRequests(n int) HostOption {
@@ -114,6 +122,7 @@ type newHostOptions struct {
 	Logger              *slog.Logger
 	ShutdownGracePeriod time.Duration
 	RequestTimeout      time.Duration
+	HealthCheck         *components.HealthCheckPolicy
 	MaxInFlightRequests int
 	MaxRequestBodySize  int64
 

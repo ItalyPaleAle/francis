@@ -84,8 +84,14 @@ func TestLookupActor(t *testing.T) {
 		activeAct := actorcore.NewActiveActor(actorRef, instance, 5*time.Minute, actorcore.LockModeExclusive, host.core.IdleProcessor, clock)
 		host.core.Actors.Set(actorRef.String(), activeAct)
 
-		// No provider calls should be made when actor is local
-		provider.AssertNotCalled(t, "LookupActor")
+		// An actor being active here does not prove it still belongs here, so the provider stays authoritative and is consulted anyway
+		provider.
+			On("LookupActor", mock.Anything, actorRef, mock.Anything).
+			Return(components.LookupActorRes{
+				HostID:      "test-host-123",
+				Address:     "localhost:8080",
+				IdleTimeout: 5 * time.Minute,
+			}, nil)
 
 		// Test lookup with skipCache = false
 		result, err := host.lookupActor(t.Context(), actorRef, false, false)
@@ -100,6 +106,38 @@ func TestLookupActor(t *testing.T) {
 		require.NotNil(t, result2)
 		assert.Equal(t, "test-host-123", result2.HostID)
 		assert.Equal(t, "localhost:8080", result2.Address)
+
+		provider.AssertCalled(t, "LookupActor", mock.Anything, actorRef, mock.Anything)
+	})
+
+	t.Run("actor is active locally but placed elsewhere", func(t *testing.T) {
+		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+
+		host, provider := newHost()
+		defer host.core.Close()
+		defer host.placementCache.Stop()
+
+		actorRef := ref.NewActorRef("testactor", "actor1-moved")
+
+		// The actor is active here, left over from before this host fell behind on its health checks
+		instance := &actor_mocks.MockActorDeactivate{}
+		activeAct := actorcore.NewActiveActor(actorRef, instance, 5*time.Minute, host.core.IdleProcessor, clock)
+		host.core.Actors.Set(actorRef.String(), activeAct)
+
+		// The provider has since placed it on another host, which is the answer that must win
+		provider.
+			On("LookupActor", mock.Anything, actorRef, mock.Anything).
+			Return(components.LookupActorRes{
+				HostID:      "other-host-456",
+				Address:     "localhost:9090",
+				IdleTimeout: 5 * time.Minute,
+			}, nil)
+
+		result, err := host.lookupActor(t.Context(), actorRef, false, false)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Equal(t, "other-host-456", result.HostID)
+		assert.False(t, host.isLocal(result), "a stale local instance must not make the placement local")
 	})
 
 	t.Run("cache hit", func(t *testing.T) {
@@ -638,8 +676,14 @@ func TestLookupActor(t *testing.T) {
 		activeAct := actorcore.NewActiveActor(actorRef, instance, 5*time.Minute, actorcore.LockModeExclusive, host.core.IdleProcessor, clock)
 		host.core.Actors.Set(actorRef.String(), activeAct)
 
-		// No provider calls should be made when actor is local
-		provider.AssertNotCalled(t, "LookupActor")
+		// An active-only lookup is answered by the provider like any other, since a local instance is not proof of ownership
+		provider.
+			On("LookupActor", mock.Anything, actorRef, components.LookupActorOpts{ActiveOnly: true}).
+			Return(components.LookupActorRes{
+				HostID:      "test-host-123",
+				Address:     "localhost:8080",
+				IdleTimeout: 5 * time.Minute,
+			}, nil)
 
 		// Test lookup with activeOnly = true
 		result, err := host.lookupActor(t.Context(), actorRef, false, true)
@@ -647,6 +691,8 @@ func TestLookupActor(t *testing.T) {
 		require.NotNil(t, result)
 		assert.Equal(t, "test-host-123", result.HostID)
 		assert.Equal(t, "localhost:8080", result.Address)
+
+		provider.AssertExpectations(t)
 	})
 
 	t.Run("activeOnly true - returns active actor from provider", func(t *testing.T) {

@@ -17,6 +17,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"k8s.io/utils/clock"
 
+	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/bootstrapauth"
 	"github.com/italypaleale/francis/internal/ca"
 	"github.com/italypaleale/francis/internal/certholder"
@@ -65,6 +66,7 @@ type runtimeClientConfig struct {
 	// bootstrapTokenFn returns a fresh bootstrap JWT, set for JWT bootstrap
 	bootstrapTokenFn func() (string, error)
 	requestTimeout   time.Duration
+	healthCheck      *components.HealthCheckPolicy
 	minBackoff       time.Duration
 	maxBackoff       time.Duration
 	handlers         runtimeHandlers
@@ -78,16 +80,18 @@ type runtimeClientConfig struct {
 	// onSessionEnd is called after a live runtime session ends, before reconnecting, so the host can drop cached placements that may have gone stale while disconnected
 	onSessionEnd func()
 
+	// onIdentityReset is called when a registration returns a fresh host identity rather than reattaching to the previous one, so the host can drop every actor it was still holding under the old identity
+	onIdentityReset func()
+
 	log   *slog.Logger
 	clock clock.WithTicker
 }
 
 // runtimeClient maintains a persistent WebTransport session to one runtime replica at a time
-// It registers the host, sends periodic health checks, serves runtime-initiated requests, and reconnects
-// to another runtime address when the current session fails, reattaching to the same host registration
+// It registers the host, sends periodic health checks, serves runtime-initiated requests, and reconnects to another runtime address when the current session fails, reattaching to the same host registration
 type runtimeClient struct {
-	cfg    runtimeClientConfig
-	dialer *webtransport.Dialer
+	cfg       runtimeClientConfig
+	transport *webtransport.Transport
 
 	mu        sync.RWMutex
 	session   *webtransport.Session
@@ -117,9 +121,9 @@ func newRuntimeClient(cfg runtimeClientConfig) *runtimeClient {
 	}
 
 	return &runtimeClient{
-		cfg:    cfg,
-		dialer: wt.NewDialer(cfg.tlsConfig),
-		ready:  make(chan struct{}),
+		cfg:       cfg,
+		transport: wt.NewDialer(cfg.tlsConfig),
+		ready:     make(chan struct{}),
 	}
 }
 
@@ -137,7 +141,7 @@ func (rc *runtimeClient) HostID() string {
 
 // Run connects to a runtime and keeps the session alive, reconnecting on failure until the context is canceled
 func (rc *runtimeClient) Run(ctx context.Context) error {
-	defer func() { _ = rc.dialer.Close() }()
+	defer func() { _ = rc.transport.Close() }()
 
 	// Start at a random address so replicas spread the initial connections
 	// #nosec G404 -- not security-sensitive
@@ -220,6 +224,13 @@ func (rc *runtimeClient) connectAndServe(ctx context.Context, addr string) (bool
 		return false, fmt.Errorf("failed to register with runtime: %w", err)
 	}
 
+	// A registration that did not reattach means the runtime issued us a fresh identity, so whatever we still hold from our previous one is no longer ours
+	// This happens when our old registration expired while we were away, in which case the cluster has already been free to place those actors on other hosts
+	// The actors are dropped before the session is published, so no invocation can land on one in the window between registering and cleaning up
+	if !resp.Reattached && rc.cfg.onIdentityReset != nil {
+		rc.cfg.onIdentityReset()
+	}
+
 	// Publish the live session so host-to-runtime requests can use it, and clear it again on the way out
 	rc.setSession(session, resp.HostID, resp.SessionID)
 	defer rc.clearSession()
@@ -268,7 +279,7 @@ func (rc *runtimeClient) connectAndServe(ctx context.Context, addr string) (bool
 // dial establishes a WebTransport session with the runtime at addr
 func (rc *runtimeClient) dial(ctx context.Context, addr string) (*webtransport.Session, error) {
 	url := "https://" + addr + protocol.RuntimeConnectPath
-	rsp, session, err := rc.dialer.Dial(ctx, url, nil)
+	rsp, session, err := rc.transport.Dial(ctx, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -574,8 +585,8 @@ func (rc *runtimeClient) runHealthChecks(ctx context.Context, session *webtransp
 	for {
 		select {
 		case <-t.C():
-			// Send a health check, bounding it by the per-request timeout
-			reqCtx, cancel := context.WithTimeout(ctx, rc.cfg.requestTimeout)
+			// Bound a health check by the dedicated attempt timeout rather than the general request timeout
+			reqCtx, cancel := context.WithTimeout(ctx, rc.cfg.healthCheck.EffectiveAttemptTimeout())
 			err := rc.doRequest(reqCtx, protocol.KindHealthCheck, protocol.HealthCheckRequest{}, nil)
 			cancel()
 

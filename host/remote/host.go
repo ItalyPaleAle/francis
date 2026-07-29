@@ -220,6 +220,7 @@ func newHost(options *newHostOptions) (*Host, error) {
 		bootstrapPSK:     bootstrapPSK,
 		bootstrapTokenFn: options.BootstrapTokenFn,
 		requestTimeout:   options.RequestTimeout,
+		healthCheck:      options.HealthCheck,
 		log:              options.Logger,
 		clock:            options.clock,
 		onDrainStart:     func() { h.draining.Store(true) },
@@ -227,6 +228,8 @@ func newHost(options *newHostOptions) (*Host, error) {
 		onDrain: h.drainActors,
 		// When a session ends, drop cached placements so they are re-resolved against the next session
 		onSessionEnd: h.invalidateAllPlacements,
+		// A registration that did not reattach means our previous identity is gone, so nothing we still hold is ours to serve
+		onIdentityReset: h.abandonActors,
 		handlers: runtimeHandlers{
 			executeAlarm:   h.executeAlarm,
 			terminateActor: h.terminateActor,
@@ -386,6 +389,14 @@ func (h *Host) bootstrapSingletonActors(ctx context.Context) {
 				return
 			}
 		}
+	}
+}
+
+// abandonActors drops every actor this host is still holding after the runtime issued it a fresh identity
+func (h *Host) abandonActors() {
+	err := h.core.AbandonAll()
+	if err != nil {
+		h.log.Warn("Error abandoning actors after the host was given a new identity", slog.Any("error", err))
 	}
 }
 

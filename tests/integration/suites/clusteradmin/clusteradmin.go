@@ -34,7 +34,7 @@ import (
 const (
 	// stableDeadline keeps hosts comfortably healthy through a subtest, so a slow health check never prunes a host the limit test is counting
 	stableDeadline = time.Minute
-	// evictDeadline is the shortest deadline the store providers accept (it must exceed their 5s query timeout by at least 5s), which still yields a 5s health check interval so a locked host self-terminates within a few seconds
+	// evictDeadline is the shortest deadline the providers accept, being just enough to hold a full sequence of health check attempts plus the gap before the next one, so a locked host self-terminates within a few seconds
 	evictDeadline = 12 * time.Second
 
 	readyTimeout = 20 * time.Second
@@ -65,7 +65,7 @@ func (s *clusterAdmin) Name() string {
 
 func (s *clusterAdmin) Setup(t *testing.T) []framework.Option {
 	// Only the shared store is a managed process: the hosts and the Admin are built by Run so it can control their lifecycles precisely
-	s.backend = provider.New(s.variant)
+	s.backend = provider.New(s.variant, provider.Options{})
 	return []framework.Option{
 		framework.WithProcesses(s.backend),
 	}

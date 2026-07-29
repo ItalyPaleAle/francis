@@ -124,6 +124,7 @@ type Host struct {
 	activeAlarms     map[string]struct{}
 	retryingAlarms   map[string]struct{}
 
+	healthCheck            *components.HealthCheckPolicy
 	bind                   string
 	alarmsPollInterval     time.Duration
 	providerRequestTimeout time.Duration
@@ -141,6 +142,7 @@ func (o newHostOptions) getProviderConfig() components.ProviderConfig {
 		AlarmsFetchAheadInterval:  o.AlarmsFetchAheadInterval,
 		AlarmsFetchAheadBatchSize: o.AlarmsFetchAheadBatchSize,
 		MaxHosts:                  o.MaxHosts,
+		HealthCheck:               o.HealthCheck,
 	}
 }
 
@@ -243,11 +245,13 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 		alarmsPollInterval:     options.AlarmsPollInterval,
 		shutdownGracePeriod:    options.ShutdownGracePeriod,
 		providerRequestTimeout: options.ProviderRequestTimeout,
+		healthCheck:            options.HealthCheck,
 		bind:                   net.JoinHostPort(options.BindAddress, strconv.Itoa(options.BindPort)),
 		logSource:              options.Logger,
 		clock:                  options.clock,
 		ready:                  make(chan struct{}),
 	}
+
 	h.service = actor.NewService(h)
 
 	// The actor core owns activation, turn-based invocation, idle deactivation, and halting
@@ -531,8 +535,8 @@ func (h *Host) runHealthChecks(parentCtx context.Context) error {
 	defer t.Stop()
 
 	retryOpts := []backoff.RetryOption{
-		backoff.WithBackOff(backoff.NewConstantBackOff(500 * time.Millisecond)),
-		backoff.WithMaxTries(3),
+		backoff.WithBackOff(backoff.NewConstantBackOff(h.healthCheck.EffectiveRetryDelay())),
+		backoff.WithMaxTries(h.healthCheck.EffectiveMaxAttempts()),
 	}
 
 	for {
@@ -540,7 +544,7 @@ func (h *Host) runHealthChecks(parentCtx context.Context) error {
 		case <-t.C():
 			h.log.DebugContext(parentCtx, "Sending health check to the provider")
 			_, err = backoff.Retry(parentCtx, func() (r struct{}, rErr error) {
-				ctx, cancel := context.WithTimeout(parentCtx, h.providerRequestTimeout)
+				ctx, cancel := context.WithTimeout(parentCtx, h.healthCheck.EffectiveAttemptTimeout())
 				defer cancel()
 				rErr = h.actorProvider.UpdateActorHost(ctx, h.hostID, components.UpdateActorHostReq{UpdateLastHealthCheck: true})
 				switch {
