@@ -75,6 +75,11 @@ func TestHostHalt(t *testing.T) {
 		// Set expected method calls on provider
 		provider.
 			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef).
+			Run(func(mock.Arguments) {
+				registered, ok := host.Actors.Get(actorRef.String())
+				assert.True(t, ok, "Actor should remain registered until its placement is removed")
+				assert.Same(t, activeAct, registered, "The halted activation should prevent a retry from creating a replacement during placement removal")
+			}).
 			Return(nil).
 			Once()
 

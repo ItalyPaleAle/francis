@@ -532,26 +532,30 @@ func (m *Manager) haltActiveActor(act *ActiveActor, drain bool, abandon bool) (e
 		m.log.Error("Actor returned an error during deactivation", slog.Any("error", err))
 	}
 
-	// Remove the actor from the table
-	// This will prevent more state changes
-	act, ok := m.Actors.GetAndDel(key)
-	if !ok || act == nil {
+	// Confirm this activation is still the one registered before changing its placement
+	current, ok := m.Actors.Get(key)
+	if !ok || current == nil || current != act {
 		// If nothing was loaded, the actor was already deactivated
 		return nil
 	}
 
-	// An abandoned actor stops here: the placement record is no longer ours to clear, and may already name the host that took the actor over
+	// An abandoned actor only leaves the local table because its placement may already name the host that took it over
 	if abandon {
+		m.Actors.GetAndDel(key)
 		return nil
 	}
 
-	// Report to the placement store that the actor has been deactivated
+	// Clear placement while the halted activation remains discoverable so a retry cannot create a replacement that this deactivation would orphan
 	// This uses a background context because at this point it needs to not be tied to the caller's context
 	// Once the decision to deactivate an actor has been made, we must go through with it or we could have an inconsistent state
 	// TODO: Handle this error - should retry, and then maybe gracefully exit?
 	ctx, cancel := context.WithTimeout(context.Background(), m.providerRequestTimeout)
 	defer cancel()
 	err = m.removeActor(ctx, act.ref)
+
+	// Remove the halted activation even when clearing placement failed so it cannot remain permanently unusable in memory
+	m.Actors.GetAndDel(key)
+
 	if errors.Is(err, components.ErrNoActor) {
 		// If the error is ErrNoActor, the actor was already deactivated in the placement store, so we can ignore it
 		return nil
