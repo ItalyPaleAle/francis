@@ -88,6 +88,7 @@ Quick links:
 - [Writing actors](https://francis.italypaleale.me/docs/writing-actors/) — the full actor API
 - [Topologies](https://francis.italypaleale.me/docs/topologies/) — local vs. remote, and choosing the right one
 - [Deploying the runtime](https://francis.italypaleale.me/docs/deploying-the-runtime/) — running the standalone control plane
+- [Built-in actors](https://francis.italypaleale.me/builtin-actors/) - framework-managed actors for common patterns
 
 You can also find runnable samples in the [`examples`](./examples) directory.
 
