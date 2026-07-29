@@ -57,6 +57,8 @@ func init() {
 	suite.Register(&providerOutage{})
 	suite.Register(&jobSurvivesHostDeath{})
 	suite.Register(&addressConflict{})
+	suite.Register(&stateWriteFailure{})
+	suite.Register(&linkFlapping{})
 }
 
 // labelHosts assigns each host a stable label and returns them in host order, so the probe can report which host ran an invocation or an alarm

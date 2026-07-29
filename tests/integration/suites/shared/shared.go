@@ -90,6 +90,8 @@ const (
 	ProbeMethodFail = "fail"
 	// ProbeMethodBlock occupies the actor's turn until the test releases it, so a scenario can break something while an invocation is provably in flight
 	ProbeMethodBlock = "block"
+	// ProbeMethodBlockingWrite reads the state, then waits to be released before writing it back, so a scenario can break the store between an actor's read and its write
+	ProbeMethodBlockingWrite = "blocking-write"
 )
 
 // blockMaxHold caps how long ProbeMethodBlock waits to be released, so a scenario that forgets to release it cannot wedge the suite
@@ -146,6 +148,28 @@ func (a *ProbeActor) Invoke(ctx context.Context, method string, _ actor.Envelope
 		case <-time.After(blockMaxHold):
 		}
 		return nil, nil
+
+	case ProbeMethodBlockingWrite:
+		// Read first, so the value being written back is one the actor genuinely loaded
+		state, err := a.client.GetState(ctx)
+		if err != nil {
+			return nil, err
+		}
+		state.N++
+
+		// Park between the read and the write, which is the window a scenario uses to take the store away
+		ProbeObserver.enterBlock(a.actorID)
+		select {
+		case <-ProbeObserver.blockRelease(a.actorID):
+		case <-ctx.Done():
+		case <-time.After(blockMaxHold):
+		}
+
+		err = a.client.SetState(ctx, state, nil)
+		if err != nil {
+			return nil, err
+		}
+		return state, nil
 
 	case ProbeMethodHold:
 		// Track concurrent turns for this actor, then hold the turn briefly
