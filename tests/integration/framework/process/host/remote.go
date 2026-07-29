@@ -113,6 +113,9 @@ func (p *Remote) Run(t *testing.T) {
 		require.NoError(t, err, "failed to register actor %q", a.Type)
 	}
 
+	// A previous run may have left its exit error behind, which would otherwise be mistaken for this one failing immediately
+	drainExit(p.runErrC)
+
 	// Run the host in the background and wait until it has registered with a runtime
 	// The runtime client reconnects with backoff, so the host may start before the runtime is listening
 	runCtx, cancel := context.WithCancel(t.Context())

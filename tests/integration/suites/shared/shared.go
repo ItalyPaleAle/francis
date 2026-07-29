@@ -88,7 +88,12 @@ const (
 	ProbeMethodArmAlarm = "arm-alarm"
 	// ProbeMethodFail returns an error, so error propagation back to the caller can be exercised
 	ProbeMethodFail = "fail"
+	// ProbeMethodBlock occupies the actor's turn until the test releases it, so a scenario can break something while an invocation is provably in flight
+	ProbeMethodBlock = "block"
 )
+
+// blockMaxHold caps how long ProbeMethodBlock waits to be released, so a scenario that forgets to release it cannot wedge the suite
+const blockMaxHold = 2 * time.Minute
 
 // ProbeFailMessage is the error text the probe returns for ProbeMethodFail, so callers can assert it propagated
 const ProbeFailMessage = "induced invoke failure"
@@ -130,6 +135,17 @@ func (a *ProbeActor) Invoke(ctx context.Context, method string, _ actor.Envelope
 	case ProbeMethodFail:
 		// Return an error so the caller can assert it propagates back, including across a peer or runtime boundary
 		return nil, errors.New(ProbeFailMessage)
+
+	case ProbeMethodBlock:
+		// Signal that the invocation has reached the actor, then hold the turn until the test lets go
+		// The context is honored too, so the actor still releases when its host halts it out from under the caller
+		ProbeObserver.enterBlock(a.actorID)
+		select {
+		case <-ProbeObserver.blockRelease(a.actorID):
+		case <-ctx.Done():
+		case <-time.After(blockMaxHold):
+		}
+		return nil, nil
 
 	case ProbeMethodHold:
 		// Track concurrent turns for this actor, then hold the turn briefly
@@ -202,6 +218,9 @@ func (a *ProbeActor) Job(_ context.Context, method string, data actor.Envelope) 
 	if data != nil {
 		_ = data.Decode(&payload)
 	}
+
+	// Record which host ran this job so scenarios that kill a host mid-job can observe where it resumed
+	ProbeObserver.recordJobHost(a.actorID, HostLabel(a.service))
 
 	// Recording decides whether this execution should fail, and whether it should fail permanently
 	fail, permanent := ProbeObserver.recordJob(a.actorID, method, payload)
@@ -301,6 +320,9 @@ var ProbeObserver = &probeObserver{
 	jobFaults:     map[string]int{},
 	jobPermanent:  map[string]bool{},
 	jobFailed:     map[string]int{},
+	jobHost:       map[string]string{},
+	blockEntered:  map[string]int{},
+	blockReleases: map[string]chan struct{}{},
 }
 
 // JobFire is a single recorded execution of a probe actor's job
@@ -340,6 +362,78 @@ type probeObserver struct {
 	jobPermanent map[string]bool
 	// jobFailed counts how many times an actor's JobFailed hook has run, keyed by actor ID
 	jobFailed map[string]int
+	// jobHost records the label of the host that last ran a job for an actor
+	jobHost map[string]string
+	// blockEntered counts how many times an actor has entered ProbeMethodBlock, and blockReleases holds the channel each one waits on
+	blockEntered  map[string]int
+	blockReleases map[string]chan struct{}
+}
+
+// ArmBlock prepares an actor's ProbeMethodBlock so a later invocation holds its turn until ReleaseBlock
+// It must be called before the invocation, and resets any count from an earlier use
+func (o *probeObserver) ArmBlock(actorID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.blockEntered[actorID] = 0
+	o.blockReleases[actorID] = make(chan struct{})
+}
+
+// ReleaseBlock lets every invocation blocked on an actor return, and is safe to call more than once
+func (o *probeObserver) ReleaseBlock(actorID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	ch, ok := o.blockReleases[actorID]
+	if !ok {
+		return
+	}
+	delete(o.blockReleases, actorID)
+	close(ch)
+}
+
+// BlockEnteredCount reports how many invocations have reached an actor's ProbeMethodBlock, so a test can wait for one to be genuinely in flight
+func (o *probeObserver) BlockEnteredCount(actorID string) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.blockEntered[actorID]
+}
+
+// enterBlock notes that an invocation reached the blocking method
+func (o *probeObserver) enterBlock(actorID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.blockEntered[actorID]++
+}
+
+// blockRelease returns the channel an actor's blocking method waits on, which is already closed when the actor was never armed
+func (o *probeObserver) blockRelease(actorID string) chan struct{} {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	ch, ok := o.blockReleases[actorID]
+	if !ok {
+		closed := make(chan struct{})
+		close(closed)
+		return closed
+	}
+	return ch
+}
+
+// recordJobHost notes the host that ran a job for an actor
+func (o *probeObserver) recordJobHost(actorID string, label string) {
+	if label == "" {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.jobHost[actorID] = label
+}
+
+// LastJobHost returns the label of the host that most recently ran a job for an actor
+func (o *probeObserver) LastJobHost(actorID string) string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.jobHost[actorID]
 }
 
 // SetJobFault configures induced job failures for an actor before its job runs
