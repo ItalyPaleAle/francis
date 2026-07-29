@@ -247,8 +247,7 @@ func (p *Provider) persistThenApply(ctx context.Context, lock *sync.RWMutex, cha
 }
 
 func (p *Provider) HealthCheckInterval() time.Duration {
-	// Use a simple interval: half of the health check deadline, with a minimum of 1s
-	return max(p.Cfg.HostHealthCheckDeadline/2, time.Second)
+	return p.Cfg.HealthCheckInterval()
 }
 
 func (p *Provider) RenewLeaseInterval() time.Duration {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	gosqlsqlite "github.com/italypaleale/go-sql-utils/sqlite"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/italypaleale/francis/components"
@@ -45,8 +46,13 @@ func (b *sqliteBackend) Variant() Variant {
 func (b *sqliteBackend) Run(t *testing.T) {
 	t.Helper()
 
-	// Create a temp directory to hold the shared database file
-	b.dir = t.TempDir()
+	// Create a temp directory to hold the shared database file, owned by this backend rather than by t.TempDir
+	// Cleanups run in reverse order of registration, and the framework registers this backend's before starting it, so a directory registered here would be removed before Cleanup closes the database handles the backend holds
+	// Windows refuses to delete a file that is still open, so the removal has to be sequenced by us
+	//nolint:usetesting // t.TempDir is what this deliberately avoids: its cleanup would run before this backend closes its handles
+	dir, err := os.MkdirTemp("", "francis-integration-")
+	require.NoError(t, err, "failed to create the temp directory for the SQLite database")
+	b.dir = dir
 
 	// A generous busy_timeout lets concurrent hosts wait out each other's write locks
 	path := filepath.Join(b.dir, "it.db")
@@ -158,8 +164,13 @@ func (b *sqliteBackend) Cleanup(t *testing.T) {
 	for consumer := range b.stalled {
 		b.Unstall(t, consumer)
 	}
-	for _, db := range b.handles {
-		_ = db.Close()
+	for i, db := range b.handles {
+		err := db.Close()
+		// Assert rather than require throughout the teardown: a failure here must not skip closing the remaining handles or removing the directory
+		//nolint:testifylint // see above
+		assert.NoErrorf(t, err, "failed to close the database handle of consumer %d", i)
+		// A connection left checked out survives Close and keeps the database file open, which Windows then refuses to delete
+		assert.Zerof(t, db.Stats().OpenConnections, "consumer %d still holds a database connection after close", i)
 	}
 	b.handles = nil
 
@@ -167,6 +178,8 @@ func (b *sqliteBackend) Cleanup(t *testing.T) {
 		return
 	}
 
-	_ = os.RemoveAll(b.dir)
+	// Removal is asserted rather than ignored, since a failure here means something still holds the database file open
+	err := os.RemoveAll(b.dir)
+	assert.NoError(t, err, "failed to remove the temp directory holding the SQLite database")
 	b.dir = ""
 }

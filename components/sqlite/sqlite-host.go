@@ -98,8 +98,9 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 }
 
 // reattachHost reattaches a reconnecting host to its existing registration, identified by req.ExistingHostID
-// It refreshes the registration in place even if its health record is stale, so a host can reclaim it after a runtime failover without waiting for the previous health record to expire
-// If the registration no longer exists, a brand-new one is created instead
+// It refreshes the registration in place only while its health record is still live, so a host that reconnects quickly (e.g. after a runtime failover) keeps its identity and its actors
+// A registration whose health record has expired is not reclaimable: the cluster has already written that host off and may have placed its actors elsewhere, so it is cleaned up like any other dead host and the caller is given a brand-new registration, whose Reattached of false tells it to drop everything it was still holding
+// A brand-new registration is also created when the previous one no longer exists at all
 func (s *SQLiteProvider) reattachHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {
 	// Generate a fresh ID up front, used only if we have to fall back to a new registration
 	newHostIDObj, oErr := uuid.NewV7()
@@ -116,15 +117,14 @@ func (s *SQLiteProvider) reattachHost(ctx context.Context, req components.Regist
 		now := s.clock.Now().UnixMilli()
 		cutoff := now - s.cfg.HostHealthCheckDeadline.Milliseconds()
 
-		// Clean up unhealthy hosts, but never the registration we are reattaching to
-		// This lets a host reclaim its registration even if its health record is stale, while still clearing other dead hosts that might otherwise block the address
+		// Clean up unhealthy hosts
 		queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 		defer cancel()
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err = tx.ExecContext(queryCtx,
 			`DELETE FROM `+s.tablePrefix+`hosts
-			WHERE host_last_health_check < ? AND host_id != ?`,
-			cutoff, req.ExistingHostID,
+			WHERE host_last_health_check < ?`,
+			cutoff,
 		)
 		if err != nil {
 			return zero, fmt.Errorf("error removing failed hosts: %w", err)
@@ -168,7 +168,7 @@ func (s *SQLiteProvider) reattachHost(ctx context.Context, req components.Regist
 			activeHostID = req.ExistingHostID
 			reattached = true
 		} else {
-			// The existing registration was not found (already garbage-collected): create a new one
+			// The existing registration was not found (already cleaned up): create a new one
 			queryCtx, cancel = context.WithTimeout(ctx, s.timeout)
 			defer cancel()
 			// #nosec G202 -- the only concatenated value is the static table prefix, not user input

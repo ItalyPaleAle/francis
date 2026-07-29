@@ -11,15 +11,25 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/tests/integration/framework/cluster"
 	"github.com/italypaleale/francis/tests/integration/suite"
 	"github.com/italypaleale/francis/tests/integration/suites/shared"
 )
 
+// healthCheckPolicy shrinks the health check retry budget well below the production default
+// The budget is what puts a floor under the deadline, and the deadline is the clock every silent-failure scenario waits on, so shrinking it is what lets these scenarios run in seconds
+var healthCheckPolicy = components.HealthCheckPolicy{
+	AttemptTimeout: time.Second,
+	RetryDelay:     100 * time.Millisecond,
+	MaxAttempts:    3,
+	MinInterval:    500 * time.Millisecond,
+}
+
 const (
 	// healthCheckDeadline is how long a host registration survives without a health check
-	// It is the clock every silent-failure scenario waits on, so it is kept short while staying comfortably above the query timeout
-	healthCheckDeadline = 5 * time.Second
+	// It is the shortest the policy above allows: a 3.2s retry budget plus the 500ms minimum interval, rounded up
+	healthCheckDeadline = 4 * time.Second
 	// queryTimeout bounds a single database query, so a host whose database has stopped answering gets an error rather than blocking
 	queryTimeout = time.Second
 	// requestTimeout bounds a host's provider requests, runtime requests, and peer dials, so a request into a black hole fails fast

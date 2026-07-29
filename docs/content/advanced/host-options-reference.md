@@ -42,7 +42,8 @@ Set exactly one provider:
 | `WithLogger(logger *slog.Logger)` | Provide an `slog` logger. |
 | `WithShutdownGracePeriod(d time.Duration)` | Grace period for a clean shutdown. |
 | `WithProviderRequestTimeout(d time.Duration)` | Timeout for requests to the data store provider. |
-| `WithHostHealthCheckDeadline(d time.Duration)` | Maximum interval between health pings from a host. |
+| `WithHostHealthCheckDeadline(d time.Duration)` | Maximum interval between health pings from a host. A host that misses the deadline is considered gone and shuts down to ensure consistency. Must be at least `12s` with the default health check policy. |
+| `WithHealthCheckPolicy(p *components.HealthCheckPolicy)` | How the host retries its health checks: the timeout per attempt, the delay between them, and how many it makes. Together these set the floor under `WithHostHealthCheckDeadline`. A nil policy, or any unset field, falls back to the defaults. Most deployments should not alter these values. |
 | `WithAlarmsPollInterval(d time.Duration)` | How often to poll for due alarms. |
 | `WithAlarmsLeaseDuration(d time.Duration)` | How long an alarm lease is held while executing. |
 | `WithAlarmsFetchAheadInterval(d time.Duration)` | Look-ahead window for pre-fetching upcoming alarms. |

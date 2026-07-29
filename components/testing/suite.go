@@ -315,7 +315,7 @@ func (s Suite) TestRegisterHost(t *testing.T) {
 		assert.Len(t, spec.ActiveActors, 1, "active actor should survive reattachment")
 	})
 
-	t.Run("reattach refreshes a stale registration before it expires", func(t *testing.T) {
+	t.Run("reattach to an expired registration mints a new host ID", func(t *testing.T) {
 		// Seed a host whose last health check is already older than the 1m deadline
 		require.NoError(t, s.p.Seed(t.Context(), Spec{
 			Hosts: HostSpecCollection{
@@ -334,14 +334,41 @@ func (s Suite) TestRegisterHost(t *testing.T) {
 			},
 		})
 		require.NoError(t, err)
-		assert.True(t, res.Reattached, "should reattach even though the record was stale")
-		assert.Equal(t, reattachHostA, res.HostID)
 
-		// The reattached host is healthy again and holds the address, so a fresh registration at the same address must fail
+		// Once a registration has expired the cluster has written that host off and may have placed its actors elsewhere, so it must not be reclaimable
+		// The new identity, reported through Reattached, is what tells the host to drop whatever it was still holding
+		assert.False(t, res.Reattached, "an expired registration must not be reattachable")
+		assert.NotEqual(t, reattachHostA, res.HostID, "should mint a new host ID rather than resume the expired one")
+		assert.NotEmpty(t, res.HostID)
+
+		// The new registration is healthy and holds the address, so a fresh registration at the same address must fail
 		_, err = s.p.RegisterHost(t.Context(), components.RegisterHostReq{
 			Address: "192.168.1.112:8080",
 		})
 		require.ErrorIs(t, err, components.ErrHostAlreadyRegistered)
+	})
+
+	t.Run("reattach refreshes a live registration in place", func(t *testing.T) {
+		// Seed a host whose last health check is still within the 1m deadline, as it would be right after a runtime failover
+		require.NoError(t, s.p.Seed(t.Context(), Spec{
+			Hosts: HostSpecCollection{
+				{HostID: reattachHostA, Address: "192.168.1.112:8080", LastHealthAgo: 30 * time.Second},
+			},
+			HostActorTypes: HostActorTypeSpecCollection{
+				{HostID: reattachHostA, ActorType: "T", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 1},
+			},
+		}))
+
+		res, err := s.p.RegisterHost(t.Context(), components.RegisterHostReq{
+			ExistingHostID: reattachHostA,
+			Address:        "192.168.1.112:8080",
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "T", IdleTimeout: 5 * time.Minute, ConcurrencyLimit: 1},
+			},
+		})
+		require.NoError(t, err)
+		assert.True(t, res.Reattached, "a host whose registration is still live keeps its identity")
+		assert.Equal(t, reattachHostA, res.HostID)
 	})
 
 	t.Run("reattach to an unknown host creates a new registration", func(t *testing.T) {

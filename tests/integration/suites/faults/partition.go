@@ -37,6 +37,7 @@ func (s *runtimePartition) Setup(t *testing.T) []framework.Option {
 		Hosts:                   2,
 		Actors:                  []frameworkhost.ActorReg{shared.ProbeReg(actorcore.WithIdleTimeout(time.Minute))},
 		HostHealthCheckDeadline: healthCheckDeadline,
+		HealthCheckPolicy:       healthCheckPolicy,
 		ProviderQueryTimeout:    queryTimeout,
 		HostRequestTimeout:      requestTimeout,
 		RuntimeLinks:            true,
@@ -64,6 +65,10 @@ func (s *runtimePartition) Run(t *testing.T) {
 	require.GreaterOrEqual(t, placedIdx, 0, "the probe should have recorded its placement host")
 	survivor := (placedIdx + 1) % s.cluster.Len()
 
+	hostIDBefore := s.cluster.Host(placedIdx).HostID()
+	require.NotEmpty(t, hostIDBefore)
+	deactivationsBefore := shared.ProbeObserver.DeactivateCount(actorID)
+
 	// Cut the host holding the actor off from the control plane, without stopping either side
 	s.cluster.RuntimeLink(t, placedIdx).Sever(t)
 
@@ -79,7 +84,6 @@ func (s *runtimePartition) Run(t *testing.T) {
 	assert.Equal(t, int64(1), out.N, "persisted state should survive the partition")
 
 	// Restore the network and confirm the isolated host rejoins the cluster rather than staying a zombie
-	// A fresh actor is used for this, since it exercises the whole rejoined path (placement through the runtime, then state) rather than whatever the host still holds in memory from before the partition
 	s.cluster.RuntimeLink(t, placedIdx).Restore(t)
 	const rejoinedActorID = "faults-runtime-partition-2"
 	require.Eventually(t, func() bool {
@@ -90,6 +94,26 @@ func (s *runtimePartition) Run(t *testing.T) {
 		return e.Decode(&out) == nil
 	}, recoveryTimeout, recoveryInterval, "the previously isolated host should reconnect and serve invocations again")
 	assert.Positive(t, out.N, "the rejoined host should be able to place an actor and persist its state")
+
+	// Its registration expired while it was away, so it could not reclaim its old identity and had to rejoin as a new host
+	assert.NotEqual(t, hostIDBefore, s.cluster.Host(placedIdx).HostID(), "a host whose registration expired must not reattach under its old identity")
+
+	// Coming back under a new identity means everything it was still holding was dropped, including the actor that had already moved
+	assert.Greater(t, shared.ProbeObserver.DeactivateCount(actorID), deactivationsBefore, "the stale instance should have been deactivated when the host rejoined with a new identity")
+
+	// The rejoined host must not still be serving the actor it held before the partition, which now lives on the survivor
+	// It resolves placement rather than answering from its own actor map, so the invocation is forwarded and both hosts agree on the state
+	env, err = s.cluster.Service(placedIdx).Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodIncrement, nil)
+	require.NoError(t, err)
+	require.NoError(t, env.Decode(&out))
+	assert.Equal(t, labels[survivor], shared.ProbeObserver.LastInvokeHost(actorID), "the rejoined host must route to the actor's current host, not to its own stale instance")
+	assert.Equal(t, int64(2), out.N, "the increment must build on the state the survivor holds, not on a snapshot from before the partition")
+
+	// The survivor sees the same value, so only one live instance ever answered
+	env, err = s.cluster.Service(survivor).Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodGet, nil)
+	require.NoError(t, err)
+	require.NoError(t, env.Decode(&out))
+	assert.Equal(t, int64(2), out.N, "both hosts must agree on the actor's state after the partition heals")
 }
 
 // peerPartition cuts the network between two hosts while both stay registered and healthy, and verifies that an invocation that can no longer reach the host owning the actor fails within the caller's deadline instead of hanging, then succeeds again once the network is back
@@ -111,6 +135,7 @@ func (s *peerPartition) Setup(t *testing.T) []framework.Option {
 		Hosts:                   2,
 		Actors:                  []frameworkhost.ActorReg{shared.ProbeReg(actorcore.WithIdleTimeout(time.Minute))},
 		HostHealthCheckDeadline: healthCheckDeadline,
+		HealthCheckPolicy:       healthCheckPolicy,
 		ProviderQueryTimeout:    queryTimeout,
 		HostRequestTimeout:      requestTimeout,
 		PeerLinks:               true,

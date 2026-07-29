@@ -17,9 +17,13 @@ import (
 	"github.com/italypaleale/francis/tests/integration/suites/shared"
 )
 
-// exitTimeout bounds how long the scenario waits for a host to give up on its own health checks
-// The host retries a failing health check a few times, each bounded by the query timeout, so this covers the whole retry budget with room to spare
-const exitTimeout = 45 * time.Second
+const (
+	// exitTimeout bounds how long the scenario waits for a host to give up on its own health checks
+	// It is deliberately far longer than the host should need, so a host that fails to stop is reported as such rather than as a timeout of the scenario
+	exitTimeout = 45 * time.Second
+	// exitSlack is the room allowed for the outage to land mid-interval and for the host to then unwind and return from Run
+	exitSlack = 5 * time.Second
+)
 
 // healthCheckFailure takes the database away from one host and verifies that the host notices its own health checks failing and shuts itself down, rather than staying up serving actors the rest of the cluster is about to reassign
 //
@@ -40,6 +44,7 @@ func (s *healthCheckFailure) Setup(t *testing.T) []framework.Option {
 		Hosts:                   2,
 		Actors:                  []frameworkhost.ActorReg{shared.ProbeReg(actorcore.WithIdleTimeout(time.Minute))},
 		HostHealthCheckDeadline: healthCheckDeadline,
+		HealthCheckPolicy:       healthCheckPolicy,
 		ProviderQueryTimeout:    queryTimeout,
 		HostRequestTimeout:      requestTimeout,
 		StallableProvider:       true,
@@ -68,12 +73,18 @@ func (s *healthCheckFailure) Run(t *testing.T) {
 	survivor := (placedIdx + 1) % s.cluster.Len()
 
 	// Take the database away from the host holding the actor, leaving every other host untouched
+	stalledAt := time.Now()
 	s.cluster.StallProvider(t, placedIdx)
 
 	// The host exhausts its health check retries and stops itself, instead of lingering while the cluster stops counting it as healthy
 	exitErr := s.cluster.Host(placedIdx).WaitExit(t, exitTimeout)
 	require.Error(t, exitErr, "a host whose health checks keep failing should stop itself")
-	assert.ErrorContains(t, exitErr, "health check")
+	require.ErrorContains(t, exitErr, "health check")
+
+	// It gives up within one health check interval plus the full retry budget, rather than retrying indefinitely against a database that is never coming back
+	// That bound is what the interval formula guarantees; it equals the deadline itself only when the deadline is long enough to hold the retry budget, which this scenario's deliberately short deadline is not
+	maxExit := healthCheckPolicy.Interval(healthCheckDeadline) + healthCheckPolicy.Budget() + exitSlack
+	assert.Less(t, time.Since(stalledAt), maxExit, "the host should give up on its health checks within one interval plus the retry budget")
 
 	// Give the database back, which also confirms the outage was the only reason the host went
 	s.cluster.UnstallProvider(t, placedIdx)

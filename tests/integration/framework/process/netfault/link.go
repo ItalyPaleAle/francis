@@ -66,11 +66,7 @@ func (l *Link) Run(t *testing.T) {
 	l.conn = conn
 
 	// Relay in background so Run returns as soon as the link is carrying traffic
-	l.wg.Add(1)
-	go func() {
-		defer l.wg.Done()
-		l.relayFromClients()
-	}()
+	l.wg.Go(l.relayFromClients)
 }
 
 // Sever turns the link into a black hole, dropping every datagram in both directions until Restore
@@ -157,11 +153,9 @@ func (l *Link) upstreamFor(client *net.UDPAddr) *net.UDPConn {
 
 	// Each flow gets its own return path, writing replies back to the client through the listening socket
 	clientAddr := *client
-	l.wg.Add(1)
-	go func() {
-		defer l.wg.Done()
+	l.wg.Go(func() {
 		l.relayToClient(up, &clientAddr)
-	}()
+	})
 
 	return up
 }

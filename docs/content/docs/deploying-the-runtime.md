@@ -142,7 +142,7 @@ Subcommands (including `print-ca`, `healthcheck`, `backup`, and `restore`) resol
 | `bootstrap.jwt.issuer` / `audience` / `jwksURL` / `staticJWKS` | JWT validation settings, for `method: jwt`. |
 | `provider.connectionString` | Connection string for the data store; the backend is inferred from its scheme. `postgres://…` or `postgresql://…` for PostgreSQL, `memory` for the non-durable in-memory store, anything else is a SQLite file path or DSN. **Required.** |
 | `workloadCertTTL` | Lifetime of the workload certificates issued to hosts. Default `1h`. |
-| `healthCheckDeadline` | Maximum interval between host health pings. Default `20s`. |
+| `healthCheckDeadline` | Maximum interval between host health pings. A host that has not checked in within the deadline is considered gone and its actors are placed elsewhere. Must be at least `12s` with the default health check policy. Default `20s`. |
 | `alarmsPollInterval` | How often the runtime polls for due alarms. Default `1500ms`. |
 | `alarmsLeaseDuration` | How long an alarm lease is held while executing. Default `20s`. |
 | `shutdownGracePeriod` | Grace period for a clean shutdown. Default `30s`. |

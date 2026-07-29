@@ -39,6 +39,7 @@ func (s *silentHostDeath) Setup(t *testing.T) []framework.Option {
 		Hosts:                   2,
 		Actors:                  []frameworkhost.ActorReg{shared.ProbeReg(actorcore.WithIdleTimeout(time.Minute))},
 		HostHealthCheckDeadline: healthCheckDeadline,
+		HealthCheckPolicy:       healthCheckPolicy,
 		ProviderQueryTimeout:    queryTimeout,
 		HostRequestTimeout:      requestTimeout,
 		StallableProvider:       true,
@@ -116,6 +117,7 @@ func (s *alarmAfterSilentDeath) Setup(t *testing.T) []framework.Option {
 		Hosts:                   2,
 		Actors:                  []frameworkhost.ActorReg{shared.ProbeReg(actorcore.WithIdleTimeout(time.Minute))},
 		HostHealthCheckDeadline: healthCheckDeadline,
+		HealthCheckPolicy:       healthCheckPolicy,
 		ProviderQueryTimeout:    queryTimeout,
 		HostRequestTimeout:      requestTimeout,
 		AlarmsPollInterval:      alarmsPollInterval,
@@ -161,6 +163,13 @@ func (s *alarmAfterSilentDeath) Run(t *testing.T) {
 		return shared.ProbeObserver.AlarmCount(actorID) >= countAtDeath+2 &&
 			shared.ProbeObserver.LastAlarmHost(actorID) == labels[survivor]
 	}, recoveryTimeout, recoveryInterval, "the surviving host should take over an alarm whose owner died without releasing it")
+
+	// Ownership stays put: the dead host's leftover lease must not resurrect execution on the instance it was still holding
+	// Alarm execution confirms placement before invoking, so an occurrence that reaches a host the actor has moved off is handed back rather than run
+	for range 10 {
+		time.Sleep(200 * time.Millisecond)
+		require.Equal(t, labels[survivor], shared.ProbeObserver.LastAlarmHost(actorID), "the alarm must keep executing on the surviving host alone")
+	}
 
 	// Stop the alarm so it cannot leak into later scenarios
 	err = s.cluster.Service(survivor).DeleteAlarm(ctx, shared.ProbeActorType, actorID, "a")
