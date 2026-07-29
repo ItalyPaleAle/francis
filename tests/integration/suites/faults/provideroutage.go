@@ -105,7 +105,8 @@ func (s *providerOutage) Run(t *testing.T) {
 
 	env, err = s.cluster.Service(0).Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodIncrement, nil)
 	require.NoError(t, err)
-	require.NoError(t, env.Decode(&out))
+	err = env.Decode(&out)
+	require.NoError(t, err)
 	assert.Equal(t, int64(2), out.N, "the recovered actor should accept new work")
 
 	// The alarm survived too, rather than being dropped along with the hosts that were executing it

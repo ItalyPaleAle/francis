@@ -102,7 +102,8 @@ func (s *linkFlapping) Run(t *testing.T) {
 	// After every cycle the total matches the calls that were made, so no flap ever left a second instance answering alongside the first
 	env, err = s.cluster.Service(survivor).Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodGet, nil)
 	require.NoError(t, err)
-	require.NoError(t, env.Decode(&out))
+	err = env.Decode(&out)
+	require.NoError(t, err)
 	assert.Equal(t, int64(1+flapCycles), out.N, "the counter should account for exactly the increments that were issued")
 
 	// The flapped host is a working member again rather than something the repeated resets left behind
