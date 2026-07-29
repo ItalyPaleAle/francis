@@ -5,6 +5,8 @@ package provider
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -12,7 +14,6 @@ import (
 	"time"
 
 	gosqlsqlite "github.com/italypaleale/go-sql-utils/sqlite"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/italypaleale/francis/components"
@@ -164,15 +165,25 @@ func (b *sqliteBackend) Cleanup(t *testing.T) {
 	for consumer := range b.stalled {
 		b.Unstall(t, consumer)
 	}
+
+	errs := make([]error, 0)
 	for i, db := range b.handles {
 		err := db.Close()
-		// Assert rather than require throughout the teardown: a failure here must not skip closing the remaining handles or removing the directory
-		//nolint:testifylint // see above
-		assert.NoErrorf(t, err, "failed to close the database handle of consumer %d", i)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("failed to close the database handle of consumer %d: %w", i, err))
+			continue
+		}
+
 		// A connection left checked out survives Close and keeps the database file open, which Windows then refuses to delete
-		assert.Zerof(t, db.Stats().OpenConnections, "consumer %d still holds a database connection after close", i)
+		if db.Stats().OpenConnections != 0 {
+			errs = append(errs, fmt.Errorf("consumer %d still holds a database connection after close", i))
+			continue
+		}
 	}
 	b.handles = nil
+
+	// There shouldn't have been any error
+	require.NoError(t, errors.Join(errs...))
 
 	if b.dir == "" {
 		return
@@ -180,6 +191,7 @@ func (b *sqliteBackend) Cleanup(t *testing.T) {
 
 	// Removal is asserted rather than ignored, since a failure here means something still holds the database file open
 	err := os.RemoveAll(b.dir)
-	assert.NoError(t, err, "failed to remove the temp directory holding the SQLite database")
+	require.NoError(t, err, "failed to remove the temp directory holding the SQLite database")
+
 	b.dir = ""
 }
