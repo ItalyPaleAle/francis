@@ -71,6 +71,9 @@ type Manager struct {
 	capacityGroups map[string]*capacitySemaphore
 	// actorTypeCapacityGroup maps an actor type to the capacity group it belongs to, for the types that opted into one
 	actorTypeCapacityGroup map[string]string
+	// actorTypeLockMode holds the lock mode of each registered actor type, which is stamped onto every actor instance the type activates
+	// It is kept separate from ActorsConfig because that struct is the placement store's view of an actor type, and the lock mode is purely host-local
+	actorTypeLockMode map[string]LockMode
 	// Actors holds the actors currently active on this host, keyed by "actorType/actorID"
 	Actors *haxmap.Map[string, *ActiveActor]
 	// IdleProcessor schedules actors for deactivation when they become idle
@@ -103,6 +106,7 @@ func NewManager(opts Options) *Manager {
 		ActorsConfig:           map[string]components.ActorHostType{},
 		capacityGroups:         map[string]*capacitySemaphore{},
 		actorTypeCapacityGroup: map[string]string{},
+		actorTypeLockMode:      map[string]LockMode{},
 		Actors:                 haxmap.New[string, *ActiveActor](defaultActorsMapSize),
 	}
 }
@@ -136,6 +140,7 @@ func (m *Manager) RegisterActor(actorType string, factory actor.Factory, opts Re
 		InitialRetryDelay:   opts.InitialRetryDelay,
 	}
 	m.ActorFactories[actorType] = factory
+	m.actorTypeLockMode[actorType] = opts.LockMode
 
 	// Enroll the type in its capacity group, if one was configured, so its executions are gated on this host
 	if opts.CapacityGroup != "" {
@@ -264,10 +269,18 @@ func (m *Manager) LockAndPeekActive(parentCtx context.Context, r ref.ActorRef, f
 // lockAndInvokeActor acquires the actor's turn-based lock and runs fn, canceling the call if the actor is halted mid-flight
 // readOnly selects the shared (read) lock used by Peek
 func (m *Manager) lockAndInvokeActor(parentCtx context.Context, act *ActiveActor, readOnly bool, fn func(ctx context.Context, act *ActiveActor) (any, error)) (any, error) {
+	sharedLock := act.LockMode() == LockModeShared
+
+	// A shared-mode actor synchronizes itself and mutates its own state, so none of its invocations are read-only and a Peek has no meaning against it
+	if sharedLock && readOnly {
+		return nil, ErrActorMethodUnsupported
+	}
+
 	// Determine the methods to use
+	// A shared-mode actor takes the shared lock for every invocation and never the exclusive one
 	acquire := act.Lock
 	release := act.Unlock
-	if readOnly {
+	if readOnly || sharedLock {
 		acquire = act.RLock
 		release = act.RUnlock
 	}
@@ -287,6 +300,9 @@ func (m *Manager) lockAndInvokeActor(parentCtx context.Context, act *ActiveActor
 		return nil, fmt.Errorf("failed to acquire lock for actor: %w", err)
 	}
 	defer release()
+
+	// Expose the halt signal to the actor, so a handler that blocks for a long time can return as soon as the actor starts halting instead of waiting out the shutdown grace period below
+	ctx = actor.WithHalting(ctx, haltCh)
 
 	go func() {
 		select {
@@ -366,9 +382,10 @@ func (m *Manager) createActorFn(r ref.ActorRef) (func() *ActiveActor, error) {
 	}
 
 	idleTimeout := m.ActorsConfig[r.ActorType].IdleTimeout
+	lockMode := m.actorTypeLockMode[r.ActorType]
 	return func() *ActiveActor {
 		instance := factoryFn(r.ActorID, m.service)
-		return NewActiveActor(r, instance, idleTimeout, m.IdleProcessor, m.clock)
+		return NewActiveActor(r, instance, idleTimeout, lockMode, m.IdleProcessor, m.clock)
 	}, nil
 }
 

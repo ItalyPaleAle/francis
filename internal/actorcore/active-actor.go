@@ -36,6 +36,9 @@ type ActiveActor struct {
 	// Configured max idle time for actors of this type
 	idleTimeout time.Duration
 
+	// Lock mode configured for actors of this type, which decides whether invocations are serialized by the exclusive lock or run concurrently under the shared one
+	lockMode LockMode
+
 	// Time after which this actor is considered to be idle
 	// When the actor is locked, idleAt is updated by adding the idleTimeout to the current time
 	idleAt atomic.Pointer[time.Time]
@@ -53,7 +56,8 @@ type ActiveActor struct {
 }
 
 // NewActiveActor returns a new ActiveActor for the given instance
-func NewActiveActor(ref ref.ActorRef, instance actor.Actor, idleTimeout time.Duration, idleProcessor idleActorProcessor, cl clock.Clock) *ActiveActor {
+// lockMode selects how the framework serializes this actor's invocations, and is configured on its actor type
+func NewActiveActor(ref ref.ActorRef, instance actor.Actor, idleTimeout time.Duration, lockMode LockMode, idleProcessor idleActorProcessor, cl clock.Clock) *ActiveActor {
 	if cl == nil {
 		cl = &clock.RealClock{}
 	}
@@ -62,6 +66,7 @@ func NewActiveActor(ref ref.ActorRef, instance actor.Actor, idleTimeout time.Dur
 		Instance:      instance,
 		ref:           ref,
 		idleTimeout:   idleTimeout,
+		lockMode:      lockMode,
 		haltCh:        make(chan struct{}),
 		locker:        locker.TurnBasedLocker{},
 		idleProcessor: idleProcessor,
@@ -202,6 +207,11 @@ func (a *ActiveActor) Halt(drain bool) error {
 	}
 
 	return nil
+}
+
+// LockMode returns the lock mode configured for this actor's type
+func (a *ActiveActor) LockMode() LockMode {
+	return a.lockMode
 }
 
 // ActorType returns the type of the actor.

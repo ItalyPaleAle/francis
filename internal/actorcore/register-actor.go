@@ -13,6 +13,28 @@ const (
 	defaultAlarmInitialRetryDelay   = 2 * time.Second
 )
 
+// LockMode selects how the framework serializes the invocations of an actor type
+type LockMode uint8
+
+const (
+	// LockModeExclusive is the default turn-based model, where one invocation runs at a time and concurrent Peek calls share the read side
+	LockModeExclusive LockMode = 0
+	// LockModeShared runs every invocation of the type under the shared lock and never takes the exclusive one, so invocations never block each other
+	// An actor type registered this way synchronizes itself, including around its own durable state writes, and it rejects Peek because none of its invocations are read-only
+	// This is limited to built-in actors only (at least for now)
+	LockModeShared LockMode = 1
+)
+
+// IsValid reports whether the lock mode is one of the defined modes
+func (m LockMode) IsValid() bool {
+	switch m {
+	case LockModeExclusive, LockModeShared:
+		return true
+	default:
+		return false
+	}
+}
+
 // RegisterActorOptions is the type for the options for the RegisterActor method.
 type RegisterActorOptions struct {
 	// Maximum idle time before the actor is deactivated
@@ -39,6 +61,10 @@ type RegisterActorOptions struct {
 	// CapacityGroupLimit is the maximum number of jobs that may run at once across all actor types in the capacity group, on this host
 	// It is required when CapacityGroup is set, must be greater than zero, and every actor type sharing a group must declare the same limit
 	CapacityGroupLimit int
+	// LockMode selects how the framework serializes the invocations of this actor type
+	// It defaults to LockModeExclusive, the turn-based model every application actor uses
+	// LockModeShared is currently reserved for built-in actors
+	LockMode LockMode
 	// BootstrapData is optional data passed to ActorBootstrapper.Bootstrap when the host bootstraps the singleton instance
 	// It is delivered as the Bootstrap call's data argument (decoded from the invocation envelope), just like Invokes deliver their data via an Envelope
 	// It is nil when not provided
@@ -135,6 +161,11 @@ func (o *RegisterActorOptions) Validate() error {
 	// A capacity group is meaningless without a positive limit to enforce
 	if o.CapacityGroup != "" && o.CapacityGroupLimit <= 0 {
 		return errors.New("option CapacityGroupLimit must be greater than zero when CapacityGroup is set")
+	}
+
+	// An unknown lock mode would silently fall back to the turn-based path, so reject it at registration instead
+	if !o.LockMode.IsValid() {
+		return errors.New("option LockMode is not a valid lock mode")
 	}
 
 	return nil

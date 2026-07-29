@@ -20,7 +20,7 @@ Jobs and [alarms](/docs/alarms) both ride on the same durable scheduling engine,
 
 Use an **alarm** for a self-scheduled reminder or timer that an actor owns (one per name). Use a **job** to dispatch background work to an actor, especially when you need each dispatch to run and failures to be recorded rather than dropped.
 
-> To distribute many independent tasks across a cluster — running a bounded number per host and scaling out with more hosts — use the built-in [task pool](/docs/builtin-actors#task-pool), which builds this pattern on top of jobs.
+> To distribute many independent tasks across a cluster — running a bounded number per host and scaling out with more hosts — use the built-in [task pool](/builtin-actors/task-pool/), which builds this pattern on top of jobs.
 
 ## Receiving jobs
 
