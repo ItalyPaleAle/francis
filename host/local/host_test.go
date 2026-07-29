@@ -47,14 +47,18 @@ func TestRunHealthChecks(t *testing.T) {
 		}
 
 		// Set up expectations for successful health checks
+		healthChecks := &atomic.Int32{}
 		provider.
 			On("UpdateActorHost",
 				mock.MatchedBy(testutil.MatchContextInterface),
 				"test-host-123",
 				components.UpdateActorHostReq{UpdateLastHealthCheck: true},
 			).
+			Run(func(mock.Arguments) {
+				healthChecks.Add(1)
+			}).
 			Return(nil).
-			Times(3) // Expect 3 health checks
+			Times(3)
 
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
@@ -65,26 +69,16 @@ func TestRunHealthChecks(t *testing.T) {
 			errCh <- host.runHealthChecks(ctx)
 		}()
 
-		// Wait for the method to start and log the initial message
-		assert.Eventually(t, func() bool {
-			return strings.Contains(logBuf.String(), "Starting background health checks")
-		}, time.Second, 10*time.Millisecond)
+		// Wait for the ticker to exist so the first clock advance cannot race with startup
+		require.Eventually(t, clock.HasWaiters, time.Second, 10*time.Millisecond, "health check ticker did not start")
 
-		// Advance time to trigger first health check
-		clock.Step(healthCheckInterval)
-
-		// Wait for first health check to be logged
-		assert.Eventually(t, func() bool {
-			return strings.Contains(logBuf.String(), "Sending health check to the provider")
-		}, time.Second, 10*time.Millisecond)
-
-		// Advance time to trigger 2 more health checks
-		for range 2 {
+		// Consume each tick before advancing again because the fake ticker only retains one pending event
+		for want := int32(1); want <= 3; want++ {
 			clock.Step(healthCheckInterval)
+			require.Eventually(t, func() bool {
+				return healthChecks.Load() == want
+			}, time.Second, 10*time.Millisecond, "health check %d did not run", want)
 		}
-
-		// Wait a bit for all health checks to complete
-		time.Sleep(100 * time.Millisecond)
 
 		// Cancel the context to stop the health checks
 		cancel()

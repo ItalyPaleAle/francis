@@ -69,12 +69,17 @@ func TestHostHalt(t *testing.T) {
 			Return(nil).
 			Once()
 
-		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider
 		provider.
 			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef).
+			Run(func(mock.Arguments) {
+				registered, ok := host.Actors.Get(actorRef.String())
+				assert.True(t, ok, "Actor should remain registered until its placement is removed")
+				assert.Same(t, activeAct, registered, "The halted activation should prevent a retry from creating a replacement during placement removal")
+			}).
 			Return(nil).
 			Once()
 
@@ -125,7 +130,7 @@ func TestHostHalt(t *testing.T) {
 			Return(nil).
 			Once()
 
-		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider
@@ -158,7 +163,7 @@ func TestHostHalt(t *testing.T) {
 			Return(nil).
 			Once()
 
-		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider
@@ -221,7 +226,7 @@ func TestHostHalt(t *testing.T) {
 			Return(nil).
 			Once()
 
-		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider
@@ -291,7 +296,7 @@ func TestHostHalt(t *testing.T) {
 			Return(nil).
 			Once()
 
-		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider
@@ -387,7 +392,7 @@ func TestHostHalt(t *testing.T) {
 		// The Deactivate method should NOT be called
 		instance := &actor_mocks.MockActorDeactivate{}
 
-		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider
@@ -418,7 +423,7 @@ func TestHostHalt(t *testing.T) {
 		actorRef := ref.NewActorRef("testactor", "noDeactivate")
 		instance := &actor_mocks.MockActorInvoke{}
 
-		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider
@@ -453,7 +458,7 @@ func TestHostHalt(t *testing.T) {
 			Return(errors.New("deactivate failed")).
 			Once()
 
-		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider
@@ -494,7 +499,7 @@ func TestHostHalt(t *testing.T) {
 			Return(nil).
 			Once()
 
-		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider to return an error
@@ -530,7 +535,7 @@ func TestHostHalt(t *testing.T) {
 		// The Deactivate method should NOT be called
 		instance := &actor_mocks.MockActorDeactivate{}
 
-		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Halt the actor first
@@ -558,7 +563,7 @@ func TestHostHalt(t *testing.T) {
 			Return(nil).
 			Once()
 
-		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		// Don't add to host.Actors map, so GetAndDel will return nil
 
 		// Test haltActiveActor directly - should succeed without calling RemoveActor
@@ -612,7 +617,7 @@ func TestHostHalt(t *testing.T) {
 			Return(context.DeadlineExceeded).
 			Once()
 
-		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, shortTimeoutHost.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, shortTimeoutHost.IdleProcessor, clock)
 		shortTimeoutHost.Actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider
@@ -717,7 +722,7 @@ func TestHostHaltAll(t *testing.T) {
 			Return(nil).
 			Once()
 
-		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider
@@ -778,7 +783,7 @@ func TestHostHaltAll(t *testing.T) {
 				Return(nil).
 				Once()
 
-			activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+			activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 			host.Actors.Set(actorRef.String(), activeAct)
 
 			activeActors[i] = activeAct
@@ -847,7 +852,7 @@ func TestHostHaltAll(t *testing.T) {
 			On("Deactivate", mock.MatchedBy(testutil.MatchContextInterface)).
 			Return(nil).
 			Once()
-		activeAct0 := NewActiveActor(actorRef0, instance0, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct0 := NewActiveActor(actorRef0, instance0, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef0.String(), activeAct0)
 		provider.
 			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef0).
@@ -861,7 +866,7 @@ func TestHostHaltAll(t *testing.T) {
 			On("Deactivate", mock.MatchedBy(testutil.MatchContextInterface)).
 			Return(errors.New("deactivate failed")).
 			Once()
-		activeAct1 := NewActiveActor(actorRef1, instance1, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct1 := NewActiveActor(actorRef1, instance1, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef1.String(), activeAct1)
 		provider.
 			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef1).
@@ -875,7 +880,7 @@ func TestHostHaltAll(t *testing.T) {
 			On("Deactivate", mock.MatchedBy(testutil.MatchContextInterface)).
 			Return(nil).
 			Once()
-		activeAct2 := NewActiveActor(actorRef2, instance2, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct2 := NewActiveActor(actorRef2, instance2, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef2.String(), activeAct2)
 		provider.
 			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef2).
@@ -889,7 +894,7 @@ func TestHostHaltAll(t *testing.T) {
 			On("Deactivate", mock.MatchedBy(testutil.MatchContextInterface)).
 			Return(nil).
 			Once()
-		activeAct3 := NewActiveActor(actorRef3, instance3, 5*time.Minute, host.IdleProcessor, clock)
+		activeAct3 := NewActiveActor(actorRef3, instance3, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef3.String(), activeAct3)
 		provider.
 			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef3).
@@ -961,7 +966,7 @@ func TestHostHaltAll(t *testing.T) {
 			instance := &actor_mocks.MockActorDeactivate{}
 			// No expectations set since actors are already halted
 
-			activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+			activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 			host.Actors.Set(actorRef.String(), activeAct)
 			activeActors[i] = activeAct
 
@@ -1022,7 +1027,7 @@ func TestHostHaltAll(t *testing.T) {
 				Return(nil).
 				Once()
 
-			activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, host.IdleProcessor, clock)
+			activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 			host.Actors.Set(actorRef.String(), activeAct)
 			activeActors[i] = activeAct
 
@@ -1139,7 +1144,7 @@ func TestIdleActorHandling(t *testing.T) {
 			Once()
 
 		idleTimeout := 1 * time.Minute
-		activeAct := NewActiveActor(actorRef, instance, idleTimeout, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, idleTimeout, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Set expected method calls on provider
@@ -1179,7 +1184,7 @@ func TestIdleActorHandling(t *testing.T) {
 		instance := &actor_mocks.MockActorDeactivate{}
 
 		idleTimeout := 1 * time.Minute
-		activeAct := NewActiveActor(actorRef, instance, idleTimeout, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, idleTimeout, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Lock the actor to make it "busy"
@@ -1244,7 +1249,7 @@ func TestIdleActorHandling(t *testing.T) {
 		actorRef := ref.NewActorRef("testactor", "noIdleTimeout")
 		instance := &actor_mocks.MockActorDeactivate{}
 
-		activeAct := NewActiveActor(actorRef, instance, 0, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, 0, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Try to update idle time - should be a no-op
@@ -1278,7 +1283,7 @@ func TestIdleActorHandling(t *testing.T) {
 		instance := &actor_mocks.MockActorDeactivate{}
 
 		idleTimeout := 1 * time.Minute
-		activeAct := NewActiveActor(actorRef, instance, idleTimeout, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, idleTimeout, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Halt the actor first to cause TryLock to return an error
@@ -1320,7 +1325,7 @@ func TestIdleActorHandling(t *testing.T) {
 			Once()
 
 		idleTimeout := 1 * time.Minute
-		activeAct := NewActiveActor(actorRef, instance, idleTimeout, host.IdleProcessor, clock)
+		activeAct := NewActiveActor(actorRef, instance, idleTimeout, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef.String(), activeAct)
 
 		// Set up provider to return an error
@@ -1398,7 +1403,7 @@ func TestIdleActorHandling(t *testing.T) {
 				Return(nil).
 				Once()
 
-			activeAct := NewActiveActor(actorRef, instance, idleTimeout, host.IdleProcessor, clock)
+			activeAct := NewActiveActor(actorRef, instance, idleTimeout, LockModeExclusive, host.IdleProcessor, clock)
 			host.Actors.Set(actorRef.String(), activeAct)
 
 			activeActors[i] = activeAct

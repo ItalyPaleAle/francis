@@ -31,7 +31,7 @@ func TestNewActiveActor(t *testing.T) {
 		Clock:     clock,
 	})
 
-	activeAct := NewActiveActor(actorRef, instance, idleTimeout, processor, clock)
+	activeAct := NewActiveActor(actorRef, instance, idleTimeout, LockModeExclusive, processor, clock)
 
 	assert.Equal(t, actorRef, activeAct.ref)
 	assert.Equal(t, instance, activeAct.Instance)
@@ -65,7 +65,7 @@ func TestNewActiveActorWithZeroIdleTimeout(t *testing.T) {
 		ExecuteFn: func(a *ActiveActor) {},
 	})
 
-	activeAct := NewActiveActor(actorRef, instance, idleTimeout, processor, nil)
+	activeAct := NewActiveActor(actorRef, instance, idleTimeout, LockModeExclusive, processor, nil)
 
 	// idleAt should be nil since idleTimeout is 0 (UpdateIdleAt returns early)
 	assert.Nil(t, activeAct.idleAt.Load())
@@ -83,7 +83,7 @@ func TestUpdateIdleAt(t *testing.T) {
 			Clock:     clock,
 		})
 
-		return NewActiveActor(actorRef, instance, idleTimeout, processor, clock)
+		return NewActiveActor(actorRef, instance, idleTimeout, LockModeExclusive, processor, clock)
 	}
 
 	t.Run("updates idle time with default timeout", func(t *testing.T) {
@@ -160,7 +160,7 @@ func TestTryLock(t *testing.T) {
 			Clock:     clock,
 		})
 
-		return NewActiveActor(actorRef, instance, 5*time.Minute, processor, clock)
+		return NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, processor, clock)
 	}
 
 	t.Run("successful lock acquisition", func(t *testing.T) {
@@ -235,7 +235,7 @@ func TestLock(t *testing.T) {
 			Clock:     clock,
 		})
 
-		return NewActiveActor(actorRef, instance, 5*time.Minute, processor, clock)
+		return NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, processor, clock)
 	}
 
 	t.Run("successful lock acquisition", func(t *testing.T) {
@@ -310,7 +310,7 @@ func TestRLock(t *testing.T) {
 			Clock:     clock,
 		})
 
-		return NewActiveActor(actorRef, instance, 5*time.Minute, processor, clock)
+		return NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, processor, clock)
 	}
 
 	t.Run("successful read lock acquisition", func(t *testing.T) {
@@ -416,7 +416,7 @@ func TestRUnlock(t *testing.T) {
 			Clock:     clock,
 		})
 
-		return NewActiveActor(actorRef, instance, 5*time.Minute, processor, clock)
+		return NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, processor, clock)
 	}
 
 	t.Run("successful read unlock", func(t *testing.T) {
@@ -450,7 +450,7 @@ func TestUnlock(t *testing.T) {
 			Clock:     clock,
 		})
 
-		return NewActiveActor(actorRef, instance, 5*time.Minute, processor, clock)
+		return NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, processor, clock)
 	}
 
 	t.Run("successful unlock", func(t *testing.T) {
@@ -484,7 +484,7 @@ func TestHalt(t *testing.T) {
 			Clock:     clock,
 		})
 
-		return NewActiveActor(actorRef, instance, 5*time.Minute, processor, clock)
+		return NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, processor, clock)
 	}
 
 	t.Run("successful halt without drain", func(t *testing.T) {
@@ -613,7 +613,7 @@ func TestConcurrentLockUnlock(t *testing.T) {
 		ExecuteFn: func(a *ActiveActor) {},
 	})
 
-	activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, processor, nil)
+	activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, processor, nil)
 
 	const numGoroutines = 100
 	const numIterations = 10
@@ -653,7 +653,7 @@ func TestConcurrentTryLock(t *testing.T) {
 		ExecuteFn: func(a *ActiveActor) {},
 	})
 
-	activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, processor, nil)
+	activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, processor, nil)
 
 	const numGoroutines = 50
 
@@ -711,7 +711,7 @@ func TestConcurrentLockAndHalt(t *testing.T) {
 		ExecuteFn: func(a *ActiveActor) {},
 	})
 
-	activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, processor, nil)
+	activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, processor, nil)
 
 	const numGoroutines = 20
 
@@ -784,7 +784,7 @@ func TestConcurrentIdleTimeUpdates(t *testing.T) {
 		ExecuteFn: func(a *ActiveActor) {},
 	})
 
-	activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, processor, nil)
+	activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, processor, nil)
 
 	const numGoroutines = 50
 
@@ -820,7 +820,7 @@ func TestConcurrentHaltCalls(t *testing.T) {
 		Clock:     clock,
 	})
 
-	activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, processor, clock)
+	activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, processor, clock)
 
 	const numGoroutines = 10
 
@@ -867,7 +867,7 @@ func TestRaceConditionLockAndHalt(t *testing.T) {
 				ExecuteFn: func(a *ActiveActor) {},
 			})
 
-			activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, processor, nil)
+			activeAct := NewActiveActor(actorRef, instance, 5*time.Minute, LockModeExclusive, processor, nil)
 
 			var wg sync.WaitGroup
 			lockDone := make(chan error, 1)

@@ -45,6 +45,9 @@ type Instance interface {
 	WaitExit(t *testing.T, timeout time.Duration) error
 	// ListJobs lists an actor's jobs straight through the host, bypassing the Service guard so tests can inspect built-in actors
 	ListJobs(ctx context.Context, actorType string, actorID string) ([]actor.JobInfo, error)
+	// Halt deactivates an actor straight through the host, bypassing the Service guard so tests can halt built-in actors
+	// It returns actor.ErrActorNotHosted when the actor is not active on this host, which doubles as a placement probe
+	Halt(actorType string, actorID string) error
 }
 
 // ActorReg describes an actor type to register on a host before it starts

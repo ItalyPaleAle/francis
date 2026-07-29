@@ -81,7 +81,7 @@ func TestLookupActor(t *testing.T) {
 
 		// Create and register an active actor locally
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := actorcore.NewActiveActor(actorRef, instance, 5*time.Minute, host.core.IdleProcessor, clock)
+		activeAct := actorcore.NewActiveActor(actorRef, instance, 5*time.Minute, actorcore.LockModeExclusive, host.core.IdleProcessor, clock)
 		host.core.Actors.Set(actorRef.String(), activeAct)
 
 		// An actor being active here does not prove it still belongs here, so the provider stays authoritative and is consulted anyway
@@ -121,7 +121,7 @@ func TestLookupActor(t *testing.T) {
 
 		// The actor is active here, left over from before this host fell behind on its health checks
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := actorcore.NewActiveActor(actorRef, instance, 5*time.Minute, host.core.IdleProcessor, clock)
+		activeAct := actorcore.NewActiveActor(actorRef, instance, 5*time.Minute, actorcore.LockModeExclusive, host.core.IdleProcessor, clock)
 		host.core.Actors.Set(actorRef.String(), activeAct)
 
 		// The provider has since placed it on another host, which is the answer that must win
@@ -673,7 +673,7 @@ func TestLookupActor(t *testing.T) {
 
 		// Create and register an active actor locally
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := actorcore.NewActiveActor(actorRef, instance, 5*time.Minute, host.core.IdleProcessor, clock)
+		activeAct := actorcore.NewActiveActor(actorRef, instance, 5*time.Minute, actorcore.LockModeExclusive, host.core.IdleProcessor, clock)
 		host.core.Actors.Set(actorRef.String(), activeAct)
 
 		// An active-only lookup is answered by the provider like any other, since a local instance is not proof of ownership
