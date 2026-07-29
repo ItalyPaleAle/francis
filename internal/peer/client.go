@@ -46,7 +46,7 @@ type ClientConfig struct {
 type Client struct {
 	closed      atomic.Bool
 	dialed      atomic.Bool
-	dialer      *webtransport.Dialer
+	transport   *webtransport.Transport
 	dialTimeout time.Duration
 	log         *slog.Logger
 
@@ -68,7 +68,7 @@ func NewClient(cfg ClientConfig) *Client {
 
 	return &Client{
 		// The dialer's QUIC idle timeout reclaims a session once it stops carrying traffic, while an active stream keeps it alive
-		dialer:      wt.NewDialer(cfg.TLSConfig, wt.WithMaxIdleTimeout(cfg.IdleTimeout)),
+		transport:   wt.NewDialer(cfg.TLSConfig, wt.WithMaxIdleTimeout(cfg.IdleTimeout)),
 		dialTimeout: cfg.DialTimeout,
 		log:         cfg.Log,
 		sessions:    haxmap.New[string, *webtransport.Session](),
@@ -398,7 +398,7 @@ func (c *Client) dial(ctx context.Context, address string) (*webtransport.Sessio
 	dialCtx, cancel := context.WithTimeout(ctx, c.dialTimeout)
 	defer cancel()
 
-	rsp, session, err := c.dialer.Dial(dialCtx, "https://"+address+protocol.PeerConnectPath, nil)
+	rsp, session, err := c.transport.Dial(dialCtx, "https://"+address+protocol.PeerConnectPath, nil)
 	// The dialer lazily initializes its transport on the first Dial, so record that it is now safe to close
 	c.dialed.Store(true)
 	if err != nil {
@@ -421,7 +421,7 @@ func (c *Client) Close() {
 	// Close the dialer so no new connection can be established
 	// The dialer's transport is created lazily on the first Dial, and closing it before then panics, so only close it if we ever dialed
 	if c.dialed.Load() {
-		_ = c.dialer.Close()
+		_ = c.transport.Close()
 	}
 
 	// Snapshot the pooled addresses, then remove and close each session

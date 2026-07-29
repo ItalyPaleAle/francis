@@ -88,11 +88,10 @@ type runtimeClientConfig struct {
 }
 
 // runtimeClient maintains a persistent WebTransport session to one runtime replica at a time
-// It registers the host, sends periodic health checks, serves runtime-initiated requests, and reconnects
-// to another runtime address when the current session fails, reattaching to the same host registration
+// It registers the host, sends periodic health checks, serves runtime-initiated requests, and reconnects to another runtime address when the current session fails, reattaching to the same host registration
 type runtimeClient struct {
-	cfg    runtimeClientConfig
-	dialer *webtransport.Dialer
+	cfg       runtimeClientConfig
+	transport *webtransport.Transport
 
 	mu        sync.RWMutex
 	session   *webtransport.Session
@@ -122,9 +121,9 @@ func newRuntimeClient(cfg runtimeClientConfig) *runtimeClient {
 	}
 
 	return &runtimeClient{
-		cfg:    cfg,
-		dialer: wt.NewDialer(cfg.tlsConfig),
-		ready:  make(chan struct{}),
+		cfg:       cfg,
+		transport: wt.NewDialer(cfg.tlsConfig),
+		ready:     make(chan struct{}),
 	}
 }
 
@@ -142,7 +141,7 @@ func (rc *runtimeClient) HostID() string {
 
 // Run connects to a runtime and keeps the session alive, reconnecting on failure until the context is canceled
 func (rc *runtimeClient) Run(ctx context.Context) error {
-	defer func() { _ = rc.dialer.Close() }()
+	defer func() { _ = rc.transport.Close() }()
 
 	// Start at a random address so replicas spread the initial connections
 	// #nosec G404 -- not security-sensitive
@@ -280,7 +279,7 @@ func (rc *runtimeClient) connectAndServe(ctx context.Context, addr string) (bool
 // dial establishes a WebTransport session with the runtime at addr
 func (rc *runtimeClient) dial(ctx context.Context, addr string) (*webtransport.Session, error) {
 	url := "https://" + addr + protocol.RuntimeConnectPath
-	rsp, session, err := rc.dialer.Dial(ctx, url, nil)
+	rsp, session, err := rc.transport.Dial(ctx, url, nil)
 	if err != nil {
 		return nil, err
 	}

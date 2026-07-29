@@ -82,7 +82,7 @@ func (s *healthCheckFailure) Run(t *testing.T) {
 	require.ErrorContains(t, exitErr, "health check")
 
 	// It gives up within one health check interval plus the full retry budget, rather than retrying indefinitely against a database that is never coming back
-	// That bound is what the interval formula guarantees; it equals the deadline itself only when the deadline is long enough to hold the retry budget, which this scenario's deliberately short deadline is not
+	// That bound is what the interval formula guarantees: it equals the deadline itself only when the deadline is long enough to hold the retry budget, which this scenario's deliberately short deadline is not
 	maxExit := healthCheckPolicy.Interval(healthCheckDeadline) + healthCheckPolicy.Budget() + exitSlack
 	assert.Less(t, time.Since(stalledAt), maxExit, "the host should give up on its health checks within one interval plus the retry budget")
 

@@ -13,14 +13,14 @@ require (
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
-	github.com/italypaleale/go-kit v0.0.0-20260725195228-78f113702f86
+	github.com/italypaleale/go-kit v0.0.0-20260729024436-06ef4dfe084c
 	github.com/italypaleale/go-sql-utils v0.2.4
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/lmittmann/tint v1.2.0
 	github.com/mattn/go-isatty v0.0.23
-	github.com/quic-go/quic-go v0.60.0
-	github.com/quic-go/webtransport-go v0.11.1
+	github.com/quic-go/quic-go v0.61.0
+	github.com/quic-go/webtransport-go v0.12.0
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/stretchr/testify v1.11.1
 	github.com/vmihailenco/msgpack/v5 v5.4.1
