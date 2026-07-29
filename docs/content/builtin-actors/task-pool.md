@@ -19,15 +19,17 @@ Build a task pool with `taskpool.New` and register it on the host, before the ho
 import "github.com/italypaleale/francis/builtin/taskpool"
 
 pool, err := taskpool.New("video-convert",
-	taskpool.WithConcurrency(2),       // at most 2 tasks at a time on this host
-	taskpool.WithCapability("gpu"),    // this host can also run tasks that require a GPU
+	// At most 2 tasks at a time on this host
+	taskpool.WithConcurrency(2),
+	// This host can also run tasks that require a GPU
+	taskpool.WithCapability("gpu"),
 	taskpool.WithHandler(func(ctx context.Context, task taskpool.Task) error {
 		var req ConvertRequest
 		err := task.Decode(&req)
 		if err != nil {
 			return err
 		}
-		// ... do the (long-running) work, respecting ctx cancellation ...
+		// ... Do the (long-running) work, respecting ctx cancellation ...
 		return nil
 	}),
 )

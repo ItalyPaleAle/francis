@@ -21,7 +21,7 @@ const (
 	LockModeExclusive LockMode = 0
 	// LockModeShared runs every invocation of the type under the shared lock and never takes the exclusive one, so invocations never block each other
 	// An actor type registered this way synchronizes itself, including around its own durable state writes, and it rejects Peek because none of its invocations are read-only
-	// This is limited to built-in actors only for now
+	// This is limited to built-in actors only (at least for now)
 	LockModeShared LockMode = 1
 )
 

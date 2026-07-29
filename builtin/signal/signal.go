@@ -1,16 +1,16 @@
-// Package signal provides a built-in actor that broadcasts a one-shot signal to any number of waiting callers
+// Package signal provides a built-in actor that broadcasts a one-shot signal to any number of waiting callers.
 //
-// Build one with New and register the result on a host with the host's RegisterBuiltInActor method, then obtain a SignalService with Service to call Wait and Complete
-// There is one actor instance per signal ID (a free-form string such as a deployment ID or a job ID), so each signal is independent
+// Build one with New and register the result on a host with the host's RegisterBuiltInActor method, then obtain a SignalService with Service to call Wait and Complete.
+// Each signal is independent: there is one actor instance per signal ID, which could be a free-form string such as a deployment ID or a job ID.
 //
-// A signal fires once. Callers block in Wait until it does; one caller fires it with Complete, optionally attaching a payload; and every waiter is released at that moment with that payload
-// A caller that arrives after the completion does not block at all: it is answered from the durable completion record, for as long as the retention window set with WithRetention
+// A signal fires once and callers block in Wait until it does.
+// One caller fires it with Complete, optionally attaching a payload, and every waiter is released at that moment with that payload.
+// A caller that arrives after the completion does not block at all: it is answered from the durable completion record, for as long as the retention window set with WithRetention.
 //
-// That makes a signal level-triggered rather than edge-triggered: a caller that loses its connection and calls Wait again is answered correctly, whether the signal fired while it was away or has yet to fire
-// Nothing about a waiter is registered anywhere, so callers may come and go freely and a caller that gives up leaves nothing behind
+// That makes a signal level-triggered rather than edge-triggered: a caller that loses its connection and calls Wait again is answered correctly, whether the signal fired while it was away or has yet to fire.
 //
-// A signal is not a message queue: it carries one payload, it cannot be re-armed, and it delivers nothing to a caller that is neither waiting nor asking
-// Use jobs when what you need is durable, at-least-once delivery to a known recipient
+// A signal is not a message queue: it carries one payload, it cannot be re-armed, and it delivers nothing to a caller that is neither waiting nor asking.
+// Use jobs when what you need is durable, at-least-once delivery to a known recipient.
 package signal
 
 import (
@@ -189,7 +189,6 @@ type signalActor struct {
 	retention time.Duration
 
 	// mu guards every field below
-	// complete holds it across its durable write, so concurrent completions are serialized and the first one wins; a waiter only ever holds it long enough to read a snapshot, never while parked
 	mu sync.Mutex
 	// loaded reports whether the durable state has been consulted during this activation
 	loaded bool

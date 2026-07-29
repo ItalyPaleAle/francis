@@ -35,7 +35,7 @@ func main() {
 }
 
 func run(parentCtx context.Context, log *slog.Logger) error {
-	// The demo cancels this context when it is done, which drains the host and ends the example
+	// The example cancels this context when it is done, which drains the host and ends the example
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
@@ -47,7 +47,7 @@ func run(parentCtx context.Context, log *slog.Logger) error {
 		return err
 	}
 
-	// A single-host local cluster using the in-memory provider, which is enough for a demo that does not outlive the process
+	// A single-host local cluster using the in-memory provider, which is enough for an example that does not outlive the process
 	h, err := local.NewHost(
 		local.WithAddress("127.0.0.1:7582"),
 		local.WithLogger(log.With("scope", "actor-host")),
@@ -67,13 +67,16 @@ func run(parentCtx context.Context, log *slog.Logger) error {
 	}
 
 	// Run the host in the background
-	// The demo drives it once it is ready
+	// The example drives it once it is ready
 	errCh := make(chan error, 1)
-	go func() { errCh <- h.Run(ctx) }()
+	go func() {
+		errCh <- h.Run(ctx)
+	}()
 
 	// Wait for the host to be ready before invoking
 	select {
 	case <-h.Ready():
+		// All good, no-op
 	case err = <-errCh:
 		return fmt.Errorf("host stopped before becoming ready: %w", err)
 	case <-ctx.Done():
@@ -91,20 +94,21 @@ func run(parentCtx context.Context, log *slog.Logger) error {
 	for i := 1; i <= 5; i++ {
 		waiters.Go(func() {
 			// This blocks for as long as it takes: a signal has no timeout of its own, so bound it with the context when a caller should give up
-			env, waitErr := sig.Wait(ctx, deploymentID)
-			if waitErr != nil {
-				log.Error("Waiter gave up", slog.Int("waiter", i), slog.Any("error", waitErr))
+			env, wErr := sig.Wait(ctx, deploymentID)
+			if wErr != nil {
+				log.Error("Waiter gave up", slog.Int("waiter", i), slog.Any("error", wErr))
 				return
 			}
 
 			var res deployResult
 			if env != nil {
-				decodeErr := env.Decode(&res)
-				if decodeErr != nil {
-					log.Error("Waiter could not decode the payload", slog.Int("waiter", i), slog.Any("error", decodeErr))
+				wErr = env.Decode(&res)
+				if wErr != nil {
+					log.Error("Waiter could not decode the payload", slog.Int("waiter", i), slog.Any("error", wErr))
 					return
 				}
 			}
+
 			log.Info("Waiter released", slog.Int("waiter", i), slog.String("version", res.Version), slog.Bool("healthy", res.Healthy))
 		})
 	}
@@ -118,6 +122,7 @@ func run(parentCtx context.Context, log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("failed to complete the signal: %w", err)
 	}
+
 	waiters.Wait()
 
 	// A caller arriving after the completion does not block at all: it is answered from the durable record
@@ -132,6 +137,7 @@ func run(parentCtx context.Context, log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("failed to decode the payload: %w", err)
 	}
+
 	log.Info("Late caller answered immediately", slog.String("version", late.Version))
 
 	// A signal fires once: a second completion changes nothing and says so
@@ -149,11 +155,11 @@ func run(parentCtx context.Context, log *slog.Logger) error {
 	}
 	log.Info("A signal that never fired reads as pending", slog.Bool("completed", completed))
 
-	// The demo is done: stop the host and wait for it to drain
+	// The example is done: stop the host and wait for it to drain
 	cancel()
-	runErr := <-errCh
-	if runErr != nil && !errors.Is(runErr, context.Canceled) {
-		return fmt.Errorf("failed to run actor host: %w", runErr)
+	err = <-errCh
+	if err != nil && !errors.Is(err, context.Canceled) {
+		return fmt.Errorf("failed to run actor host: %w", err)
 	}
 
 	return nil
