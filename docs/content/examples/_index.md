@@ -1,5 +1,5 @@
 ---
 title: "Examples"
-weight: 30
+weight: 25
 description: "End-to-end examples of running Francis"
 ---

@@ -135,7 +135,8 @@ func (s *builtinSignal) Run(t *testing.T) {
 			require.NoError(t, waitErr, "host %d", i)
 
 			var got payload
-			require.NoError(t, env.Decode(&got), "host %d", i)
+			err = env.Decode(&got)
+			require.NoError(t, err, "host %d", i)
 			assert.Equal(t, "v3", got.Version, "host %d", i)
 
 			cancel()
@@ -200,7 +201,8 @@ func (s *builtinSignal) Run(t *testing.T) {
 		require.NoError(t, err)
 
 		var got payload
-		require.NoError(t, env.Decode(&got))
+		err = env.Decode(&got)
+		require.NoError(t, err)
 		assert.Equal(t, "first", got.Version, "the first completion's payload is the one callers receive")
 	})
 

@@ -121,7 +121,7 @@ func TestLookupActor(t *testing.T) {
 
 		// The actor is active here, left over from before this host fell behind on its health checks
 		instance := &actor_mocks.MockActorDeactivate{}
-		activeAct := actorcore.NewActiveActor(actorRef, instance, 5*time.Minute, host.core.IdleProcessor, clock)
+		activeAct := actorcore.NewActiveActor(actorRef, instance, 5*time.Minute, actorcore.LockModeExclusive, host.core.IdleProcessor, clock)
 		host.core.Actors.Set(actorRef.String(), activeAct)
 
 		// The provider has since placed it on another host, which is the answer that must win

@@ -113,7 +113,7 @@ func New(name string, opts ...Option) (*Signal, error) {
 }
 
 // Signal is a built-in signal actor, returned by New and registered on a host with RegisterBuiltInActor
-// It satisfies the framework's built-in actor contract (ActorType, Factory, RegisterOptions, Singleton) and exposes a Service method that returns a SignalService for the Wait, Complete, and Check operations
+// It satisfies the framework's built-in actor contract and exposes a Service method that returns a SignalService for the Wait, Complete, and Check operations
 // The actor behavior itself lives in the unexported signalActor instances that Factory builds, one per signal ID
 type Signal struct {
 	actorType      string
@@ -240,7 +240,7 @@ func (a *signalActor) load(ctx context.Context) error {
 
 // wait blocks until the signal completes and returns its payload, or returns straight away when it has already completed
 func (a *signalActor) wait(ctx context.Context) (any, error) {
-	// Take a snapshot under the lock, then release it: a waiter must not hold mu while parked, or it would block the completion that releases it
+	// Take a snapshot under the lock, then release it, to avoid locking the actor
 	a.mu.Lock()
 	err := a.load(ctx)
 	if err != nil {
@@ -298,11 +298,16 @@ func (a *signalActor) complete(ctx context.Context, data actor.Envelope) (any, e
 
 	// Persist before making the completion observable: a crash after this point costs only the in-memory wake-up, and the waiters that re-resolve are answered from the stored record
 	// A failure here leaves nothing changed, so the caller's Complete reports the failure and the signal has genuinely not fired
-	err = a.client.SetState(ctx, signalState{
-		Completed:   true,
-		Data:        req.Data,
-		CompletedAt: time.Now(),
-	}, &actor.SetStateOpts{TTL: a.retention})
+	err = a.client.SetState(ctx,
+		signalState{
+			Completed:   true,
+			Data:        req.Data,
+			CompletedAt: time.Now(),
+		},
+		&actor.SetStateOpts{
+			TTL: a.retention,
+		},
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to persist signal completion: %w", err)
 	}
