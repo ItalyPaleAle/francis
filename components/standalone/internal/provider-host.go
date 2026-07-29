@@ -104,8 +104,9 @@ func (p *Provider) RegisterHost(ctx context.Context, req components.RegisterHost
 }
 
 // reattachHost reattaches a reconnecting host to its existing registration, identified by req.ExistingHostID
-// It refreshes the registration in place even if its health record is stale, so a host can reclaim it after a runtime failover without waiting for the previous health record to expire
-// If the registration no longer exists, a brand-new one is created instead
+// It refreshes the registration in place only while its health record is still live, so a host that reconnects quickly (e.g. after a runtime failover) keeps its identity and its actors
+// A registration whose health record has expired is not reclaimable: the cluster has already written that host off and may have placed its actors elsewhere, so it is cleaned up like any other dead host and the caller is given a brand-new registration, whose Reattached of false tells it to drop everything it was still holding
+// A brand-new registration is also created when the previous one no longer exists at all
 func (p *Provider) reattachHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
@@ -117,6 +118,13 @@ func (p *Provider) reattachHost(ctx context.Context, req components.RegisterHost
 
 	p.Mu.RLock()
 	existing, exists := p.Hosts[req.ExistingHostID]
+
+	// An expired registration cannot be reclaimed, so treat it as absent and let the cleanup below remove it
+	// The host then registers afresh and learns from Reattached that it must drop the actors it was still holding
+	if exists && !p.IsHostHealthy(existing) {
+		existing = nil
+		exists = false
+	}
 
 	// Reject a reattach while an exclusive-access lease is held, so a locked cluster stays empty
 	// A reattach never adds a host beyond the limit, so the host count and limit agreement are not re-checked here
@@ -133,14 +141,14 @@ func (p *Provider) reattachHost(ctx context.Context, req components.RegisterHost
 		}
 	}
 
-	// Plan cleanup of unhealthy hosts, but never the registration we are reattaching to
+	// Plan cleanup of unhealthy hosts, including the registration being reattached to when it has gone stale
 	var (
 		cleanupHostIDs   []string
 		cleanupAddresses []string
 		cleanupActors    []ActorKey
 	)
 	for id, h := range p.Hosts {
-		if id == req.ExistingHostID || p.IsHostHealthy(h) {
+		if (exists && id == req.ExistingHostID) || p.IsHostHealthy(h) {
 			continue
 		}
 

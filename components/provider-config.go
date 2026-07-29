@@ -2,6 +2,7 @@ package components
 
 import (
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -23,6 +24,15 @@ type ProviderConfig struct {
 	// A value of 0 (the default) means there is no limit
 	// The first host to join a cluster establishes the effective value, and a host configured with a different value is rejected (to change the limit, shut down the whole cluster first)
 	MaxHosts int
+
+	// HealthCheck is how hosts retry their health checks, which decides both the gap left between checks and the shortest usable HostHealthCheckDeadline
+	// A nil policy, or any field left unset, means the defaults
+	HealthCheck *HealthCheckPolicy
+}
+
+// HealthCheckInterval returns the gap hosts should leave between health checks under this configuration
+func (o *ProviderConfig) HealthCheckInterval() time.Duration {
+	return o.HealthCheck.Interval(o.HostHealthCheckDeadline)
 }
 
 // NewProviderConfig returns a ProviderConfig with all default values
@@ -32,13 +42,16 @@ func NewProviderConfig() ProviderConfig {
 		AlarmsLeaseDuration:       DefaultAlarmsLeaseDuration,
 		AlarmsFetchAheadInterval:  DefaultAlarmsFetchAheadInterval,
 		AlarmsFetchAheadBatchSize: DefaultAlarmsFetchAheadBatchSize,
+		HealthCheck:               NewHealthCheckPolicy(),
 	}
 }
 
 func (o *ProviderConfig) Validate() error {
-	if o.HostHealthCheckDeadline < time.Second {
-		return errors.New("property HostHealthCheckDeadline is not valid: must be at least 1s")
+	minDeadline := o.HealthCheck.MinDeadline()
+	if o.HostHealthCheckDeadline < minDeadline {
+		return fmt.Errorf("property HostHealthCheckDeadline is not valid: must be at least %v with the configured health check policy (%v)", minDeadline, o.HealthCheck)
 	}
+
 	if o.AlarmsLeaseDuration < time.Second {
 		return errors.New("property AlarmsLeaseDuration is not valid: must be at least 1s")
 	}
@@ -51,5 +64,6 @@ func (o *ProviderConfig) Validate() error {
 	if o.MaxHosts < 0 {
 		return errors.New("property MaxHosts is not valid: must be greater than or equal to 0")
 	}
+
 	return nil
 }
