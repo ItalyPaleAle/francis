@@ -42,7 +42,7 @@ As with any built-in actor, register the same rate limiter (same name and option
 |--------|-------------|
 | `WithRate(n)` | Number of calls admitted per period. **Required**, must be greater than zero. |
 | `WithPer(d)` | The window the rate applies over. Defaults to one second, so `WithRate(100)` alone is 100/s; combine with `WithPer(time.Minute)` for a per-minute rate. |
-| `WithBurst(n)` | The token bucket's capacity: how many calls may be admitted instantly before throttling kicks in, refilling at the configured rate. Defaults to **1** (strict), so calls are admitted one at a time - raise it to tolerate short bursts above the steady rate. |
+| `WithBurst(n)` | The token bucket's capacity: how many calls may be admitted instantly before throttling kicks in, refilling at the configured rate. Defaults to `1` (strict), so calls are admitted one at a time - raise it to tolerate short bursts above the steady rate. |
 | `WithIdleTimeout(d)` | How long a key's in-memory limiter is kept after its last call before the actor is deactivated. Defaults to double the period (the `WithPer` window), with a minimum of one minute. Lower it to reclaim memory faster when limiting many distinct keys. |
 
 ## Throttling by key

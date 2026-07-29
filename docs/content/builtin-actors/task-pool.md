@@ -55,7 +55,7 @@ Register the same pool (same name) on every host that should run its tasks. Each
 | Option | Description |
 |--------|-------------|
 | `WithHandler(fn)` | The function that runs each task. **Required.** |
-| `WithConcurrency(n)` | The strict maximum number of tasks this host runs at once, across all of the pool's queues. Defaults to **1**. |
+| `WithConcurrency(n)` | The strict maximum number of tasks this host runs at once, across all of the pool's queues. Defaults to `1`. |
 | `WithCapability(cap)` | Advertise a capability on this host, so tasks that require it can run here. Repeatable. |
 | `WithAccept(fn)` | An optional predicate that runs before a task, letting this host decline it so it re-routes to another host (see below). |
 | `WithMaxAttempts(n)` | How many times a failing task is retried before it is dead-lettered. |
