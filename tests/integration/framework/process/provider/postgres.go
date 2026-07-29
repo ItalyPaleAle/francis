@@ -34,6 +34,7 @@ const (
 // When standalone is true it drives the standalone (in-memory, Postgres-backed) provider instead of the multi-instance Postgres provider
 type postgresBackend struct {
 	standalone bool
+	opts       Options
 
 	schema string
 	pool   *pgxpool.Pool
@@ -104,6 +105,7 @@ func (b *postgresBackend) LocalHostOption(t *testing.T) local.HostOption {
 
 	return local.WithPostgresProvider(postgres.PostgresProviderOptions{
 		DB:              b.pool,
+		Timeout:         b.opts.QueryTimeout,
 		CleanupInterval: -1,
 	})
 }
@@ -115,15 +117,16 @@ func (b *postgresBackend) NewProvider(t *testing.T, log *slog.Logger) components
 	if b.standalone {
 		p, err := standalone.NewStandalonePostgresBacked(log, standalone.StandalonePostgresOptions{
 			DB: b.pool,
-		}, providerConfig())
+		}, providerConfig(b.opts))
 		require.NoError(t, err, "failed to create standalone Postgres provider")
 		return p
 	}
 
 	p, err := postgres.NewPostgresProvider(log, postgres.PostgresProviderOptions{
 		DB:              b.pool,
+		Timeout:         b.opts.QueryTimeout,
 		CleanupInterval: -1,
-	}, providerConfig())
+	}, providerConfig(b.opts))
 	require.NoError(t, err, "failed to create Postgres provider")
 
 	return p
@@ -141,6 +144,7 @@ func (b *postgresBackend) ProviderOptions(t *testing.T) components.ProviderOptio
 
 	return postgres.PostgresProviderOptions{
 		DB:              b.pool,
+		Timeout:         b.opts.QueryTimeout,
 		CleanupInterval: -1,
 	}
 }

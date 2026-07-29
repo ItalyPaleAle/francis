@@ -189,8 +189,42 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 	// Set when the alarm repeats and its lease was kept for the next occurrence, so the deferred cleanup below re-enqueues it
 	reEnqueue := false
 
-	// Get and lock the actor
+	// Remove from the list of active alarms upon returning
+	// Registered before the placement check below so an occurrence this host declines still clears its active flag and can fire again later
+	isRetrying := false
+	defer func() {
+		h.activeAlarmsLock.Lock()
+		delete(h.activeAlarms, key)
+
+		// If it's retrying, we add it to the list of retrying alarms
+		if isRetrying {
+			h.retryingAlarms[key] = struct{}{}
+		} else {
+			delete(h.retryingAlarms, key)
+		}
+
+		h.activeAlarmsLock.Unlock()
+
+		// Re-enqueue a repeating alarm whose lease we kept, only after the active flag is cleared above
+		// Otherwise enqueueAlarms would skip it as already active and the alarm would never re-fire on schedule
+		if reEnqueue {
+			enqErr := h.enqueueAlarms([]*ref.AlarmLease{lease})
+			if enqErr != nil {
+				log.Error("Error re-enqueueing leased alarm", slog.Any("error", enqErr))
+			}
+		}
+	}()
+
 	aRef := lease.ActorRef()
+
+	// Confirm the actor is still placed on this host before running the occurrence (the lookup has a cache)
+	placement, lookupErr := h.lookupActor(ctx, aRef, false, false)
+	if lookupErr != nil || !h.isLocal(placement) {
+		h.releaseForeignAlarm(ctx, lease, log, lookupErr)
+		return
+	}
+
+	// Get and lock the actor
 	statusAny, err := h.core.LockAndInvoke(ctx, aRef, func(parentCtx context.Context, act *actorcore.ActiveActor) (status any, err error) {
 		// A successfully-executed occurrence is finalized in the provider before the actor's turn lock is released
 		// An actor that halts itself from its own handler is removed from the placement store as soon as the lock is released, and the provider drops the leases of a deactivated actor's alarms
@@ -267,31 +301,6 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 
 		return executeAlarmStatusCompleted, nil
 	})
-
-	// Remove from the list of active alarms upon returning
-	isRetrying := false
-	defer func() {
-		h.activeAlarmsLock.Lock()
-		delete(h.activeAlarms, key)
-
-		// If it's retrying, we add it to the list of retrying alarms
-		if isRetrying {
-			h.retryingAlarms[key] = struct{}{}
-		} else {
-			delete(h.retryingAlarms, key)
-		}
-
-		h.activeAlarmsLock.Unlock()
-
-		// Re-enqueue a repeating alarm whose lease we kept, only after the active flag is cleared above
-		// Otherwise enqueueAlarms would skip it as already active and the alarm would never re-fire on schedule
-		if reEnqueue {
-			enqErr := h.enqueueAlarms([]*ref.AlarmLease{lease})
-			if enqErr != nil {
-				log.Error("Error re-enqueueing leased alarm", slog.Any("error", enqErr))
-			}
-		}
-	}()
 
 	status, ok := statusAny.(executeAlarmStatus)
 	if !ok {
@@ -508,6 +517,24 @@ func (h *Host) releaseForReroute(parentCtx context.Context, lease *ref.AlarmLeas
 	if err != nil && !errors.Is(err, components.ErrNoAlarm) {
 		// Log only: if this fails the lease simply expires on its own and the occurrence is re-fetched later
 		log.Warn("Failed to release lease for re-route", slog.Any("error", err))
+	}
+}
+
+// releaseForeignAlarm hands back the lease on an occurrence whose actor this host could not confirm it still owns
+// Releasing rather than letting the lease lapse lets the actor's current host pick the occurrence up on its next poll, instead of waiting out the remaining lease duration
+func (h *Host) releaseForeignAlarm(parentCtx context.Context, lease *ref.AlarmLease, log *slog.Logger, lookupErr error) {
+	if lookupErr != nil {
+		log.WarnContext(parentCtx, "Could not confirm actor placement before executing alarm - skipping execution", slog.Any("error", lookupErr))
+	} else {
+		log.DebugContext(parentCtx, "Actor is no longer placed on this host - releasing alarm lease")
+	}
+
+	ctx, cancel := context.WithTimeout(parentCtx, h.providerRequestTimeout)
+	defer cancel()
+	err := h.actorProvider.ReleaseAlarmLease(ctx, lease)
+	if err != nil && !errors.Is(err, components.ErrNoAlarm) {
+		// Log only: if this fails the lease simply expires on its own and the occurrence is re-fetched later
+		log.WarnContext(ctx, "Error releasing alarm lease", slog.Any("error", err))
 	}
 }
 

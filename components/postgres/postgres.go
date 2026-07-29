@@ -93,9 +93,6 @@ func NewPostgresProvider(log *slog.Logger, postgresOpts PostgresProviderOptions,
 	if p.timeout >= p.cfg.HostHealthCheckDeadline {
 		return nil, fmt.Errorf("the configured host health check deadline ('%v') must be bigger than the query timeout ('%v')", p.timeout, p.cfg.HostHealthCheckDeadline)
 	}
-	if p.cfg.HostHealthCheckDeadline-p.timeout < 5*time.Second {
-		p.log.Warn("The configured host health check deadline is less than 5s more than the query timeout: this could cause issues", "healthCheckDeadline", p.cfg.HostHealthCheckDeadline, "queryTimeout", p.timeout)
-	}
 
 	// Open a database connection unless we have one passed in already
 	if p.db == nil {
@@ -170,12 +167,7 @@ func (p *PostgresProvider) Close() error {
 }
 
 func (p *PostgresProvider) HealthCheckInterval() time.Duration {
-	// The recommended health check interval is the deadline, less the query timeout, less 1s, then rounded down to the closest 5s
-	interval := (p.cfg.HostHealthCheckDeadline - p.timeout - time.Second).Truncate(time.Second)
-	interval -= time.Duration(int64(interval.Seconds())%5) * time.Second
-
-	// ...however, there's a minimum of 1s
-	return max(interval, time.Second)
+	return p.cfg.HealthCheckInterval()
 }
 
 func (p *PostgresProvider) RenewLeaseInterval() time.Duration {

@@ -181,9 +181,10 @@ type RegisterHostReq struct {
 	// List of supported actor types
 	ActorTypes []ActorHostType
 	// ExistingHostID, when non-empty, requests reattachment to an existing host registration with this ID
-	// This is used when a host reconnects (for example after a runtime failover) and wants to reclaim its registration rather than waiting for the previous health record to expire
-	// If a host with this ID exists, its address, supported actor types, and health check are refreshed in place, regardless of the previous record's health, and the same host ID is returned with Reattached set to true
-	// If no such host exists (for example it was already garbage-collected), a brand-new registration is created with a freshly-generated host ID and Reattached is false
+	// This is used when a host reconnects (for example after a runtime failover) and wants to reclaim its registration rather than starting over
+	// If a host with this ID exists and its health record is still live, its address, supported actor types, and health check are refreshed in place, and the same host ID is returned with Reattached set to true
+	// If no such host exists (or if its health record has expired), a brand-new registration is created with a freshly-generated host ID and Reattached is false
+	// A host that sees Reattached false after having been registered before must drop every actor it's still holding
 	ExistingHostID string
 	// JoinToken is the jti from the JWT bootstrap token
 	// When non-empty, the provider records it to prevent replay

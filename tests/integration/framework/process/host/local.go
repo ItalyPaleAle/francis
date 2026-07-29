@@ -6,6 +6,7 @@ import (
 	"context"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -18,8 +19,11 @@ import (
 
 // LocalOptions configures a local host process
 type LocalOptions struct {
-	// Address the host binds to and is reachable at, e.g. "127.0.0.1:7571"
+	// Address the host is reachable at and advertises to its peers, e.g. "127.0.0.1:7571"
 	Address string
+	// Bind is the address the peer server actually listens on, when it differs from the advertised address
+	// A scenario sets it when peers must reach this host through something else, such as a severable link that stands in front of it
+	Bind string
 	// Backend supplies the embedded provider option, resolved at Run time
 	Backend provider.Backend
 	// Actors to register before the host starts
@@ -76,6 +80,11 @@ func (p *Local) Run(t *testing.T) {
 		local.WithShutdownGracePeriod(ShutdownGrace),
 		p.opts.Backend.LocalHostOption(t),
 	}
+	// When the peer server listens somewhere other than the advertised address, peers reach it indirectly and the bind must be set explicitly
+	if p.opts.Bind != "" {
+		bindAddr, bindPort := splitHostPort(t, p.opts.Bind)
+		hostOpts = append(hostOpts, local.WithBindAddress(bindAddr), local.WithBindPort(bindPort))
+	}
 	if p.opts.Logger != nil {
 		hostOpts = append(hostOpts, local.WithLogger(p.opts.Logger))
 	}
@@ -105,6 +114,12 @@ func (p *Local) Run(t *testing.T) {
 	waitReady(t, p.opts.Address, h.Ready(), p.runErrC)
 	// The peer server starts concurrently with registration, so confirm it is serving before proceeding
 	waitPeerServer(t, p.opts.Address)
+}
+
+// WaitExit blocks until the host's Run returns on its own and reports the error it exited with
+func (p *Local) WaitExit(t *testing.T, timeout time.Duration) error {
+	t.Helper()
+	return waitExit(t, p.opts.Address, p.runErrC, timeout)
 }
 
 // Stop gracefully shuts the host down mid-test
