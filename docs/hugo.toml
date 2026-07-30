@@ -38,6 +38,7 @@ enableRobotsTXT = true
   github_url = "https://github.com/ItalyPaleAle/francis"
   github_repo = "https://github.com/ItalyPaleAle/francis"
   github_branch = "main"
+  github_path = "docs"
   PlausibleAnalytics = true
 
   [params.robots]
