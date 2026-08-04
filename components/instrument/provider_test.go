@@ -169,12 +169,14 @@ func TestWrapProviderSlowOperationWarns(t *testing.T) {
 	handler := newCaptureHandler()
 
 	base := components_mocks.NewMockActorProvider(t)
+	// Keep the operation comfortably above the threshold across platforms with coarse clock resolution
 	base.EXPECT().
 		RenewAlarmLeases(mock.Anything, mock.Anything).
+		After(10*time.Millisecond).
 		Return(components.RenewAlarmLeasesRes{}, nil)
 
 	p := WrapProvider(base, slog.New(handler), components.OperationLogConfig{
-		SlowThreshold: time.Nanosecond,
+		SlowThreshold: time.Millisecond,
 	})
 
 	_, err := p.RenewAlarmLeases(t.Context(), components.RenewAlarmLeasesReq{})
