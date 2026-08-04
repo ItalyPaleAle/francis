@@ -6,8 +6,8 @@
   ],
   "allow": [
     {
-      "module": "github.com/quic-go/webtransport-go",
-      "version": "v0.12.0",
+      "module": "modernc.org/sqlite",
+      "version": "v1.56.0",
       "reason": ""
     }
   ]
