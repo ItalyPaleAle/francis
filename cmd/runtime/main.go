@@ -200,8 +200,9 @@ func buildProvider(cfg providerConfig, providerCfg components.ProviderConfig, lo
 
 	// Resolve the independent SQL and provider-operation log settings
 	queryLog := components.QueryLogConfig{
-		Enabled:       cfg.QueryLog.Enabled,
-		SlowThreshold: cfg.QueryLog.GetSlowThreshold(),
+		Enabled:           cfg.QueryLog.Enabled,
+		IncludeParameters: cfg.QueryLog.IncludeParameters,
+		SlowThreshold:     cfg.QueryLog.GetSlowThreshold(),
 	}
 	operationLog := components.OperationLogConfig{
 		Enabled:       cfg.OperationLog.Enabled,

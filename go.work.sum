@@ -76,8 +76,6 @@ github.com/italypaleale/go-kit v0.0.0-20260620130522-3cb485fabbc9 h1:69qxkeq9Kiz
 github.com/italypaleale/go-kit v0.0.0-20260620130522-3cb485fabbc9/go.mod h1:BSDA6tYbFSyg2YkH4jdhbJaEpKx83qaO6Kn51jeElA0=
 github.com/italypaleale/go-sql-utils v0.2.4 h1:6CN8y3qEdNzvYlS/JK6N65E8cL9F8a6OBCJjzaQIv3c=
 github.com/italypaleale/go-sql-utils v0.2.4/go.mod h1:BJStxMfB6fzYVcOe0oZQCjGIPZQu76UBmg1Wuy6Z/7I=
-github.com/italypaleale/go-sql-utils v0.3.1 h1:JEPN3C0+t04cnLt5D66TIa+oSHlqgo4kaFHKrVCK4Wo=
-github.com/italypaleale/go-sql-utils v0.3.1/go.mod h1:uhhiq3Ku+Z+hbZmeJ+vvJShwMCOzknQ/cQhi7fU2IWc=
 github.com/jordanlewis/gcassert v0.0.0-20250430164644-389ef753e22e/go.mod h1:ZybsQk6DWyN5t7An1MuPm1gtSZ1xDaTXS9ZjIOxvQrk=
 github.com/josharian/intern v1.0.0/go.mod h1:5DoeVV0s6jJacbCEi61lwdGj/aVlrQvzHFFd8Hwg//Y=
 github.com/jpillora/backoff v1.0.0/go.mod h1:J/6gKK9jxlEcS3zixgDgUAsiuZ7yrSoa/FX5e0EB2j4=
@@ -206,3 +204,4 @@ tailscale.com v1.98.4/go.mod h1:U23ZwbZlKJMNU7CScy+lCVVlece/S5n09q0nyudncBI=
 tailscale.com v1.98.8/go.mod h1:zH5+644fVCOozdtB256cRLPMcwv15h/lcyN+/MX1nBc=
 tailscale.com v1.98.9/go.mod h1:fQIDgzRTC2LfDGEEyVGRxVpysTfjqo5XKyByOms/fC4=
 tailscale.com v1.98.10/go.mod h1:NeACE/ATZA6GjyVTERnoyTcHps2BpRfs2mXDcPstD9A=
+tailscale.com v1.102.1/go.mod h1:ynxKzc9hDxwGLHORQE0qrTH1b8NBRrIsXcnfnug/3dg=

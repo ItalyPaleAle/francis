@@ -106,9 +106,10 @@ func NewPostgresProvider(log *slog.Logger, postgresOpts PostgresProviderOptions,
 
 		// Attach the tracer that emits spans (and optional query logs) for every statement and pool acquisition, chaining any tracer the caller may have set on the pool config
 		cfg.ConnConfig.Tracer = postgresinstrument.NewTracer(&sqlinstrument.Options{
-			Log:           p.log,
-			QueryLog:      postgresOpts.QueryLog.Enabled,
-			SlowThreshold: postgresOpts.QueryLog.SlowThreshold,
+			Log:               p.log,
+			QueryLog:          postgresOpts.QueryLog.Enabled,
+			IncludeParameters: postgresOpts.QueryLog.IncludeParameters,
+			SlowThreshold:     postgresOpts.QueryLog.SlowThreshold,
 		}, cfg.ConnConfig.Tracer)
 
 		// Open the database

@@ -116,6 +116,7 @@ provider:
   # Optional: warn about slow SQL statements
   # queryLog:
   #   slowThreshold: "250ms" # Warn-log queries slower than this
+  #   includeParameters: false # Include parameter values in traces and SQL text logs
   # Optional: warn about slow provider operations on every backend (including memory)
   # operationLog:
   #   slowThreshold: "500ms"
@@ -148,7 +149,8 @@ Subcommands (including `print-ca`, `healthcheck`, `backup`, and `restore`) resol
 | `bootstrap.jwt.issuer` / `audience` / `jwksURL` / `staticJWKS` | JWT validation settings, for `method: jwt`. |
 | `provider.connectionString` | Connection string for the data store; the backend is inferred from its scheme. `postgres://…` or `postgresql://…` for PostgreSQL, `memory` for the non-durable in-memory store, anything else is a SQLite file path or DSN. **Required.** |
 | `provider.queryLog.enabled` | Log every SQL statement at Debug level with its duration when the provider opens the connection. Default `false`. |
-| `provider.queryLog.slowThreshold` | Log a Warn record for every SQL statement that reaches this duration (e.g. `"250ms"`). At Info level the warning omits SQL text (without parameter values). Warnings are disabled by default or when the value is zero. |
+| `provider.queryLog.includeParameters` | Include parameter values as `db.query.parameter.<name-or-position>` attributes in traces and in SQL logs that include query text. This may expose sensitive data. Default `false`. |
+| `provider.queryLog.slowThreshold` | Log a Warn record for every SQL statement that reaches this duration (e.g. `"250ms"`). At Info level the warning omits SQL text and parameters. Warnings are disabled by default or when the value is zero. |
 | `provider.operationLog.enabled` | Log every provider operation at Debug level with its duration (for every backend, including memory). Default `false`. |
 | `provider.operationLog.slowThreshold` | Log successful slow operations at Warn and domain warnings or failures at their policy level when operation logging is otherwise disabled. Warnings are disabled by default or when the value is zero. |
 | `workloadCertTTL` | Lifetime of the workload certificates issued to hosts. Default `1h`. |

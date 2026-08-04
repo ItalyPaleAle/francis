@@ -29,7 +29,7 @@ A trace is assembled from spans created at every meaningful boundary. The main s
 
 Spans are tagged with attributes such as `francis.actor.type`, `francis.actor.id`, `francis.actor.method`, `francis.request.id`, `francis.host.id`, and `francis.peer.address`.  
 Provider spans carry `francis.provider.method`, and statement spans carry `db.query.text`.  
-SQL statements are always recorded in traces, without parameter values.
+SQL statements are always recorded in traces. Parameter values are excluded by default and can be included with `QueryLog.IncludeParameters`, or with `instrument.Options.IncludeParameters` when instrumenting an existing database handle directly.
 
 > Note: alarms start their own trace.  
 > A fired alarm is not triggered by a caller request, so `alarm.dispatch` and `alarm.execute` begin a fresh trace rather than attaching to an unrelated one. The trace still spans the runtime and the owning host.
@@ -76,17 +76,18 @@ Aside from traces, francis can log SQL statements and provider operations with t
 - `QueryLog` (or runtime `provider.queryLog`) controls SQL statement logs for connections opened by the provider.
 - `OperationLog` (or runtime `provider.operationLog`) controls provider-operation logs for every backend, including memory.
 
-Each configuration has an `Enabled` switch for Debug records and a `SlowThreshold` for Warn records.
+Each configuration has an `Enabled` switch for Debug records and a `SlowThreshold` for Warn records. `QueryLog` also has an `IncludeParameters` switch, which defaults to `false` because parameter values may contain sensitive data.
 
-SQL text is included in logs only when `QueryLog.Enabled` is true and the logger accepts Debug records (parameters' values are never included).
+SQL text in logs is normalized to one line with consecutive whitespace condensed. Every SQL log includes `code.file.path` and `code.line.number` attributes for the query call.
 
-A slow-query Warn record at Info level intentionally omits SQL text; use the correlated trace to identify the statement, or temporarily enable Debug query logging.
+Parameter values are emitted as `db.query.parameter.<name-or-position>` attributes in traces when `QueryLog.IncludeParameters` is true. Logs include them only alongside SQL text when Debug query logging is active, so an Info-level slow-query warning omits both SQL text and parameters.
 
 ```yaml
 provider:
   connectionString: "data.db"
   queryLog:
     enabled: true
+    includeParameters: false
     slowThreshold: "250ms"
   operationLog:
     enabled: true
@@ -96,7 +97,7 @@ log:
   level: debug
 ```
 
-When a provider is given an existing database handle (`DB` option), statement-level logging requires opening the connection with `sqliteinstrument.Open` or `postgresinstrument.NewTracer` as shown above, passing the corresponding `instrument.Options`.
+When a provider is given an existing database handle (`DB` option), statement-level logging requires opening the connection with `sqliteinstrument.Open` or `postgresinstrument.NewTracer` as shown above, passing the corresponding `instrument.Options`. Set `instrument.Options.IncludeParameters` to include parameter values in that case.
 
 ## Trace context propagation
 

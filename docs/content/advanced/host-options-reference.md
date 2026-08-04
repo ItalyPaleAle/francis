@@ -122,4 +122,5 @@ The low-level `NewSQLiteProvider`, `NewPostgresProvider`, and standalone constru
 
 When you pass an existing connection in `DB`, statement-level spans and logs are not possible from inside Francis. Open that connection with the instrumentation helpers from [go-sql-utils](https://github.com/italypaleale/go-sql-utils) instead. See an example in the [observability](../docs/observability.md#sql-visibility) docs.
 
-SQL text is always available in traces as `db.query.text`, without bound parameter values. In logs, it's included only when `QueryLog.Enabled` is true and the logger accepts Debug records.
+SQL text is always available in traces as `db.query.text`. Logged SQL text is normalized to one line, and each SQL log includes the query call's source file and line.  
+Parameter values are excluded by default as they may contain sensitive information. Set `QueryLog.IncludeParameters` to include `db.query.parameter.<name-or-position>` attributes in traces and in SQL logs that already include query text.

@@ -8,8 +8,11 @@ import (
 // SQL statement traces and their text are emitted independently from this configuration
 type QueryLogConfig struct {
 	// Enabled logs every SQL statement at Debug level with its duration
-	// Logged statements never include parameter values
 	Enabled bool
+
+	// IncludeParameters includes query parameter values in traces and in SQL logs that include statement text
+	// Parameter values may contain sensitive information and are excluded by default
+	IncludeParameters bool
 
 	// SlowThreshold logs a Warn record for every SQL statement whose duration reaches this value
 	// A value of 0 (the default) disables slow-query warnings

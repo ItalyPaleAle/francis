@@ -129,9 +129,10 @@ func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, provi
 
 		// Open the database through the instrumented driver, so every statement is traced and optionally logged
 		s.db, err = sqliteinstrument.Open(connector, &sqlinstrument.Options{
-			Log:           s.log,
-			QueryLog:      sqliteOpts.QueryLog.Enabled,
-			SlowThreshold: sqliteOpts.QueryLog.SlowThreshold,
+			Log:               s.log,
+			QueryLog:          sqliteOpts.QueryLog.Enabled,
+			IncludeParameters: sqliteOpts.QueryLog.IncludeParameters,
+			SlowThreshold:     sqliteOpts.QueryLog.SlowThreshold,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to open SQLite database: %w", err)

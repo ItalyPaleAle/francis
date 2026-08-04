@@ -62,10 +62,18 @@ type providerConfig struct {
 	ConnectionString string `yaml:"connectionString"`
 
 	// QueryLog configures optional SQL statement logging
-	QueryLog durationLogConfig `yaml:"queryLog"`
+	QueryLog queryLogConfig `yaml:"queryLog"`
 
 	// OperationLog configures optional provider-operation logging for every backend
 	OperationLog durationLogConfig `yaml:"operationLog"`
+}
+
+type queryLogConfig struct {
+	durationLogConfig `yaml:",inline"`
+
+	// IncludeParameters includes query parameter values in traces and in SQL logs that include statement text
+	// Parameter values may contain sensitive information and are excluded by default
+	IncludeParameters bool `yaml:"includeParameters"`
 }
 
 type durationLogConfig struct {

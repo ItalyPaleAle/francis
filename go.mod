@@ -13,8 +13,8 @@ require (
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
-	github.com/italypaleale/go-kit v0.0.0-20260729024436-06ef4dfe084c
-	github.com/italypaleale/go-sql-utils v0.3.1
+	github.com/italypaleale/go-kit v0.0.0-20260804130631-7f274d362cca
+	github.com/italypaleale/go-sql-utils v0.3.2
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/lmittmann/tint v1.2.0
