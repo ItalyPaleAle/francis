@@ -16,6 +16,7 @@ import (
 
 	"github.com/italypaleale/francis/tests/integration/framework"
 	"github.com/italypaleale/francis/tests/integration/suite"
+	"github.com/italypaleale/francis/tests/integration/telemetry"
 
 	// Blank-import every suite package so their init() registers the cases
 	_ "github.com/italypaleale/francis/tests/integration/suites/alarminvoke"
@@ -35,6 +36,7 @@ import (
 	_ "github.com/italypaleale/francis/tests/integration/suites/invocation"
 	_ "github.com/italypaleale/francis/tests/integration/suites/jobs"
 	_ "github.com/italypaleale/francis/tests/integration/suites/lifecycle"
+	_ "github.com/italypaleale/francis/tests/integration/suites/observability"
 	_ "github.com/italypaleale/francis/tests/integration/suites/routing"
 	_ "github.com/italypaleale/francis/tests/integration/suites/runtimefailover"
 	_ "github.com/italypaleale/francis/tests/integration/suites/state"
@@ -43,6 +45,9 @@ import (
 
 // TestIntegration runs every registered integration scenario as a subtest
 func TestIntegration(t *testing.T) {
+	// Install one dynamically sampled provider before any scenario starts so package-level tracers bind to the integration collector
+	telemetry.Install(t)
+
 	t.Log("Starting Integration tests")
 
 	for name, c := range suite.All() {
