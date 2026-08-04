@@ -30,16 +30,16 @@ jobs:
     steps:
 
       - name: Check out code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # 7.0.0
         with:
           go-version-file: 'go.mod'
           # Do not cache in release workflows
           cache: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
         with:
           # Do not cache in release workflows
           cache-binary: false
@@ -52,7 +52,7 @@ jobs:
 
       - name: Generate Container tags and labels
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ env.REPO_OWNER }}/francis
           tags: |
@@ -107,7 +107,7 @@ jobs:
           echo "CONTAINER_PLATFORMS: '$container_platforms'"
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # 4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
@@ -216,7 +216,7 @@ jobs:
           ls -al .out
 
       - name: Publish binaries as Actions Artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
         with:
           name: artifacts
           path: .out
@@ -224,7 +224,7 @@ jobs:
           compression-level: 0
 
       - name: Build and push Container images
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # 7.3.0
         id: docker-build-push
         with:
           tags: ${{ steps.meta.outputs.tags }}
@@ -235,7 +235,7 @@ jobs:
           push: true
 
       - name: Binary attestation linux-amd64
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # 4.2.1
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           subject-name: linux-amd64/francis
@@ -244,7 +244,7 @@ jobs:
             .bin/francis-*-linux-amd64/francis-cli
 
       - name: Binary attestation linux-arm64
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # 4.2.1
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           subject-name: linux-arm64/francis
@@ -253,7 +253,7 @@ jobs:
             .bin/francis-*-linux-arm64/francis-cli
 
       - name: Binary attestation linux-armv7
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # 4.2.1
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           subject-name: linux-armv7/francis
@@ -262,7 +262,7 @@ jobs:
             .bin/francis-*-linux-armv7/francis-cli
 
       - name: Binary attestation macos-arm64
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # 4.2.1
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           subject-name: macos-arm64/francis
@@ -271,7 +271,7 @@ jobs:
             .bin/francis-*-macos-arm64/francis-cli
 
       - name: Binary attestation freebsd-amd64
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # 4.2.1
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           subject-name: freebsd-amd64/francis
@@ -280,7 +280,7 @@ jobs:
             .bin/francis-*-freebsd-amd64/francis-cli
 
       - name: Binary attestation freebsd-arm64
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # 4.2.1
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           subject-name: freebsd-arm64/francis
@@ -289,7 +289,7 @@ jobs:
             .bin/francis-*-freebsd-arm64/francis-cli
 
       - name: Container image attestation
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # 4.2.1
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           subject-name: 'ghcr.io/${{ env.REPO_OWNER }}/francis'
