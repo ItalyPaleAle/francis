@@ -60,7 +60,7 @@ func TestBackupRestoreRoundTripSQLite(t *testing.T) {
 	want := []byte("hello-backup")
 
 	// Seed the source with one state entry, using the same provider construction path as the CLI
-	seed, err := buildProvider(srcConn, testProviderConfig(), slog.New(slog.DiscardHandler))
+	seed, err := buildProvider(providerConfig{ConnectionString: srcConn}, testProviderConfig(), slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	err = seed.Init(t.Context())
 	require.NoError(t, err)
@@ -87,7 +87,7 @@ func TestBackupRestoreRoundTripSQLite(t *testing.T) {
 	require.Zero(t, rc, "restore should succeed")
 
 	// The destination now holds the seeded state
-	dst, err := buildProvider(dstConn, testProviderConfig(), slog.New(slog.DiscardHandler))
+	dst, err := buildProvider(providerConfig{ConnectionString: dstConn}, testProviderConfig(), slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 
 	t.Cleanup(func() {

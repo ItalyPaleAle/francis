@@ -15,6 +15,8 @@ import (
 
 	sqladapter "github.com/italypaleale/go-sql-utils/adapter/sql"
 	"github.com/italypaleale/go-sql-utils/cleanup"
+	sqlinstrument "github.com/italypaleale/go-sql-utils/instrument"
+	sqliteinstrument "github.com/italypaleale/go-sql-utils/instrument/sqlite"
 	"github.com/italypaleale/go-sql-utils/migrations"
 	sqlitemigrations "github.com/italypaleale/go-sql-utils/migrations/sqlite"
 	gosqlsqlite "github.com/italypaleale/go-sql-utils/sqlite"
@@ -113,30 +115,30 @@ func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, provi
 
 	// Open a database connection unless we have one passed in already
 	if s.db == nil {
-		// Parse the connection string
+		// Prepare the connector so the instrumented driver keeps the SQLite connection setup and pool constraints
 		if sqliteOpts.ConnectionString == "" {
 			sqliteOpts.ConnectionString = DefaultConnectionString
 		}
-		var isMemoryDB bool
-		sqliteOpts.ConnectionString, _, isMemoryDB, err = gosqlsqlite.ParseConnectionString(sqliteOpts.ConnectionString, s.log)
+		connector, err := gosqlsqlite.NewConnector(gosqlsqlite.ConnectOpts{
+			ConnString: sqliteOpts.ConnectionString,
+			Logger:     s.log,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("connection string for SQLite is not valid: %w", err)
 		}
 
-		// Open the database
-		s.db, err = sql.Open("sqlite", sqliteOpts.ConnectionString)
+		// Open the database through the instrumented driver, so every statement is traced and optionally logged
+		s.db, err = sqliteinstrument.Open(connector, &sqlinstrument.Options{
+			Log:           s.log,
+			QueryLog:      sqliteOpts.QueryLog.Enabled,
+			SlowThreshold: sqliteOpts.QueryLog.SlowThreshold,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to open SQLite database: %w", err)
 		}
 
 		// The provider owns this connection, so Close is responsible for closing it
 		s.ownsDB = true
-
-		// For in-memory databases, we must limit to 1 open connection at the same time, or they won't see the whole data
-		// The other workaround, of using shared caches, doesn't work well with multiple write transactions trying to happen at once
-		if isMemoryDB {
-			s.db.SetMaxOpenConns(1)
-		}
 	}
 
 	return s, nil
@@ -162,6 +164,14 @@ type SQLiteProviderOptions struct {
 	// When set, tables are named "<prefix>_<table>", e.g. with prefix "francis" the hosts table is "francis_hosts"
 	// Defaults to "francis" when empty
 	TablePrefix string
+
+	// QueryLog controls optional SQL statement logging when this constructor opens the database connection
+	// When a connection is passed in via DB, the caller can add statement tracing and logging by opening the database with instrument/sqlite.Open from go-sql-utils
+	QueryLog components.QueryLogConfig
+
+	// OperationLog is applied by the host and runtime provider factory
+	// Direct callers of this low-level constructor can apply it explicitly with instrument.WrapProvider
+	OperationLog components.OperationLogConfig
 
 	// Clock, used to pass a mock one for testing
 	clock clock.WithTicker

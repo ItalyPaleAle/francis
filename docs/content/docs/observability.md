@@ -23,11 +23,80 @@ A trace is assembled from spans created at every meaningful boundary. The main s
 | `alarm.dispatch` / `alarm.execute` | Runtime / host | Dispatching a due alarm and running its handler |
 | `rpc.peer.invoke` | Both hosts | A host-to-host actor invocation (client and server spans) |
 | `rpc.runtime.*` / `rpc.host.*` / `runtime.*` | Host / runtime | Host-to-runtime and runtime-to-host requests |
+| `provider.<Method>` | Host or runtime | A provider method call, such as `provider.UpdateActorHost` (health check) or `provider.RenewAlarmLeases` |
+| `sqlite.exec` / `sqlite.query` / `sqlite.transaction` / `sqlite.prepare` | Provider | Individual SQLite statements and transactions, when the provider owns the database connection |
+| `postgresql.query` / `postgresql.batch` / `postgresql.copy_from` / `postgresql.prepare` / `postgresql.pool.acquire` | Provider | Individual Postgres statements (and pool acquisitions), when the provider owns the connection pool |
 
-Spans are tagged with attributes such as `francis.actor.type`, `francis.actor.id`, `francis.actor.method`, `francis.request.id`, `francis.host.id`, and `francis.peer.address`.
+Spans are tagged with attributes such as `francis.actor.type`, `francis.actor.id`, `francis.actor.method`, `francis.request.id`, `francis.host.id`, and `francis.peer.address`.  
+Provider spans carry `francis.provider.method`, and statement spans carry `db.query.text`.  
+SQL statements are always recorded in traces, without parameter values.
 
 > Note: alarms start their own trace.  
 > A fired alarm is not triggered by a caller request, so `alarm.dispatch` and `alarm.execute` begin a fresh trace rather than attaching to an unrelated one. The trace still spans the runtime and the owning host.
+
+## SQL visibility
+
+Two complementary levels make database work observable:
+
+- **Provider spans** (`provider.<Method>`) are emitted for every provider method call made through the local-host, runtime, or ClusterAdmin construction paths, no matter how the database connection was created.  
+  A slow health check or lease renewal shows up as its own span, with the error attached when it fails.
+- **Statement spans** (`sqlite.*`, `postgresql.*`) are emitted for every SQL statement, but only when Francis opens the database connection itself (a `ConnectionString` in the provider options, or the runtime binary's `provider.connectionString`).  
+  On Postgres, `postgresql.pool.acquire` spans do the same for time spent waiting for a free connection in the pool.
+
+If your application creates its own database handle and passes it to the provider (`DB` field in the provider options), statement spans are not automatic. To enable them, use the instrumentation helpers from [go-sql-utils](https://github.com/italypaleale/go-sql-utils) when opening the connection:
+
+```go
+import (
+	"github.com/italypaleale/go-sql-utils/instrument"
+	gosqlsqlite "github.com/italypaleale/go-sql-utils/sqlite"
+	sqliteinstrument "github.com/italypaleale/go-sql-utils/instrument/sqlite"
+	postgresinstrument "github.com/italypaleale/go-sql-utils/instrument/postgres"
+)
+
+// SQLite: open the database with the instrumented driver
+connector, err := gosqlsqlite.NewConnector(gosqlsqlite.ConnectOpts{
+    ConnString: dsn,
+    Logger:     logger,
+})
+db, err := sqliteinstrument.Open(connector, &instrument.Options{})
+
+// Postgres: attach the tracer to the pool config, chaining any tracer you already set
+cfg, err := pgxpool.ParseConfig(connString)
+cfg.ConnConfig.Tracer = postgresinstrument.NewTracer(&instrument.Options{}, cfg.ConnConfig.Tracer)
+pool, err := pgxpool.NewWithConfig(ctx, cfg)
+```
+
+Direct callers of the low-level provider constructors can add provider-operation telemetry explicitly with `WrapProvider` from Francis's `components/instrument` package.
+The local host, runtime, and ClusterAdmin factories apply that wrapper automatically.
+
+### Database logging
+
+Aside from traces, francis can log SQL statements and provider operations with their durations using two independent configurations:
+
+- `QueryLog` (or runtime `provider.queryLog`) controls SQL statement logs for connections opened by the provider.
+- `OperationLog` (or runtime `provider.operationLog`) controls provider-operation logs for every backend, including memory.
+
+Each configuration has an `Enabled` switch for Debug records and a `SlowThreshold` for Warn records.
+
+SQL text is included in logs only when `QueryLog.Enabled` is true and the logger accepts Debug records (parameters' values are never included).
+
+A slow-query Warn record at Info level intentionally omits SQL text; use the correlated trace to identify the statement, or temporarily enable Debug query logging.
+
+```yaml
+provider:
+  connectionString: "data.db"
+  queryLog:
+    enabled: true
+    slowThreshold: "250ms"
+  operationLog:
+    enabled: true
+    slowThreshold: "500ms"
+
+log:
+  level: debug
+```
+
+When a provider is given an existing database handle (`DB` option), statement-level logging requires opening the connection with `sqliteinstrument.Open` or `postgresinstrument.NewTracer` as shown above, passing the corresponding `instrument.Options`.
 
 ## Trace context propagation
 

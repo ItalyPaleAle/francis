@@ -20,6 +20,10 @@ type StandaloneMemory struct {
 type StandaloneMemoryOptions struct {
 	components.ProviderOptions
 
+	// OperationLog is applied by the host and runtime provider factory
+	// Direct callers of this low-level constructor can apply it explicitly with instrument.WrapProvider
+	OperationLog components.OperationLogConfig
+
 	// Clock, used to pass a mock one for testing
 	Clock clock.WithTicker
 

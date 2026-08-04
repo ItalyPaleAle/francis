@@ -22,6 +22,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"k8s.io/utils/clock"
 
+	sqlinstrument "github.com/italypaleale/go-sql-utils/instrument"
+	postgresinstrument "github.com/italypaleale/go-sql-utils/instrument/postgres"
+
 	"github.com/italypaleale/francis/components"
 )
 
@@ -100,6 +103,13 @@ func NewPostgresProvider(log *slog.Logger, postgresOpts PostgresProviderOptions,
 		if err != nil {
 			return nil, err
 		}
+
+		// Attach the tracer that emits spans (and optional query logs) for every statement and pool acquisition, chaining any tracer the caller may have set on the pool config
+		cfg.ConnConfig.Tracer = postgresinstrument.NewTracer(&sqlinstrument.Options{
+			Log:           p.log,
+			QueryLog:      postgresOpts.QueryLog.Enabled,
+			SlowThreshold: postgresOpts.QueryLog.SlowThreshold,
+		}, cfg.ConnConfig.Tracer)
 
 		// Open the database
 		connCtx, cancel := context.WithTimeout(context.Background(), p.timeout)

@@ -18,6 +18,7 @@ import (
 	"github.com/italypaleale/francis/components/sqlite"
 	"github.com/italypaleale/francis/components/standalone"
 	"github.com/italypaleale/francis/internal/bootstrapauth"
+	"github.com/italypaleale/francis/internal/providerfactory"
 	"github.com/italypaleale/francis/internal/runtime"
 	timeutils "github.com/italypaleale/francis/internal/time"
 )
@@ -80,6 +81,19 @@ func run(ctx context.Context, cfg *config) error {
 	}
 	log := obs.log
 
+	// Register telemetry shutdown first so later resource defers run while exporters are still active
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), observabilityShutdownTimeout)
+		defer shutdownCancel()
+
+		shutdownErr := servicerunner.
+			NewServiceRunner(obs.shutdownServices()...).
+			Run(shutdownCtx)
+		if shutdownErr != nil {
+			log.Error("Error flushing telemetry on shutdown", slog.Any("error", shutdownErr))
+		}
+	}()
+
 	// Resolve durations, falling back to sensible defaults
 	healthCheckDeadline := timeutils.ParseDurationDefault(cfg.HealthCheckDeadline, components.DefaultHostHealthCheckDeadline)
 	alarmsLeaseDuration := timeutils.ParseDurationDefault(cfg.AlarmsLeaseDuration, components.DefaultAlarmsLeaseDuration)
@@ -95,7 +109,7 @@ func run(ctx context.Context, cfg *config) error {
 		MaxHosts:                  cfg.MaxHosts,
 	}
 
-	provider, err := buildProvider(cfg.Provider.ConnectionString, providerCfg, log)
+	provider, err := buildProvider(cfg.Provider, providerCfg, log)
 	if err != nil {
 		return fmt.Errorf("failed to build provider: %w", err)
 	}
@@ -146,17 +160,6 @@ func run(ctx context.Context, cfg *config) error {
 		NewServiceRunner(rt.Run).
 		Run(ctx)
 
-	// Run all the shutdown methods
-	// The context has already been canceled so we use a background one here
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), observabilityShutdownTimeout)
-	defer shutdownCancel()
-	shutdownErr := servicerunner.
-		NewServiceRunner(obs.shutdownServices()...).
-		Run(shutdownCtx)
-	if shutdownErr != nil {
-		log.Error("Error flushing telemetry on shutdown", slog.Any("error", shutdownErr))
-	}
-
 	return runErr
 }
 
@@ -188,29 +191,49 @@ func bootstrapOption(cfg bootstrapConfig) (runtime.RuntimeOption, error) {
 }
 
 // buildProvider constructs the actor provider, inferring the backend from the connection string scheme
-// The original connection string is passed to the provider,
-func buildProvider(connString string, providerCfg components.ProviderConfig, log *slog.Logger) (components.ActorProvider, error) {
-	connString = strings.TrimSpace(connString)
+// Surrounding whitespace is removed before the connection string is passed to the provider
+func buildProvider(cfg providerConfig, providerCfg components.ProviderConfig, log *slog.Logger) (components.ActorProvider, error) {
+	connString := strings.TrimSpace(cfg.ConnectionString)
 	if connString == "" {
 		return nil, errors.New("provider.connectionString is required")
 	}
 
+	// Resolve the independent SQL and provider-operation log settings
+	queryLog := components.QueryLogConfig{
+		Enabled:       cfg.QueryLog.Enabled,
+		SlowThreshold: cfg.QueryLog.GetSlowThreshold(),
+	}
+	operationLog := components.OperationLogConfig{
+		Enabled:       cfg.OperationLog.Enabled,
+		SlowThreshold: cfg.OperationLog.GetSlowThreshold(),
+	}
+
 	connStringLC := strings.ToLower(connString)
+	var opts components.ProviderOptions
 	switch {
 	// Postgres connection strings begin with "postgres://" or "postgresql://"
 	case strings.HasPrefix(connStringLC, "postgres://"), strings.HasPrefix(connStringLC, "postgresql://"):
-		return postgres.NewPostgresProvider(log, postgres.PostgresProviderOptions{
+		opts = postgres.PostgresProviderOptions{
 			ConnectionString: connString,
-		}, providerCfg)
+			QueryLog:         queryLog,
+			OperationLog:     operationLog,
+		}
 
 	// The non-durable in-memory store is selected with the literal "memory" or the "memory://" scheme
 	case connStringLC == "memory", strings.HasPrefix(connStringLC, "memory://"):
-		return standalone.NewStandaloneMemory(log, standalone.StandaloneMemoryOptions{}, providerCfg)
+		opts = standalone.StandaloneMemoryOptions{
+			OperationLog: operationLog,
+		}
 
 	// Anything else is treated as a SQLite file path or DSN
 	default:
-		return sqlite.NewSQLiteProvider(log, sqlite.SQLiteProviderOptions{
+		opts = sqlite.SQLiteProviderOptions{
 			ConnectionString: connString,
-		}, providerCfg)
+			QueryLog:         queryLog,
+			OperationLog:     operationLog,
+		}
 	}
+
+	// The factory also wraps the provider so every provider method call is traced
+	return providerfactory.New(log, opts, providerCfg)
 }

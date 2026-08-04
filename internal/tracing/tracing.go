@@ -1,6 +1,5 @@
 // Package tracing wraps the global OpenTelemetry tracer for the Francis framework
 // It centralizes the instrumentation name, the span helpers, and the attribute keys so spans are named and tagged consistently across packages
-// The tracer is resolved from the global provider, so every span is a no-op until the embedding app or the runtime binary configures OpenTelemetry
 package tracing
 
 import (
@@ -16,7 +15,6 @@ import (
 // instrumentationName identifies this framework as the source of its spans
 const instrumentationName = "github.com/italypaleale/francis"
 
-// tracer delegates to the global provider, picking up the real provider once one is installed
 var tracer = otel.Tracer(instrumentationName)
 
 // Start begins a span as a child of the span in ctx, returning the derived context and the span
@@ -100,4 +98,9 @@ func PeerAddress(v string) attribute.KeyValue {
 // RPCKind returns the attribute for a protocol message kind
 func RPCKind(v string) attribute.KeyValue {
 	return attribute.String("francis.rpc.kind", v)
+}
+
+// ProviderMethod returns the attribute for an invoked provider method
+func ProviderMethod(v string) attribute.KeyValue {
+	return attribute.String("francis.provider.method", v)
 }

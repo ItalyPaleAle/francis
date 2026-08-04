@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/italypaleale/go-kit/observability"
 	"github.com/italypaleale/go-kit/utils"
@@ -59,6 +60,30 @@ type providerConfig struct {
 	// ConnectionString selects and configures the data store
 	// The backend is inferred from the connection string scheme: "postgres://" or "postgresql://" for PostgreSQL, "memory" (or "memory://") for the non-durable in-memory store, and anything else is treated as a SQLite file path or DSN
 	ConnectionString string `yaml:"connectionString"`
+
+	// QueryLog configures optional SQL statement logging
+	QueryLog durationLogConfig `yaml:"queryLog"`
+
+	// OperationLog configures optional provider-operation logging for every backend
+	OperationLog durationLogConfig `yaml:"operationLog"`
+}
+
+type durationLogConfig struct {
+	// Enabled logs every matching operation at Debug level with its duration
+	Enabled bool `yaml:"enabled"`
+
+	// SlowThreshold logs a Warn record for every matching operation that reaches this duration
+	// Non-positive values use the default, which disables slow-operation warnings
+	SlowThreshold time.Duration `yaml:"slowThreshold"`
+}
+
+// GetSlowThreshold returns the configured threshold or zero when the value is negative
+func (cfg durationLogConfig) GetSlowThreshold() time.Duration {
+	if cfg.SlowThreshold < 0 {
+		return 0
+	}
+
+	return cfg.SlowThreshold
 }
 
 type logConfig struct {

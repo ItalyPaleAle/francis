@@ -192,7 +192,7 @@ func cliProvider(ctx context.Context) (components.ActorProvider, *slog.Logger, f
 	providerCfg := components.NewProviderConfig()
 	providerCfg.HostHealthCheckDeadline = timeutils.ParseDurationDefault(cfg.HealthCheckDeadline, components.DefaultHostHealthCheckDeadline)
 
-	provider, err := buildProvider(cfg.Provider.ConnectionString, providerCfg, log)
+	provider, err := buildProvider(cfg.Provider, providerCfg, log)
 	if err != nil {
 		return nil, nil, nil, err
 	}

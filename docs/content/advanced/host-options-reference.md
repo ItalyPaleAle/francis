@@ -109,5 +109,17 @@ The SQLite and PostgreSQL provider options accept:
 | `DB` | SQLite (`*sql.DB`), Postgres (`*pgxpool.Pool`) | Use an existing connection instead of opening one. |
 | `Timeout` | SQLite, Postgres | Timeout for database queries. |
 | `CleanupInterval` | SQLite, Postgres, memory | Interval for purging expired state and alarms. |
+| `QueryLog` | SQLite, Postgres | A `components.QueryLogConfig` that enables SQL statement logging when the provider opens its own connection. |
+| `OperationLog` | SQLite, Postgres, standalone | A `components.OperationLogConfig` that enables provider-operation logging through the local-host factory. |
 
 > When using SQLite, the database file must not be stored on a networked filesystem (NFS/SMB).
+
+### SQL observability
+
+The local host factory traces every provider method call with spans named `provider.<Method>`, and it applies `OperationLog` for optional operation logging.
+
+The low-level `NewSQLiteProvider`, `NewPostgresProvider`, and standalone constructors return unwrapped providers, while direct callers can opt in with `WrapProvider` from the `components/instrument` package. Every SQL statement is traced when the SQLite or PostgreSQL provider opens the connection itself via `ConnectionString`.
+
+When you pass an existing connection in `DB`, statement-level spans and logs are not possible from inside Francis. Open that connection with the instrumentation helpers from [go-sql-utils](https://github.com/italypaleale/go-sql-utils) instead. See an example in the [observability](../docs/observability.md#sql-visibility) docs.
+
+SQL text is always available in traces as `db.query.text`, without bound parameter values. In logs, it's included only when `QueryLog.Enabled` is true and the logger accepts Debug records.

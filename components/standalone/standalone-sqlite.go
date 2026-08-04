@@ -58,6 +58,10 @@ type StandaloneSQLiteOptions struct {
 	// When set, tables are named "<prefix>_<table>", e.g. with prefix "francis" the hosts table is "francis_hosts"
 	// Defaults to "francis" when empty
 	TablePrefix string
+
+	// OperationLog is applied by the host and runtime provider factory
+	// Direct callers of this low-level constructor can apply it explicitly with instrument.WrapProvider
+	OperationLog components.OperationLogConfig
 }
 
 const defaultSQLiteTimeout = 5 * time.Second

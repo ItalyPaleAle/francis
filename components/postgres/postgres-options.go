@@ -32,6 +32,14 @@ type PostgresProviderOptions struct {
 	// Defaults to "francis" when empty
 	TablePrefix string
 
+	// QueryLog controls optional SQL statement logging when this constructor opens the connection pool
+	// When a pool is passed in via DB, the caller can add statement tracing and logging with instrument/postgres.NewTracer from go-sql-utils on the pool config
+	QueryLog components.QueryLogConfig
+
+	// OperationLog is applied by the host and runtime provider factory
+	// Direct callers of this low-level constructor can apply it explicitly with instrument.WrapProvider
+	OperationLog components.OperationLogConfig
+
 	// Clock, used to pass a mock one for testing
 	clock clock.WithTicker
 }
