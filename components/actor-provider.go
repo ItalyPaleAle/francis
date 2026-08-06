@@ -154,7 +154,7 @@ type ActorProvider interface {
 	// HealthCheckInterval returns the recommended health check interval for hosts.
 	HealthCheckInterval() time.Duration
 
-	// HealthCheckInterval returns the recommended lease renewal interval for hosts.
+	// RenewLeaseInterval returns the recommended lease renewal interval for hosts.
 	RenewLeaseInterval() time.Duration
 
 	// AcquireExclusiveLease acquires or re-acquires the cluster exclusive-access lease for owner, extending it to now+ttl
