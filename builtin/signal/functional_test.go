@@ -11,9 +11,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	clocktesting "k8s.io/utils/clock/testing"
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components/sqlite"
+	"github.com/italypaleale/francis/components/standalone"
 	"github.com/italypaleale/francis/host/local"
 	"github.com/italypaleale/francis/internal/testutil"
 )
@@ -25,28 +27,40 @@ var testRuntimePSK = []byte("signal-test-runtime-psk-0123456789")
 func startHost(t *testing.T, dbPath string, sig *Signal) *local.Host {
 	t.Helper()
 
+	return startHostWithProvider(t, sig, local.WithSQLiteProvider(sqlite.SQLiteProviderOptions{ConnectionString: dbPath}))
+}
+
+// startHostWithProvider builds and runs a local host with the selected provider so tests can control provider-specific behavior
+func startHostWithProvider(t *testing.T, sig *Signal, provider local.HostOption) *local.Host {
+	t.Helper()
+
+	// Build the host with the selected provider and otherwise shared test configuration
 	host, err := local.NewHost(
 		local.WithAddress(testutil.FreeUDPAddr(t)),
-		local.WithSQLiteProvider(sqlite.SQLiteProviderOptions{ConnectionString: dbPath}),
+		provider,
 		local.WithRuntimePSKs(testRuntimePSK),
 		local.WithLogger(slog.New(slog.DiscardHandler)),
 	)
 	require.NoError(t, err)
 
+	// Register the signal set before the host starts accepting work
 	err = host.RegisterBuiltInActor(sig)
 	require.NoError(t, err)
 
+	// Run the host in the background for the lifetime of the test
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- host.Run(t.Context())
 	}()
 
+	// Wait until registration completes so callers can invoke the signal immediately
 	select {
 	case <-host.Ready():
 	case <-time.After(15 * time.Second):
 		t.Fatal("host did not register")
 	}
 
+	// Confirm shutdown finishes so leaked host goroutines fail the test that created them
 	t.Cleanup(func() {
 		select {
 		case <-errCh:
@@ -282,11 +296,18 @@ func TestWaitRespectsCallerContext(t *testing.T) {
 
 // TestRetentionExpiry verifies a completion stops being observable once its retention window has passed, which is the documented edge of the primitive
 func TestRetentionExpiry(t *testing.T) {
+	const retention = time.Second
+
 	// A one-second window keeps the test quick while still exercising the real provider TTL
-	sig, err := New("shortlived", WithRetention(time.Second))
+	sig, err := New("shortlived", WithRetention(retention))
 	require.NoError(t, err)
 
-	host := startHost(t, filepath.Join(t.TempDir(), "retention.db"), sig)
+	// Freeze provider time so host setup and deactivation cannot consume the short retention window
+	testClock := clocktesting.NewFakeClock(time.Now())
+	host := startHostWithProvider(t, sig, local.WithStandaloneMemoryProvider(standalone.StandaloneMemoryOptions{
+		Clock:           testClock,
+		CleanupInterval: -1,
+	}))
 	svc := sig.Service(host.Service())
 
 	err = svc.Complete(t.Context(), "deploy-1", "done")
@@ -301,15 +322,14 @@ func TestRetentionExpiry(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, completed)
 
-	require.Eventually(t, func() bool {
-		haltErr := host.Halt("francis.builtin.signal.shortlived", "deploy-1")
-		if haltErr != nil {
-			return false
-		}
+	// Advance past the retention boundary and drop the activation so the next check must consult the expired provider record
+	testClock.Step(retention + time.Millisecond)
+	err = host.Halt("francis.builtin.signal.shortlived", "deploy-1")
+	require.NoError(t, err)
 
-		_, stillCompleted, checkErr := svc.Check(t.Context(), "deploy-1")
-		return checkErr == nil && !stillCompleted
-	}, 30*time.Second, 500*time.Millisecond, "the completion outlived its retention window")
+	_, completed, err = svc.Check(t.Context(), "deploy-1")
+	require.NoError(t, err)
+	assert.False(t, completed)
 
 	// Past the window the signal is indistinguishable from one that never fired, so a wait parks rather than returning
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)

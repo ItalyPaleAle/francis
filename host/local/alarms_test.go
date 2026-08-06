@@ -1,11 +1,14 @@
 package local
 
 import (
+	"context"
 	"errors"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/italypaleale/go-kit/eventqueue"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -18,6 +21,111 @@ import (
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/testutil"
 )
+
+func TestRunAlarmFetcherInitialFetch(t *testing.T) {
+	const hostID = "test-host-123"
+	log := slog.New(slog.DiscardHandler)
+
+	newHost := func(clock *clocktesting.FakeClock, pollInterval time.Duration) (*Host, *components_mocks.MockActorProvider) {
+		provider := components_mocks.NewMockActorProvider(t)
+
+		host := &Host{
+			actorProvider:          provider,
+			log:                    log,
+			clock:                  clock,
+			hostID:                 hostID,
+			alarmsPollInterval:     pollInterval,
+			providerRequestTimeout: 15 * time.Second,
+			activeAlarms:           map[string]struct{}{},
+			retryingAlarms:         map[string]struct{}{},
+		}
+		host.alarmProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ref.AlarmLease]{
+			ExecuteFn: host.executeAlarm,
+		})
+		return host, provider
+	}
+
+	// startFetcher runs the alarm fetcher in background, returning a function that stops it and asserts it returned
+	startFetcher := func(t *testing.T, host *Host) func() {
+		t.Helper()
+
+		ctx, cancel := context.WithCancel(t.Context())
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- host.runAlarmFetcher(ctx)
+		}()
+
+		return func() {
+			cancel()
+			select {
+			case err := <-errCh:
+				require.ErrorIs(t, err, context.Canceled)
+			case <-time.After(time.Second):
+				t.Error("runAlarmFetcher did not return within expected time")
+			}
+		}
+	}
+
+	t.Run("long poll interval fetches shortly after startup", func(t *testing.T) {
+		clock := clocktesting.NewFakeClock(time.Now())
+		host, provider := newHost(clock, 5*time.Minute)
+
+		fetches := &atomic.Int32{}
+		provider.
+			On("FetchAndLeaseUpcomingAlarms",
+				mock.MatchedBy(testutil.MatchContextInterface),
+				components.FetchAndLeaseUpcomingAlarmsReq{Hosts: []string{hostID}},
+			).
+			Run(func(mock.Arguments) {
+				fetches.Add(1)
+			}).
+			Return(nil, nil)
+
+		stop := startFetcher(t, host)
+		defer stop()
+
+		// Both the poll ticker and the initial fetch timer must be armed before the clock advances, otherwise the step could race with startup
+		require.Eventually(t, func() bool { return clock.Waiters() == 2 }, time.Second, 10*time.Millisecond, "alarm fetcher did not start")
+
+		// Without the initial fetch, nothing would be fetched until five minutes in
+		clock.Step(alarmsInitialFetchDelay)
+		require.Eventually(t, func() bool { return fetches.Load() == 1 }, time.Second, 10*time.Millisecond, "initial fetch did not run")
+
+		// The initial fetch happens once only, with the poll ticker driving every fetch after it
+		clock.Step(alarmsInitialFetchDelay)
+		time.Sleep(100 * time.Millisecond)
+		assert.Equal(t, int32(1), fetches.Load(), "the initial fetch must not repeat")
+	})
+
+	t.Run("short poll interval does not fetch early", func(t *testing.T) {
+		clock := clocktesting.NewFakeClock(time.Now())
+		host, provider := newHost(clock, alarmsInitialFetchThreshold)
+
+		fetches := &atomic.Int32{}
+		provider.
+			On("FetchAndLeaseUpcomingAlarms", mock.Anything, mock.Anything).
+			Run(func(mock.Arguments) {
+				fetches.Add(1)
+			}).
+			Return(nil, nil).
+			Maybe()
+
+		stop := startFetcher(t, host)
+		defer stop()
+
+		// Only the poll ticker is armed: a poll interval this short needs no initial fetch
+		require.Eventually(t, clock.HasWaiters, time.Second, 10*time.Millisecond, "alarm fetcher did not start")
+		assert.Equal(t, 1, clock.Waiters(), "no initial fetch timer should be armed")
+
+		clock.Step(alarmsInitialFetchDelay)
+		time.Sleep(100 * time.Millisecond)
+		assert.Equal(t, int32(0), fetches.Load(), "no fetch should happen before the first tick")
+
+		// The regular tick still fetches
+		clock.Step(alarmsInitialFetchThreshold)
+		require.Eventually(t, func() bool { return fetches.Load() == 1 }, time.Second, 10*time.Millisecond, "the first tick did not fetch")
+	})
+}
 
 func TestGetAlarm(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())

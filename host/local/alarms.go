@@ -21,6 +21,12 @@ import (
 	"github.com/italypaleale/francis/internal/tracing"
 )
 
+// alarmsInitialFetchThreshold is the poll interval above which the fetcher performs an early first fetch after startup, rather than waiting for the first tick
+const alarmsInitialFetchThreshold = 5 * time.Second
+
+// alarmsInitialFetchDelay is how long after startup the early first fetch happens
+const alarmsInitialFetchDelay = 250 * time.Millisecond
+
 func (h *Host) runAlarmFetcher(ctx context.Context) error {
 	h.log.DebugContext(ctx, "Starting background alarm fetcher", slog.Any("interval", h.alarmsPollInterval))
 	defer h.log.Debug("Stopped background alarm fetcher")
@@ -40,10 +46,25 @@ func (h *Host) runAlarmFetcher(ctx context.Context) error {
 	t := h.clock.NewTicker(h.alarmsPollInterval)
 	defer t.Stop()
 
+	// With a long poll interval the first tick is far away, so an alarm that is already due would not fire until then
+	// Perform an early first fetch in that case: the host is registered before the services start, so there is something to fetch for right away
+	var initialCh <-chan time.Time
+	if h.alarmsPollInterval > alarmsInitialFetchThreshold {
+		initialTimer := h.clock.NewTimer(alarmsInitialFetchDelay)
+		defer initialTimer.Stop()
+		initialCh = initialTimer.C()
+	}
+
 	var err error
 	hostList := []string{h.hostID}
 	for {
 		select {
+		case <-initialCh:
+			initialCh = nil
+			err = h.fetchAndEnqueueAlarms(ctx, hostList)
+			if err != nil {
+				h.log.ErrorContext(ctx, "Failed to fetch alarms", slog.Any("error", err))
+			}
 		case <-t.C():
 			err = h.fetchAndEnqueueAlarms(ctx, hostList)
 			if err != nil {

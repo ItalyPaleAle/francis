@@ -354,6 +354,82 @@ func TestRunAlarmFetcherKeepsProcessorAfterShutdown(t *testing.T) {
 	require.ErrorIs(t, rt.alarmProcessor.Enqueue(), eventqueue.ErrProcessorStopped)
 }
 
+func TestRunAlarmFetcherInitialFetchWithLongPollInterval(t *testing.T) {
+	// With a poll interval this long, waiting for the first tick would delay every already-due alarm by a full interval after startup
+	rt, prov := newTestRuntime(t, WithAlarmsPollInterval(10*time.Minute))
+	_ = connectTestHost(t, rt, prov, "10.1.0.30:1", protocol.ActorHostType{ActorType: "T", MaxAttempts: 3, InitialRetryDelayMs: 100})
+
+	require.NoError(t, prov.SetAlarm(t.Context(), ref.NewAlarmRef("T", "a1", "wake"), components.SetAlarmReq{
+		AlarmProperties: ref.AlarmProperties{DueTime: time.Now().Add(-time.Second)},
+	}))
+
+	dispatched := make(chan protocol.ExecuteAlarmRequest, 1)
+	rt.sendToHost = func(_ context.Context, _ *hostConn, env *protocol.Envelope) (*protocol.Envelope, error) {
+		var req protocol.ExecuteAlarmRequest
+		_ = env.DecodePayload(&req)
+		dispatched <- req
+		return env.ReplyWith(protocol.KindExecuteAlarmResponse, protocol.ExecuteAlarmResponse{})
+	}
+
+	stop := runTestAlarmFetcher(t, rt)
+	defer stop()
+
+	select {
+	case req := <-dispatched:
+		assert.Equal(t, "a1", req.ActorID)
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected the due alarm to be dispatched by the initial fetch, without waiting for the first poll tick")
+	}
+}
+
+func TestRunAlarmFetcherInitialFetchWaitsForConnectedHost(t *testing.T) {
+	rt, prov := newTestRuntime(t, WithAlarmsPollInterval(10*time.Minute))
+
+	dispatched := make(chan protocol.ExecuteAlarmRequest, 1)
+	rt.sendToHost = func(_ context.Context, _ *hostConn, env *protocol.Envelope) (*protocol.Envelope, error) {
+		var req protocol.ExecuteAlarmRequest
+		_ = env.DecodePayload(&req)
+		dispatched <- req
+		return env.ReplyWith(protocol.KindExecuteAlarmResponse, protocol.ExecuteAlarmResponse{})
+	}
+
+	// The fetcher starts before any host has connected, which is the normal order when a whole cluster starts up
+	stop := runTestAlarmFetcher(t, rt)
+	defer stop()
+
+	// Let the initial fetch come due while there is still nothing to fetch for
+	time.Sleep(alarmsInitialFetchDelay + 500*time.Millisecond)
+
+	_ = connectTestHost(t, rt, prov, "10.1.0.31:1", protocol.ActorHostType{ActorType: "T", MaxAttempts: 3, InitialRetryDelayMs: 100})
+	require.NoError(t, prov.SetAlarm(t.Context(), ref.NewAlarmRef("T", "a1", "wake"), components.SetAlarmReq{
+		AlarmProperties: ref.AlarmProperties{DueTime: time.Now().Add(-time.Second)},
+	}))
+
+	select {
+	case req := <-dispatched:
+		assert.Equal(t, "a1", req.ActorID)
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected the initial fetch to be retried once a host connected")
+	}
+}
+
+// runTestAlarmFetcher starts runAlarmFetcher in the background, returning a function that stops it and waits for it to return
+func runTestAlarmFetcher(t *testing.T, rt *Runtime) func() {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = rt.runAlarmFetcher(ctx)
+	}()
+
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
 func TestFetchAndEnqueueAlarmsScopedToConnectedHosts(t *testing.T) {
 	rt, prov := newTestRuntime(t)
 

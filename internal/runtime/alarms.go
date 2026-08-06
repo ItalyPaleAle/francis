@@ -11,12 +11,19 @@ import (
 
 	"github.com/italypaleale/go-kit/eventqueue"
 	"go.opentelemetry.io/otel/trace"
+	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/tracing"
 	"github.com/italypaleale/francis/protocol"
 )
+
+// alarmsInitialFetchThreshold is the poll interval above which the fetcher performs an early first fetch after startup, rather than waiting for the first tick
+const alarmsInitialFetchThreshold = 5 * time.Second
+
+// alarmsInitialFetchDelay is how long after startup the early first fetch happens, and how often it is retried while no host is connected yet
+const alarmsInitialFetchDelay = 250 * time.Millisecond
 
 // runAlarmFetcher periodically fetches and leases upcoming alarms for the hosts connected to this runtime
 // It dispatches each due alarm to the host that owns its actor
@@ -46,9 +53,40 @@ func (rt *Runtime) runAlarmFetcher(ctx context.Context) error {
 	t := rt.clock.NewTicker(rt.alarmsPollInterval)
 	defer t.Stop()
 
+	// With a long poll interval the first tick is far away, so an alarm that is already due would not fire until then
+	// Perform an early first fetch in that case, re-arming while no host has connected yet, since a fetch is scoped to the connected hosts and there would be nothing to fetch for
+	var (
+		initialTimer clock.Timer
+		initialCh    <-chan time.Time
+	)
+	if rt.alarmsPollInterval > alarmsInitialFetchThreshold {
+		initialTimer = rt.clock.NewTimer(alarmsInitialFetchDelay)
+		defer initialTimer.Stop()
+		initialCh = initialTimer.C()
+	}
+
 	for {
 		select {
+		case <-initialCh:
+			if len(rt.hosts.ConnectedHostIDs()) == 0 {
+				initialTimer.Reset(alarmsInitialFetchDelay)
+				continue
+			}
+
+			// Stop the early fetch once it has run
+			initialCh = nil
+
+			err := rt.fetchAndEnqueueAlarms(ctx)
+			if err != nil {
+				rt.log.ErrorContext(ctx, "Failed to fetch alarms", slog.Any("error", err))
+			}
 		case <-t.C():
+			// The regular ticker has taken over, so the early fetch is no longer needed
+			if initialCh != nil {
+				initialTimer.Stop()
+				initialCh = nil
+			}
+
 			err := rt.fetchAndEnqueueAlarms(ctx)
 			if err != nil {
 				// Log errors
