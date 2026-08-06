@@ -25,7 +25,7 @@ import (
 const alarmsInitialFetchThreshold = 5 * time.Second
 
 // alarmsInitialFetchDelay is how long after startup the early first fetch happens
-const alarmsInitialFetchDelay = time.Second
+const alarmsInitialFetchDelay = 250 * time.Millisecond
 
 func (h *Host) runAlarmFetcher(ctx context.Context) error {
 	h.log.DebugContext(ctx, "Starting background alarm fetcher", slog.Any("interval", h.alarmsPollInterval))

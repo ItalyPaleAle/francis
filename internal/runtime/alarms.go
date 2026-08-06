@@ -23,7 +23,7 @@ import (
 const alarmsInitialFetchThreshold = 5 * time.Second
 
 // alarmsInitialFetchDelay is how long after startup the early first fetch happens, and how often it is retried while no host is connected yet
-const alarmsInitialFetchDelay = time.Second
+const alarmsInitialFetchDelay = 250 * time.Millisecond
 
 // runAlarmFetcher periodically fetches and leases upcoming alarms for the hosts connected to this runtime
 // It dispatches each due alarm to the host that owns its actor
