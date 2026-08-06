@@ -61,6 +61,20 @@ func runRuntimeServer(t *testing.T) (*Runtime, *standalone.StandaloneMemory, str
 	return rt, prov, addr
 }
 
+// blockingUnregisterProvider holds session teardown inside the provider so shutdown tests can observe whether Runtime.Run waits for it
+type blockingUnregisterProvider struct {
+	components.ActorProvider
+
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingUnregisterProvider) UnregisterHost(ctx context.Context, hostID string) error {
+	close(p.started)
+	<-p.release
+	return p.ActorProvider.UnregisterHost(ctx, hostID)
+}
+
 // dialRuntime dials the runtime's WebTransport endpoint, retrying until the server is accepting connections
 func dialRuntime(t *testing.T, ctx context.Context, addr string) *webtransport.Session {
 	t.Helper()
@@ -302,6 +316,61 @@ func TestServeSessionUnregistersDrainedHostFromProvider(t *testing.T) {
 		_, rErr := prov.LookupActor(t.Context(), ref.NewActorRef("T", "x"), components.LookupActorOpts{})
 		return errors.Is(rErr, components.ErrNoHost)
 	}, 10*time.Second, 50*time.Millisecond, "a gracefully drained host should be unregistered from the provider once its session closes")
+}
+
+func TestRuntimeRunWaitsForSessionTeardown(t *testing.T) {
+	// Wrap a real provider so graceful session cleanup can be paused inside UnregisterHost
+	base, err := standalone.NewStandaloneMemory(slog.New(slog.DiscardHandler), standalone.StandaloneMemoryOptions{}, components.ProviderConfig{
+		HostHealthCheckDeadline:   20 * time.Second,
+		AlarmsLeaseDuration:       20 * time.Second,
+		AlarmsFetchAheadInterval:  2500 * time.Millisecond,
+		AlarmsFetchAheadBatchSize: 25,
+	})
+	require.NoError(t, err)
+	prov := &blockingUnregisterProvider{
+		ActorProvider: base,
+		started:       make(chan struct{}),
+		release:       make(chan struct{}),
+	}
+
+	// Start a runtime whose alarm loop stays idle while this test exercises shutdown
+	addr := freeUDPAddr(t)
+	rt, err := NewRuntime(prov, append([]RuntimeOption{WithBind(addr), WithAlarmsPollInterval(time.Hour)}, baseRuntimeOpts()...)...)
+	require.NoError(t, err)
+	runCtx, cancel := context.WithCancel(t.Context())
+	runErrC := make(chan error, 1)
+	go func() {
+		runErrC <- rt.Run(runCtx)
+	}()
+
+	// Register and gracefully drain a host so closing its session starts provider cleanup
+	session := dialRuntime(t, t.Context(), addr)
+	reg := registerOnSession(t, t.Context(), session)
+	unregisterOnSession(t, t.Context(), session, reg.HostID, reg.SessionID)
+	err = session.CloseWithError(0, "")
+	require.NoError(t, err)
+	select {
+	case <-prov.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("session teardown did not reach the provider")
+	}
+
+	// Canceling the runtime must not return while the session still owns provider work
+	cancel()
+	select {
+	case err = <-runErrC:
+		t.Fatalf("runtime returned before session teardown completed: %v", err)
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	// Releasing provider cleanup allows the tracked session to finish and Runtime.Run to return
+	close(prov.release)
+	select {
+	case err = <-runErrC:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("runtime did not return after session teardown completed")
+	}
 }
 
 func TestServeSessionRejectsNonRegistrationFirstMessage(t *testing.T) {

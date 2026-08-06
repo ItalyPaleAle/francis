@@ -222,6 +222,7 @@ const runtimeMaxIncomingStreamsPerSession = 2 << 8
 // runServer runs the WebTransport server that accepts host sessions
 func (rt *Runtime) runServer(ctx context.Context) error {
 	mux := http.NewServeMux()
+	var handlers sync.WaitGroup
 
 	// Create the WebTransport server with the shared HTTP/3 and QUIC settings, bounding streams per session
 	wtServer := wt.NewServer(rt.bind, rt.serverTLSConfig, mux,
@@ -242,8 +243,10 @@ func (rt *Runtime) runServer(ctx context.Context) error {
 			return
 		}
 
-		// Each session is served on its own goroutine for the lifetime of the connection
-		go rt.serveSession(ctx, session)
+		// Track each session so shutdown waits for its stream handlers and provider cleanup
+		handlers.Go(func() {
+			rt.serveSession(ctx, session, &handlers)
+		})
 	})
 
 	rt.log.InfoContext(ctx, "Runtime WebTransport server started", slog.String("bind", rt.bind))
@@ -271,12 +274,17 @@ func (rt *Runtime) runServer(ctx context.Context) error {
 	if err != nil {
 		rt.log.WarnContext(ctx, "Runtime WebTransport server shutdown error", slog.Any("error", err))
 	}
+
+	// Close waits for upgrades to finish, so no new session can be added while this waits for every accepted session and stream to drain
+	handlers.Wait()
+
 	return nil
 }
 
 // serveSession serves a single host's WebTransport session
 // The first stream must carry the registration handshake, while subsequent streams are dispatched concurrently
-func (rt *Runtime) serveSession(parentCtx context.Context, session *webtransport.Session) {
+// handlers tracks streams together with their parent session, whose own count keeps further registrations safe until the accept loop ends
+func (rt *Runtime) serveSession(parentCtx context.Context, session *webtransport.Session, handlers *sync.WaitGroup) {
 	sessCtx := session.Context()
 
 	// Close the session if the runtime shuts down
@@ -318,7 +326,9 @@ func (rt *Runtime) serveSession(parentCtx context.Context, session *webtransport
 			return
 		}
 
-		go rt.handleStream(sessCtx, c, stream)
+		handlers.Go(func() {
+			rt.handleStream(sessCtx, c, stream)
+		})
 	}
 }
 
