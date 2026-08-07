@@ -205,3 +205,4 @@ tailscale.com v1.98.8/go.mod h1:zH5+644fVCOozdtB256cRLPMcwv15h/lcyN+/MX1nBc=
 tailscale.com v1.98.9/go.mod h1:fQIDgzRTC2LfDGEEyVGRxVpysTfjqo5XKyByOms/fC4=
 tailscale.com v1.98.10/go.mod h1:NeACE/ATZA6GjyVTERnoyTcHps2BpRfs2mXDcPstD9A=
 tailscale.com v1.102.1/go.mod h1:ynxKzc9hDxwGLHORQE0qrTH1b8NBRrIsXcnfnug/3dg=
+tailscale.com v1.102.2/go.mod h1:ynxKzc9hDxwGLHORQE0qrTH1b8NBRrIsXcnfnug/3dg=

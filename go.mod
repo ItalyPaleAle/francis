@@ -8,12 +8,12 @@ tool (
 )
 
 require (
-	github.com/MicahParks/keyfunc/v3 v3.8.0
+	github.com/MicahParks/keyfunc/v3 v3.8.1
 	github.com/alphadose/haxmap v1.4.1
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
-	github.com/italypaleale/go-kit v0.0.0-20260804130631-7f274d362cca
+	github.com/italypaleale/go-kit v0.0.0-20260806152440-491aff6b42b5
 	github.com/italypaleale/go-sql-utils v0.3.3
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
 	github.com/jackc/pgx/v5 v5.10.0
@@ -37,7 +37,7 @@ require (
 )
 
 require (
-	github.com/MicahParks/jwkset v0.11.0 // indirect
+	github.com/MicahParks/jwkset v0.11.3 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/brunoga/deep v1.3.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
