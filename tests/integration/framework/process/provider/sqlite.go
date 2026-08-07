@@ -105,7 +105,7 @@ func (b *sqliteBackend) providerOptions(t *testing.T) sqlite.SQLiteProviderOptio
 func (b *sqliteBackend) newHandle(t *testing.T) *sql.DB {
 	t.Helper()
 
-	connStr, _, _, err := gosqlsqlite.ParseConnectionString(b.connStr, slog.New(slog.DiscardHandler))
+	connStr, _, _, _, err := gosqlsqlite.ParseConnectionString(b.connStr, slog.New(slog.DiscardHandler))
 	require.NoError(t, err, "failed to parse the SQLite connection string")
 
 	db, err := sql.Open("sqlite", connStr)
