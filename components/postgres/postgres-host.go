@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	postgresadapter "github.com/italypaleale/go-sql-utils/adapter/postgres"
 	postgrestransactions "github.com/italypaleale/go-sql-utils/transactions/postgres"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -205,12 +206,23 @@ func (p *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, r
 		return nil
 	}
 
-	_, oErr := postgrestransactions.ExecuteInTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (zero struct{}, err error) {
+	// If we're only updating actor types, we can skip obtaining a transaction to reduce the DB roundtrips
+	// (technically the req.UpdateLastHealthCheck check here is redundant)
+	if req.UpdateLastHealthCheck && req.ActorTypes == nil {
+		err := p.updateActorHostLastHealthCheck(ctx, hostID, p.db)
+		if err != nil {
+			return fmt.Errorf("failed to update last health check: %w", err)
+		}
+
+		return nil
+	}
+
+	_, err := postgrestransactions.ExecuteInTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (zero struct{}, rErr error) {
 		// Update the last health check if needed
 		if req.UpdateLastHealthCheck {
-			err = p.updateActorHostLastHealthCheck(ctx, hostID, tx)
-			if err != nil {
-				return zero, fmt.Errorf("failed to update last health check: %w", err)
+			rErr = p.updateActorHostLastHealthCheck(ctx, hostID, tx)
+			if rErr != nil {
+				return zero, fmt.Errorf("failed to update last health check: %w", rErr)
 			}
 		}
 
@@ -223,7 +235,7 @@ func (p *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, r
 				defer cancel()
 				var ok bool
 				// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-				err = tx.QueryRow(queryCtx,
+				rErr = tx.QueryRow(queryCtx,
 					`SELECT EXISTS (
 						SELECT 1 FROM `+p.tablePrefix+`hosts
 						WHERE
@@ -233,8 +245,8 @@ func (p *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, r
 					hostID,
 					p.cfg.HostHealthCheckDeadline,
 				).Scan(&ok)
-				if err != nil {
-					return zero, fmt.Errorf("error checking host health: %w", err)
+				if rErr != nil {
+					return zero, fmt.Errorf("error checking host health: %w", rErr)
 				}
 				if !ok {
 					// Host doesn't exist, or exists but is un-healthy
@@ -243,26 +255,26 @@ func (p *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, r
 			}
 
 			// Replace all supported actor types for the host
-			err = p.insertHostActorTypes(ctx, tx, hostID, req.ActorTypes, true)
-			if err != nil {
-				return zero, fmt.Errorf("error inserting supported actor types: %w", err)
+			rErr = p.insertHostActorTypes(ctx, tx, hostID, req.ActorTypes, true)
+			if rErr != nil {
+				return zero, fmt.Errorf("error inserting supported actor types: %w", rErr)
 			}
 		}
 
 		return zero, nil
 	})
-	if oErr != nil {
-		return fmt.Errorf("failed to update host: %w", oErr)
+	if err != nil {
+		return fmt.Errorf("failed to update host: %w", err)
 	}
 
 	return nil
 }
 
-func (p *PostgresProvider) updateActorHostLastHealthCheck(ctx context.Context, hostID string, tx pgx.Tx) error {
+func (p *PostgresProvider) updateActorHostLastHealthCheck(ctx context.Context, hostID string, db postgresadapter.PGXQuerier) error {
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	res, err := tx.
+	res, err := db.
 		Exec(queryCtx,
 			`UPDATE `+p.tablePrefix+`hosts
 		SET
