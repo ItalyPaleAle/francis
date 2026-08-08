@@ -221,12 +221,23 @@ func (s *SQLiteProvider) UpdateActorHost(ctx context.Context, hostID string, req
 		return nil
 	}
 
-	_, oErr := sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
+	// If we're only updating actor types, we can skip obtaining a transaction to reduce the DB roundtrips
+	// (technically the req.UpdateLastHealthCheck check here is redundant)
+	if req.UpdateLastHealthCheck && req.ActorTypes == nil {
+		err := s.updateActorHostLastHealthCheck(ctx, hostID, s.db)
+		if err != nil {
+			return fmt.Errorf("failed to update last health check: %w", err)
+		}
+
+		return nil
+	}
+
+	_, err := sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, rErr error) {
 		// Update the last health check if needed
 		if req.UpdateLastHealthCheck {
-			err = s.updateActorHostLastHealthCheck(ctx, hostID, tx)
-			if err != nil {
-				return zero, fmt.Errorf("failed to update last health check: %w", err)
+			rErr = s.updateActorHostLastHealthCheck(ctx, hostID, tx)
+			if rErr != nil {
+				return zero, fmt.Errorf("failed to update last health check: %w", rErr)
 			}
 		}
 
@@ -240,7 +251,7 @@ func (s *SQLiteProvider) UpdateActorHost(ctx context.Context, hostID string, req
 				defer cancel()
 				var ok bool
 				// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-				err = tx.QueryRowContext(queryCtx,
+				rErr = tx.QueryRowContext(queryCtx,
 					`SELECT EXISTS (
 						SELECT 1 FROM `+s.tablePrefix+`hosts
 						WHERE
@@ -250,8 +261,8 @@ func (s *SQLiteProvider) UpdateActorHost(ctx context.Context, hostID string, req
 					hostID,
 					now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
 				).Scan(&ok)
-				if err != nil {
-					return zero, fmt.Errorf("error checking host health: %w", err)
+				if rErr != nil {
+					return zero, fmt.Errorf("error checking host health: %w", rErr)
 				}
 				if !ok {
 					// Host doesn't exist, or exists but is un-healthy
@@ -260,28 +271,28 @@ func (s *SQLiteProvider) UpdateActorHost(ctx context.Context, hostID string, req
 			}
 
 			// Replace all supported actor types for the host
-			err = s.insertHostActorTypes(ctx, tx, hostID, req.ActorTypes, true)
-			if err != nil {
-				return zero, fmt.Errorf("error inserting supported actor types: %w", err)
+			rErr = s.insertHostActorTypes(ctx, tx, hostID, req.ActorTypes, true)
+			if rErr != nil {
+				return zero, fmt.Errorf("error inserting supported actor types: %w", rErr)
 			}
 		}
 
 		return zero, nil
 	})
-	if oErr != nil {
-		return fmt.Errorf("failed to update host: %w", oErr)
+	if err != nil {
+		return fmt.Errorf("failed to update host: %w", err)
 	}
 
 	return nil
 }
 
-func (s *SQLiteProvider) updateActorHostLastHealthCheck(ctx context.Context, hostID string, tx *sql.Tx) error {
+func (s *SQLiteProvider) updateActorHostLastHealthCheck(ctx context.Context, hostID string, db querier) error {
 	now := s.clock.Now().UnixMilli()
 
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	res, err := tx.
+	res, err := db.
 		ExecContext(queryCtx,
 			`UPDATE `+s.tablePrefix+`hosts
 		SET

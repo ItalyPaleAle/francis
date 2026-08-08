@@ -423,3 +423,10 @@ func getInPlaceholders(vals []string, appendArgs []any, startAppend int) string 
 		return b.String()
 	}
 }
+
+// querier is an interface that is implemented by both *sql.DB and *sql.Tx
+type querier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
