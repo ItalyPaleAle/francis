@@ -20,10 +20,12 @@ const (
 	// healthCheckDeadline is how long a host registration survives without a health check
 	// The retry policy scales itself to this short deadline so failure scenarios finish quickly
 	healthCheckDeadline = 4 * time.Second
-	// queryTimeout bounds a single database query, so a host whose database has stopped answering gets an error rather than blocking
-	queryTimeout = time.Second
-	// requestTimeout bounds a host's provider requests, runtime requests, and peer dials, so a request into a black hole fails fast
-	requestTimeout = 2 * time.Second
+	// queryTimeout gives ordinary SQLite work enough headroom on slower Windows runners while still bounding stalled queries
+	// Health checks remain limited by the policy's shorter per-attempt timeout
+	queryTimeout = 2 * time.Second
+	// requestTimeout leaves enough time for provider initialization while still bounding provider requests, runtime requests, and peer dials
+	// Health checks do not inherit this timeout because their retry policy supplies its own attempt context
+	requestTimeout = 3 * time.Second
 	// alarmsLeaseDuration is how long a host holds the lease on an alarm it is executing, and therefore how long a surviving host waits before it can take over one whose owner died
 	alarmsLeaseDuration = 5 * time.Second
 	// alarmsPollInterval keeps alarms firing quickly enough to observe a handover within a test

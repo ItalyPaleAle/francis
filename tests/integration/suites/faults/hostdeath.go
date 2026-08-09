@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/tests/integration/framework"
 	"github.com/italypaleale/francis/tests/integration/framework/cluster"
@@ -67,17 +68,19 @@ func (s *silentHostDeath) Run(t *testing.T) {
 	survivor := (placedIdx + 1) % s.cluster.Len()
 
 	// Kill the host holding the actor without letting it say goodbye: with its database gone, the deregistration on its shutdown path cannot land
+	stalledAt := time.Now()
 	s.cluster.StallProvider(t, placedIdx)
 	s.cluster.Host(placedIdx).Stop(t)
-	diedAt := time.Now()
 	s.cluster.UnstallProvider(t, placedIdx)
 
 	// The cluster still believes the actor lives on the dead host, so a call made inside that window cannot succeed
-	// It is only asserted while the stale registration is certainly still live, since the whole point of the scenario is that it expires
+	// A host can be one interval past its last health check when cut off, so only the remaining retry budget guarantees the registration is still live
+	policy := components.NewHealthCheckPolicy(healthCheckDeadline)
+	stillWithinGuaranteedWindow := time.Since(stalledAt) < policy.Budget()
 	callCtx, cancel := context.WithTimeout(ctx, time.Second)
 	_, err = s.cluster.Service(survivor).Invoke(callCtx, shared.ProbeActorType, actorID, shared.ProbeMethodGet, nil)
 	cancel()
-	if time.Since(diedAt) < healthCheckDeadline {
+	if stillWithinGuaranteedWindow {
 		require.Error(t, err, "the actor must not be reachable while the cluster still believes it lives on the dead host")
 	}
 

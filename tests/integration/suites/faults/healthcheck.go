@@ -81,11 +81,11 @@ func (s *healthCheckFailure) Run(t *testing.T) {
 	require.Error(t, exitErr, "a host whose health checks keep failing should stop itself")
 	require.ErrorContains(t, exitErr, "health check")
 
-	// It gives up within one health check interval plus the full retry budget, rather than retrying indefinitely against a database that is never coming back
-	// That bound is what the deadline-derived policy guarantees even for this deliberately short deadline
+	// It gives up after one health check interval plus the full retry budget rather than retrying indefinitely against a database that is never coming back
+	// Run can then spend one ordinary request timeout attempting its best-effort unregister against the same stalled provider
 	policy := components.NewHealthCheckPolicy(healthCheckDeadline)
-	maxExit := policy.Interval() + policy.Budget() + exitSlack
-	assert.Less(t, time.Since(stalledAt), maxExit, "the host should give up on its health checks within one interval plus the retry budget")
+	maxExit := policy.Interval() + policy.Budget() + requestTimeout + exitSlack
+	assert.Less(t, time.Since(stalledAt), maxExit, "the host should stop within the retry schedule and teardown allowance")
 
 	// Give the database back, which also confirms the outage was the only reason the host went
 	s.cluster.UnstallProvider(t, placedIdx)
