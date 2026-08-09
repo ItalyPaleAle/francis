@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -209,6 +210,22 @@ func (p *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, r
 	// If we're only updating actor types, we can skip obtaining a transaction to reduce the DB roundtrips
 	// (technically the req.UpdateLastHealthCheck check here is redundant)
 	if req.UpdateLastHealthCheck && req.ActorTypes == nil {
+		// A retry may repeat an attempt that committed after the caller stopped waiting
+		// Skip the redundant write when the last committed health check is already fresh enough
+		if req.Retry {
+			// Note: we run this outside of a transaction to avoid 2 extra roundtrips
+			// The extra consistency offered by a transaction is not necessary here
+			ok, err := p.actorHostHealthCheckedWithin(ctx, hostID, p.cfg.HealthCheckPolicy().Budget())
+			switch {
+			case err != nil:
+				// Fall through to the write, which produces the definitive answer
+				p.log.WarnContext(ctx, "Failed to check whether the last health check is recent, retrying the update", slog.Any("error", err))
+			case ok:
+				// A recent committed health check makes another write unnecessary
+				return nil
+			}
+		}
+
 		err := p.updateActorHostLastHealthCheck(ctx, hostID, p.db)
 		if err != nil {
 			return fmt.Errorf("failed to update last health check: %w", err)
@@ -268,6 +285,36 @@ func (p *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, r
 	}
 
 	return nil
+}
+
+// actorHostHealthCheckedWithin reports whether the host's last health check is within window and the host is still admitted to the cluster
+// The predicates match those of updateActorHostLastHealthCheck so a positive result is one the update would have accepted
+func (p *PostgresProvider) actorHostHealthCheckedWithin(ctx context.Context, hostID string, window time.Duration) (bool, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+
+	var ok bool
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	err := p.db.QueryRow(queryCtx,
+		`SELECT EXISTS (
+			SELECT 1 FROM `+p.tablePrefix+`hosts
+			WHERE
+				host_id = $1
+				AND host_last_health_check >= ((now() AT TIME ZONE 'utc') - $2::interval)
+				AND NOT EXISTS (
+					SELECT 1 FROM `+p.tablePrefix+`cluster_config
+					WHERE cluster_config_id = 1
+						AND exclusive_expires_at >= `+nowMsExpr+`
+				)
+		)`,
+		hostID,
+		window,
+	).Scan(&ok)
+	if err != nil {
+		return false, fmt.Errorf("error executing query: %w", err)
+	}
+
+	return ok, nil
 }
 
 func (p *PostgresProvider) updateActorHostLastHealthCheck(ctx context.Context, hostID string, db postgresadapter.PGXQuerier) error {

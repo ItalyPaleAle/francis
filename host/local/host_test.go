@@ -109,10 +109,10 @@ func TestRunHealthChecks(t *testing.T) {
 
 		// Create a mocked actor provider
 		provider := components_mocks.NewMockActorProvider(t)
-		const healthCheckInterval = 10 * time.Second
+		const healthCheckInterval = 100 * time.Millisecond
 		provider.
 			On("HealthCheckPolicy").
-			Return(components.NewHealthCheckPolicy(20 * time.Second)).
+			Return(components.NewHealthCheckPolicy(2 * healthCheckInterval)).
 			Maybe()
 
 		// Create a minimal host for testing
@@ -124,23 +124,49 @@ func TestRunHealthChecks(t *testing.T) {
 			providerRequestTimeout: 5 * time.Second,
 		}
 
-		// Set up expectations: first two calls fail with temporary error, third succeeds
+		// Make the first attempt and its retry fail before the final retry succeeds
+		// A following sequence verifies that the policy resets the retry state
 		tempError := errors.New("temporary network error")
 		callCount := &atomic.Int32{}
+		recordCall := func(mock.Arguments) {
+			callCount.Add(1)
+		}
 		provider.
-			On(
-				"UpdateActorHost",
+			On("UpdateActorHost",
 				mock.MatchedBy(testutil.MatchContextInterface),
 				"test-host-456",
-				components.UpdateActorHostReq{UpdateLastHealthCheck: true},
+				components.UpdateActorHostReq{UpdateLastHealthCheck: true, Retry: false},
 			).
-			Return(func(ctx context.Context, hostID string, req components.UpdateActorHostReq) error {
-				c := callCount.Add(1)
-				if c < 3 {
-					return tempError
-				}
-				return nil
-			})
+			Run(recordCall).
+			Return(tempError).
+			Once()
+		provider.
+			On("UpdateActorHost",
+				mock.MatchedBy(testutil.MatchContextInterface),
+				"test-host-456",
+				components.UpdateActorHostReq{UpdateLastHealthCheck: true, Retry: true},
+			).
+			Run(recordCall).
+			Return(tempError).
+			Once()
+		provider.
+			On("UpdateActorHost",
+				mock.MatchedBy(testutil.MatchContextInterface),
+				"test-host-456",
+				components.UpdateActorHostReq{UpdateLastHealthCheck: true, Retry: true},
+			).
+			Run(recordCall).
+			Return(nil).
+			Once()
+		provider.
+			On("UpdateActorHost",
+				mock.MatchedBy(testutil.MatchContextInterface),
+				"test-host-456",
+				components.UpdateActorHostReq{UpdateLastHealthCheck: true, Retry: false},
+			).
+			Run(recordCall).
+			Return(nil).
+			Once()
 
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
@@ -156,15 +182,27 @@ func TestRunHealthChecks(t *testing.T) {
 			return strings.Contains(logBuf.String(), "Starting background health checks")
 		}, time.Second, 10*time.Millisecond)
 
-		// Advance time to trigger first health check (which will retry and eventually succeed)
-		clock.Step(healthCheckInterval)
+		// Wait for the ticker before advancing the fake clock so startup cannot lose the tick
+		require.Eventually(t, clock.HasWaiters, time.Second, 10*time.Millisecond, "health check ticker did not start")
 
-		// Wait for retry warnings to appear in logs
-		assert.Eventually(t, func() bool {
+		// Trigger one sequence and wait for all three attempts to finish
+		clock.Step(healthCheckInterval)
+		require.Eventually(t, func() bool {
+			return callCount.Load() == 3
+		}, time.Second, 10*time.Millisecond, "health check retries did not finish")
+
+		// Confirm temporary errors were reported before the successful retry
+		require.Eventually(t, func() bool {
 			logContent := logBuf.String()
 			return strings.Contains(logContent, "Health check error, will retry") &&
 				strings.Contains(logContent, "temporary network error")
-		}, 2*time.Second, 10*time.Millisecond)
+		}, time.Second, 10*time.Millisecond)
+
+		// Trigger the next sequence and verify its first attempt is not marked as a retry
+		clock.Step(healthCheckInterval)
+		require.Eventually(t, func() bool {
+			return callCount.Load() == 4
+		}, time.Second, 10*time.Millisecond, "next health check sequence did not run")
 
 		// Cancel the context to stop the health checks
 		cancel()
@@ -265,9 +303,10 @@ func TestRunHealthChecks(t *testing.T) {
 		// Create a mocked actor provider
 		provider := components_mocks.NewMockActorProvider(t)
 		healthCheckInterval := 10 * time.Second
+		policy := components.NewHealthCheckPolicy(20 * time.Second)
 		provider.
 			On("HealthCheckPolicy").
-			Return(components.NewHealthCheckPolicy(20 * time.Second)).
+			Return(policy).
 			Maybe()
 
 		// Create a minimal host for testing
@@ -280,12 +319,21 @@ func TestRunHealthChecks(t *testing.T) {
 		}
 
 		// Set up expectations: all calls fail with temporary error (will exhaust retries)
+		// The first attempt is not flagged as a retry, while every attempt after it is, so the provider can check whether an earlier attempt landed before writing again
 		persistentError := errors.New("persistent error")
 		provider.
 			On("UpdateActorHost",
 				mock.MatchedBy(testutil.MatchContextInterface),
 				"test-host-retry",
-				components.UpdateActorHostReq{UpdateLastHealthCheck: true},
+				components.UpdateActorHostReq{UpdateLastHealthCheck: true, Retry: false},
+			).
+			Return(persistentError).
+			Once()
+		provider.
+			On("UpdateActorHost",
+				mock.MatchedBy(testutil.MatchContextInterface),
+				"test-host-retry",
+				components.UpdateActorHostReq{UpdateLastHealthCheck: true, Retry: true},
 			).
 			Return(persistentError) // Return error always
 
@@ -321,9 +369,11 @@ func TestRunHealthChecks(t *testing.T) {
 		assert.Contains(t, logContent, "Health check error, will retry")
 		assert.Contains(t, logContent, "Health check failed")
 
-		// Assert that at least one call was made - exact count might vary due to timing
-		// but we know it should try at least once
+		// Assert the expected first attempt and retry calls were made
 		provider.AssertExpectations(t)
+
+		// The policy allows one initial attempt followed by the remaining attempts marked as retries
+		provider.AssertNumberOfCalls(t, "UpdateActorHost", policy.MaxAttempts())
 	})
 
 	t.Run("context cancellation during health check", func(t *testing.T) {

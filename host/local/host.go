@@ -548,7 +548,10 @@ func (h *Host) runHealthChecks(parentCtx context.Context) error {
 			_, err = backoff.Retry(parentCtx, func() (r struct{}, rErr error) {
 				ctx, cancel := context.WithTimeout(parentCtx, policy.AttemptTimeout())
 				defer cancel()
-				rErr = h.actorProvider.UpdateActorHost(ctx, h.hostID, components.UpdateActorHostReq{UpdateLastHealthCheck: true})
+				rErr = h.actorProvider.UpdateActorHost(ctx, h.hostID, components.UpdateActorHostReq{
+					UpdateLastHealthCheck: true,
+					Retry:                 policy.Attempts() > 0,
+				})
 				switch {
 				case errors.Is(rErr, components.ErrHostUnregistered):
 					// Registration has expired, so no point in retrying anymore

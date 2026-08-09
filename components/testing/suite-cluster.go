@@ -98,8 +98,8 @@ func (s Suite) TestClusterAdmission(t *testing.T) {
 		_, err = s.p.RegisterHost(t.Context(), clusterRegisterReq("10.0.0.2:1000"))
 		require.ErrorIs(t, err, components.ErrClusterLocked)
 
-		// The existing host's health check now fails, so it will self-terminate
-		err = s.p.UpdateActorHost(t.Context(), res.HostID, components.UpdateActorHostReq{UpdateLastHealthCheck: true})
+		// A retried health check must still fail under the lease so the existing host self-terminates
+		err = s.p.UpdateActorHost(t.Context(), res.HostID, components.UpdateActorHostReq{UpdateLastHealthCheck: true, Retry: true})
 		require.ErrorIs(t, err, components.ErrHostUnregistered)
 
 		// Releasing re-opens the cluster

@@ -165,6 +165,23 @@ func TestHandleHealthCheck(t *testing.T) {
 		assert.Equal(t, protocol.KindHealthCheckResponse, resp.Kind)
 	})
 
+	t.Run("forwards retry state to the provider", func(t *testing.T) {
+		provider := components_mocks.NewMockActorProvider(t)
+		provider.EXPECT().
+			UpdateActorHost(mock.Anything, "h1", components.UpdateActorHostReq{
+				UpdateLastHealthCheck: true,
+				Retry:                 true,
+			}).
+			Return(nil).
+			Once()
+
+		retryRuntime, err := NewRuntime(provider, append([]RuntimeOption{WithBind("127.0.0.1:0")}, baseRuntimeOpts()...)...)
+		require.NoError(t, err)
+		c := &hostConn{hostID: "h1", sessionID: "s1"}
+		resp := dispatchReq(t, retryRuntime, c, protocol.KindHealthCheck, protocol.HealthCheckRequest{Retry: true})
+		assert.Equal(t, protocol.KindHealthCheckResponse, resp.Kind)
+	})
+
 	t.Run("reports unregistered for an unknown host", func(t *testing.T) {
 		c := &hostConn{hostID: "00000000-0000-4000-8000-000000000000", sessionID: "s1"}
 		resp := dispatchReq(t, rt, c, protocol.KindHealthCheck, protocol.HealthCheckRequest{})

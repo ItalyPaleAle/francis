@@ -150,6 +150,8 @@ type UnregisterHostResponse struct {
 type HealthCheckRequest struct {
 	// ActorTypes optionally replaces the set of supported actor types, when non-nil
 	ActorTypes []ActorHostType `msgpack:"actorTypes,omitempty"`
+	// Retry indicates this request repeats an earlier attempt that failed without a definitive answer
+	Retry bool `msgpack:"retry,omitempty"`
 }
 
 // LookupActorRequest asks the runtime for the placement of an actor

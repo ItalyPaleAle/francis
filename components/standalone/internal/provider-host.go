@@ -317,6 +317,11 @@ func (p *Provider) UpdateActorHost(ctx context.Context, hostID string, req compo
 		updatedHost *Host
 		newHats     []*HostActorType
 	)
+	// A retry does not need another write when the last committed health check is already fresh enough
+	// Keeping this behavior uniform lets callers use the same retry contract with every provider
+	healthCheckFresh := req.Retry && req.UpdateLastHealthCheck && req.ActorTypes == nil &&
+		healthy && p.Clock.Since(h.LastHealthCheck) <= p.Cfg.HealthCheckPolicy().Budget()
+
 	if healthy {
 		// Update last health check if requested
 		// We clone the host instead of mutating it in place, so nothing changes in memory until the change has been persisted
@@ -354,6 +359,11 @@ func (p *Provider) UpdateActorHost(ctx context.Context, hostID string, req compo
 	if !healthy || leaseBlocksHealthCheck {
 		// Host doesn't exist, exists but is un-healthy, or is being evicted by a live exclusive-access lease
 		return components.ErrHostUnregistered
+	}
+
+	if healthCheckFresh {
+		// A recent committed health check makes another write unnecessary
+		return nil
 	}
 
 	return p.persistThenApply(ctx, &p.Mu, changes, func() {

@@ -422,6 +422,7 @@ func (rt *Runtime) handleHealthCheck(parentCtx context.Context, c *hostConn, req
 
 	updateReq := components.UpdateActorHostReq{
 		UpdateLastHealthCheck: true,
+		Retry:                 payload.Retry,
 	}
 
 	// A non-nil actor type list replaces the host's supported types

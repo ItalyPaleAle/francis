@@ -211,6 +211,8 @@ type UpdateActorHostReq struct {
 	// List of supported actor types
 	// If non-nil, will replace all existing, registered actor types (an empty, non-nil slice indicates no supported actor types)
 	ActorTypes []ActorHostType
+	// Retry indicates the call repeats an earlier attempt that failed without a definitive answer
+	Retry bool
 }
 
 // ActorHostType references a supported actor type.

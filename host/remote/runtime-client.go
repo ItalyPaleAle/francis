@@ -600,7 +600,9 @@ func (rc *runtimeClient) runHealthChecks(ctx context.Context, session *webtransp
 				reqCtx, cancel := context.WithTimeout(ctx, policy.AttemptTimeout())
 				defer cancel()
 
-				reqErr := rc.doRequest(reqCtx, protocol.KindHealthCheck, protocol.HealthCheckRequest{}, nil)
+				reqErr := rc.doRequest(reqCtx, protocol.KindHealthCheck, protocol.HealthCheckRequest{
+					Retry: policy.Attempts() > 0,
+				}, nil)
 				return struct{}{}, reqErr
 			}, retryOpts...)
 

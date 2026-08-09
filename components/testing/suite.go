@@ -640,6 +640,72 @@ func (s Suite) TestUpdateActorHost(t *testing.T) {
 		require.ErrorIs(t, err, components.ErrHostUnregistered)
 	})
 
+	// A retry can repeat an attempt that committed after the caller stopped waiting
+	// Providers may skip a redundant write when the last health check is already fresh enough
+	// The retry budget bounds the freshness window so skipping remains within the health-check deadline
+	t.Run("retry does not rewrite a fresh health check", func(t *testing.T) {
+		// Reads back how long ago the seeded host was last health-checked
+		lastHealthAgo := func(t *testing.T) time.Duration {
+			t.Helper()
+			spec, err := s.p.GetAllHosts(t.Context())
+			require.NoError(t, err)
+			require.Len(t, spec.Hosts, 1)
+			return spec.Hosts[0].LastHealthAgo
+		}
+
+		// Use the same retry budget configured for each provider under test
+		providerConfig := GetProviderConfig()
+		budget := providerConfig.HealthCheckPolicy().Budget()
+
+		t.Run("skips the write when the last health check is within the retry budget", func(t *testing.T) {
+			// Seed a health check inside the freshness window so a retry can safely skip the write
+			seeded := budget / 4
+			require.NoError(t, s.p.Seed(t.Context(), Spec{
+				Hosts: []HostSpec{
+					{HostID: SpecHostH1, Address: "127.0.0.1:4001", LastHealthAgo: seeded},
+				},
+			}))
+
+			err := s.p.UpdateActorHost(t.Context(), SpecHostH1, components.UpdateActorHostReq{
+				UpdateLastHealthCheck: true,
+				Retry:                 true,
+			})
+			require.NoError(t, err)
+
+			// The stored value is untouched: had the write run, the host would have been checked just now
+			assert.GreaterOrEqual(t, lastHealthAgo(t), seeded/2, "the retry should have left the existing health check in place")
+		})
+
+		t.Run("writes when the last health check predates the retry budget", func(t *testing.T) {
+			// Seed a registered host whose health check predates the freshness window
+			require.NoError(t, s.p.Seed(t.Context(), Spec{
+				Hosts: []HostSpec{
+					{HostID: SpecHostH1, Address: "127.0.0.1:4001", LastHealthAgo: budget * 2},
+				},
+			}))
+
+			err := s.p.UpdateActorHost(t.Context(), SpecHostH1, components.UpdateActorHostReq{
+				UpdateLastHealthCheck: true,
+				Retry:                 true,
+			})
+			require.NoError(t, err)
+
+			// The write ran, so the host has just been checked
+			assert.Less(t, lastHealthAgo(t), budget, "the retry should have written a new health check")
+		})
+
+		t.Run("returns ErrHostUnregistered when the host is no longer registered", func(t *testing.T) {
+			// The read must not report a host as healthy when the update would have rejected it
+			require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+
+			err := s.p.UpdateActorHost(t.Context(), SpecHostNonExistent, components.UpdateActorHostReq{
+				UpdateLastHealthCheck: true,
+				Retry:                 true,
+			})
+			require.ErrorIs(t, err, components.ErrHostUnregistered)
+		})
+	})
+
 	t.Run("returns ErrHostUnregistered if host not registered while updating actor types only", func(t *testing.T) {
 		// Seed with empty database
 		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
@@ -678,6 +744,7 @@ func (s Suite) TestUpdateActorHost(t *testing.T) {
 		// Try to update the now-unhealthy host - only last health check
 		updateReq := components.UpdateActorHostReq{
 			UpdateLastHealthCheck: true,
+			Retry:                 true,
 		}
 		err = s.p.UpdateActorHost(ctx, res.HostID, updateReq)
 		require.Error(t, err)
