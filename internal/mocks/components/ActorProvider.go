@@ -1048,46 +1048,46 @@ func (_c *MockActorProvider_GetState_Call) RunAndReturn(run func(ctx context.Con
 	return _c
 }
 
-// HealthCheckInterval provides a mock function for the type MockActorProvider
-func (_mock *MockActorProvider) HealthCheckInterval() time.Duration {
+// HealthCheckPolicy provides a mock function for the type MockActorProvider
+func (_mock *MockActorProvider) HealthCheckPolicy() *components.HealthCheckPolicy {
 	ret := _mock.Called()
 
 	if len(ret) == 0 {
-		panic("no return value specified for HealthCheckInterval")
+		panic("no return value specified for HealthCheckPolicy")
 	}
 
-	var r0 time.Duration
-	if returnFunc, ok := ret.Get(0).(func() time.Duration); ok {
+	var r0 *components.HealthCheckPolicy
+	if returnFunc, ok := ret.Get(0).(func() *components.HealthCheckPolicy); ok {
 		r0 = returnFunc()
-	} else {
-		r0 = ret.Get(0).(time.Duration)
+	} else if ret.Get(0) != nil {
+		r0 = ret.Get(0).(*components.HealthCheckPolicy)
 	}
 	return r0
 }
 
-// MockActorProvider_HealthCheckInterval_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'HealthCheckInterval'
-type MockActorProvider_HealthCheckInterval_Call struct {
+// MockActorProvider_HealthCheckPolicy_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'HealthCheckPolicy'
+type MockActorProvider_HealthCheckPolicy_Call struct {
 	*mock.Call
 }
 
-// HealthCheckInterval is a helper method to define mock.On call
-func (_e *MockActorProvider_Expecter) HealthCheckInterval() *MockActorProvider_HealthCheckInterval_Call {
-	return &MockActorProvider_HealthCheckInterval_Call{Call: _e.mock.On("HealthCheckInterval")}
+// HealthCheckPolicy is a helper method to define mock.On call
+func (_e *MockActorProvider_Expecter) HealthCheckPolicy() *MockActorProvider_HealthCheckPolicy_Call {
+	return &MockActorProvider_HealthCheckPolicy_Call{Call: _e.mock.On("HealthCheckPolicy")}
 }
 
-func (_c *MockActorProvider_HealthCheckInterval_Call) Run(run func()) *MockActorProvider_HealthCheckInterval_Call {
+func (_c *MockActorProvider_HealthCheckPolicy_Call) Run(run func()) *MockActorProvider_HealthCheckPolicy_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		run()
 	})
 	return _c
 }
 
-func (_c *MockActorProvider_HealthCheckInterval_Call) Return(duration time.Duration) *MockActorProvider_HealthCheckInterval_Call {
-	_c.Call.Return(duration)
+func (_c *MockActorProvider_HealthCheckPolicy_Call) Return(healthCheckPolicy *components.HealthCheckPolicy) *MockActorProvider_HealthCheckPolicy_Call {
+	_c.Call.Return(healthCheckPolicy)
 	return _c
 }
 
-func (_c *MockActorProvider_HealthCheckInterval_Call) RunAndReturn(run func() time.Duration) *MockActorProvider_HealthCheckInterval_Call {
+func (_c *MockActorProvider_HealthCheckPolicy_Call) RunAndReturn(run func() *components.HealthCheckPolicy) *MockActorProvider_HealthCheckPolicy_Call {
 	_c.Call.Return(run)
 	return _c
 }

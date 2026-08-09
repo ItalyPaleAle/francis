@@ -238,8 +238,8 @@ func (s *SQLiteProvider) Close() error {
 	return nil
 }
 
-func (s *SQLiteProvider) HealthCheckInterval() time.Duration {
-	return s.cfg.HealthCheckInterval()
+func (s *SQLiteProvider) HealthCheckPolicy() *components.HealthCheckPolicy {
+	return s.cfg.HealthCheckPolicy()
 }
 
 func (s *SQLiteProvider) RenewLeaseInterval() time.Duration {

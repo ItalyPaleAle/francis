@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cenkalti/backoff/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -15,46 +16,25 @@ func TestProviderConfigValidate(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	t.Run("an unset health check policy behaves as the defaults", func(t *testing.T) {
-		cfg := NewProviderConfig()
-		cfg.HealthCheck = nil
+	t.Run("rejects a deadline without room for retries", func(t *testing.T) {
+		for _, deadline := range []time.Duration{0, time.Second} {
+			cfg := NewProviderConfig()
+			cfg.HostHealthCheckDeadline = deadline
 
-		err := cfg.Validate()
-		require.NoError(t, err)
-		assert.Equal(t, NewHealthCheckPolicy().MinDeadline(), cfg.HealthCheck.MinDeadline(), "a nil policy reads as the defaults")
-	})
-
-	t.Run("rejects a deadline shorter than the retry budget allows", func(t *testing.T) {
-		cfg := NewProviderConfig()
-		minDeadline := cfg.HealthCheck.MinDeadline()
-
-		cfg.HostHealthCheckDeadline = minDeadline - time.Millisecond
-		err := cfg.Validate()
-		require.Error(t, err)
-		require.ErrorContains(t, err, "HostHealthCheckDeadline")
-
-		cfg.HostHealthCheckDeadline = minDeadline
-		err = cfg.Validate()
-		require.NoError(t, err)
-	})
-
-	t.Run("the minimum deadline follows the configured policy", func(t *testing.T) {
-		cfg := NewProviderConfig()
-		cfg.HealthCheck = &HealthCheckPolicy{
-			AttemptTimeout: time.Second,
-			RetryDelay:     100 * time.Millisecond,
-			MaxAttempts:    3,
-			MinInterval:    500 * time.Millisecond,
+			err := cfg.Validate()
+			require.ErrorContains(t, err, "HostHealthCheckDeadline")
 		}
-		require.Less(t, cfg.HealthCheck.MinDeadline(), NewHealthCheckPolicy().MinDeadline())
+	})
 
-		cfg.HostHealthCheckDeadline = 4 * time.Second
-		err := cfg.Validate()
-		require.NoError(t, err, "a deadline the shortened policy can be honored within must be accepted")
+	t.Run("returns a fresh health check policy for each sequence", func(t *testing.T) {
+		cfg := NewProviderConfig()
+		first := cfg.HealthCheckPolicy()
+		second := cfg.HealthCheckPolicy()
 
-		cfg.HealthCheck = NewHealthCheckPolicy()
-		err = cfg.Validate()
-		require.Error(t, err)
+		assert.NotSame(t, first, second)
+		first.NextRetryDelay()
+		assert.Equal(t, 1, first.Attempts())
+		assert.Zero(t, second.Attempts())
 	})
 
 	t.Run("rejects the other invalid values", func(t *testing.T) {
@@ -77,54 +57,62 @@ func TestProviderConfigValidate(t *testing.T) {
 }
 
 func TestHealthCheckPolicy(t *testing.T) {
-	t.Run("budget covers every attempt and the delays between them", func(t *testing.T) {
-		p := HealthCheckPolicy{
-			AttemptTimeout: 2 * time.Second,
-			RetryDelay:     500 * time.Millisecond,
-			MaxAttempts:    3,
-			MinInterval:    time.Second,
-		}
-		assert.Equal(t, 7*time.Second, p.Budget(), "three attempts of 2s with two 500ms delays between them")
-		assert.Equal(t, 8*time.Second, p.MinDeadline())
+	t.Run("retry budget is half the deadline up to ten seconds", func(t *testing.T) {
+		policy := NewHealthCheckPolicy(20 * time.Second)
+
+		assert.Equal(t, 20*time.Second, policy.Deadline())
+		assert.Equal(t, 10*time.Second, policy.Interval())
+		assert.Equal(t, 10*time.Second, policy.Budget())
+		assert.Equal(t, 2500*time.Millisecond, policy.AttemptTimeout())
+		assert.Equal(t, 3, policy.MaxAttempts())
+		assertPolicyFitsBudget(t, policy, []time.Duration{10 * time.Second / 12, 2 * (10 * time.Second / 12)})
 	})
 
-	t.Run("a sequence started on schedule ends as the deadline expires", func(t *testing.T) {
-		p := NewHealthCheckPolicy()
-		tt := []time.Duration{
-			p.MinDeadline(),
-			20 * time.Second,
-			30 * time.Second,
-			time.Minute,
-		}
-		for _, deadline := range tt {
-			assert.LessOrEqualf(t, p.Interval(deadline)+p.Budget(), deadline, "a host with a %s deadline would still be retrying past it", deadline)
-		}
+	t.Run("long deadlines use the same capped policy", func(t *testing.T) {
+		policy := NewHealthCheckPolicy(2 * time.Minute)
+
+		assert.Equal(t, 110*time.Second, policy.Interval())
+		assert.Equal(t, 10*time.Second, policy.Budget())
+		assert.Equal(t, 3, policy.MaxAttempts())
+		assertPolicyFitsBudget(t, policy, []time.Duration{10 * time.Second / 12, 2 * (10 * time.Second / 12)})
 	})
 
-	t.Run("the zero value and a nil policy behave as the defaults", func(t *testing.T) {
-		defaults := NewHealthCheckPolicy()
-		for name, p := range map[string]*HealthCheckPolicy{
-			"zero value": {},
-			"nil":        nil,
-		} {
-			assert.Equal(t, defaults.Budget(), p.Budget(), name)
-			assert.Equal(t, defaults.MinDeadline(), p.MinDeadline(), name)
-			assert.Equal(t, defaults.Interval(time.Minute), p.Interval(time.Minute), name)
-			assert.Equal(t, defaults.String(), p.String(), name)
-		}
+	t.Run("short deadlines scale the policy to the available budget", func(t *testing.T) {
+		policy := NewHealthCheckPolicy(4 * time.Second)
+
+		assert.Equal(t, 2*time.Second, policy.Interval())
+		assert.Equal(t, 2*time.Second, policy.Budget())
+		assert.Equal(t, 500*time.Millisecond, policy.AttemptTimeout())
+		assertPolicyFitsBudget(t, policy, []time.Duration{2 * time.Second / 12, 2 * (2 * time.Second / 12)})
 	})
 
-	t.Run("unset fields fall back to their defaults when read", func(t *testing.T) {
-		p := &HealthCheckPolicy{MaxAttempts: 5}
-		assert.Equal(t, uint(5), p.EffectiveMaxAttempts())
-		assert.Equal(t, DefaultHealthCheckAttemptTimeout, p.EffectiveAttemptTimeout())
-		assert.Equal(t, DefaultHealthCheckRetryDelay, p.EffectiveRetryDelay())
-		assert.Equal(t, DefaultMinHealthCheckInterval, p.EffectiveMinInterval())
-	})
+	t.Run("reset starts a fresh attempt sequence", func(t *testing.T) {
+		policy := NewHealthCheckPolicy(20 * time.Second)
 
-	t.Run("the interval floors at the minimum", func(t *testing.T) {
-		p := NewHealthCheckPolicy()
-		assert.Equal(t, p.MinInterval, p.Interval(p.Budget()))
-		assert.Equal(t, p.MinInterval, p.Interval(0))
+		assert.Equal(t, 10*time.Second/12, policy.NextRetryDelay())
+		assert.Equal(t, 1, policy.Attempts())
+		policy.Reset()
+		assert.Zero(t, policy.Attempts())
+		assert.Equal(t, 10*time.Second/12, policy.NextRetryDelay())
 	})
+}
+
+func assertPolicyFitsBudget(t *testing.T, policy *HealthCheckPolicy, wantDelays []time.Duration) {
+	t.Helper()
+
+	var totalDelay time.Duration
+	for attempt, wantDelay := range wantDelays {
+		delay := policy.NextRetryDelay()
+		assert.Equal(t, wantDelay, delay, "retry delay after attempt %d", attempt+1)
+		totalDelay += delay
+	}
+
+	assert.Equal(t, backoff.Stop, policy.NextRetryDelay())
+	assert.Equal(t, policy.MaxAttempts(), policy.Attempts())
+	total := totalDelay
+	for range policy.MaxAttempts() {
+		total += policy.AttemptTimeout()
+	}
+	assert.LessOrEqual(t, total, policy.Budget())
+	assert.Less(t, policy.Budget()-total, 5*time.Nanosecond)
 }

@@ -151,8 +151,8 @@ type ActorProvider interface {
 	// It returns ErrHostsConnected if any host is currently connected, since restoring underneath live hosts would corrupt running actors.
 	Restore(ctx context.Context, r io.Reader) error
 
-	// HealthCheckInterval returns the recommended health check interval for hosts.
-	HealthCheckInterval() time.Duration
+	// HealthCheckPolicy returns a HealthCheckPolicy object for one sequence of host health checks
+	HealthCheckPolicy() *HealthCheckPolicy
 
 	// RenewLeaseInterval returns the recommended lease renewal interval for hosts.
 	RenewLeaseInterval() time.Duration

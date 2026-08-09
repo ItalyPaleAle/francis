@@ -51,7 +51,6 @@ func (s *jobSurvivesHostDeath) Setup(t *testing.T) []framework.Option {
 			),
 		},
 		HostHealthCheckDeadline: healthCheckDeadline,
-		HealthCheckPolicy:       healthCheckPolicy,
 		ProviderQueryTimeout:    queryTimeout,
 		HostRequestTimeout:      requestTimeout,
 		AlarmsPollInterval:      alarmsPollInterval,

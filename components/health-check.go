@@ -1,105 +1,76 @@
 package components
 
 import (
-	"fmt"
 	"time"
+
+	"github.com/cenkalti/backoff/v5"
 )
 
-// Default values for HealthCheckPolicy
 const (
-	// DefaultHealthCheckAttemptTimeout bounds a single health check attempt
-	// It is smaller than the general provider request timeout
-	DefaultHealthCheckAttemptTimeout = 3500 * time.Millisecond
-	// DefaultHealthCheckRetryDelay is the delay between health check attempts
-	DefaultHealthCheckRetryDelay = 250 * time.Millisecond
-	// DefaultHealthCheckMaxAttempts is how many times a host tries a health check before giving up (including the initial attempt)
-	DefaultHealthCheckMaxAttempts = 3
-	// DefaultMinHealthCheckInterval is the shortest gap that will be scheduled between health checks
-	DefaultMinHealthCheckInterval = time.Second
+	maxHealthCheckRetryBudget = 10 * time.Second
+	healthCheckMaxAttempts    = 3
 )
 
-// HealthCheckPolicy controls how hosts perform healthchecks with the runtime actor runtime
-// Default values are recommended for all production deployments: a nil policy, or any field left unset, means the default for that field
+// HealthCheckPolicy schedules one sequence of health check attempts within the time reserved before a host's deadline
+// The policy is stateful and must not be shared by concurrent retry sequences
 type HealthCheckPolicy struct {
-	// AttemptTimeout is the timeout for each healthcheck attempt
-	AttemptTimeout time.Duration
-
-	// RetryDelay is the constant delay between attempts
-	RetryDelay time.Duration
-
-	// MaxAttempts is how many times a host tries a health check before giving up and shutting down
-	MaxAttempts int
-
-	// MinInterval is the shortest gap that will be scheduled between health checks
-	MinInterval time.Duration
+	deadline time.Duration
+	attempts int
 }
 
-// NewHealthCheckPolicy returns a HealthCheckPolicy with all default values
-func NewHealthCheckPolicy() *HealthCheckPolicy {
-	return &HealthCheckPolicy{
-		AttemptTimeout: DefaultHealthCheckAttemptTimeout,
-		RetryDelay:     DefaultHealthCheckRetryDelay,
-		MaxAttempts:    DefaultHealthCheckMaxAttempts,
-		MinInterval:    DefaultMinHealthCheckInterval,
-	}
+// NewHealthCheckPolicy builds a fresh retry sequence for a health check deadline
+func NewHealthCheckPolicy(deadline time.Duration) *HealthCheckPolicy {
+	return &HealthCheckPolicy{deadline: deadline}
 }
 
-// EffectiveAttemptTimeout returns the timeout for each attempt, applying the default when unset
-func (p *HealthCheckPolicy) EffectiveAttemptTimeout() time.Duration {
-	if p == nil || p.AttemptTimeout <= 0 {
-		return DefaultHealthCheckAttemptTimeout
-	}
-
-	return p.AttemptTimeout
+// Deadline returns the maximum allowed gap between successful health checks
+func (p *HealthCheckPolicy) Deadline() time.Duration {
+	return p.deadline
 }
 
-// EffectiveRetryDelay returns the delay between attempts, applying the default when unset
-func (p *HealthCheckPolicy) EffectiveRetryDelay() time.Duration {
-	if p == nil || p.RetryDelay <= 0 {
-		return DefaultHealthCheckRetryDelay
-	}
-
-	return p.RetryDelay
+// Interval returns the delay before a new sequence of health check attempts begins
+func (p *HealthCheckPolicy) Interval() time.Duration {
+	return p.deadline - p.Budget()
 }
 
-// EffectiveMaxAttempts returns how many attempts a host makes before giving up, applying the default when unset
-func (p *HealthCheckPolicy) EffectiveMaxAttempts() uint {
-	if p == nil || p.MaxAttempts <= 0 || p.MaxAttempts > 10 {
-		return DefaultHealthCheckMaxAttempts
-	}
-
-	return uint(p.MaxAttempts)
-}
-
-// EffectiveMinInterval returns the shortest gap scheduled between health checks, applying the default when unset
-func (p *HealthCheckPolicy) EffectiveMinInterval() time.Duration {
-	if p == nil || p.MinInterval <= 0 {
-		return DefaultMinHealthCheckInterval
-	}
-
-	return p.MinInterval
-}
-
-// Budget is the wall time a full sequence of attempts can consume, covering every attempt and the delays between them
+// Budget returns half the deadline capped at ten seconds
 func (p *HealthCheckPolicy) Budget() time.Duration {
-	//#nosec G115 -- attempts validated to be between 1 and 10
-	attempts := time.Duration(p.EffectiveMaxAttempts())
-	return attempts*p.EffectiveAttemptTimeout() + (attempts-1)*p.EffectiveRetryDelay()
+	return min(max(p.deadline/2, time.Duration(0)), maxHealthCheckRetryBudget)
 }
 
-// MinDeadline is the shortest health check deadline this policy can be honored within
-// Anything below it cannot hold a full sequence of attempts plus a gap before the next one
-func (p *HealthCheckPolicy) MinDeadline() time.Duration {
-	return p.Budget() + p.EffectiveMinInterval()
+// AttemptTimeout gives each of the three attempts one quarter of the retry budget
+func (p *HealthCheckPolicy) AttemptTimeout() time.Duration {
+	return p.Budget() / 4
 }
 
-// Interval returns the gap to leave between health checks for a given deadline, which is whatever the deadline leaves once the retry budget is set aside
-func (p *HealthCheckPolicy) Interval(deadline time.Duration) time.Duration {
-	return max(deadline-p.Budget(), p.EffectiveMinInterval())
+// MaxAttempts returns the total number of attempts in this sequence including the initial attempt
+func (p *HealthCheckPolicy) MaxAttempts() int {
+	return healthCheckMaxAttempts
 }
 
-// String implements fmt.Stringer
-// It explains what the policy's minimum deadline is made of, for a validation error a reader can act on
-func (p *HealthCheckPolicy) String() string {
-	return fmt.Sprintf("%d attempts of %v with %v between them, plus a minimum interval of %v", p.EffectiveMaxAttempts(), p.EffectiveAttemptTimeout(), p.EffectiveRetryDelay(), p.EffectiveMinInterval())
+// Attempts returns how many failed attempts have been observed by NextRetryDelay in the current sequence
+func (p *HealthCheckPolicy) Attempts() int {
+	return p.attempts
+}
+
+// NextRetryDelay records a failed attempt and returns the exponential delay before the next one
+// The two delays use the remaining quarter of the budget in a one-to-two ratio
+// backoff.Stop is returned after the final allowed attempt fails
+func (p *HealthCheckPolicy) NextRetryDelay() time.Duration {
+	p.attempts++
+	if p.attempts >= p.MaxAttempts() {
+		return backoff.Stop
+	}
+
+	return (p.Budget() / 12) << (p.attempts - 1)
+}
+
+// NextBackOff lets the policy be consumed directly by retry loops that use the backoff.BackOff contract
+func (p *HealthCheckPolicy) NextBackOff() time.Duration {
+	return p.NextRetryDelay()
+}
+
+// Reset starts a new sequence with no attempts recorded
+func (p *HealthCheckPolicy) Reset() {
+	p.attempts = 0
 }

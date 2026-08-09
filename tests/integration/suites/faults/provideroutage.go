@@ -37,7 +37,6 @@ func (s *providerOutage) Setup(t *testing.T) []framework.Option {
 		Hosts:                   2,
 		Actors:                  []frameworkhost.ActorReg{shared.ProbeReg(actorcore.WithIdleTimeout(time.Minute))},
 		HostHealthCheckDeadline: healthCheckDeadline,
-		HealthCheckPolicy:       healthCheckPolicy,
 		ProviderQueryTimeout:    queryTimeout,
 		HostRequestTimeout:      requestTimeout,
 		AlarmsPollInterval:      alarmsPollInterval,

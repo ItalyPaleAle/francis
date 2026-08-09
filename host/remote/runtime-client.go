@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cenkalti/backoff/v5"
 	"github.com/quic-go/webtransport-go"
 	"go.opentelemetry.io/otel/trace"
 	"k8s.io/utils/clock"
@@ -66,7 +67,6 @@ type runtimeClientConfig struct {
 	// bootstrapTokenFn returns a fresh bootstrap JWT, set for JWT bootstrap
 	bootstrapTokenFn func() (string, error)
 	requestTimeout   time.Duration
-	healthCheck      *components.HealthCheckPolicy
 	minBackoff       time.Duration
 	maxBackoff       time.Duration
 	handlers         runtimeHandlers
@@ -248,8 +248,8 @@ func (rc *runtimeClient) connectAndServe(ctx context.Context, addr string) (bool
 	serveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	healthInterval := time.Duration(resp.HealthCheckIntervalMs) * time.Millisecond
-	go rc.runHealthChecks(serveCtx, session, healthInterval)
+	healthDeadline := time.Duration(resp.HealthCheckDeadlineMs) * time.Millisecond
+	go rc.runHealthChecks(serveCtx, session, healthDeadline)
 
 	// Renew the workload certificate before it expires, while the session is alive
 	go rc.runCertRenewal(serveCtx, rc.certNotAfter(resp.CertNotAfterMs))
@@ -573,25 +573,38 @@ func (rc *runtimeClient) renewCert(ctx context.Context) (time.Time, error) {
 	return time.UnixMilli(out.CertNotAfterMs), nil
 }
 
-// runHealthChecks sends periodic health checks and closes the session if one fails, triggering a reconnect
-func (rc *runtimeClient) runHealthChecks(ctx context.Context, session *webtransport.Session, interval time.Duration) {
-	if interval <= 0 {
-		interval = 10 * time.Second
+// runHealthChecks sends periodic health checks and closes the session after the retry policy is exhausted
+func (rc *runtimeClient) runHealthChecks(ctx context.Context, session *webtransport.Session, deadline time.Duration) {
+	// A missing deadline can only come from an incompatible runtime, so retain a safe fallback while reconnecting
+	if deadline <= time.Second {
+		deadline = components.DefaultHostHealthCheckDeadline
 	}
 
-	t := rc.cfg.clock.NewTicker(interval)
+	// Derive the same schedule the runtime's provider uses from the advertised deadline
+	policy := components.NewHealthCheckPolicy(deadline)
+	t := rc.cfg.clock.NewTicker(policy.Interval())
 	defer t.Stop()
 
+	// Run one bounded attempt sequence on each scheduled health check
 	for {
 		select {
 		case <-t.C():
-			// Bound a health check by the dedicated attempt timeout rather than the general request timeout
-			reqCtx, cancel := context.WithTimeout(ctx, rc.cfg.healthCheck.EffectiveAttemptTimeout())
-			err := rc.doRequest(reqCtx, protocol.KindHealthCheck, protocol.HealthCheckRequest{}, nil)
-			cancel()
+			// Retry transient health check failures within the time reserved before the runtime's deadline
+			retryOpts := []backoff.RetryOption{
+				backoff.WithBackOff(policy),
+				backoff.WithNotify(func(err error, _ time.Duration) {
+					rc.cfg.log.WarnContext(ctx, "Health check error, will retry", slog.Any("error", err))
+				}),
+			}
+			_, err := backoff.Retry(ctx, func() (struct{}, error) {
+				reqCtx, cancel := context.WithTimeout(ctx, policy.AttemptTimeout())
+				defer cancel()
 
-			// A failed health check on a live context means the session is unhealthy
-			// Close it so the connect loop reconnects, ignoring failures that are just our own shutdown
+				reqErr := rc.doRequest(reqCtx, protocol.KindHealthCheck, protocol.HealthCheckRequest{}, nil)
+				return struct{}{}, reqErr
+			}, retryOpts...)
+
+			// Exhausting the policy means this session cannot be trusted to remain registered
 			if err != nil && ctx.Err() == nil {
 				rc.cfg.log.WarnContext(ctx, "Health check failed; closing session to reconnect", slog.Any("error", err))
 				_ = session.CloseWithError(0, "health check failed")

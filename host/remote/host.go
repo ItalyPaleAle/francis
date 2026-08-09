@@ -220,7 +220,6 @@ func newHost(options *newHostOptions) (*Host, error) {
 		bootstrapPSK:     bootstrapPSK,
 		bootstrapTokenFn: options.BootstrapTokenFn,
 		requestTimeout:   options.RequestTimeout,
-		healthCheck:      options.HealthCheck,
 		log:              options.Logger,
 		clock:            options.clock,
 		onDrainStart:     func() { h.draining.Store(true) },

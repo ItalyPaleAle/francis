@@ -124,7 +124,6 @@ type Host struct {
 	activeAlarms     map[string]struct{}
 	retryingAlarms   map[string]struct{}
 
-	healthCheck            *components.HealthCheckPolicy
 	bind                   string
 	alarmsPollInterval     time.Duration
 	providerRequestTimeout time.Duration
@@ -142,7 +141,6 @@ func (o newHostOptions) getProviderConfig() components.ProviderConfig {
 		AlarmsFetchAheadInterval:  o.AlarmsFetchAheadInterval,
 		AlarmsFetchAheadBatchSize: o.AlarmsFetchAheadBatchSize,
 		MaxHosts:                  o.MaxHosts,
-		HealthCheck:               o.HealthCheck,
 	}
 }
 
@@ -245,7 +243,6 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 		alarmsPollInterval:     options.AlarmsPollInterval,
 		shutdownGracePeriod:    options.ShutdownGracePeriod,
 		providerRequestTimeout: options.ProviderRequestTimeout,
-		healthCheck:            options.HealthCheck,
 		bind:                   net.JoinHostPort(options.BindAddress, strconv.Itoa(options.BindPort)),
 		logSource:              options.Logger,
 		clock:                  options.clock,
@@ -526,25 +523,30 @@ func (h *Host) HaltDeferred(actorType string, actorID string) {
 func (h *Host) runHealthChecks(parentCtx context.Context) error {
 	var err error
 
-	// Perform periodic health checks
-	interval := h.actorProvider.HealthCheckInterval()
-	h.log.DebugContext(parentCtx, "Starting background health checks", slog.Any("interval", interval))
+	// Create one stateful policy that the retry loop resets before every sequence
+	policy := h.actorProvider.HealthCheckPolicy()
+	h.log.DebugContext(parentCtx, "Starting background health checks", slog.Any("interval", policy.Interval()))
 	defer h.log.Debug("Stopped background health checks")
 
-	t := h.clock.NewTicker(interval)
+	// Start the periodic schedule early enough to leave the policy's full retry budget before expiry
+	t := h.clock.NewTicker(policy.Interval())
 	defer t.Stop()
 
+	// Let the policy own retry exhaustion so its attempt counter and exponential delays stay together
 	retryOpts := []backoff.RetryOption{
-		backoff.WithBackOff(backoff.NewConstantBackOff(h.healthCheck.EffectiveRetryDelay())),
-		backoff.WithMaxTries(h.healthCheck.EffectiveMaxAttempts()),
+		backoff.WithBackOff(policy),
+		backoff.WithNotify(func(err error, _ time.Duration) {
+			h.log.WarnContext(parentCtx, "Health check error, will retry", slog.Any("error", err))
+		}),
 	}
 
+	// Run one bounded attempt sequence on each scheduled health check
 	for {
 		select {
 		case <-t.C():
 			h.log.DebugContext(parentCtx, "Sending health check to the provider")
 			_, err = backoff.Retry(parentCtx, func() (r struct{}, rErr error) {
-				ctx, cancel := context.WithTimeout(parentCtx, h.healthCheck.EffectiveAttemptTimeout())
+				ctx, cancel := context.WithTimeout(parentCtx, policy.AttemptTimeout())
 				defer cancel()
 				rErr = h.actorProvider.UpdateActorHost(ctx, h.hostID, components.UpdateActorHostReq{UpdateLastHealthCheck: true})
 				switch {
@@ -552,7 +554,6 @@ func (h *Host) runHealthChecks(parentCtx context.Context) error {
 					// Registration has expired, so no point in retrying anymore
 					return r, backoff.Permanent(rErr)
 				case rErr != nil:
-					h.log.WarnContext(parentCtx, "Health check error; will retry", slog.Any("error", rErr))
 					return r, rErr
 				default:
 					return r, nil

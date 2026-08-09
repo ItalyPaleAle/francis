@@ -40,7 +40,6 @@ func (s *addressConflict) Setup(t *testing.T) []framework.Option {
 	// Only the shared store is a managed process, since this scenario controls when each host starts and how it ends
 	s.backend = provider.New(provider.SQLite, provider.Options{
 		HostHealthCheckDeadline: healthCheckDeadline,
-		HealthCheck:             healthCheckPolicy,
 		QueryTimeout:            queryTimeout,
 	})
 	return []framework.Option{
@@ -95,7 +94,6 @@ func (s *addressConflict) startHost(t *testing.T, addr string) *hostRun {
 		local.WithAddress(addr),
 		local.WithRuntimePSKs(clustersecret.RuntimePSK),
 		local.WithHostHealthCheckDeadline(healthCheckDeadline),
-		local.WithHealthCheckPolicy(&healthCheckPolicy),
 		local.WithProviderRequestTimeout(requestTimeout),
 		local.WithLogger(slog.New(slog.DiscardHandler)),
 		s.backend.LocalHostOption(t),

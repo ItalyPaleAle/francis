@@ -154,7 +154,7 @@ Subcommands (including `print-ca`, `healthcheck`, `backup`, and `restore`) resol
 | `provider.operationLog.enabled` | Log every provider operation at Debug level with its duration (for every backend, including memory). Default `false`. |
 | `provider.operationLog.slowThreshold` | Log successful slow operations at Warn and domain warnings or failures at their policy level when operation logging is otherwise disabled. Warnings are disabled by default or when the value is zero. |
 | `workloadCertTTL` | Lifetime of the workload certificates issued to hosts. Default `1h`. |
-| `healthCheckDeadline` | Maximum interval between host health pings. A host that has not checked in within the deadline is considered gone and its actors are placed elsewhere. Must be at least `12s` with the default health check policy. Default `20s`. |
+| `healthCheckDeadline` | Maximum interval between host health pings. A host that has not checked in within the deadline is considered gone and its actors are placed elsewhere. Must be greater than `1s`, recommended not less than `20s`. Default `20s`. |
 | `alarmsPollInterval` | How often the runtime polls for due alarms. Default `1500ms`. |
 | `alarmsLeaseDuration` | How long an alarm lease is held while executing. Default `20s`. |
 | `shutdownGracePeriod` | Grace period for a clean shutdown. Default `30s`. |

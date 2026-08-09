@@ -246,8 +246,8 @@ func (p *Provider) persistThenApply(ctx context.Context, lock *sync.RWMutex, cha
 	return nil
 }
 
-func (p *Provider) HealthCheckInterval() time.Duration {
-	return p.Cfg.HealthCheckInterval()
+func (p *Provider) HealthCheckPolicy() *components.HealthCheckPolicy {
+	return p.Cfg.HealthCheckPolicy()
 }
 
 func (p *Provider) RenewLeaseInterval() time.Duration {

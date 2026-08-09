@@ -33,8 +33,8 @@ func TestRunHealthChecks(t *testing.T) {
 		provider := components_mocks.NewMockActorProvider(t)
 		const healthCheckInterval = 30 * time.Second
 		provider.
-			On("HealthCheckInterval").
-			Return(healthCheckInterval).
+			On("HealthCheckPolicy").
+			Return(components.NewHealthCheckPolicy(40 * time.Second)).
 			Maybe()
 
 		// Create a minimal host for testing
@@ -111,8 +111,8 @@ func TestRunHealthChecks(t *testing.T) {
 		provider := components_mocks.NewMockActorProvider(t)
 		const healthCheckInterval = 10 * time.Second
 		provider.
-			On("HealthCheckInterval").
-			Return(healthCheckInterval).
+			On("HealthCheckPolicy").
+			Return(components.NewHealthCheckPolicy(20 * time.Second)).
 			Maybe()
 
 		// Create a minimal host for testing
@@ -162,7 +162,7 @@ func TestRunHealthChecks(t *testing.T) {
 		// Wait for retry warnings to appear in logs
 		assert.Eventually(t, func() bool {
 			logContent := logBuf.String()
-			return strings.Contains(logContent, "Health check error; will retry") &&
+			return strings.Contains(logContent, "Health check error, will retry") &&
 				strings.Contains(logContent, "temporary network error")
 		}, 2*time.Second, 10*time.Millisecond)
 
@@ -194,8 +194,8 @@ func TestRunHealthChecks(t *testing.T) {
 		provider := components_mocks.NewMockActorProvider(t)
 		const healthCheckInterval = 5 * time.Second
 		provider.
-			On("HealthCheckInterval").
-			Return(healthCheckInterval).
+			On("HealthCheckPolicy").
+			Return(components.NewHealthCheckPolicy(10 * time.Second)).
 			Maybe()
 
 		// Create a minimal host for testing
@@ -266,8 +266,8 @@ func TestRunHealthChecks(t *testing.T) {
 		provider := components_mocks.NewMockActorProvider(t)
 		healthCheckInterval := 10 * time.Second
 		provider.
-			On("HealthCheckInterval").
-			Return(healthCheckInterval).
+			On("HealthCheckPolicy").
+			Return(components.NewHealthCheckPolicy(20 * time.Second)).
 			Maybe()
 
 		// Create a minimal host for testing
@@ -318,7 +318,7 @@ func TestRunHealthChecks(t *testing.T) {
 
 		// Verify retry warnings appeared in logs
 		logContent := logBuf.String()
-		assert.Contains(t, logContent, "Health check error; will retry")
+		assert.Contains(t, logContent, "Health check error, will retry")
 		assert.Contains(t, logContent, "Health check failed")
 
 		// Assert that at least one call was made - exact count might vary due to timing
@@ -339,8 +339,8 @@ func TestRunHealthChecks(t *testing.T) {
 		provider := components_mocks.NewMockActorProvider(t)
 		healthCheckInterval := 1 * time.Hour // Long interval so we control when health checks happen
 		provider.
-			On("HealthCheckInterval").
-			Return(healthCheckInterval).
+			On("HealthCheckPolicy").
+			Return(components.NewHealthCheckPolicy(healthCheckInterval + 10*time.Second)).
 			Maybe()
 
 		// Create a minimal host for testing

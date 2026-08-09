@@ -69,15 +69,9 @@ func WithStandalonePostgresProvider(opts standalone.StandalonePostgresOptions) H
 }
 
 // WithHostHealthCheckDeadline sets the maximum interval between pings received from an actor host
-// It must be at least the health check policy's minimum
+// It must be greater than one second so the health check policy has time to retry
 func WithHostHealthCheckDeadline(d time.Duration) HostOption {
 	return func(o *newHostOptions) { o.HostHealthCheckDeadline = d }
-}
-
-// WithHealthCheckPolicy sets how the host retries its health checks, which also decides the shortest usable health check deadline
-// A nil policy, or any field left unset, falls back to the defaults
-func WithHealthCheckPolicy(p *components.HealthCheckPolicy) HostOption {
-	return func(o *newHostOptions) { o.HealthCheck = p }
 }
 
 // WithAlarmsPollInterval sets the interval for polling alarms
@@ -137,7 +131,6 @@ type newHostOptions struct {
 	Logger                    *slog.Logger
 	ProviderOptions           components.ProviderOptions
 	HostHealthCheckDeadline   time.Duration
-	HealthCheck               *components.HealthCheckPolicy
 	AlarmsPollInterval        time.Duration
 	AlarmsLeaseDuration       time.Duration
 	AlarmsFetchAheadInterval  time.Duration

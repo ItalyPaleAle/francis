@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/italypaleale/francis/actor"
-	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/host/local"
 	"github.com/italypaleale/francis/host/remote"
 	"github.com/italypaleale/francis/internal/builtinactor"
@@ -71,9 +70,6 @@ type Options struct {
 	AlarmsLeaseDuration time.Duration
 	// ProviderQueryTimeout optionally shortens the timeout the provider applies to a single database query, so a database that has stopped answering surfaces as an error quickly
 	ProviderQueryTimeout time.Duration
-	// HealthCheckPolicy optionally shortens how hosts retry their health checks, which is what sets the floor under HostHealthCheckDeadline
-	// Without it a failure scenario cannot go below the twelve seconds the default policy needs, and every wait on a registration expiring is that much longer
-	HealthCheckPolicy components.HealthCheckPolicy
 	// HostRequestTimeout optionally shortens how long a host waits on a provider request, a runtime request, or a peer dial, so a severed link fails fast instead of hanging on the default timeouts
 	HostRequestTimeout time.Duration
 	// StallableProvider makes the backend give each host, or each runtime on the remote topology, its own database handle that StallProvider can choke on demand
@@ -112,7 +108,6 @@ func New(t *testing.T, opts Options) *Cluster {
 		HostHealthCheckDeadline: opts.HostHealthCheckDeadline,
 		AlarmsLeaseDuration:     opts.AlarmsLeaseDuration,
 		QueryTimeout:            opts.ProviderQueryTimeout,
-		HealthCheck:             opts.HealthCheckPolicy,
 		Stallable:               opts.StallableProvider,
 	})
 	c := &Cluster{
@@ -153,8 +148,6 @@ func (c *Cluster) buildLocal(t *testing.T, opts Options) {
 	if opts.HostRequestTimeout > 0 {
 		hostExtra = append(hostExtra, local.WithProviderRequestTimeout(opts.HostRequestTimeout))
 	}
-	hostExtra = append(hostExtra, local.WithHealthCheckPolicy(&opts.HealthCheckPolicy))
-
 	// A host with a peer link in front of it binds to one port and advertises the link's, so peers reach it only through the link
 	hostPorts, linkPorts := c.reserveHostPorts(t, opts)
 	for i := range opts.Hosts {
@@ -254,8 +247,6 @@ func (c *Cluster) buildRemote(t *testing.T, opts Options) {
 	if opts.HostRequestTimeout > 0 {
 		hostExtra = append(hostExtra, remote.WithRequestTimeout(opts.HostRequestTimeout))
 	}
-	hostExtra = append(hostExtra, remote.WithHealthCheckPolicy(&opts.HealthCheckPolicy))
-
 	for i := range opts.Hosts {
 		// When JWT bootstrap is configured, each host presents a token whose subject identifies it
 		var token string

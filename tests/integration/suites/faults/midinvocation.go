@@ -36,7 +36,6 @@ func (s *hostDeathMidInvocation) Setup(t *testing.T) []framework.Option {
 		Hosts:                   2,
 		Actors:                  []frameworkhost.ActorReg{shared.ProbeReg(actorcore.WithIdleTimeout(time.Minute))},
 		HostHealthCheckDeadline: healthCheckDeadline,
-		HealthCheckPolicy:       healthCheckPolicy,
 		ProviderQueryTimeout:    queryTimeout,
 		HostRequestTimeout:      requestTimeout,
 		StallableProvider:       true,

@@ -105,8 +105,8 @@ type RegisterHostResponse struct {
 	SessionID string `msgpack:"sessionId"`
 	// ProtocolVersion is the negotiated protocol version both ends will use
 	ProtocolVersion uint16 `msgpack:"v"`
-	// HealthCheckIntervalMs is how often the host should send health checks, in milliseconds
-	HealthCheckIntervalMs int64 `msgpack:"healthInterval"`
+	// HealthCheckDeadlineMs is the maximum interval between successful health checks, in milliseconds
+	HealthCheckDeadlineMs int64 `msgpack:"healthDeadline"`
 	// Reattached is true if the runtime reattached to an existing registration rather than creating a new one
 	Reattached bool `msgpack:"reattached,omitempty"`
 	// WorkloadCertDER is the host's newly issued workload certificate, omitted when no new certificate was issued

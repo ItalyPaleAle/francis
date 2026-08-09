@@ -62,10 +62,6 @@ type Options struct {
 	// Shortening it makes a database that has stopped answering surface as an error quickly instead of hanging on the default timeout
 	QueryTimeout time.Duration
 
-	// HealthCheck overrides how hosts retry their health checks, which also sets the shortest deadline the provider accepts
-	// Failure scenarios shrink it so they can run against a deadline of a few seconds rather than the twelve the default policy needs
-	HealthCheck components.HealthCheckPolicy
-
 	// Stallable makes the backend hand every consumer its own database handle whose pool a scenario can exhaust on demand, simulating a database that has become unavailable for that consumer alone
 	// Only the SQLite backend supports it
 	Stallable bool
@@ -142,6 +138,5 @@ func providerConfig(opts Options) components.ProviderConfig {
 	if opts.AlarmsLeaseDuration > 0 {
 		cfg.AlarmsLeaseDuration = opts.AlarmsLeaseDuration
 	}
-	cfg.HealthCheck = &opts.HealthCheck
 	return cfg
 }

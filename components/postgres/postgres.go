@@ -177,8 +177,8 @@ func (p *PostgresProvider) Close() error {
 	return nil
 }
 
-func (p *PostgresProvider) HealthCheckInterval() time.Duration {
-	return p.cfg.HealthCheckInterval()
+func (p *PostgresProvider) HealthCheckPolicy() *components.HealthCheckPolicy {
+	return p.cfg.HealthCheckPolicy()
 }
 
 func (p *PostgresProvider) RenewLeaseInterval() time.Duration {

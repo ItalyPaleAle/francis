@@ -464,10 +464,10 @@ func (w *providerWrapper) Restore(ctx context.Context, reader io.Reader) (err er
 	return err
 }
 
-// HealthCheckInterval implements components.ActorProvider
+// HealthCheckPolicy implements components.ActorProvider
 // This is a pure configuration read with no database access, so it is not traced
-func (w *providerWrapper) HealthCheckInterval() time.Duration {
-	return w.base.HealthCheckInterval()
+func (w *providerWrapper) HealthCheckPolicy() *components.HealthCheckPolicy {
+	return w.base.HealthCheckPolicy()
 }
 
 // RenewLeaseInterval implements components.ActorProvider

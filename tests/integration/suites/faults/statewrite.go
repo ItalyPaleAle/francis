@@ -41,7 +41,6 @@ func (s *stateWriteFailure) Setup(t *testing.T) []framework.Option {
 		Hosts:                   1,
 		Actors:                  []frameworkhost.ActorReg{shared.ProbeReg(actorcore.WithIdleTimeout(time.Minute))},
 		HostHealthCheckDeadline: writeOutageDeadline,
-		HealthCheckPolicy:       healthCheckPolicy,
 		ProviderQueryTimeout:    queryTimeout,
 		HostRequestTimeout:      requestTimeout,
 		StallableProvider:       true,

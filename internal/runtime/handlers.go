@@ -318,11 +318,12 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 	}
 
 	// Build the response, always sending the current trust bundle so the host can pick up a root rotation
+	healthCheckPolicy := rt.provider.HealthCheckPolicy()
 	resp := protocol.RegisterHostResponse{
 		HostID:                c.hostID,
 		SessionID:             c.sessionID,
 		ProtocolVersion:       c.protocolVersion,
-		HealthCheckIntervalMs: rt.provider.HealthCheckInterval().Milliseconds(),
+		HealthCheckDeadlineMs: healthCheckPolicy.Deadline().Milliseconds(),
 		Reattached:            res.Reattached,
 		CABundlePEM:           rt.caBundlePEM(),
 	}
