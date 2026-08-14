@@ -32,6 +32,8 @@ const (
 	pollInterval = 250 * time.Millisecond
 	// cronInterval is the cron job's repetition period, kept short so the scenario observes several occurrences quickly
 	cronInterval = 300 * time.Millisecond
+	// cronJitter spreads the jittered job's occurrences
+	cronJitter = 100 * time.Millisecond
 
 	// singletonActorID mirrors the fixed actor ID built-in singletons use, needed to query the scheduler half
 	singletonActorID = "singleton"
@@ -73,6 +75,13 @@ type builtinCron struct {
 	cronType string
 	// runs counts how many times the user job has executed, incremented from the actor's goroutine
 	runs atomic.Int64
+
+	// jitterCron is a third cron job configured with jitter, whose schedule is a chain of one-shot runs rather than a recurring job
+	jitterCron *cronjob.CronJob
+	// jitterType is the reserved actor type of the jittered cron job, used to inspect the jobs it registers
+	jitterType string
+	// jitterRuns counts executions of the jittered job
+	jitterRuns atomic.Int64
 
 	// trigCron is a second cron job that only runs when triggered, used to exercise the trigger API and the scheduler/runner split
 	trigCron *cronjob.CronJob
@@ -127,11 +136,25 @@ func (s *builtinCron) Setup(t *testing.T) []framework.Option {
 	require.NoError(t, err)
 	s.trigCron = trigCron
 
+	// A third cron job on the same schedule, but jittered: it has no recurring job, and each occurrence dispatches the next one around its scheduled time
+	jitterCron, err := cronjob.New(
+		"e2e-jitter",
+		cronjob.WithInterval(cronInterval),
+		cronjob.WithJitter(cronJitter),
+		cronjob.WithJob(func(context.Context) error {
+			s.jitterRuns.Add(1)
+			return nil
+		}),
+	)
+	require.NoError(t, err)
+	s.jitterCron = jitterCron
+	s.jitterType = builtinactor.FullActorType(jitterCron.ActorType())
+
 	s.cluster = cluster.New(t, cluster.Options{
 		Kind:               s.kind,
 		Variant:            s.variant,
 		Hosts:              s.hosts,
-		BuiltInActors:      []builtinactor.BuiltInActor{cronActor, trigCron},
+		BuiltInActors:      []builtinactor.BuiltInActor{cronActor, trigCron, jitterCron},
 		AlarmsPollInterval: pollInterval,
 	})
 
@@ -145,6 +168,7 @@ func (s *builtinCron) Run(t *testing.T) {
 	svc := s.cluster.Service(0)
 	cronSvc := s.cron.Service(svc)
 	trigSvc := s.trigCron.Service(svc)
+	jitterSvc := s.jitterCron.Service(svc)
 
 	// The job runs repeatedly on its schedule (WithImmediate means the first occurrence is right away)
 	t.Run("runs on schedule", func(t *testing.T) {
@@ -205,6 +229,32 @@ func (s *builtinCron) Run(t *testing.T) {
 		release()
 	})
 
+	// A jittered job runs on its schedule as a chain of one-shot jobs, each occurrence dispatching the one after it
+	t.Run("jittered schedule runs on time", func(t *testing.T) {
+		require.Eventually(t, func() bool {
+			return s.jitterRuns.Load() >= 3
+		}, eventuallyTimeout, eventuallyTick, "the jittered cron job should run repeatedly on its schedule")
+
+		// There is no recurring job to find: the schedule only ever exists as the occurrences that are still live, and a chain that forked would show up here as more of them
+		assert.Zero(t, s.liveJobs(t, s.jitterType, "run"), "a jittered schedule registers no recurring job")
+		assert.LessOrEqual(t, s.liveJobs(t, s.jitterType, "scheduled-run"), 2, "at most the occurrence running and the one it planned should be live")
+	})
+
+	// Unregistering a jittered job cancels the occurrence the chain is waiting on, which is what ends it
+	t.Run("unregister stops a jittered schedule", func(t *testing.T) {
+		err := jitterSvc.Unregister(ctx)
+		require.NoError(t, err)
+
+		require.Eventually(t, func() bool {
+			return s.liveJobs(t, s.jitterType, "scheduled-run") == 0
+		}, eventuallyTimeout, eventuallyTick, "unregister should leave no occurrence of the chain behind")
+
+		// With nothing left to carry the schedule forward, executions stop
+		settled := s.settleRuns(t, &s.jitterRuns)
+		time.Sleep(stabilizeWindow)
+		assert.Equal(t, settled, s.jitterRuns.Load(), "no further executions after unregister")
+	})
+
 	// Unregister cancels the recurring job and stops further executions
 	t.Run("unregister stops execution", func(t *testing.T) {
 		err := cronSvc.Unregister(ctx)
@@ -216,24 +266,30 @@ func (s *builtinCron) Run(t *testing.T) {
 		}, eventuallyTimeout, eventuallyTick, "unregister should cancel the recurring job")
 
 		// And the run count stops growing
-		settled := s.settleRuns(t)
+		settled := s.settleRuns(t, &s.runs)
 		time.Sleep(stabilizeWindow)
 		assert.Equal(t, settled, s.runs.Load(), "no further executions after unregister")
 	})
 }
 
 // liveRunJobs returns how many live (non-dead-lettered) recurring "run" jobs the runner has
-// The scheduler dispatches the recurring job to the runner instance, so that is where it lives
-// It inspects through the host because the public Service rejects built-in actor types
 // A duplicate registration would surface here as more than one
 func (s *builtinCron) liveRunJobs(t *testing.T) int {
 	t.Helper()
-	jobs, err := s.cluster.Host(0).ListJobs(t.Context(), s.cronType, runnerActorID)
+	return s.liveJobs(t, s.cronType, "run")
+}
+
+// liveJobs returns how many live (non-dead-lettered) jobs with the given method a cron job's runner has
+// The scheduler dispatches every job to the runner instance, so that is where they live: one recurring "run" job for a plain schedule, or the "scheduled-run" occurrences a jittered one is made of
+// It inspects through the host because the public Service rejects built-in actor types
+func (s *builtinCron) liveJobs(t *testing.T, actorType string, method string) int {
+	t.Helper()
+	jobs, err := s.cluster.Host(0).ListJobs(t.Context(), actorType, runnerActorID)
 	require.NoError(t, err)
 
 	var n int
 	for _, j := range jobs {
-		if j.Status != actor.JobStatusDeadLettered && j.Method == "run" {
+		if j.Status != actor.JobStatusDeadLettered && j.Method == method {
 			n++
 		}
 	}
@@ -280,16 +336,16 @@ func (s *builtinCron) assertClientRejected(t *testing.T, svc *actor.Service, hos
 	require.ErrorIs(t, haltErr, actor.ErrActorTypeReserved, "host %d Halt", host)
 }
 
-// settleRuns waits until the run count stops changing for a full stabilize window and returns it
-func (s *builtinCron) settleRuns(t *testing.T) int64 {
+// settleRuns waits until the given run count stops changing for a full stabilize window and returns it
+func (s *builtinCron) settleRuns(t *testing.T, counter *atomic.Int64) int64 {
 	t.Helper()
 
-	last := s.runs.Load()
+	last := counter.Load()
 	stableSince := time.Now()
 	deadline := time.Now().Add(eventuallyTimeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(eventuallyTick)
-		c := s.runs.Load()
+		c := counter.Load()
 		if c != last {
 			last = c
 			stableSince = time.Now()

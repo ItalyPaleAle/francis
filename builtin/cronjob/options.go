@@ -16,6 +16,9 @@ type cronJobOptions struct {
 	cron string
 	// immediate runs the job once right away on first registration
 	immediate bool
+	// jitter is the maximum random offset applied to each occurrence's due time (from WithJitter)
+	// Zero, the default, runs every occurrence at its exact scheduled time
+	jitter time.Duration
 	// job is the function executed on each occurrence
 	job func(ctx context.Context) error
 	// logger is the optional slog logger used to report registration and run events
@@ -66,6 +69,15 @@ func WithJob(fn func(ctx context.Context) error) Option {
 func WithImmediate() Option {
 	return func(o *cronJobOptions) {
 		o.immediate = true
+	}
+}
+
+// WithJitter spreads each occurrence around its scheduled time by a random offset in the range +/- d
+// The offset is drawn independently for every occurrence, and d must be less than half the interval
+// Runs from WithImmediate and from Trigger are never jittered, since both mean "run now"
+func WithJitter(d time.Duration) Option {
+	return func(o *cronJobOptions) {
+		o.jitter = d
 	}
 }
 

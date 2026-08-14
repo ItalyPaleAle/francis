@@ -46,8 +46,28 @@ err = host.RegisterBuiltInActor(cleanupJob)
 | `WithPeriod(iso8601)` | Repeat on an ISO 8601 duration string, e.g. `"PT5M"` or `"P1D"`. |
 | `WithCron(expr)` | Repeat on a standard cron expression, e.g. `"0 9 * * 1-5"`. |
 | `WithImmediate()` | Also run the job once right away, but only the first time it is registered. |
+| `WithJitter(d)` | Spread each occurrence by a random offset within `±d` of its scheduled time. |
 
 Exactly one of `WithInterval`, `WithPeriod`, or `WithCron` is required, and `WithJob` is required. Without `WithImmediate`, the first run happens after one interval (or at the next cron tick).
+
+## Jitter
+
+Cron jobs that share a schedule all fire at the same instant, so the work lands in one spike. For example, a fleet of jobs set to `0 2 * * *` all start at exactly 2am. Use `WithJitter` to spread them apart:
+
+```go
+cleanupJob, err := cronjob.New("nightly-cleanup",
+	cronjob.WithCron("0 2 * * *"),
+	// Each run lands somewhere between 01:55 and 02:05
+	cronjob.WithJitter(5*time.Minute),
+	cronjob.WithJob(func(ctx context.Context) error {
+		return nil
+	}),
+)
+```
+
+A fresh offset is drawn for every occurrence within `±d` of the scheduled time. For example, with a cron job set for `0 2 * * *` (every day at 2am) and a jitter of 5 minutes, jobs are executed at a random time between 1.55-2.05am.
+
+Note: `WithImmediate` and `Trigger` runs are never jittered, since both mean "run now".
 
 ## How it works
 
