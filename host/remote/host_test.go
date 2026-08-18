@@ -18,11 +18,15 @@ import (
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/standalone"
+	"github.com/italypaleale/francis/host"
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/runtime"
 	"github.com/italypaleale/francis/protocol"
 )
+
+// Interface assertion
+var _ host.Host = (*Host)(nil)
 
 // testActor is a minimal actor used by the integration tests
 // It echoes invocations, round-trips its state through the runtime, and optionally signals invocation, alarm, and deactivation events
@@ -927,4 +931,100 @@ func TestHostRemoteRunFailsWhenPeerServerCannotBind(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("Run did not return after the peer server failed to start")
 	}
+}
+
+// TestNewHostClientOnlyRejectsPeerAddress verifies the peer address options are refused on a host that serves nothing
+func TestNewHostClientOnlyRejectsPeerAddress(t *testing.T) {
+	base := []HostOption{
+		WithRuntimeAddresses("127.0.0.1:7400"),
+		WithHostBootstrapPSK(testHostPSK),
+		WithUnsafeNoPinnedCA(),
+		WithClientOnly(),
+		WithLogger(slog.New(slog.DiscardHandler)),
+	}
+
+	t.Run("accepts a client-only host with no address", func(t *testing.T) {
+		h, err := NewHost(base...)
+		require.NoError(t, err)
+		assert.Empty(t, h.bind, "a client-only host must not bind a peer server")
+	})
+
+	for name, opt := range map[string]HostOption{
+		"WithAddress":     WithAddress("127.0.0.1:7000"),
+		"WithBindAddress": WithBindAddress("127.0.0.1"),
+		"WithBindPort":    WithBindPort(7000),
+	} {
+		t.Run("rejects "+name, func(t *testing.T) {
+			_, err := NewHost(append(append([]HostOption{}, base...), opt)...)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "client-only host cannot set a peer address")
+		})
+	}
+}
+
+// TestHostRemoteClientOnly covers a host that joins the cluster without hosting any actor: it registers no actor type, runs no peer server, and still reaches actors placed on a worker host
+func TestHostRemoteClientOnly(t *testing.T) {
+	runtimeAddr, _ := startTestRuntime(t, t.Context())
+
+	// The worker owns the actor, so anything the client does has to be routed through the runtime
+	worker, err := NewHost(
+		WithAddress(freeUDPAddr(t)),
+		WithRuntimeAddresses(runtimeAddr),
+		WithHostBootstrapPSK(testHostPSK),
+		WithUnsafeNoPinnedCA(),
+		WithLogger(slog.New(slog.DiscardHandler)))
+	require.NoError(t, err)
+
+	err = worker.RegisterActor("T", func(actorID string, service *actor.Service) actor.Actor {
+		return &testActor{svc: service, id: actorID}
+	})
+	require.NoError(t, err)
+	runRemoteHost(t, worker)
+
+	client, err := NewHost(
+		WithRuntimeAddresses(runtimeAddr),
+		WithHostBootstrapPSK(testHostPSK),
+		WithUnsafeNoPinnedCA(),
+		WithClientOnly(),
+		WithLogger(slog.New(slog.DiscardHandler)))
+	require.NoError(t, err)
+
+	t.Run("registering an actor is refused", func(t *testing.T) {
+		err := client.RegisterActor("T", func(actorID string, service *actor.Service) actor.Actor {
+			return &testActor{svc: service, id: actorID}
+		})
+		require.ErrorIs(t, err, errClientOnly)
+
+		err = client.RegisterSingletonActor("T", func(actorID string, service *actor.Service) actor.Actor {
+			return &testActor{svc: service, id: actorID}
+		})
+		require.ErrorIs(t, err, errClientOnly)
+	})
+
+	runRemoteHost(t, client)
+	require.NotEmpty(t, client.HostID(), "a client-only host still joins the cluster")
+
+	svc := client.Service()
+
+	t.Run("writes state the worker reads back", func(t *testing.T) {
+		// The client writes directly through the runtime, without the actor ever being activated on it
+		err := svc.SetState(t.Context(), "T", "a1", "written-by-client", nil)
+		require.NoError(t, err)
+
+		res, err := svc.Invoke(t.Context(), "T", "a1", "getstate", nil)
+		require.NoError(t, err)
+
+		var out string
+		require.NoError(t, res.Decode(&out))
+		assert.Equal(t, "written-by-client", out)
+	})
+
+	t.Run("invocations are placed on the worker", func(t *testing.T) {
+		res, err := svc.Invoke(t.Context(), "T", "a2", "echo", "hi")
+		require.NoError(t, err)
+
+		var out string
+		require.NoError(t, res.Decode(&out))
+		assert.Equal(t, "echo:hi", out)
+	})
 }

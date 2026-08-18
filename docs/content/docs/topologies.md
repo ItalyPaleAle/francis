@@ -83,6 +83,24 @@ h, err := remote.NewHost(
 
 The worker code is otherwise identical to the local example: you `RegisterActor`, get the `Service()`, and `Run`. Only the host construction differs.
 
+### Client-only hosts
+
+A process that needs to reach the cluster but shouldn't host actors (a CLI command, an admin tool, a web frontend that only invokes actors) can join as a **client-only** host:
+
+```go
+h, err := remote.NewHost(
+	remote.WithRuntimeAddresses("127.0.0.1:7400"),
+	remote.WithHostBootstrapPSK([]byte("host-bootstrap-psk")),
+	remote.WithPinnedCA(caPEM),
+	remote.WithClientOnly(),
+)
+```
+
+It connects, authenticates, and gets a `Service()` with the full set of operations (invocations, state, alarms, jobs), but it registers no actor type.
+
+A client-only host runs no peer server and doesn't need a reachable address of its own.  
+You still have to `Run` it and wait for `Ready`, because the operations go through its runtime session.
+
 **Choose remote when:**
 
 - You want to separate the control plane (placement, state, alarms) from your stateless workers.
@@ -110,3 +128,26 @@ The local host also offers standalone provider variants (`WithStandaloneSQLitePr
 ## Switching topologies
 
 Because actor code is topology-agnostic, moving from local to remote (or back) is a change to **host setup only**: swap `host/local` for `host/remote` (or vice versa) and adjust the construction options. Your factories, `Invoke`, `Alarm`, state, and alarm code don't change.
+
+Apps that decide their topology at runtime (for example from configuration) can hold the host as a `host.Host`, the interface both `local.Host` and `remote.Host` implement:
+
+```go
+import (
+	"github.com/italypaleale/francis/host"
+	"github.com/italypaleale/francis/host/local"
+	"github.com/italypaleale/francis/host/remote"
+)
+
+func newHost(runtimeAddresses []string) (host.Host, error) {
+	if len(runtimeAddresses) == 0 {
+		return local.NewHost( /* … */ )
+	}
+
+	return remote.NewHost(
+		remote.WithRuntimeAddresses(runtimeAddresses...),
+		// …
+	)
+}
+```
+
+The construction options stay in the `local` and `remote` packages, since they describe the topology itself.

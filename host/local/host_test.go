@@ -15,9 +15,13 @@ import (
 	clocktesting "k8s.io/utils/clock/testing"
 
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/host"
 	components_mocks "github.com/italypaleale/francis/internal/mocks/components"
 	"github.com/italypaleale/francis/internal/testutil"
 )
+
+// Interface assertion
+var _ host.Host = (*Host)(nil)
 
 func TestRunHealthChecks(t *testing.T) {
 	t.Run("successful health checks with regular interval", func(t *testing.T) {
