@@ -13,6 +13,9 @@ import (
 // RegisterActorOption is a functional option for RegisterActor/RegisterSingletonActor.
 type RegisterActorOption = actorcore.RegisterActorOption
 
+// errClientOnly is returned when an actor is registered on a host created with WithClientOnly, which hosts no actor by design
+var errClientOnly = errors.New("cannot register an actor on a client-only host")
+
 // WithIdleTimeout sets the maximum idle time before the actor is deactivated
 func WithIdleTimeout(d time.Duration) RegisterActorOption {
 	return actorcore.WithIdleTimeout(d)
@@ -56,6 +59,9 @@ func (h *Host) RegisterActor(actorType string, factory actor.Factory, opts ...Re
 	if h.running.Load() {
 		return errors.New("cannot call RegisterActor after host has started")
 	}
+	if h.clientOnly {
+		return errClientOnly
+	}
 
 	var o actorcore.RegisterActorOptions
 	for _, opt := range opts {
@@ -71,6 +77,9 @@ func (h *Host) RegisterActor(actorType string, factory actor.Factory, opts ...Re
 func (h *Host) RegisterSingletonActor(actorType string, factory actor.Factory, opts ...RegisterActorOption) error {
 	if h.running.Load() {
 		return errors.New("cannot call RegisterSingletonActor after host has started")
+	}
+	if h.clientOnly {
+		return errClientOnly
 	}
 
 	var o actorcore.RegisterActorOptions
@@ -96,6 +105,9 @@ func (h *Host) RegisterSingletonActor(actorType string, factory actor.Factory, o
 func (h *Host) RegisterBuiltInActor(b builtinactor.BuiltInActor) error {
 	if h.running.Load() {
 		return errors.New("cannot call RegisterBuiltInActor after host has started")
+	}
+	if h.clientOnly {
+		return errClientOnly
 	}
 	if b == nil {
 		return errors.New("built-in actor is nil")

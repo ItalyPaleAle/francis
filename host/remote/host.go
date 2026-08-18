@@ -29,6 +29,10 @@ import (
 const (
 	defaultShutdownGracePeriod = 30 * time.Second
 	defaultRequestTimeout      = 15 * time.Second
+
+	// clientOnlyAddress is the peer address a client-only host advertises to the runtime
+	// This is invalid on purpose
+	clientOnlyAddress = "client-only.invalid:0"
 )
 
 // singletonActorRegistration is the host-side record for a singleton actor the host will bootstrap at startup
@@ -44,7 +48,10 @@ type Host struct {
 	// Peer address this host advertises to the runtime and other hosts
 	address string
 	// Address the peer server binds to
+	// This is empty on a client-only host
 	bind string
+	// clientOnly marks a host that registers no actor types, so it serves no invocation and runs no peer server
+	clientOnly bool
 
 	running atomic.Bool
 	// draining is set once graceful shutdown begins, so the peer server rejects new invocations while local actors drain
@@ -89,17 +96,31 @@ func NewHost(opts ...HostOption) (*Host, error) {
 }
 
 func newHost(options *newHostOptions) (*Host, error) {
+	// A client-only host serves nothing, so the peer address options describe something it does not have
+	if options.ClientOnly && (options.Address != "" || options.BindAddress != "" || options.BindPort > 0) {
+		return nil, errors.New("a client-only host cannot set a peer address: remove WithAddress, WithBindAddress, and WithBindPort")
+	}
+
 	// Validate the peer address
-	if options.Address == "" {
-		return nil, errors.New("option Address is required")
-	}
-	addrHost, addrPortStr, err := net.SplitHostPort(options.Address)
-	if err != nil {
-		return nil, fmt.Errorf("option Address is invalid: cannot split host and port: %w", err)
-	}
-	addrPort, err := strconv.Atoi(addrPortStr)
-	if err != nil || addrPort == 0 {
-		return nil, errors.New("option Address is invalid: port is invalid")
+	var (
+		addrHost string
+		addrPort int
+		err      error
+	)
+	if !options.ClientOnly {
+		if options.Address == "" {
+			return nil, errors.New("option Address is required")
+		}
+
+		var addrPortStr string
+		addrHost, addrPortStr, err = net.SplitHostPort(options.Address)
+		if err != nil {
+			return nil, fmt.Errorf("option Address is invalid: cannot split host and port: %w", err)
+		}
+		addrPort, err = strconv.Atoi(addrPortStr)
+		if err != nil || addrPort == 0 {
+			return nil, errors.New("option Address is invalid: port is invalid")
+		}
 	}
 
 	// At least one runtime address is required to connect to
@@ -113,11 +134,13 @@ func newHost(options *newHostOptions) (*Host, error) {
 	}
 
 	// Set other default values
-	if options.BindAddress == "" {
-		options.BindAddress = addrHost
-	}
-	if options.BindPort <= 0 {
-		options.BindPort = addrPort
+	if !options.ClientOnly {
+		if options.BindAddress == "" {
+			options.BindAddress = addrHost
+		}
+		if options.BindPort <= 0 {
+			options.BindPort = addrPort
+		}
 	}
 	if options.ShutdownGracePeriod <= 0 {
 		options.ShutdownGracePeriod = defaultShutdownGracePeriod
@@ -178,14 +201,20 @@ func newHost(options *newHostOptions) (*Host, error) {
 	peerServerTLSConfig := hosttls.PeerServerTLSConfig(holder)
 
 	// Create the host
+	// A client-only host advertises the placeholder address and binds nothing, since it registers no actor types and so can never be the target of a peer invocation
 	h := &Host{
 		address:             options.Address,
-		bind:                net.JoinHostPort(options.BindAddress, strconv.Itoa(options.BindPort)),
+		clientOnly:          options.ClientOnly,
 		holder:              holder,
 		requestTimeout:      options.RequestTimeout,
 		shutdownGracePeriod: options.ShutdownGracePeriod,
 		logSource:           options.Logger,
 		clock:               options.clock,
+	}
+	if options.ClientOnly {
+		h.address = clientOnlyAddress
+	} else {
+		h.bind = net.JoinHostPort(options.BindAddress, strconv.Itoa(options.BindPort))
 	}
 	h.service = actor.NewService(h)
 
@@ -214,7 +243,7 @@ func newHost(options *newHostOptions) (*Host, error) {
 	// Its actor types are filled in at Run, once all actor types have been registered
 	h.runtimeClient = newRuntimeClient(runtimeClientConfig{
 		addresses:        options.RuntimeAddresses,
-		peerAddress:      options.Address,
+		peerAddress:      h.address,
 		tlsConfig:        runtimeTLSConfig,
 		holder:           holder,
 		bootstrapPSK:     bootstrapPSK,
@@ -238,17 +267,19 @@ func newHost(options *newHostOptions) (*Host, error) {
 
 	// The peer server serves invocations of actors owned by this host
 	// It reports our current runtime-assigned host ID so it can reject invocations aimed at a stale placement
-	h.peerServer = peer.NewServer(peer.ServerConfig{
-		Bind:                h.bind,
-		TLSConfig:           peerServerTLSConfig,
-		Handler:             h.peerInvokeObject,
-		StreamHandler:       h.peerInvokeStream,
-		Log:                 options.Logger,
-		HostID:              h.runtimeClient.HostID,
-		Draining:            h.isDraining,
-		MaxInFlightRequests: options.MaxInFlightRequests,
-		MaxRequestBodySize:  options.MaxRequestBodySize,
-	})
+	if !options.ClientOnly {
+		h.peerServer = peer.NewServer(peer.ServerConfig{
+			Bind:                h.bind,
+			TLSConfig:           peerServerTLSConfig,
+			Handler:             h.peerInvokeObject,
+			StreamHandler:       h.peerInvokeStream,
+			Log:                 options.Logger,
+			HostID:              h.runtimeClient.HostID,
+			Draining:            h.isDraining,
+			MaxInFlightRequests: options.MaxInFlightRequests,
+			MaxRequestBodySize:  options.MaxRequestBodySize,
+		})
+	}
 
 	return h, nil
 }
@@ -296,10 +327,14 @@ func (h *Host) Run(parentCtx context.Context) error {
 	peerCtx, stopPeer := context.WithCancel(context.WithoutCancel(parentCtx))
 	defer stopPeer()
 
-	peerErrCh := make(chan error, 1)
-	go func() {
-		peerErrCh <- h.peerServer.Run(peerCtx)
-	}()
+	// A client-only host owns no actor and so has no peer server to run, which leaves its channel nil and permanently blocked in the select below
+	var peerErrCh chan error
+	if !h.clientOnly {
+		peerErrCh = make(chan error, 1)
+		go func() {
+			peerErrCh <- h.peerServer.Run(peerCtx)
+		}()
+	}
 
 	// Maintain the persistent session to the runtime, reconnecting as needed
 	// On graceful shutdown the runtime client sets the host draining, unregisters, and drains local actors before returning
@@ -327,7 +362,9 @@ func (h *Host) Run(parentCtx context.Context) error {
 	select {
 	case runErr = <-runErrCh:
 		stopPeer()
-		peerErr = <-peerErrCh
+		if peerErrCh != nil {
+			peerErr = <-peerErrCh
+		}
 	case peerErr = <-peerErrCh:
 		cancel()
 		runErr = <-runErrCh

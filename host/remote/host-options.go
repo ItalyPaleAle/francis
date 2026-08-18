@@ -35,6 +35,15 @@ func WithRuntimeAddresses(addresses ...string) HostOption {
 	return func(o *newHostOptions) { o.RuntimeAddresses = addresses }
 }
 
+// WithClientOnly configures the host as a client of the cluster that hosts no actor of its own
+// It joins the cluster like any other host, and can invoke actors, read and write their state, and manage their alarms and jobs, but it registers no actor type, so the runtime never places an actor on it
+// A client-only host runs no peer server, doesn't need a reachable address, and rejects every RegisterActor call
+// Use it for short-lived processes that need to reach the cluster without joining it as a worker, such as CLI commands and admin tools
+// It is incompatible with WithAddress, WithBindAddress, and WithBindPort
+func WithClientOnly() HostOption {
+	return func(o *newHostOptions) { o.ClientOnly = true }
+}
+
 // WithHostBootstrapPSK configures the host to bootstrap with a host pre-shared key, proven to the runtime via a channel-bound challenge-response
 func WithHostBootstrapPSK(psk []byte) HostOption {
 	return func(o *newHostOptions) { o.BootstrapPSK = psk }
@@ -107,6 +116,7 @@ type newHostOptions struct {
 	BindPort            int
 	BindAddress         string
 	RuntimeAddresses    []string
+	ClientOnly          bool
 	BootstrapPSK        []byte
 	BootstrapTokenFn    func() (string, error)
 	PinnedCAPEM         [][]byte
