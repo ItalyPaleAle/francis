@@ -1211,9 +1211,15 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		// Seed with the test data
 		require.NoError(t, s.p.Seed(ctx, GetSpec()))
 
-		// Create 40 actors of type C (unlimited on H1 and H2) to validate distribution
+		// Create actors of type C (unlimited on H1 and H2) to validate distribution
+		// Placement picks one of the eligible hosts at random, so the sample has to be large enough for the evenness assertion below to be about the implementation rather than about luck
+		const (
+			numActors  = 100
+			minPerHost = numActors / 5
+		)
+
 		hostCounts := make(map[string]int)
-		for i := range 40 {
+		for i := range numActors {
 			ref := ref.ActorRef{ActorType: "C", ActorID: fmt.Sprintf("C-unlimited-%d", i)}
 			res, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{})
 			require.NoError(t, err)
@@ -1229,14 +1235,14 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		// Should have distributed across both hosts
 		assert.Len(t, hostCounts, 2, "should distribute across both H1 and H2")
 
-		// Validate approximately even distribution (at least 12 on each host out of 40 total)
-		// This allows for some randomness while ensuring reasonable distribution
+		// Validate approximately even distribution: each host should get at least a fifth of the actors
+		// With a fair pick between two hosts, either host falling below 20 out of 100 has a probability of about 3e-10, so this tolerates the randomness while still catching an implementation that stops spreading actors
 		h1Count := hostCounts[SpecHostH1]
 		h2Count := hostCounts[SpecHostH2]
 
-		assert.GreaterOrEqual(t, h1Count, 12, "H1 should have at least 12 actors for reasonable distribution, got %d", h1Count)
-		assert.GreaterOrEqual(t, h2Count, 12, "H2 should have at least 12 actors for reasonable distribution, got %d", h2Count)
-		assert.Equal(t, 40, h1Count+h2Count, "total should be 40 actors")
+		assert.GreaterOrEqual(t, h1Count, minPerHost, "H1 should have at least %d actors for reasonable distribution, got %d", minPerHost, h1Count)
+		assert.GreaterOrEqual(t, h2Count, minPerHost, "H2 should have at least %d actors for reasonable distribution, got %d", minPerHost, h2Count)
+		assert.Equal(t, numActors, h1Count+h2Count, "total should be %d actors", numActors)
 
 		t.Logf("Distribution: H1=%d, H2=%d", h1Count, h2Count)
 	})
@@ -1249,8 +1255,9 @@ func (s Suite) TestLookupActor(t *testing.T) {
 
 		// Create multiple actors of type C (unlimited capacity) to validate they never go to unhealthy hosts
 		// Type C is supported on H1 and H2 (both healthy) but not on H5/H6 (unhealthy)
+		const numActors = 40
 		seenHosts := make(map[string]bool)
-		for i := range 10 { // Try multiple times to ensure consistent behavior
+		for i := range numActors { // Try multiple times to ensure consistent behavior
 			ref := ref.ActorRef{ActorType: "C", ActorID: fmt.Sprintf("C-ignore-unhealthy-%d", i)}
 			res, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{})
 			require.NoError(t, err)
@@ -1265,6 +1272,7 @@ func (s Suite) TestLookupActor(t *testing.T) {
 		}
 
 		// Should have used both healthy hosts (validation that distribution works)
+		// Each placement is an independent random pick between H1 and H2, so every lookup landing on the same host has a probability of about 2e-12 with this many iterations
 		assert.Len(t, seenHosts, 2, "should distribute across both healthy hosts that support C: %v", seenHosts)
 	})
 
