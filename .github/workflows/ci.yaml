@@ -171,7 +171,7 @@ jobs:
 
       - name: "Run Helm E2E tests"
         run: |
-          tests/e2e/run.sh \
+          go run ./tests/e2e/testhelper \
             --database "${{ matrix.database }}" \
             --authentication "${{ matrix.authentication }}" \
             --namespace "${TEST_NAMESPACE}" \

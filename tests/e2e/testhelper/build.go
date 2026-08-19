@@ -116,7 +116,7 @@ func runGoTest(ctx context.Context, cfg config, baseURLs []string) error {
 	// Give the selected package both the first endpoint and every replica endpoint derived from its temporary port-forwards
 	environmentPrefix := "E2E_" + strings.ToUpper(strings.ReplaceAll(cfg.TestName, "-", "_"))
 	packagePath := "./" + cfg.TestName
-	// #nosec G204 -- The package path comes from the validated repository-owned test catalog
+	// #nosec G204 -- The package path comes from the validated repository-owned test folder
 	command := exec.CommandContext(
 		ctx,
 		"go",

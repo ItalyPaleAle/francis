@@ -3,23 +3,29 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
 	"time"
+
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 func main() {
 	// Parse before installing lifecycle handling so invalid requests cannot mutate the cluster
 	cfg, err := parseConfig(os.Args[1:])
-	if err != nil {
+	if errors.Is(err, flag.ErrHelp) {
+		return
+	} else if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
 
 	// Cancel builds, tests, and Kubernetes waits consistently on signals
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	err = run(ctx, cfg)
+	err = runSuite(ctx, cfg)
 	stop()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -27,7 +33,7 @@ func main() {
 	}
 }
 
-func run(parentCtx context.Context, cfg config) (returnErr error) {
+func runTest(parentCtx context.Context, cfg config, restConfig *rest.Config, client kubernetes.Interface) (returnErr error) {
 	// Bound the whole per-test lifecycle so teardown still runs after a stuck child command
 	ctx, cancel := context.WithTimeout(parentCtx, cfg.Timeout)
 	defer cancel()
@@ -47,26 +53,22 @@ func run(parentCtx context.Context, cfg config) (returnErr error) {
 		return err
 	}
 
-	// Connect through the active kubeconfig and track only resources created by this invocation
-	restConfig, client, err := newKubernetesClient()
-	if err != nil {
-		return err
-	}
+	// Track only resources created for this discovered test so teardown cannot affect another test
 	resources := newTestResources(cfg, restConfig, client)
 	defer func() {
-		if returnErr != nil {
-			logCtx, logCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			logErr := resources.printPodLogs(logCtx)
-			logCancel()
-			if logErr != nil {
-				fmt.Fprintf(os.Stderr, "failed to collect %s pod logs: %v\n", cfg.TestName, logErr)
-			}
+		// Collect every replica's logs after the test finishes and before teardown removes the pods
+		logCtx, logCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		logErr := resources.printPodLogs(logCtx)
+		logCancel()
+		if logErr != nil {
+			logErr = fmt.Errorf("failed to collect %s pod logs: %w", cfg.TestName, logErr)
 		}
 
+		// Remove this test's resources even when test execution or log collection failed
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), cfg.DeploymentTimeout)
 		defer cleanupCancel()
 		cleanupErr := resources.teardown(cleanupCtx)
-		returnErr = errors.Join(returnErr, cleanupErr)
+		returnErr = errors.Join(returnErr, logErr, cleanupErr)
 	}()
 
 	// Deploy three app replicas and wait until Kubernetes reports all of them available

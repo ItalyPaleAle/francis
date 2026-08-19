@@ -88,7 +88,7 @@ func newTestResources(cfg config, restConfig *rest.Config, client kubernetes.Int
 }
 
 func (r *testResources) deploy(ctx context.Context) error {
-	// Give each test its own service account so teardown never affects another catalog entry
+	// Give each test its own service account so teardown never affects another discovered test
 	serviceAccount := &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   r.name,
@@ -126,7 +126,7 @@ func (r *testResources) deploy(ctx context.Context) error {
 	}
 	r.serviceCreated = true
 
-	// Deploy the application with the selected bootstrap credential and runtime configuration prepared by run.sh
+	// Deploy the application with the selected bootstrap credential and runtime configuration prepared by suite setup
 	deployment := r.deployment()
 	_, err = r.client.AppsV1().Deployments(r.cfg.Namespace).Create(ctx, deployment, metav1.CreateOptions{})
 	if err != nil {
@@ -170,7 +170,7 @@ func (r *testResources) volumes() []corev1.Volume {
 			Name: "cluster-ca",
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "francis-e2e-ca"},
+					LocalObjectReference: corev1.LocalObjectReference{Name: sharedCAConfig},
 				},
 			},
 		},
@@ -233,7 +233,7 @@ func (r *testResources) container() corev1.Container {
 				Name: "FRANCIS_RUNTIME_ADDRESSES",
 				ValueFrom: &corev1.EnvVarSource{
 					ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "francis-e2e-config"},
+						LocalObjectReference: corev1.LocalObjectReference{Name: sharedRuntimeConfig},
 						Key:                  "runtime-addresses",
 					},
 				},
@@ -416,7 +416,7 @@ func (f *appPortForward) Close() error {
 }
 
 func (r *testResources) printPodLogs(ctx context.Context) error {
-	// Preserve every replica's output in CI before the failed test resources are torn down
+	// Preserve every replica's output in CI before the test resources are torn down
 	pods, err := r.client.CoreV1().Pods(r.cfg.Namespace).List(ctx, metav1.ListOptions{LabelSelector: metav1.FormatLabelSelector(&metav1.LabelSelector{MatchLabels: r.labels})})
 	if err != nil {
 		return err
@@ -473,7 +473,7 @@ func (r *testResources) teardown(ctx context.Context) error {
 }
 
 func (r *testResources) waitForPodsDeleted(ctx context.Context) error {
-	// Wait for application pods to disappear before the next catalog test starts
+	// Wait for application pods to disappear before the next discovered test starts
 	err := wait.PollUntilContextTimeout(ctx, time.Second, r.cfg.DeploymentTimeout, true, func(pollCtx context.Context) (bool, error) {
 		pods, listErr := r.client.CoreV1().Pods(r.cfg.Namespace).List(pollCtx, metav1.ListOptions{LabelSelector: metav1.FormatLabelSelector(&metav1.LabelSelector{MatchLabels: r.labels})})
 		if listErr != nil {
