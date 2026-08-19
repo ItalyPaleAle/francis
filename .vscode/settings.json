@@ -1,5 +1,5 @@
 {
-    "go.buildTags": "unit integration",
+    "go.buildTags": "unit integration e2e",
     "terminal.integrated.env.linux": {
         "TEST_POSTGRES_CONNSTRING":"postgres://actors:actors@localhost:5432/actors",
         "TEST_STANDALONE_POSTGRES_CONNSTRING":"postgres://actors:actors@localhost:5432/actors"
