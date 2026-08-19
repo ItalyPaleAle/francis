@@ -72,6 +72,43 @@ Then start it in the background:
 docker compose up -d
 ```
 
+### Kubernetes (Helm)
+
+A Helm chart that runs the runtime as a StatefulSet is published to the GitHub Container Registry as an OCI artifact, alongside the container image. Its version always matches the runtime version it deploys.
+
+JWT bootstrap is enabled by default, so find your Kubernetes cluster's issuer and JWKS endpoint with `kubectl get --raw /.well-known/openid-configuration | jq '{issuer, jwks_uri}'` and provide them when you install:
+
+```sh
+helm install francis oci://ghcr.io/italypaleale/charts/francis \
+  --version 1.2.3 \
+  --namespace francis --create-namespace \
+  --set-string 'runtimePSKs[0]=change-me-runtime-psk' \
+  --set-string 'bootstrap.jwt.issuer=<your Kubernetes OIDC issuer>' \
+  --set-string 'bootstrap.jwt.audience=francis-runtime' \
+  --set-string 'bootstrap.jwt.jwksURL=<your Kubernetes OIDC JWKS URL>'
+```
+
+That deploys one replica backed by SQLite on a persistent volume. For a highly-available control plane, point the chart at PostgreSQL and scale up (up to four replicas):
+
+```sh
+helm install francis oci://ghcr.io/italypaleale/charts/francis \
+  --version 1.2.3 \
+  --namespace francis --create-namespace \
+  --set replicaCount=3 \
+  --set database.type=postgres \
+  --set-string 'database.postgres.connectionString=postgres://user:password@postgres:5432/francis' \
+  --set-string 'runtimePSKs[0]=change-me-runtime-psk' \
+  --set-string 'bootstrap.jwt.issuer=<your Kubernetes OIDC issuer>' \
+  --set-string 'bootstrap.jwt.audience=francis-runtime' \
+  --set-string 'bootstrap.jwt.jwksURL=<your Kubernetes OIDC JWKS URL>'
+```
+
+SQLite is limited to a single replica, since one runtime owns the database file.
+
+The chart creates a headless Service, so every replica gets a stable DNS name such as `francis-0.francis-headless.francis.svc.cluster.local:7400`. Pass all of them to `remote.WithRuntimeAddresses(…)` on your workers, and remember that the port is **UDP**.
+
+The chart's source lives in [`charts/francis`](https://github.com/ItalyPaleAle/francis/tree/main/charts/francis), and its [README](https://github.com/ItalyPaleAle/francis/tree/main/charts/francis) documents the full list of options, including JWT bootstrap with projected service account tokens, OpenTelemetry export, and supplying the configuration from a Secret you manage yourself.
+
 ### Pre-compiled binaries
 
 Pre-compiled binaries are attached to every release on the [releases page](https://github.com/ItalyPaleAle/francis/releases). Builds are published for Linux (`amd64`, `arm64`, `armv7`), macOS (`arm64`), and FreeBSD (`amd64`, `arm64`).

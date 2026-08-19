@@ -1,0 +1,26 @@
+apiVersion: v2
+name: francis
+description: The Francis distributed actor runtime, the standalone control plane used by the remote topology
+type: application
+
+# Version of the chart itself
+# The release workflow overwrites this with the release tag, so these values only apply when installing from a checkout
+version: 0.1.0
+
+# Version of Francis this chart deploys by default
+appVersion: "0.1.0-beta.22"
+
+home: https://francis.italypaleale.me
+icon: https://raw.githubusercontent.com/ItalyPaleAle/francis/main/docs/static/logo-light.png
+sources:
+  - https://github.com/ItalyPaleAle/francis
+
+keywords:
+  - francis
+  - actors
+  - distributed-actors
+  - durable-objects
+
+maintainers:
+  - name: ItalyPaleAle
+    url: https://github.com/ItalyPaleAle

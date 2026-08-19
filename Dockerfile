@@ -3,5 +3,4 @@ FROM gcr.io/distroless/static-debian13:nonroot
 ARG TARGETARCH
 COPY .bin/linux-${TARGETARCH}/francis /bin
 HEALTHCHECK CMD ["/bin/francis", "healthcheck"]
-CMD ["/bin/francis"]
 ENTRYPOINT ["/bin/francis"]

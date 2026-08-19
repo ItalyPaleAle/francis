@@ -1,0 +1,210 @@
+{{- include "francis.validateValues" . -}}
+{{- $sqlite := eq (include "francis.databaseType" .) "sqlite" -}}
+{{- $persistence := .Values.database.sqlite.persistence -}}
+{{- $useVolumeClaimTemplate := and $sqlite $persistence.enabled (not $persistence.existingClaim) -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "francis.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "francis.labels" . | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ int .Values.replicaCount }}
+  serviceName: {{ include "francis.headlessServiceName" . }}
+  podManagementPolicy: {{ .Values.podManagementPolicy }}
+  {{- with .Values.updateStrategy }}
+  updateStrategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "francis.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "francis.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if or (not .Values.existingConfigSecret) .Values.commonAnnotations .Values.podAnnotations }}
+      annotations:
+        {{- if not .Values.existingConfigSecret }}
+        {{- /* Rolls the pods whenever the rendered configuration changes */}}
+        checksum/config: {{ include "francis.configFile" . | sha256sum }}
+        {{- end }}
+        {{- with .Values.commonAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "francis.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ int .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.affinity }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
+      {{- else if eq .Values.podAntiAffinity "soft" }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "francis.selectorLabels" . | nindent 20 }}
+      {{- else if eq .Values.podAntiAffinity "hard" }}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "francis.selectorLabels" . | nindent 18 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: runtime
+          image: {{ include "francis.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /bin/francis
+          {{- with .Values.extraArgs }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            {{- /* The runtime speaks WebTransport over HTTP/3, which runs on QUIC, so the port is always UDP */}}
+            - name: runtime
+              containerPort: {{ int .Values.service.port }}
+              protocol: UDP
+          env:
+            - name: FRANCIS_CONFIG
+              value: /etc/francis/config.yaml
+            {{- if .Values.openTelemetry.enabled }}
+            {{- include "francis.openTelemetryEnv" . | nindent 12 }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.startupProbe.enabled }}
+          startupProbe:
+            {{- include "francis.probe" (dict "probe" .Values.startupProbe) | nindent 12 }}
+          {{- end }}
+          {{- if .Values.livenessProbe.enabled }}
+          livenessProbe:
+            {{- include "francis.probe" (dict "probe" .Values.livenessProbe) | nindent 12 }}
+          {{- end }}
+          {{- if .Values.readinessProbe.enabled }}
+          readinessProbe:
+            {{- include "francis.probe" (dict "probe" .Values.readinessProbe "successThreshold" true) | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/francis
+              readOnly: true
+            {{- /* The container runs with a read-only root filesystem, so give the runtime a writable temporary directory */}}
+            - name: tmp
+              mountPath: /tmp
+            {{- if $sqlite }}
+            - name: data
+              mountPath: {{ $persistence.mountPath | quote }}
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: config
+          secret:
+            secretName: {{ include "francis.configSecretName" . }}
+            {{- /* Read-only for everyone: the file is owned by root, so a narrower mode would keep the non-root runtime user from reading it */}}
+            defaultMode: 0444
+            items:
+              - key: {{ include "francis.configSecretKey" . | quote }}
+                path: config.yaml
+        - name: tmp
+          emptyDir: {}
+        {{- if and $sqlite (not $useVolumeClaimTemplate) }}
+        - name: data
+          {{- if $persistence.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ $persistence.existingClaim | quote }}
+          {{- else }}
+          {{- /* Persistence is disabled, so the database lives for as long as the pod does */}}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+  {{- if $useVolumeClaimTemplate }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "francis.labels" . | nindent 10 }}
+        {{- if or $persistence.annotations .Values.commonAnnotations }}
+        annotations:
+          {{- with .Values.commonAnnotations }}
+          {{- toYaml . | nindent 10 }}
+          {{- end }}
+          {{- with $persistence.annotations }}
+          {{- toYaml . | nindent 10 }}
+          {{- end }}
+        {{- end }}
+      spec:
+        accessModes:
+          {{- toYaml $persistence.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ $persistence.size | quote }}
+        {{- if $persistence.storageClass }}
+        {{- if eq "-" $persistence.storageClass }}
+        storageClassName: ""
+        {{- else }}
+        storageClassName: {{ $persistence.storageClass | quote }}
+        {{- end }}
+        {{- end }}
+  {{- end }}

@@ -1,0 +1,65 @@
+{{- include "francis.validateValues" . -}}
+{{/*
+Dials the first replica over WebTransport and verifies its certificate against the cluster CA, which proves the runtime is serving and that the mounted configuration derives the same CA
+Run it with: helm test <release>
+*/}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "francis.fullname" . }}-test-healthcheck
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "francis.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  restartPolicy: Never
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  automountServiceAccountToken: false
+  {{- with .Values.podSecurityContext }}
+  securityContext:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: healthcheck
+      image: {{ include "francis.image" . | quote }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      {{- with .Values.securityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      command:
+        - /bin/francis
+      args:
+        - healthcheck
+        - -addr
+        - {{ printf "%s-0.%s.%s.svc:%d" (include "francis.fullname" .) (include "francis.headlessServiceName" .) .Release.Namespace (int .Values.service.port) | quote }}
+        - -timeout
+        - 10s
+        - -verbose
+      env:
+        - name: FRANCIS_CONFIG
+          value: /etc/francis/config.yaml
+      volumeMounts:
+        - name: config
+          mountPath: /etc/francis
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+    - name: config
+      secret:
+        secretName: {{ include "francis.configSecretName" . }}
+        defaultMode: 0444
+        items:
+          - key: {{ include "francis.configSecretKey" . | quote }}
+            path: config.yaml

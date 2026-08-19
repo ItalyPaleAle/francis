@@ -1,0 +1,44 @@
+{{- include "francis.validateValues" . -}}
+{{- if .Values.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "francis.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "francis.labels" . | nindent 4 }}
+  {{- if or .Values.service.annotations .Values.commonAnnotations }}
+  annotations:
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.service.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  {{- /* The API server rejects externalTrafficPolicy on a ClusterIP Service */}}
+  {{- if and .Values.service.externalTrafficPolicy (has .Values.service.type (list "NodePort" "LoadBalancer")) }}
+  externalTrafficPolicy: {{ .Values.service.externalTrafficPolicy }}
+  {{- end }}
+  {{- if eq .Values.service.type "LoadBalancer" }}
+  {{- with .Values.service.loadBalancerIP }}
+  loadBalancerIP: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- end }}
+  ports:
+    - name: runtime
+      port: {{ int .Values.service.port }}
+      targetPort: runtime
+      protocol: UDP
+      {{- if and .Values.service.nodePort (has .Values.service.type (list "NodePort" "LoadBalancer")) }}
+      nodePort: {{ int .Values.service.nodePort }}
+      {{- end }}
+  selector:
+    {{- include "francis.selectorLabels" . | nindent 4 }}
+{{- end }}

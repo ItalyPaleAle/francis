@@ -1,0 +1,254 @@
+# Number of runtime replicas
+# Must be between 1 and 4
+# Only 1 replica is allowed when database.type is "sqlite": a SQLite database can be owned by a single runtime only
+replicaCount: 1
+
+image:
+  repository: ghcr.io/italypaleale/francis
+  # Image tag, which defaults to the chart's appVersion when empty
+  tag: ""
+  # Pin the image by digest ("sha256:…"), which takes precedence over the tag
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Overrides for the generated resource names
+nameOverride: ""
+fullnameOverride: ""
+
+# Extra labels and annotations added to every resource created by this chart
+commonLabels: {}
+commonAnnotations: {}
+
+# Database that stores actor state, placement, and alarms
+database:
+  # Database to use, either "postgres" or "sqlite"
+  # "sqlite" works only with replicaCount 1, so use "postgres" to run more than one replica
+  type: sqlite
+
+  sqlite:
+    # Path of the SQLite database file inside the container
+    # It must be inside persistence.mountPath, or the database is lost whenever the pod restarts
+    path: /data/francis.db
+
+    persistence:
+      # Store the SQLite database on a PersistentVolumeClaim
+      # Disabling this uses an emptyDir instead, which loses all actor state when the pod restarts: never do that outside of testing
+      enabled: true
+      # Mount an existing PersistentVolumeClaim instead of the volume claim template created by the chart
+      existingClaim: ""
+      # Directory the volume is mounted at
+      mountPath: /data
+      # Empty uses the cluster's default StorageClass, while "-" disables dynamic provisioning
+      storageClass: ""
+      accessModes:
+        - ReadWriteOnce
+      size: 8Gi
+      annotations: {}
+
+  postgres:
+    # PostgreSQL connection string, for example "postgres://francis:password@postgres.default.svc.cluster.local:5432/francis"
+    # It must begin with "postgres://" or "postgresql://": that is how the runtime selects the PostgreSQL backend
+    # This value is rendered into the chart's Secret, so pass it with --set or a values file that is kept out of source control, or use existingConfigSecret instead
+    connectionString: ""
+
+  # Logging of the SQL statements the runtime executes
+  queryLog:
+    # Log every SQL statement at debug level with its duration
+    enabled: false
+    # Include parameter values in traces and SQL logs, which may expose sensitive data
+    includeParameters: false
+    # Log a warning for every statement that takes at least this long, for example "250ms"
+    # An empty value disables slow-statement warnings
+    slowThreshold: ""
+
+  # Logging of provider operations, which is available on every backend
+  operationLog:
+    enabled: false
+    slowThreshold: ""
+
+# Pre-shared keys the cluster CA is derived from
+# Every runtime that shares these keys is the same certificate issuer, so all replicas must use the same list
+# The first key is the primary one, used to sign new certificates, while the others stay trusted so keys can be rotated without downtime
+# REQUIRED unless existingConfigSecret is set: pass it with --set or a values file that is kept out of source control
+runtimePSKs: []
+
+# Optional identifier for this runtime, recorded in its server certificate
+# All replicas share this value
+runtimeId: ""
+
+# How worker hosts authenticate themselves when they join the cluster
+bootstrap:
+  # Bootstrap method, either "psk" or "jwt"
+  method: jwt
+
+  # Shared secret workers present when method is "psk"
+  # Workers pass the same value to remote.WithHostBootstrapPSK()
+  hostPSK: ""
+
+  # Validation settings for the JWTs workers present with the default "jwt" method
+  # In Kubernetes these are typically projected service account tokens validated against the cluster's OIDC issuer, whose issuer and key source must be supplied
+  # The runtime checks the issuer, audience, signature, and expiry, but not the subject, so any token from this issuer with this audience is accepted: see the chart's README before using this on a shared cluster
+  jwt:
+    # Find these with: kubectl get --raw /.well-known/openid-configuration
+    issuer: ""
+    audience: ""
+    jwksURL: ""
+    # Inline JWKS document, used instead of fetching jwksURL
+    # Useful when the issuer is the in-cluster one, whose discovery endpoint is neither publicly reachable nor served with a publicly trusted certificate
+    staticJWKS: ""
+
+# Runtime behavior, left empty to use the runtime's own defaults
+tuning:
+  # Lifetime of the workload certificates issued to hosts, default "1h"
+  workloadCertTTL: ""
+  # Maximum interval between host health pings, after which a host is considered gone and its actors are placed elsewhere, default "20s"
+  healthCheckDeadline: ""
+  # How often the runtime polls for due alarms, default "1500ms"
+  alarmsPollInterval: ""
+  # How long an alarm lease is held while it executes, default "20s"
+  alarmsLeaseDuration: ""
+  # Grace period for a clean shutdown, default "30s"
+  # terminationGracePeriodSeconds should stay comfortably above this
+  shutdownGracePeriod: ""
+  # Maximum number of hosts allowed in the cluster, where 0 means unlimited
+  maxHosts: 0
+
+log:
+  # One of "debug", "info", "warn", or "error"
+  level: info
+  # Log in structured JSON, which is usually what you want in Kubernetes
+  json: true
+
+# OpenTelemetry export, which is off until an exporter is configured
+# Anything not covered here can be set through extraEnv, since the runtime reads the standard OTEL_* variables
+openTelemetry:
+  enabled: false
+  # Endpoint of the OTLP collector, for example "http://otel-collector.observability.svc.cluster.local:4318"
+  endpoint: ""
+  # Either "http/protobuf" or "grpc"
+  protocol: http/protobuf
+  # Per-signal exporters, each either "otlp", "console", or "none"
+  traces: otlp
+  metrics: otlp
+  logs: otlp
+  # Head sampler, for example "parentbased_traceidratio" with samplerArg "0.1"
+  sampler: ""
+  samplerArg: ""
+
+# Mount a Secret holding a complete runtime config.yaml instead of having the chart render one
+# When this is set the chart ignores database (except for the persistence settings), runtimePSKs, runtimeId, bootstrap, tuning, and log
+existingConfigSecret: ""
+existingConfigSecretKey: config.yaml
+
+service:
+  # Port the runtime listens on
+  # The runtime speaks WebTransport over HTTP/3, so this is always a UDP port
+  port: 7400
+
+  # Headless Service that gives every replica a stable per-pod DNS name
+  # This is the address workers should be pointed at, since it lets them reach each replica individually
+  headless:
+    annotations: {}
+
+  # Additional Service with a single virtual IP in front of all replicas
+  # Convenient for single-replica installations, while multi-replica installations should prefer the per-pod names above
+  enabled: true
+  type: ClusterIP
+  # Only used when type is NodePort or LoadBalancer
+  nodePort: null
+  loadBalancerIP: ""
+  loadBalancerSourceRanges: []
+  externalTrafficPolicy: ""
+  annotations: {}
+
+serviceAccount:
+  create: true
+  # Uses the generated name when empty
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+podDisruptionBudget:
+  # Only created when replicaCount is greater than 1
+  enabled: true
+  minAvailable: 1
+  maxUnavailable: null
+
+# Pods are spread across nodes on a best-effort basis so a single node failure does not take out the control plane
+# Set to "hard" to require distinct nodes, or "" to disable
+podAntiAffinity: soft
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  # The published image runs as UID/GID 65532
+  runAsUser: 65532
+  runAsGroup: 65532
+  # Makes the SQLite volume writable by the runtime user
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+resources: {}
+  # limits:
+  #   memory: 512Mi
+  # requests:
+  #   cpu: 100m
+  #   memory: 128Mi
+
+# Probes run the image's own "francis healthcheck" command, which completes a full WebTransport handshake against the local runtime
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 0
+  periodSeconds: 20
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 0
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1
+
+startupProbe:
+  enabled: true
+  initialDelaySeconds: 2
+  periodSeconds: 3
+  timeoutSeconds: 5
+  failureThreshold: 20
+
+# Should stay comfortably above tuning.shutdownGracePeriod so the runtime can drain
+terminationGracePeriodSeconds: 60
+
+updateStrategy:
+  type: RollingUpdate
+
+# "Parallel" starts and stops replicas together, which is safe because they coordinate through the shared database
+podManagementPolicy: Parallel
+
+nodeSelector: {}
+tolerations: []
+# Takes precedence over podAntiAffinity when set
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""
+
+# Additional environment variables, volumes, and command-line arguments for the runtime container
+extraEnv: []
+extraEnvFrom: []
+extraVolumes: []
+extraVolumeMounts: []
+extraArgs: []

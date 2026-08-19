@@ -295,3 +295,117 @@ jobs:
           subject-name: 'ghcr.io/${{ env.REPO_OWNER }}/francis'
           subject-digest: ${{ steps.docker-build-push.outputs.digest }}
           push-to-registry: true
+
+  helm-chart:
+    name: Publish Helm chart
+    runs-on: ubuntu-latest
+
+    # The chart pins the container image by its appVersion, so it is only published once that image exists
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    env:
+      HELM_VERSION: "v4.2.4"
+
+    steps:
+
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+
+      # Lowercase REPO_OWNER which is required for containers
+      - name: Set lowercase REPO_OWNER
+        run: |
+          REPO_OWNER=${{ github.repository_owner }}
+          echo "REPO_OWNER=${REPO_OWNER,,}" >>${GITHUB_ENV}
+
+      - name: Install Helm
+        run: |
+          set -eo pipefail
+
+          HELM_TARBALL="helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          curl -fsSLO "https://get.helm.sh/${HELM_TARBALL}"
+          curl -fsSLO "https://get.helm.sh/${HELM_TARBALL}.sha256sum"
+          sha256sum -c "${HELM_TARBALL}.sha256sum"
+
+          tar -xzf "${HELM_TARBALL}" linux-amd64/helm
+          sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
+          rm -rf "${HELM_TARBALL}" "${HELM_TARBALL}.sha256sum" linux-amd64
+
+          helm version
+
+      - name: Set variables
+        run: |
+          # The chart is released alongside the runtime, so its version and appVersion both track the release tag
+          CHART_VERSION="${GITHUB_REF_NAME#v}"
+
+          echo "CHART_VERSION=$CHART_VERSION" >> $GITHUB_ENV
+
+          echo "CHART_VERSION: '$CHART_VERSION'"
+
+      - name: Lint and render the chart
+        run: |
+          set -eo pipefail
+
+          helm lint charts/francis --strict \
+            --set-string 'runtimePSKs[0]=lint' \
+            --set-string 'bootstrap.jwt.issuer=https://kubernetes.default.svc.cluster.local' \
+            --set-string 'bootstrap.jwt.audience=francis-runtime' \
+            --set-string 'bootstrap.jwt.jwksURL=https://kubernetes.default.svc.cluster.local/openid/v1/jwks'
+
+          # Rendering both database options catches template errors the linter does not reach
+          echo -e "\n###\nRendering with SQLite\n"
+          helm template francis charts/francis \
+            --set-string 'runtimePSKs[0]=lint' \
+            --set-string 'bootstrap.jwt.issuer=https://kubernetes.default.svc.cluster.local' \
+            --set-string 'bootstrap.jwt.audience=francis-runtime' \
+            --set-string 'bootstrap.jwt.jwksURL=https://kubernetes.default.svc.cluster.local/openid/v1/jwks' \
+            >/dev/null
+
+          echo -e "\n###\nRendering with PostgreSQL and 4 replicas\n"
+          helm template francis charts/francis \
+            --set-string 'runtimePSKs[0]=lint' \
+            --set-string 'bootstrap.jwt.issuer=https://kubernetes.default.svc.cluster.local' \
+            --set-string 'bootstrap.jwt.audience=francis-runtime' \
+            --set-string 'bootstrap.jwt.jwksURL=https://kubernetes.default.svc.cluster.local/openid/v1/jwks' \
+            --set database.type=postgres \
+            --set-string 'database.postgres.connectionString=postgres://user:password@postgres:5432/francis' \
+            --set replicaCount=4 \
+            >/dev/null
+
+      - name: Login to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | helm registry login ghcr.io \
+                --username "${{ github.repository_owner }}" \
+                --password-stdin
+
+      - name: Package and push the chart
+        id: helm-push
+        run: |
+          set -eo pipefail
+
+          mkdir -p .charts
+          helm package charts/francis \
+            --version "${CHART_VERSION}" \
+            --app-version "${CHART_VERSION}" \
+            --destination .charts
+
+          # The chart goes under a "charts" path so its repository does not collide with the container image at ghcr.io/${REPO_OWNER}/francis
+          helm push ".charts/francis-${CHART_VERSION}.tgz" "oci://ghcr.io/${REPO_OWNER}/charts" 2>&1 | tee helm-push.log
+
+          CHART_DIGEST=$(grep -oE 'sha256:[0-9a-f]{64}' helm-push.log | head -n 1)
+          if [[ -z "$CHART_DIGEST" ]]; then
+            echo "Failed to determine the digest of the pushed chart"
+            exit 1
+          fi
+
+          echo "digest=$CHART_DIGEST" >> $GITHUB_OUTPUT
+
+          echo "CHART_DIGEST: '$CHART_DIGEST'"
+
+      - name: Helm chart attestation
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # 4.2.1
+        with:
+          subject-name: 'ghcr.io/${{ env.REPO_OWNER }}/charts/francis'
+          subject-digest: ${{ steps.helm-push.outputs.digest }}
+          push-to-registry: true
