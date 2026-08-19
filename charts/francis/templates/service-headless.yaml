@@ -1,0 +1,29 @@
+{{- include "francis.validateValues" . -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "francis.headlessServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "francis.labels" . | nindent 4 }}
+  {{- if or .Values.service.headless.annotations .Values.commonAnnotations }}
+  annotations:
+    {{- with .Values.commonAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.service.headless.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  {{- /* Each replica keeps its DNS name while it is starting up, so workers can be configured with all of them up front */}}
+  publishNotReadyAddresses: true
+  ports:
+    - name: runtime
+      port: {{ int .Values.service.port }}
+      targetPort: runtime
+      protocol: UDP
+  selector:
+    {{- include "francis.selectorLabels" . | nindent 4 }}

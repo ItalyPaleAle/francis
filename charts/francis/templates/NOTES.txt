@@ -1,0 +1,60 @@
+Francis runtime {{ default .Chart.AppVersion .Values.image.tag }} was installed as "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+Replicas: {{ int .Values.replicaCount }}
+Database: {{ include "francis.databaseType" . }}
+{{- if eq (include "francis.databaseType" .) "sqlite" }}{{ if not .Values.database.sqlite.persistence.enabled }}
+
+  WARNING: database.sqlite.persistence is disabled, so all actor state, placement, and alarms
+  are lost when the pod restarts. Only do this for testing.
+{{- end }}{{ end }}
+
+1. Point your worker hosts at the runtime.
+
+   Each replica has its own stable address, and a host connects to one at a time and rolls over
+   to another on failure, so list all of them:
+
+{{ range $i := until (int .Values.replicaCount) }}     {{ include "francis.fullname" $ }}-{{ $i }}.{{ include "francis.headlessServiceName" $ }}.{{ $.Release.Namespace }}.svc.cluster.local:{{ int $.Values.service.port }}
+{{ end }}
+   In Go:
+
+     h, err := remote.NewHost(
+         remote.WithAddress("<this pod's peer address>:7571"),
+         remote.WithRuntimeAddresses(
+{{- range $i := until (int .Values.replicaCount) }}
+             "{{ include "francis.fullname" $ }}-{{ $i }}.{{ include "francis.headlessServiceName" $ }}.{{ $.Release.Namespace }}.svc.cluster.local:{{ int $.Values.service.port }}",
+{{- end }}
+         ),
+{{- if eq (lower (default "jwt" .Values.bootstrap.method)) "jwt" }}
+         remote.WithHostBootstrapJWTFile("/var/run/secrets/francis/token"),
+{{- else }}
+         remote.WithHostBootstrapPSK([]byte(os.Getenv("FRANCIS_HOST_BOOTSTRAP_PSK"))),
+{{- end }}
+         remote.WithPinnedCA(caPEM),
+     )
+{{- if .Values.service.enabled }}
+
+   A single virtual IP in front of all replicas is also available at
+   {{ include "francis.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ int .Values.service.port }} (UDP).
+{{- end }}
+
+2. Pin the cluster CA on your workers.
+
+   Print the CA derived from the runtime PSKs and pass the PEM to remote.WithPinnedCA():
+
+     kubectl exec -n {{ .Release.Namespace }} {{ include "francis.fullname" . }}-0 -- /bin/francis print-ca
+
+3. Verify the install:
+
+     helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+{{- if and (eq (include "francis.databaseType" .) "sqlite") (not .Values.existingConfigSecret) }}
+
+To scale beyond a single replica, switch to PostgreSQL: SQLite can be owned by one runtime only.
+
+     helm upgrade {{ .Release.Name }} <chart> -n {{ .Release.Namespace }} \
+       --set database.type=postgres \
+       --set database.postgres.connectionString='postgres://user:password@host:5432/francis' \
+       --set replicaCount=3
+{{- end }}
+
+Documentation: https://francis.italypaleale.me/docs/deploying-the-runtime/
