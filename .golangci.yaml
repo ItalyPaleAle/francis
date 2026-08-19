@@ -3,6 +3,7 @@ run:
   build-tags:
     - unit
     - integration
+    - e2e
 output:
   formats:
     text:

@@ -8,6 +8,8 @@ on:
 
 env:
   GOLANGCI_LINT_VERSION: "v2.12.2"
+  HELM_VERSION: "v4.2.4"
+  KIND_VERSION: "v0.29.0"
 
 permissions:
   contents: "read"
@@ -44,6 +46,9 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # 7.0.0
         with:
           go-version-file: "go.mod"
+          cache-dependency-path: |
+            go.sum
+            tests/e2e/go.sum
 
       - name: Check Go dependency minimum age
         run: |
@@ -53,6 +58,12 @@ jobs:
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # 9.3.0
         with:
           version: "${{ env.GOLANGCI_LINT_VERSION }}"
+
+      - name: "Lint E2E"
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # 9.3.0
+        with:
+          version: "${{ env.GOLANGCI_LINT_VERSION }}"
+          working-directory: "tests/e2e"
 
       - name: "Test"
         run: |
@@ -81,3 +92,97 @@ jobs:
       - name: "Integration tests"
         run: |
           go test -tags integration -v -count=1 -timeout 15m ./tests/integration/...
+
+  e2e:
+    name: "K8s E2E (${{ matrix.database }})"
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        database: ["sqlite", "postgres"]
+
+    env:
+      TEST_NAMESPACE: "francis-e2e-${{ matrix.database }}"
+      RUNTIME_IMAGE_REPOSITORY: "francis-e2e"
+      RUNTIME_IMAGE_TAG: "local"
+      TEST_IMAGE_PREFIX: "francis-e2e-"
+      TEST_IMAGE_TAG: "local"
+      KIND_CLUSTER_NAME: "francis-e2e"
+
+    steps:
+      - name: "Check out code"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+
+      - name: "Set up Go"
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # 7.0.0
+        with:
+          go-version-file: "go.mod"
+          cache-dependency-path: |
+            go.sum
+            tests/e2e/go.sum
+
+      - name: "Install Helm and Kind"
+        run: |
+          set -eo pipefail
+
+          HELM_TARBALL="helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          curl -fsSLO "https://get.helm.sh/${HELM_TARBALL}"
+          curl -fsSLO "https://get.helm.sh/${HELM_TARBALL}.sha256sum"
+          sha256sum -c "${HELM_TARBALL}.sha256sum"
+          tar -xzf "${HELM_TARBALL}" linux-amd64/helm
+          sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
+
+          KIND_BINARY="kind-linux-amd64"
+          curl -fsSLO "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/${KIND_BINARY}"
+          curl -fsSLO "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/${KIND_BINARY}.sha256sum"
+          sha256sum -c "${KIND_BINARY}.sha256sum"
+          sudo install -m 0755 "${KIND_BINARY}" /usr/local/bin/kind
+
+          helm version
+          kind version
+
+      - name: "Start Kind"
+        run: |
+          kind create cluster --name "${KIND_CLUSTER_NAME}" --wait 3m
+
+      - name: "Build E2E runtime image"
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p .bin/linux-amd64
+          GOOS=linux GOARCH=amd64 \
+            go build -trimpath -o .bin/linux-amd64/francis ./cmd/runtime
+
+          docker build --build-arg TARGETARCH=amd64 \
+            -t "${RUNTIME_IMAGE_REPOSITORY}:${RUNTIME_IMAGE_TAG}" .
+
+      - name: "Load E2E runtime image"
+        run: |
+          kind load docker-image --name "${KIND_CLUSTER_NAME}" \
+            "${RUNTIME_IMAGE_REPOSITORY}:${RUNTIME_IMAGE_TAG}"
+
+      - name: "Run Helm E2E tests"
+        run: |
+          tests/e2e/run.sh \
+            --database "${{ matrix.database }}" \
+            --namespace "${TEST_NAMESPACE}" \
+            --runtime-image-repository "${RUNTIME_IMAGE_REPOSITORY}" \
+            --runtime-image-tag "${RUNTIME_IMAGE_TAG}" \
+            --test-image-prefix "${TEST_IMAGE_PREFIX}" \
+            --test-image-tag "${TEST_IMAGE_TAG}" \
+            --image-pull-policy Never \
+            --container-engine docker \
+            --target-arch amd64 \
+            --kind-cluster "${KIND_CLUSTER_NAME}" \
+            --keep-namespace
+
+      - name: "Collect E2E diagnostics"
+        if: always()
+        run: |
+          helm status francis --namespace "${TEST_NAMESPACE}" || true
+          kubectl --namespace "${TEST_NAMESPACE}" get pods,services,deployments,statefulsets,pvc -o wide || true
+          kubectl --namespace "${TEST_NAMESPACE}" describe pods || true
+          kubectl --namespace "${TEST_NAMESPACE}" logs -l app.kubernetes.io/instance=francis --all-containers --prefix --tail=-1 || true
+          kubectl --namespace "${TEST_NAMESPACE}" logs -l app.kubernetes.io/name=francis-e2e-postgres --all-containers --prefix --tail=-1 || true

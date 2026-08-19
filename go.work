@@ -3,4 +3,5 @@ go 1.26.5
 use (
 	.
 	./docs
+	./tests/e2e
 )
