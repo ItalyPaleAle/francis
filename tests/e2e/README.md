@@ -2,14 +2,12 @@
 
 These tests deploy the local Francis Helm chart and each cataloged test application to Kubernetes, then drive the applications through HTTP from tagged Go tests.
 
-The suite has two runtime variants:
+The suite has two database variants:
 
 - `sqlite` installs one Francis runtime replica with a persistent SQLite volume
 - `postgres` starts one disposable PostgreSQL Deployment and installs three Francis runtime replicas
 
-GitHub Actions runs both variants in parallel, each in its own Docker-backed Kind cluster.
-
-Both variants use the chart's default JWT bootstrap. The runner reads the current cluster's OIDC issuer and public JWKS through `kubectl`, projects short-lived service-account tokens into the application pods, and pins the Francis CA before the apps connect.
+GitHub Actions runs SQLite with JWT authentication and PostgreSQL with both JWT and PSK authentication in parallel, each in its own Docker-backed Kind cluster.
 
 Each catalog entry is an independent application and tagged Go test package. The test files carry the `e2e` build tag, so ordinary `go test` runs do not select them.
 
@@ -21,8 +19,10 @@ For each catalog entry, the Go helper under [`testhelper`](testhelper) performs 
 2. Build its container with Docker or Podman using [`app.Dockerfile`](app.Dockerfile)
 3. Optionally push the image or load it into Kind
 4. Create a dedicated ServiceAccount, three-replica Deployment, and Service with client-go
-5. Wait for every replica, port-forward a ready pod, and run that test's tagged Go package
+5. Wait for every replica, port-forward all three application pods, and run that test's tagged Go package with both the first endpoint and the complete endpoint list
 6. Print pod logs on failure and delete that test's Kubernetes resources before the next test starts
+
+The helper exports the first endpoint as `E2E_<TEST-NAME>_URL` and the comma-separated replica endpoints as `E2E_<TEST-NAME>_URLS`, after uppercasing the test name and replacing hyphens with underscores.
 
 ## Prerequisites
 
@@ -31,7 +31,8 @@ For each catalog entry, the Go helper under [`testhelper`](testhelper) performs 
 - Helm 4
 - `kubectl`
 - `jq`
-- A current Kubernetes context on which you can create a namespace and read `/.well-known/openid-configuration` and `/openid/v1/jwks`
+- A current Kubernetes context on which you can create a namespace
+- Permission to read `/.well-known/openid-configuration` and `/openid/v1/jwks`
 - A default StorageClass for the SQLite variant
 
 The target cluster must be able to pull the runtime image. The helper handles each test application image immediately before deploying that test.
@@ -65,6 +66,21 @@ For a remote cluster, tell the helper to push each just-built test image to a re
 tests/e2e/run.sh \
   --database postgres \
   --namespace francis-e2e-postgres \
+  --runtime-image-repository registry.example.com/francis-e2e \
+  --runtime-image-tag local \
+  --test-image-prefix registry.example.com/francis-e2e- \
+  --test-image-tag local \
+  --container-engine docker \
+  --push-test-images
+```
+
+Select the PSK variant with `--authentication psk`:
+
+```sh
+tests/e2e/run.sh \
+  --database postgres \
+  --authentication psk \
+  --namespace francis-e2e-postgres-psk \
   --runtime-image-repository registry.example.com/francis-e2e \
   --runtime-image-tag local \
   --test-image-prefix registry.example.com/francis-e2e- \

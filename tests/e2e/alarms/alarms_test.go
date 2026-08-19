@@ -17,7 +17,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const alarmTimeout = 30 * time.Second
+const (
+	alarmTimeout  = 30 * time.Second
+	alarmReplicas = 3
+)
 
 type alarmState struct {
 	Activated      bool   `json:"activated"`
@@ -29,8 +32,7 @@ type alarmState struct {
 }
 
 func TestAlarmDelivery(t *testing.T) {
-	baseURL := strings.TrimRight(os.Getenv("E2E_ALARMS_URL"), "/")
-	require.NotEmpty(t, baseURL, "E2E_ALARMS_URL must point at the alarms test app")
+	baseURLs := alarmReplicaURLs(t)
 	client := &http.Client{
 		Timeout: 10 * time.Second,
 		Transport: &http.Transport{
@@ -42,17 +44,17 @@ func TestAlarmDelivery(t *testing.T) {
 		actorID := fmt.Sprintf("active-%d", time.Now().UnixNano())
 
 		// Activate and persist the actor before scheduling its alarm
-		activateURL := baseURL + "/actors/" + actorID + "/activate"
+		activateURL := baseURLs[0] + "/actors/" + actorID + "/activate"
 		var activated alarmState
 		postJSON(t, client, activateURL, nil, http.StatusOK, &activated)
 		require.True(t, activated.Activated)
 		require.NotEmpty(t, activated.ActivationHost)
 
-		// A later one-shot alarm must be delivered to the already active actor
+		// Schedule through a second replica and observe through the third so delivery cannot rely on one application pod
 		alarmName := "active-alarm"
 		alarmData := "active-payload"
-		scheduleAlarm(t, client, baseURL, actorID, alarmName, alarmData)
-		state := waitForAlarm(t, client, baseURL, actorID)
+		scheduleAlarm(t, client, baseURLs[1], actorID, alarmName, alarmData)
+		state := waitForAlarm(t, client, baseURLs[2], actorID)
 		assert.True(t, state.Activated)
 		assert.GreaterOrEqual(t, state.AlarmCount, 1)
 		assert.Equal(t, alarmName, state.LastAlarmName)
@@ -64,21 +66,36 @@ func TestAlarmDelivery(t *testing.T) {
 		actorID := fmt.Sprintf("inactive-%d", time.Now().UnixNano())
 
 		// A missing state confirms no invocation has activated this actor before scheduling
-		_, found, err := fetchState(client, baseURL, actorID)
+		_, found, err := fetchState(client, baseURLs[0], actorID)
 		require.NoError(t, err)
 		require.False(t, found)
 
-		// Alarm dispatch must place and activate the actor without an invocation
+		// Schedule through a second replica and observe through the third while alarm dispatch activates the unplaced actor
 		const alarmName = "inactive-alarm"
 		const alarmData = "inactive-payload"
-		scheduleAlarm(t, client, baseURL, actorID, alarmName, alarmData)
-		state := waitForAlarm(t, client, baseURL, actorID)
+		scheduleAlarm(t, client, baseURLs[1], actorID, alarmName, alarmData)
+		state := waitForAlarm(t, client, baseURLs[2], actorID)
 		assert.False(t, state.Activated, "the actor should have been activated by its alarm rather than an invocation")
 		assert.GreaterOrEqual(t, state.AlarmCount, 1)
 		assert.Equal(t, alarmName, state.LastAlarmName)
 		assert.Equal(t, alarmData, state.LastAlarmData)
 		assert.NotEmpty(t, state.LastAlarmHost)
 	})
+}
+
+func alarmReplicaURLs(t *testing.T) []string {
+	t.Helper()
+
+	values := strings.Split(os.Getenv("E2E_ALARMS_URLS"), ",")
+	urls := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimRight(strings.TrimSpace(value), "/")
+		if value != "" {
+			urls = append(urls, value)
+		}
+	}
+	require.Len(t, urls, alarmReplicas, "E2E_ALARMS_URLS must contain one endpoint for each application replica")
+	return urls
 }
 
 func scheduleAlarm(t *testing.T, client *http.Client, baseURL string, actorID string, alarmName string, data string) {

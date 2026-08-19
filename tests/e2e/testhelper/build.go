@@ -112,9 +112,9 @@ func publishContainer(ctx context.Context, cfg config) error {
 	return nil
 }
 
-func runGoTest(ctx context.Context, cfg config, baseURL string) error {
-	// Give the selected package only the URL derived from its own temporary port-forward
-	environmentName := "E2E_" + strings.ToUpper(strings.ReplaceAll(cfg.TestName, "-", "_")) + "_URL"
+func runGoTest(ctx context.Context, cfg config, baseURLs []string) error {
+	// Give the selected package both the first endpoint and every replica endpoint derived from its temporary port-forwards
+	environmentPrefix := "E2E_" + strings.ToUpper(strings.ReplaceAll(cfg.TestName, "-", "_"))
 	packagePath := "./" + cfg.TestName
 	// #nosec G204 -- The package path comes from the validated repository-owned test catalog
 	command := exec.CommandContext(
@@ -128,7 +128,11 @@ func runGoTest(ctx context.Context, cfg config, baseURL string) error {
 		packagePath,
 	)
 	command.Dir = filepath.Join(cfg.RootDir, "tests", "e2e")
-	command.Env = append(os.Environ(), environmentName+"="+baseURL)
+	command.Env = append(
+		os.Environ(),
+		environmentPrefix+"_URL="+baseURLs[0],
+		environmentPrefix+"_URLS="+strings.Join(baseURLs, ","),
+	)
 	err := runExternalCommand(command)
 	if err != nil {
 		return fmt.Errorf("E2E test %s failed: %w", cfg.TestName, err)

@@ -94,17 +94,23 @@ jobs:
           go test -tags integration -v -count=1 -timeout 15m ./tests/integration/...
 
   e2e:
-    name: "K8s E2E (${{ matrix.database }})"
+    name: "K8s E2E (${{ matrix.database }}, ${{ matrix.authentication }})"
     runs-on: "ubuntu-latest"
     timeout-minutes: 30
 
     strategy:
       fail-fast: false
       matrix:
-        database: ["sqlite", "postgres"]
+        include:
+          - database: "sqlite"
+            authentication: "jwt"
+          - database: "postgres"
+            authentication: "jwt"
+          - database: "postgres"
+            authentication: "psk"
 
     env:
-      TEST_NAMESPACE: "francis-e2e-${{ matrix.database }}"
+      TEST_NAMESPACE: "francis-e2e-${{ matrix.database }}-${{ matrix.authentication }}"
       RUNTIME_IMAGE_REPOSITORY: "francis-e2e"
       RUNTIME_IMAGE_TAG: "local"
       TEST_IMAGE_PREFIX: "francis-e2e-"
@@ -167,6 +173,7 @@ jobs:
         run: |
           tests/e2e/run.sh \
             --database "${{ matrix.database }}" \
+            --authentication "${{ matrix.authentication }}" \
             --namespace "${TEST_NAMESPACE}" \
             --runtime-image-repository "${RUNTIME_IMAGE_REPOSITORY}" \
             --runtime-image-tag "${RUNTIME_IMAGE_TAG}" \

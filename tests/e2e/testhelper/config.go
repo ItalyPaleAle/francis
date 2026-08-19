@@ -21,6 +21,7 @@ type config struct {
 	ImagePrefix       string
 	ImageTag          string
 	ImagePullPolicy   string
+	Authentication    string
 	ContainerEngine   string
 	TargetArch        string
 	KindCluster       string
@@ -46,6 +47,7 @@ func parseConfig(args []string) (config, error) {
 	flags.StringVar(&cfg.ImagePrefix, "image-prefix", "francis-e2e-", "test image prefix")
 	flags.StringVar(&cfg.ImageTag, "image-tag", "local", "test image tag")
 	flags.StringVar(&cfg.ImagePullPolicy, "image-pull-policy", "IfNotPresent", "Kubernetes image pull policy")
+	flags.StringVar(&cfg.Authentication, "authentication", "jwt", "host authentication method")
 	flags.StringVar(&cfg.ContainerEngine, "container-engine", "docker", "container engine command")
 	flags.StringVar(&cfg.TargetArch, "target-arch", runtime.GOARCH, "Linux application architecture")
 	flags.StringVar(&cfg.KindCluster, "kind-cluster", "", "Kind cluster that should receive the locally-built image")
@@ -100,6 +102,11 @@ func parseConfig(args []string) (config, error) {
 	case "Always", "IfNotPresent", "Never":
 	default:
 		return config{}, errors.New("--image-pull-policy must be Always, IfNotPresent, or Never")
+	}
+	switch cfg.Authentication {
+	case "jwt", "psk":
+	default:
+		return config{}, errors.New("--authentication must be jwt or psk")
 	}
 
 	// Require the catalog, application, and test package conventions used by the lifecycle

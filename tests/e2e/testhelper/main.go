@@ -80,14 +80,21 @@ func run(parentCtx context.Context, cfg config) (returnErr error) {
 		return err
 	}
 
-	// Forward one ready pod to a random local port for the external tagged Go test
-	forward, err := resources.startPortForward(ctx)
+	// Forward every ready pod to a random local port so the tagged Go test can drive all replicas
+	forwards, err := resources.startPortForwards(ctx)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("=== Running E2E test %s at %s ===\n", cfg.TestName, forward.URL())
-	testErr := runGoTest(ctx, cfg, forward.URL())
-	forwardErr := forward.Close()
+	baseURLs := make([]string, len(forwards))
+	for i, forward := range forwards {
+		baseURLs[i] = forward.URL()
+	}
+	fmt.Printf("=== Running E2E test %s at %v ===\n", cfg.TestName, baseURLs)
+	testErr := runGoTest(ctx, cfg, baseURLs)
+	forwardErrors := make([]error, 0, len(forwards))
+	for _, forward := range forwards {
+		forwardErrors = append(forwardErrors, forward.Close())
+	}
 
-	return errors.Join(testErr, forwardErr)
+	return errors.Join(testErr, errors.Join(forwardErrors...))
 }

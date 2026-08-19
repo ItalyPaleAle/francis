@@ -18,7 +18,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const concurrentInvocations = 24
+const (
+	concurrentInvocations = 24
+	invocationReplicas    = 3
+)
 
 type invocationResult struct {
 	ActorID    string `json:"actorId"`
@@ -28,8 +31,7 @@ type invocationResult struct {
 }
 
 func TestActorInvocation(t *testing.T) {
-	baseURL := strings.TrimRight(os.Getenv("E2E_INVOCATION_URL"), "/")
-	require.NotEmpty(t, baseURL, "E2E_INVOCATION_URL must point at the invocation test app")
+	baseURLs := replicaURLs(t)
 	client := &http.Client{
 		Timeout: 10 * time.Second,
 		Transport: &http.Transport{
@@ -37,17 +39,26 @@ func TestActorInvocation(t *testing.T) {
 		},
 	}
 
-	// A sequence of calls through the public Service must reach one durable actor regardless of which app pod accepts HTTP
+	// Send one call through each application replica while requiring all of them to reach the same durable actor
 	actorID := fmt.Sprintf("sequential-%d", time.Now().UnixNano())
-	for expected := 1; expected <= 3; expected++ {
+	sequentialServers := make(map[string]struct{}, len(baseURLs))
+	var sequentialOwner string
+	for index, baseURL := range baseURLs {
+		expected := index + 1
 		result := increment(t, client, baseURL, actorID)
 		assert.Equal(t, expected, result.Count)
 		assert.Equal(t, actorID, result.ActorID)
 		assert.NotEmpty(t, result.ExecutedBy)
 		assert.NotEmpty(t, result.ServedBy)
+		if sequentialOwner == "" {
+			sequentialOwner = result.ExecutedBy
+		}
+		assert.Equal(t, sequentialOwner, result.ExecutedBy, "one active actor must have one owner")
+		sequentialServers[result.ServedBy] = struct{}{}
 	}
+	require.Len(t, sequentialServers, len(baseURLs), "every application replica must serve an invocation")
 
-	// Concurrent calls prove turn-based serialization and shared state across all routing paths
+	// Distribute concurrent calls across every replica to prove turn-based serialization and shared state across all routing paths
 	concurrentActorID := fmt.Sprintf("concurrent-%d", time.Now().UnixNano())
 	results := make([]invocationResult, concurrentInvocations)
 	errs := make([]error, concurrentInvocations)
@@ -56,27 +67,46 @@ func TestActorInvocation(t *testing.T) {
 		waitGroup.Add(1)
 		go func(index int) {
 			defer waitGroup.Done()
+			baseURL := baseURLs[index%len(baseURLs)]
 			results[index], errs[index] = incrementResult(client, baseURL, concurrentActorID)
 		}(i)
 	}
 	waitGroup.Wait()
 
 	counts := make([]int, concurrentInvocations)
-	var owner string
+	concurrentServers := make(map[string]struct{}, len(baseURLs))
+	var concurrentOwner string
 	for i := range results {
 		require.NoError(t, errs[i])
 		counts[i] = results[i].Count
 		assert.NotEmpty(t, results[i].ExecutedBy)
 		assert.NotEmpty(t, results[i].ServedBy)
-		if owner == "" {
-			owner = results[i].ExecutedBy
+		if concurrentOwner == "" {
+			concurrentOwner = results[i].ExecutedBy
 		}
-		assert.Equal(t, owner, results[i].ExecutedBy, "one active actor must have one owner")
+		assert.Equal(t, concurrentOwner, results[i].ExecutedBy, "one active actor must have one owner")
+		concurrentServers[results[i].ServedBy] = struct{}{}
 	}
+	require.Len(t, concurrentServers, len(baseURLs), "every application replica must serve a concurrent invocation")
 	sort.Ints(counts)
 	for i, count := range counts {
 		assert.Equal(t, i+1, count)
 	}
+}
+
+func replicaURLs(t *testing.T) []string {
+	t.Helper()
+
+	values := strings.Split(os.Getenv("E2E_INVOCATION_URLS"), ",")
+	urls := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimRight(strings.TrimSpace(value), "/")
+		if value != "" {
+			urls = append(urls, value)
+		}
+	}
+	require.Len(t, urls, invocationReplicas, "E2E_INVOCATION_URLS must contain one endpoint for each application replica")
+	return urls
 }
 
 func increment(t *testing.T, client *http.Client, baseURL string, actorID string) invocationResult {

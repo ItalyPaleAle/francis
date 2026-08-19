@@ -30,6 +30,8 @@ const (
 	appHTTPPort          = 8080
 	appPeerPort          = 7571
 	bootstrapTokenExpiry = 600
+	bootstrapResource    = "francis-e2e-bootstrap"
+	bootstrapSecretKey   = "host-psk"
 )
 
 type testResources struct {
@@ -124,7 +126,7 @@ func (r *testResources) deploy(ctx context.Context) error {
 	}
 	r.serviceCreated = true
 
-	// Deploy the application with projected JWT bootstrap and the runtime configuration prepared by run.sh
+	// Deploy the application with the selected bootstrap credential and runtime configuration prepared by run.sh
 	deployment := r.deployment()
 	_, err = r.client.AppsV1().Deployments(r.cfg.Namespace).Create(ctx, deployment, metav1.CreateOptions{})
 	if err != nil {
@@ -154,40 +156,52 @@ func (r *testResources) deployment() *appsv1.Deployment {
 						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 					},
 					Containers: []corev1.Container{r.container()},
-					Volumes: []corev1.Volume{
-						{
-							Name: "bootstrap-token",
-							VolumeSource: corev1.VolumeSource{
-								Projected: &corev1.ProjectedVolumeSource{
-									Sources: []corev1.VolumeProjection{
-										{
-											ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
-												Path:              "token",
-												Audience:          "francis-runtime",
-												ExpirationSeconds: ptr.To[int64](bootstrapTokenExpiry),
-											},
-										},
-									},
-								},
-							},
-						},
-						{
-							Name: "cluster-ca",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{Name: "francis-e2e-ca"},
-								},
-							},
-						},
-					},
+					Volumes:    r.volumes(),
 				},
 			},
 		},
 	}
 }
 
+func (r *testResources) volumes() []corev1.Volume {
+	// Mount the pinned cluster CA for both authentication methods
+	volumes := []corev1.Volume{
+		{
+			Name: "cluster-ca",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "francis-e2e-ca"},
+				},
+			},
+		},
+	}
+
+	// Project a short-lived service-account token only when the runtime expects JWT bootstrap
+	if r.cfg.Authentication == "jwt" {
+		volumes = append(volumes, corev1.Volume{
+			Name: "bootstrap-token",
+			VolumeSource: corev1.VolumeSource{
+				Projected: &corev1.ProjectedVolumeSource{
+					Sources: []corev1.VolumeProjection{
+						{
+							ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+								Path:              "token",
+								Audience:          "francis-runtime",
+								ExpirationSeconds: ptr.To[int64](bootstrapTokenExpiry),
+							},
+						},
+					},
+				},
+			},
+		})
+	}
+
+	return volumes
+}
+
 func (r *testResources) container() corev1.Container {
-	return corev1.Container{
+	// Build the common application container settings shared by both authentication methods
+	container := corev1.Container{
 		Name:            "app",
 		Image:           r.cfg.image(),
 		ImagePullPolicy: corev1.PullPolicy(r.cfg.ImagePullPolicy),
@@ -224,7 +238,6 @@ func (r *testResources) container() corev1.Container {
 					},
 				},
 			},
-			{Name: "FRANCIS_BOOTSTRAP_TOKEN_FILE", Value: "/var/run/secrets/francis/token"},
 			{Name: "FRANCIS_CA_FILE", Value: "/etc/francis-ca/ca.pem"},
 		},
 		ReadinessProbe: &corev1.Probe{
@@ -243,19 +256,43 @@ func (r *testResources) container() corev1.Container {
 			TimeoutSeconds: 2,
 		},
 		VolumeMounts: []corev1.VolumeMount{
-			{Name: "bootstrap-token", MountPath: "/var/run/secrets/francis", ReadOnly: true},
 			{Name: "cluster-ca", MountPath: "/etc/francis-ca", ReadOnly: true},
 		},
 		Resources: corev1.ResourceRequirements{},
 	}
+
+	// Supply exactly the credential selected for this runtime installation
+	if r.cfg.Authentication == "jwt" {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "FRANCIS_BOOTSTRAP_TOKEN_FILE",
+			Value: "/var/run/secrets/francis/token",
+		})
+		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+			Name:      "bootstrap-token",
+			MountPath: "/var/run/secrets/francis",
+			ReadOnly:  true,
+		})
+	} else {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name: "FRANCIS_BOOTSTRAP_PSK",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: bootstrapResource},
+					Key:                  bootstrapSecretKey,
+				},
+			},
+		})
+	}
+
+	return container
 }
 
 func (r *testResources) waitReady(ctx context.Context) error {
 	// Require every replica to become available so each test starts from the topology it intends to exercise
 	err := wait.PollUntilContextTimeout(ctx, 2*time.Second, r.cfg.DeploymentTimeout, true, func(pollCtx context.Context) (bool, error) {
-		deployment, getErr := r.client.AppsV1().Deployments(r.cfg.Namespace).Get(pollCtx, r.name, metav1.GetOptions{})
-		if getErr != nil {
-			return false, getErr
+		deployment, rErr := r.client.AppsV1().Deployments(r.cfg.Namespace).Get(pollCtx, r.name, metav1.GetOptions{})
+		if rErr != nil {
+			return false, rErr
 		}
 		ready := deployment.Status.ObservedGeneration >= deployment.Generation && deployment.Status.AvailableReplicas == appReplicas
 		return ready, nil
@@ -267,23 +304,40 @@ func (r *testResources) waitReady(ctx context.Context) error {
 	return nil
 }
 
-func (r *testResources) startPortForward(ctx context.Context) (*appPortForward, error) {
-	// Select a ready replica behind the Service because Kubernetes port-forwarding ultimately targets a pod
+func (r *testResources) startPortForwards(ctx context.Context) ([]*appPortForward, error) {
+	// Select every ready application pod so tests can drive all replicas directly
 	pods, err := r.client.CoreV1().Pods(r.cfg.Namespace).List(ctx, metav1.ListOptions{LabelSelector: metav1.FormatLabelSelector(&metav1.LabelSelector{MatchLabels: r.labels})})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list test pods: %w", err)
 	}
-	var podName string
+	readyPodNames := make([]string, 0, appReplicas)
 	for i := range pods.Items {
 		if podReady(&pods.Items[i]) {
-			podName = pods.Items[i].Name
-			break
+			readyPodNames = append(readyPodNames, pods.Items[i].Name)
 		}
 	}
-	if podName == "" {
-		return nil, errors.New("test Deployment has no ready pod for port-forwarding")
+	if len(readyPodNames) != appReplicas {
+		return nil, fmt.Errorf("expected %d ready pods for port-forwarding, got %d", appReplicas, len(readyPodNames))
 	}
 
+	// Open one local endpoint per replica and close completed forwards if a later replica fails
+	forwards := make([]*appPortForward, 0, len(readyPodNames))
+	for _, podName := range readyPodNames {
+		forward, forwardErr := r.startPodPortForward(ctx, podName)
+		if forwardErr != nil {
+			closeErrors := make([]error, 0, len(forwards))
+			for _, startedForward := range forwards {
+				closeErrors = append(closeErrors, startedForward.Close())
+			}
+			return nil, errors.Join(forwardErr, errors.Join(closeErrors...))
+		}
+		forwards = append(forwards, forward)
+	}
+
+	return forwards, nil
+}
+
+func (r *testResources) startPodPortForward(ctx context.Context, podName string) (*appPortForward, error) {
 	// Create the same SPDY stream used by kubectl while asking the OS for an unused local port
 	roundTripper, upgrader, err := spdy.RoundTripperFor(r.restConfig)
 	if err != nil {

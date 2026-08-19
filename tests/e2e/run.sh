@@ -8,7 +8,8 @@ usage() {
     "" \
     "Options:" \
     "  --database <sqlite|postgres>        Database variant to deploy (default: sqlite)" \
-    "  --namespace <name>                  Namespace to create (default: francis-e2e-<database>)" \
+    "  --authentication <jwt|psk>          Host authentication method (default: jwt)" \
+    "  --namespace <name>                  Namespace to create (default: francis-e2e-<database>-<authentication>)" \
     "  --runtime-image-repository <name>   Runtime image repository (default: francis-e2e)" \
     "  --runtime-image-tag <tag>           Runtime image tag (default: local)" \
     "  --test-image-prefix <prefix>        Test application image prefix (default: francis-e2e-)" \
@@ -32,6 +33,7 @@ require_value() {
 }
 
 database=sqlite
+authentication=jwt
 namespace=""
 runtime_image_repository=francis-e2e
 runtime_image_tag=local
@@ -50,6 +52,11 @@ while [[ $# -gt 0 ]]; do
     --database)
       require_value "$1" "${2-}"
       database=$2
+      shift 2
+      ;;
+    --authentication)
+      require_value "$1" "${2-}"
+      authentication=$2
       shift 2
       ;;
     --namespace)
@@ -118,7 +125,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$namespace" ]]; then
-  namespace="francis-e2e-${database}"
+  namespace="francis-e2e-${database}-${authentication}"
 fi
 
 case "$database" in
@@ -133,6 +140,20 @@ case "$database" in
     exit 1
     ;;
 esac
+
+case "$authentication" in
+  jwt | psk)
+    ;;
+  *)
+    echo "--authentication must be either jwt or psk" >&2
+    exit 1
+    ;;
+esac
+
+if [[ "$authentication" == "psk" && "$database" != "postgres" ]]; then
+  echo "--authentication psk is supported only with --database postgres" >&2
+  exit 1
+fi
 
 case "$image_pull_policy" in
   Always | IfNotPresent | Never)
@@ -170,7 +191,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-required_commands=(go helm jq kubectl "$container_engine")
+required_commands=(go helm kubectl "$container_engine")
+if [[ "$authentication" == "jwt" ]]; then
+  required_commands+=(jq)
+fi
 if [[ -n "$kind_cluster" ]]; then
   required_commands+=(kind)
 fi
@@ -189,10 +213,22 @@ fi
 kubectl create namespace "$namespace"
 namespace_created=true
 
-# Discover the current cluster's workload identity configuration for the chart's default JWT bootstrap
-kubectl get --raw /.well-known/openid-configuration >"$temp_dir/openid-configuration.json"
-issuer=$(jq -er '.issuer' "$temp_dir/openid-configuration.json")
-kubectl get --raw /openid/v1/jwks >"$temp_dir/jwks.json"
+# Configure the selected host bootstrap method before installing the runtime
+bootstrap_args=(--set-string bootstrap.method="$authentication")
+if [[ "$authentication" == "jwt" ]]; then
+  kubectl get --raw /.well-known/openid-configuration >"$temp_dir/openid-configuration.json"
+  issuer=$(jq -er '.issuer' "$temp_dir/openid-configuration.json")
+  kubectl get --raw /openid/v1/jwks >"$temp_dir/jwks.json"
+  bootstrap_args+=(
+    --set-string bootstrap.jwt.issuer="$issuer"
+    --set-string bootstrap.jwt.audience=francis-runtime
+    --set-file bootstrap.jwt.staticJWKS="$temp_dir/jwks.json"
+  )
+else
+  host_bootstrap_psk=francis-e2e-host-bootstrap-psk
+  kubectl --namespace "$namespace" create secret generic francis-e2e-bootstrap --from-literal=host-psk="$host_bootstrap_psk"
+  bootstrap_args+=(--set-string bootstrap.hostPSK="$host_bootstrap_psk")
+fi
 
 # Start an ephemeral PostgreSQL server only for the highly available runtime variant
 database_args=()
@@ -220,16 +256,14 @@ helm upgrade --install francis "$root_dir/charts/francis" \
   --set-string image.tag="$runtime_image_tag" \
   --set image.pullPolicy="$image_pull_policy" \
   --set-string 'runtimePSKs[0]=francis-e2e-runtime-psk-that-is-long-enough' \
-  --set-string bootstrap.jwt.issuer="$issuer" \
-  --set-string bootstrap.jwt.audience=francis-runtime \
-  --set-file bootstrap.jwt.staticJWKS="$temp_dir/jwks.json" \
   --set-string tuning.alarmsPollInterval=250ms \
+  "${bootstrap_args[@]}" \
   "${database_args[@]}"
 
 # Exercise the chart's own QUIC health-check hook before adding application hosts
 helm test francis --namespace "$namespace" --logs --timeout 2m
 
-# Pin the runtime-generated CA in every test app before any JWT can be presented
+# Pin the runtime-generated CA in every test app before any bootstrap credential is presented
 kubectl --namespace "$namespace" exec francis-0 -- /bin/francis print-ca >"$temp_dir/ca.pem"
 kubectl --namespace "$namespace" create configmap francis-e2e-ca --from-file=ca.pem="$temp_dir/ca.pem"
 
@@ -254,6 +288,7 @@ helper_args=(
   --image-prefix "$test_image_prefix"
   --image-tag "$test_image_tag"
   --image-pull-policy "$image_pull_policy"
+  --authentication "$authentication"
   --container-engine "$container_engine"
   --target-arch "$target_arch"
 )
