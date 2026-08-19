@@ -22,11 +22,9 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
-	"k8s.io/utils/ptr"
 )
 
 const (
-	appReplicas          = 3
 	appHTTPPort          = 8080
 	appPeerPort          = 7571
 	bootstrapTokenExpiry = 600
@@ -73,7 +71,7 @@ func newKubernetesClient() (*rest.Config, kubernetes.Interface, error) {
 }
 
 func newTestResources(cfg config, restConfig *rest.Config, client kubernetes.Interface) *testResources {
-	name := "francis-e2e-" + cfg.TestName
+	name := "francis-e2e-" + cfg.Test.Name
 	return &testResources{
 		cfg:        cfg,
 		restConfig: restConfig,
@@ -82,7 +80,7 @@ func newTestResources(cfg config, restConfig *rest.Config, client kubernetes.Int
 		labels: map[string]string{
 			"app.kubernetes.io/name":       name,
 			"app.kubernetes.io/managed-by": "francis-e2e-test-helper",
-			"francis.italypaleale.me/test": cfg.TestName,
+			"francis.italypaleale.me/test": cfg.Test.Name,
 		},
 	}
 }
@@ -102,7 +100,7 @@ func (r *testResources) deploy(ctx context.Context) error {
 	}
 	r.serviceAccountCreated = true
 
-	// Create a stable HTTP Service that targets only this test's three application replicas
+	// Create a stable HTTP Service that targets only this test's application replicas
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   r.name,
@@ -144,7 +142,7 @@ func (r *testResources) deployment() *appsv1.Deployment {
 			Labels: r.labels,
 		},
 		Spec: appsv1.DeploymentSpec{
-			Replicas: ptr.To[int32](appReplicas),
+			Replicas: new(r.cfg.Test.Replicas),
 			Selector: &metav1.LabelSelector{MatchLabels: r.labels},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: r.labels},
@@ -187,7 +185,7 @@ func (r *testResources) volumes() []corev1.Volume {
 							ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
 								Path:              "token",
 								Audience:          "francis-runtime",
-								ExpirationSeconds: ptr.To[int64](bootstrapTokenExpiry),
+								ExpirationSeconds: new(int64(bootstrapTokenExpiry)),
 							},
 						},
 					},
@@ -248,6 +246,15 @@ func (r *testResources) container() corev1.Container {
 			TimeoutSeconds:   1,
 			FailureThreshold: 15,
 		},
+		StartupProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromString("http")},
+			},
+			InitialDelaySeconds: 2,
+			PeriodSeconds:       3,
+			TimeoutSeconds:      5,
+			FailureThreshold:    20,
+		},
 		LivenessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromString("http")},
@@ -294,7 +301,7 @@ func (r *testResources) waitReady(ctx context.Context) error {
 		if rErr != nil {
 			return false, rErr
 		}
-		ready := deployment.Status.ObservedGeneration >= deployment.Generation && deployment.Status.AvailableReplicas == appReplicas
+		ready := deployment.Status.ObservedGeneration >= deployment.Generation && deployment.Status.AvailableReplicas == r.cfg.Test.Replicas
 		return ready, nil
 	})
 	if err != nil {
@@ -310,14 +317,14 @@ func (r *testResources) startPortForwards(ctx context.Context) ([]*appPortForwar
 	if err != nil {
 		return nil, fmt.Errorf("failed to list test pods: %w", err)
 	}
-	readyPodNames := make([]string, 0, appReplicas)
+	readyPodNames := make([]string, 0, r.cfg.Test.Replicas)
 	for i := range pods.Items {
 		if podReady(&pods.Items[i]) {
 			readyPodNames = append(readyPodNames, pods.Items[i].Name)
 		}
 	}
-	if len(readyPodNames) != appReplicas {
-		return nil, fmt.Errorf("expected %d ready pods for port-forwarding, got %d", appReplicas, len(readyPodNames))
+	if len(readyPodNames) != int(r.cfg.Test.Replicas) {
+		return nil, fmt.Errorf("expected %d ready pods for port-forwarding, got %d", r.cfg.Test.Replicas, len(readyPodNames))
 	}
 
 	// Open one local endpoint per replica and close completed forwards if a later replica fails
@@ -347,9 +354,9 @@ func (r *testResources) startPodPortForward(ctx context.Context, podName string)
 	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: roundTripper}, http.MethodPost, serverURL)
 	stopCh := make(chan struct{})
 	readyCh := make(chan struct{})
-	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
-	forwarder, err := portforward.New(dialer, []string{"0:8080"}, stopCh, readyCh, stdout, stderr)
+	portMapping := fmt.Sprintf("0:%d", appHTTPPort)
+	forwarder, err := portforward.New(dialer, []string{portMapping}, stopCh, readyCh, io.Discard, stderr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to configure pod port-forward: %w", err)
 	}
@@ -467,7 +474,7 @@ func (r *testResources) teardown(ctx context.Context) error {
 
 	cleanupErr := errors.Join(cleanupErrors...)
 	if cleanupErr == nil {
-		fmt.Printf("=== Removed E2E test %s resources ===\n", r.cfg.TestName)
+		fmt.Printf("=== Removed E2E test %s resources ===\n", r.cfg.Test.Name)
 	}
 	return cleanupErr
 }

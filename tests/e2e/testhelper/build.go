@@ -16,14 +16,14 @@ func buildApplication(ctx context.Context, cfg config) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to create E2E binary directory: %w", err)
 	}
-	binaryPath := filepath.Join(outputDir, cfg.TestName)
-	packagePath := "./" + cfg.TestName + "/app"
+	binaryPath := filepath.Join(outputDir, cfg.Test.Name)
+	packagePath := "./" + cfg.Test.Name + "/app"
 	command := exec.CommandContext(ctx, "go", "build", "-trimpath", "-o", binaryPath, packagePath)
 	command.Dir = filepath.Join(cfg.RootDir, "tests", "e2e")
 	command.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+cfg.TargetArch)
 	err = runExternalCommand(command)
 	if err != nil {
-		return "", fmt.Errorf("failed to build %s application: %w", cfg.TestName, err)
+		return "", fmt.Errorf("failed to build %s application: %w", cfg.Test.Name, err)
 	}
 
 	return binaryPath, nil
@@ -113,9 +113,14 @@ func publishContainer(ctx context.Context, cfg config) error {
 }
 
 func runGoTest(ctx context.Context, cfg config, baseURLs []string) error {
-	// Give the selected package both the first endpoint and every replica endpoint derived from its temporary port-forwards
-	environmentPrefix := "E2E_" + strings.ToUpper(strings.ReplaceAll(cfg.TestName, "-", "_"))
-	packagePath := "./" + cfg.TestName
+	// Reject an incomplete caller result before constructing the test environment
+	if len(baseURLs) == 0 {
+		return fmt.Errorf("E2E test %s has no application endpoints", cfg.Test.Name)
+	}
+
+	// Give the selected package every replica endpoint derived from its temporary port-forwards
+	environmentPrefix := "E2E_" + strings.ToUpper(strings.ReplaceAll(cfg.Test.Name, "-", "_"))
+	packagePath := "./" + cfg.Test.Name
 	// #nosec G204 -- The package path comes from the validated repository-owned test folder
 	command := exec.CommandContext(
 		ctx,
@@ -130,12 +135,11 @@ func runGoTest(ctx context.Context, cfg config, baseURLs []string) error {
 	command.Dir = filepath.Join(cfg.RootDir, "tests", "e2e")
 	command.Env = append(
 		os.Environ(),
-		environmentPrefix+"_URL="+baseURLs[0],
 		environmentPrefix+"_URLS="+strings.Join(baseURLs, ","),
 	)
 	err := runExternalCommand(command)
 	if err != nil {
-		return fmt.Errorf("E2E test %s failed: %w", cfg.TestName, err)
+		return fmt.Errorf("E2E test %s failed: %w", cfg.Test.Name, err)
 	}
 
 	return nil

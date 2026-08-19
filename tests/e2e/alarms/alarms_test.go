@@ -17,10 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const (
-	alarmTimeout  = 30 * time.Second
-	alarmReplicas = 3
-)
+const alarmTimeout = 30 * time.Second
 
 type alarmState struct {
 	Activated      bool   `json:"activated"`
@@ -94,7 +91,7 @@ func alarmReplicaURLs(t *testing.T) []string {
 			urls = append(urls, value)
 		}
 	}
-	require.Len(t, urls, alarmReplicas, "E2E_ALARMS_URLS must contain one endpoint for each application replica")
+	require.GreaterOrEqual(t, len(urls), 3, "E2E_ALARMS_URLS must contain at least three application endpoints")
 	return urls
 }
 
@@ -119,8 +116,7 @@ func waitForAlarm(t *testing.T, client *http.Client, baseURL string, actorID str
 		state, found, lastErr = fetchState(client, baseURL, actorID)
 		return lastErr == nil && found && state.AlarmCount > 0
 	}, alarmTimeout, 250*time.Millisecond)
-	require.True(t, received)
-	require.NoError(t, lastErr)
+	require.True(t, received, "alarm was not delivered, last error: %v", lastErr)
 	return state
 }
 

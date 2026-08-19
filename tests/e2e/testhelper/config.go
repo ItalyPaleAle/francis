@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,8 +18,8 @@ import (
 var validTestName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 type config struct {
-	TestName               string
-	Tests                  []string
+	Test                   testDefinition
+	Tests                  []testDefinition
 	Database               string
 	Authentication         string
 	Namespace              string
@@ -36,6 +39,11 @@ type config struct {
 	DeploymentTimeout      time.Duration
 	TestTimeout            time.Duration
 	HelmTimeout            time.Duration
+}
+
+type testDefinition struct {
+	Name     string `json:"-"`
+	Replicas int32  `json:"replicas"`
 }
 
 func parseConfig(args []string) (config, error) {
@@ -162,62 +170,90 @@ func validateConfig(cfg config) error {
 	return nil
 }
 
-func discoverTests(rootDir string) ([]string, error) {
-	// Scan immediate directories in stable filename order and select the app-plus-test convention
+func discoverTests(rootDir string) ([]testDefinition, error) {
+	// Scan immediate directories in stable filename order and use test.json as the explicit test marker
 	e2eDir := filepath.Join(rootDir, "tests", "e2e")
 	entries, err := os.ReadDir(e2eDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan E2E test directory: %w", err)
 	}
 
-	tests := make([]string, 0)
+	tests := make([]testDefinition, 0)
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
 		testName := entry.Name()
-		if !validTestName.MatchString(testName) {
+		testDir := filepath.Join(e2eDir, testName)
+		definitionPath := filepath.Join(testDir, "test.json")
+		definitionInfo, err := os.Stat(definitionPath)
+		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to inspect E2E definition for %q: %w", testName, err)
+		}
+		if !definitionInfo.Mode().IsRegular() {
+			return nil, fmt.Errorf("E2E definition for %q is not a regular file", testName)
+		}
+		if !validTestName.MatchString(testName) {
+			return nil, fmt.Errorf("invalid E2E test folder name %q", testName)
+		}
 
-		// Ignore infrastructure folders while rejecting a partial test convention
-		appDir := filepath.Join(e2eDir, testName, "app")
+		// Decode metadata strictly so misspelled settings fail before cluster setup
+		definitionData, err := os.ReadFile(definitionPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read E2E definition for %q: %w", testName, err)
+		}
+		definition := testDefinition{Name: testName}
+		decoder := json.NewDecoder(bytes.NewReader(definitionData))
+		decoder.DisallowUnknownFields()
+		err = decoder.Decode(&definition)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decode E2E definition for %q: %w", testName, err)
+		}
+		var trailingValue any
+		err = decoder.Decode(&trailingValue)
+		if !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("E2E definition for %q must contain exactly one JSON object", testName)
+		}
+		if definition.Replicas < 1 {
+			return nil, fmt.Errorf("E2E definition for %q must set replicas to at least 1", testName)
+		}
+
+		// Require both executable and test halves for every explicitly marked test folder
+		appDir := filepath.Join(testDir, "app")
 		appInfo, err := os.Stat(appDir)
-		hasApp := err == nil && appInfo.IsDir()
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err != nil {
 			return nil, fmt.Errorf("failed to inspect application directory for %q: %w", testName, err)
 		}
-		testFiles, err := filepath.Glob(filepath.Join(e2eDir, testName, "*_test.go"))
+		if !appInfo.IsDir() {
+			return nil, fmt.Errorf("application path for E2E test %q is not a directory", testName)
+		}
+		testFiles, err := filepath.Glob(filepath.Join(testDir, "*_test.go"))
 		if err != nil {
 			return nil, fmt.Errorf("failed to inspect Go test package %q: %w", testName, err)
 		}
-		hasTests := len(testFiles) > 0
-		if !hasApp && !hasTests {
-			continue
-		}
-		if !hasApp {
-			return nil, fmt.Errorf("E2E test %q has _test.go files but no app directory", testName)
-		}
-		if !hasTests {
+		if len(testFiles) == 0 {
 			return nil, fmt.Errorf("E2E test %q has an app directory but no _test.go files", testName)
 		}
 
-		tests = append(tests, testName)
+		tests = append(tests, definition)
 	}
 	if len(tests) == 0 {
-		return nil, errors.New("tests/e2e contains no app-plus-test folders")
+		return nil, errors.New("tests/e2e contains no folders with test.json")
 	}
 
 	return tests, nil
 }
 
-func (c config) forTest(testName string) config {
-	c.TestName = testName
+func (c config) forTest(test testDefinition) config {
+	c.Test = test
 	return c
 }
 
 func (c config) image() string {
-	return c.ImagePrefix + c.TestName + ":" + c.ImageTag
+	return c.ImagePrefix + c.Test.Name + ":" + c.ImageTag
 }
 
 func (c config) runtimeReplicas() int32 {

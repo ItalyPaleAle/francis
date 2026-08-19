@@ -18,10 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const (
-	concurrentInvocations = 24
-	invocationReplicas    = 3
-)
+const concurrentInvocations = 24
 
 type invocationResult struct {
 	ActorID    string `json:"actorId"`
@@ -105,7 +102,7 @@ func replicaURLs(t *testing.T) []string {
 			urls = append(urls, value)
 		}
 	}
-	require.Len(t, urls, invocationReplicas, "E2E_INVOCATION_URLS must contain one endpoint for each application replica")
+	require.GreaterOrEqual(t, len(urls), 2, "E2E_INVOCATION_URLS must contain endpoints for multiple application replicas")
 	return urls
 }
 

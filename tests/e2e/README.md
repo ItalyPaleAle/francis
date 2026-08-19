@@ -9,23 +9,32 @@ The suite has two database variants:
 
 GitHub Actions runs SQLite with JWT authentication and PostgreSQL with both JWT and PSK authentication in parallel, each in its own Docker-backed Kind cluster.
 
-Each discovered test folder is an independent application and tagged Go test package. The test files carry the `e2e` build tag, so ordinary `go test` runs do not select them.
+Each test folder is an independent application and tagged Go test package. The test files carry the `e2e` build tag, so ordinary `go test` runs do not select them.
 
 The Go app under [`testhelper`](testhelper) owns the complete suite lifecycle. It creates the namespace, starts PostgreSQL when selected, discovers Kubernetes JWT metadata when needed, invokes Helm 4 to install and test the local chart, publishes the runtime trust configuration, and removes the namespace when finished.
 
-The app discovers each immediate folder that contains both an `app` Go package and at least one tagged `_test.go` file.
-Adding a test requires only adding a folder that follows this convention. A partial folder with only one half is rejected before cluster setup.
+The app discovers immediate folders through a `test.json` marker, then requires both an `app` Go package and at least one tagged `_test.go` file. Infrastructure folders without that marker are ignored even when they contain their own unit tests.
+
+Each marker configures settings owned by that test, starting with its application replica count:
+
+```json
+{
+  "replicas": 3
+}
+```
+
+Unknown settings, invalid replica counts, and incomplete test folders are rejected before cluster setup.
 
 For each discovered test, the app then performs one isolated lifecycle:
 
 1. Cross-compile the test application with `go build`
 2. Build its container with Docker or Podman using [`app.Dockerfile`](app.Dockerfile)
 3. Optionally push the image or load it into Kind
-4. Create a dedicated ServiceAccount, three-replica Deployment, and Service with client-go
-5. Wait for every replica, port-forward all three application pods, and run that test's tagged Go package with both the first endpoint and the complete endpoint list
+4. Create a dedicated ServiceAccount, metadata-configured Deployment, and Service with client-go
+5. Wait for every replica, port-forward every application pod, and run that test's tagged Go package with the complete endpoint list
 6. Print every app replica's pod logs and delete that test's Kubernetes resources before the next test starts
 
-The helper exports the first endpoint as `E2E_<TEST-NAME>_URL` and the comma-separated replica endpoints as `E2E_<TEST-NAME>_URLS`, after uppercasing the test name and replacing hyphens with underscores.
+The helper exports the comma-separated replica endpoints as `E2E_<TEST-NAME>_URLS`, after uppercasing the test name and replacing hyphens with underscores.
 
 ## Prerequisites
 

@@ -39,7 +39,7 @@ func runTest(parentCtx context.Context, cfg config, restConfig *rest.Config, cli
 	defer cancel()
 
 	// Build and publish this test image immediately before its resources are deployed
-	fmt.Printf("=== Building E2E test %s ===\n", cfg.TestName)
+	fmt.Printf("=== Building E2E test %s ===\n", cfg.Test.Name)
 	binaryPath, err := buildApplication(ctx, cfg)
 	if err != nil {
 		return err
@@ -61,7 +61,7 @@ func runTest(parentCtx context.Context, cfg config, restConfig *rest.Config, cli
 		logErr := resources.printPodLogs(logCtx)
 		logCancel()
 		if logErr != nil {
-			logErr = fmt.Errorf("failed to collect %s pod logs: %w", cfg.TestName, logErr)
+			logErr = fmt.Errorf("failed to collect %s pod logs: %w", cfg.Test.Name, logErr)
 		}
 
 		// Remove this test's resources even when test execution or log collection failed
@@ -72,7 +72,7 @@ func runTest(parentCtx context.Context, cfg config, restConfig *rest.Config, cli
 	}()
 
 	// Deploy three app replicas and wait until Kubernetes reports all of them available
-	fmt.Printf("=== Deploying E2E test %s ===\n", cfg.TestName)
+	fmt.Printf("=== Deploying E2E test %s ===\n", cfg.Test.Name)
 	err = resources.deploy(ctx)
 	if err != nil {
 		return err
@@ -91,7 +91,7 @@ func runTest(parentCtx context.Context, cfg config, restConfig *rest.Config, cli
 	for i, forward := range forwards {
 		baseURLs[i] = forward.URL()
 	}
-	fmt.Printf("=== Running E2E test %s at %v ===\n", cfg.TestName, baseURLs)
+	fmt.Printf("=== Running E2E test %s at %v ===\n", cfg.Test.Name, baseURLs)
 	testErr := runGoTest(ctx, cfg, baseURLs)
 	forwardErrors := make([]error, 0, len(forwards))
 	for _, forward := range forwards {

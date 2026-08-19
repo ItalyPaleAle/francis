@@ -21,15 +21,16 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
-	"k8s.io/utils/ptr"
 )
 
 const (
-	runtimeReleaseName  = "francis"
-	postgresName        = "francis-e2e-postgres"
-	sharedCAConfig      = "francis-e2e-ca"
-	sharedRuntimeConfig = "francis-e2e-config"
-	postgresPort        = 5432
+	runtimeReleaseName     = "francis"
+	runtimeHeadlessService = runtimeReleaseName + "-headless"
+	postgresName           = "francis-e2e-postgres"
+	sharedCAConfig         = "francis-e2e-ca"
+	sharedRuntimeConfig    = "francis-e2e-config"
+	runtimePort            = 7400
+	postgresPort           = 5432
 )
 
 // #nosec G101 -- These fixed credentials exist only inside an ephemeral E2E namespace
@@ -109,8 +110,8 @@ func runSuite(parentCtx context.Context, cfg config) (returnErr error) {
 	}
 
 	// Give every discovered test its own build, deployment, execution, and teardown lifecycle
-	for _, testName := range cfg.Tests {
-		testCfg := cfg.forTest(testName)
+	for _, test := range cfg.Tests {
+		testCfg := cfg.forTest(test)
 		err = runTest(ctx, testCfg, restConfig, client)
 		if err != nil {
 			return err
@@ -180,7 +181,7 @@ func (r *suiteResources) deployPostgres(ctx context.Context) error {
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: postgresName, Namespace: r.cfg.Namespace, Labels: labels},
 		Spec: appsv1.DeploymentSpec{
-			Replicas: ptr.To[int32](1),
+			Replicas: new(int32(1)),
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
@@ -272,9 +273,17 @@ func (r *suiteResources) installRuntime(ctx context.Context) error {
 	// Select the storage backend and replica count exercised by this suite variant
 	databaseArgs := []string{"--set", "database.type=sqlite", "--set", "database.sqlite.persistence.size=1Gi"}
 	if r.cfg.Database == "postgres" {
+		connectionString := fmt.Sprintf(
+			"postgres://%s:%s@%s:%d/%s?sslmode=disable",
+			postgresCredential,
+			postgresCredential,
+			postgresName,
+			postgresPort,
+			postgresCredential,
+		)
 		databaseArgs = []string{
 			"--set", "database.type=postgres",
-			"--set-string", "database.postgres.connectionString=postgres://francis:francis@francis-e2e-postgres:5432/francis?sslmode=disable",
+			"--set-string", "database.postgres.connectionString=" + connectionString,
 		}
 	}
 
@@ -287,6 +296,8 @@ func (r *suiteResources) installRuntime(ctx context.Context) error {
 		"--wait",
 		"--timeout", r.cfg.HelmTimeout.String(),
 		"--set", fmt.Sprintf("replicaCount=%d", r.cfg.runtimeReplicas()),
+		"--set-string", "fullnameOverride="+runtimeReleaseName,
+		"--set", fmt.Sprintf("service.port=%d", runtimePort),
 		"--set-string", "image.repository="+r.cfg.RuntimeImageRepository,
 		"--set-string", "image.tag="+r.cfg.RuntimeImageTag,
 		"--set", "image.pullPolicy="+r.cfg.ImagePullPolicy,
@@ -387,7 +398,7 @@ func (r *suiteResources) testRuntime(ctx context.Context) error {
 		"helm", "test", runtimeReleaseName,
 		"--namespace", r.cfg.Namespace,
 		"--logs",
-		"--timeout", r.cfg.TestTimeout.String(),
+		"--timeout", r.cfg.HelmTimeout.String(),
 	)
 	err := runExternalCommand(command)
 	if err != nil {
@@ -401,7 +412,7 @@ func (r *suiteResources) createSharedConfig(ctx context.Context) error {
 	request := r.client.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Namespace(r.cfg.Namespace).
-		Name("francis-0").
+		Name(runtimeReleaseName+"-0").
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
 			Container: "runtime",
@@ -437,7 +448,14 @@ func (r *suiteResources) createSharedConfig(ctx context.Context) error {
 	replicas := r.cfg.runtimeReplicas()
 	addresses := make([]string, 0, replicas)
 	for replica := range replicas {
-		addresses = append(addresses, fmt.Sprintf("francis-%d.francis-headless.%s.svc:7400", replica, r.cfg.Namespace))
+		addresses = append(addresses, fmt.Sprintf(
+			"%s-%d.%s.%s.svc:%d",
+			runtimeReleaseName,
+			replica,
+			runtimeHeadlessService,
+			r.cfg.Namespace,
+			runtimePort,
+		))
 	}
 	runtimeConfig := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: sharedRuntimeConfig, Namespace: r.cfg.Namespace},
