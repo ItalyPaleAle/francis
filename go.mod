@@ -1,6 +1,6 @@
 module github.com/italypaleale/francis
 
-go 1.26.5
+go 1.27
 
 tool (
 	github.com/fchimpan/gomod-age

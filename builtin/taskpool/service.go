@@ -5,8 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/google/uuid"
+	"uuid"
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/builtinactor"
@@ -126,11 +125,7 @@ func (s *TaskPoolService) Submit(ctx context.Context, input any, opts ...SubmitO
 	// Each task is its own actor, so mint a unique ID unless the caller supplied a key for idempotency
 	actorID := so.taskKey
 	if actorID == "" {
-		id, err := uuid.NewRandom()
-		if err != nil {
-			return "", fmt.Errorf("failed to generate task ID: %w", err)
-		}
-		actorID = id.String()
+		actorID = uuid.NewV4().String()
 	} else {
 		err = ref.ValidateComponents(actorID)
 		if err != nil {

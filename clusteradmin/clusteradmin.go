@@ -8,8 +8,7 @@ import (
 	"log/slog"
 	"sync"
 	"time"
-
-	"github.com/google/uuid"
+	"uuid"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/providerfactory"
@@ -106,7 +105,7 @@ func New(ctx context.Context, providerOptions components.ProviderOptions, opts O
 
 	return &Admin{
 		provider:      provider,
-		owner:         uuid.NewString(),
+		owner:         uuid.NewV4().String(),
 		log:           opts.Logger,
 		leaseTTL:      opts.ExclusiveLeaseDuration,
 		renewInterval: opts.ExclusiveRenewInterval,

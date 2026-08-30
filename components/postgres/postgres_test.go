@@ -10,10 +10,10 @@ import (
 	"os"
 	"testing"
 	"time"
+	"uuid"
 
 	_ "embed"
 
-	"github.com/google/uuid"
 	postgrestransactions "github.com/italypaleale/go-sql-utils/transactions/postgres"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -357,7 +357,7 @@ func (p *PostgresProvider) Seed(ctx context.Context, spec comptesting.Spec) erro
 				)
 				if a.LeaseTTL != nil {
 					leaseExp = new(now.Add(*a.LeaseTTL))
-					leaseID = new(uuid.New().String())
+					leaseID = new(uuid.NewV4().String())
 				}
 
 				rows[i] = []any{

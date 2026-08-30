@@ -4,8 +4,7 @@ import (
 	"context"
 	"io"
 	"time"
-
-	"github.com/google/uuid"
+	"uuid"
 
 	"github.com/italypaleale/francis/internal/ref"
 )
