@@ -267,12 +267,12 @@ func (w *providerWrapper) GetAlarm(ctx context.Context, alarmRef ref.AlarmRef) (
 }
 
 // SetAlarm implements components.ActorProvider
-func (w *providerWrapper) SetAlarm(ctx context.Context, alarmRef ref.AlarmRef, req components.SetAlarmReq) (err error) {
+func (w *providerWrapper) SetAlarm(ctx context.Context, alarmRef ref.AlarmRef, req components.SetAlarmReq) (res *ref.AlarmLease, err error) {
 	spanCtx, span, start := w.beginOp(ctx, "SetAlarm")
-	err = w.base.SetAlarm(spanCtx, alarmRef, req)
+	res, err = w.base.SetAlarm(spanCtx, alarmRef, req)
 	w.finishOp(spanCtx, span, "SetAlarm", start, err)
 
-	return err
+	return res, err
 }
 
 // DeleteAlarm implements components.ActorProvider

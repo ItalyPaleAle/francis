@@ -190,7 +190,10 @@ func (s *builtinSignal) Run(t *testing.T) {
 		require.NoError(t, err)
 
 		// Use a different host when there is one, so the second completion crosses the cluster to reach the same instance
-		other := (1) % s.cluster.Len()
+		other := 0
+		if s.cluster.Len() > 1 {
+			other = 1
+		}
 		err = s.svc(other).Complete(ctx, signalID, payload{Version: "second"})
 		require.ErrorIs(t, err, signal.ErrAlreadyCompleted)
 

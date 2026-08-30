@@ -137,7 +137,7 @@ func SeedBackupSample(t testing.TB, ctx context.Context, p components.ActorProvi
 
 	// A plain alarm with the optional fields populated
 	ttl := now.Add(24 * time.Hour)
-	err = p.SetAlarm(ctx, ref.NewAlarmRef(actorType, "alarm-actor", "alarm-1"), components.SetAlarmReq{
+	_, err = p.SetAlarm(ctx, ref.NewAlarmRef(actorType, "alarm-actor", "alarm-1"), components.SetAlarmReq{
 		AlarmProperties: ref.AlarmProperties{
 			DueTime:  now.Add(time.Hour),
 			Interval: "PT5M",
@@ -197,7 +197,7 @@ func AddExtraBackupData(t testing.TB, ctx context.Context, p components.ActorPro
 	err := p.SetState(ctx, ref.NewActorRef("EXTRA", "extra-1"), []byte("extra-state"), components.SetStateOpts{})
 	require.NoError(t, err)
 
-	err = p.SetAlarm(ctx, ref.NewAlarmRef("EXTRA", "extra-actor", "extra-alarm"), components.SetAlarmReq{
+	_, err = p.SetAlarm(ctx, ref.NewAlarmRef("EXTRA", "extra-actor", "extra-alarm"), components.SetAlarmReq{
 		AlarmProperties: ref.AlarmProperties{DueTime: now.Add(2 * time.Hour), Data: []byte("extra-alarm")},
 		Kind:            components.AlarmKindAlarm,
 	})

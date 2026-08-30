@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"sort"
 	"time"
 
@@ -40,7 +41,13 @@ func (p *Provider) GetAlarm(ctx context.Context, aRef ref.AlarmRef) (components.
 	return res, nil
 }
 
-func (p *Provider) SetAlarm(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) error {
+func (p *Provider) SetAlarm(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) (*ref.AlarmLease, error) {
+	// Trying to acquire a lease requires using the slower path
+	// We skip that when there are no allowed hosts or when the local clock places the alarm outside of the fetch-ahead interval
+	if len(req.LeaseImmediate) > 0 && !req.DueTime.After(p.Clock.Now().Add(p.Cfg.AlarmsFetchAheadInterval)) {
+		return p.setAndLeaseAlarm(ctx, aRef, req)
+	}
+
 	key := NewAlarmKey(aRef.ActorType, aRef.ActorID, aRef.Name)
 
 	p.writeMu.Lock()
@@ -66,7 +73,7 @@ func (p *Provider) SetAlarm(ctx context.Context, aRef ref.AlarmRef, req componen
 
 	if sameProps {
 		// Properties are the same: keep the existing alarm with its lease
-		return nil
+		return nil, nil
 	}
 
 	// Normalize empty data to nil
@@ -78,7 +85,7 @@ func (p *Provider) SetAlarm(ctx context.Context, aRef ref.AlarmRef, req componen
 	// Generate a new alarm ID
 	alarmIDObj, err := uuid.NewV7()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	alarmID := alarmIDObj.String()
 
@@ -103,7 +110,7 @@ func (p *Provider) SetAlarm(ctx context.Context, aRef ref.AlarmRef, req componen
 	}
 	changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: alarmID, Value: a})
 
-	return p.persistThenApply(ctx, &p.Mu, changes, func() {
+	err = p.persistThenApply(ctx, &p.Mu, changes, func() {
 		p.Alarms[key] = a
 		p.AlarmsByID[alarmID] = a
 		// When replacing an existing alarm, the new alarm gets a fresh ID, so we drop the previous ID's mapping to avoid leaking it (and to invalidate any stale lease still referencing the old alarm ID)
@@ -111,6 +118,164 @@ func (p *Provider) SetAlarm(ctx context.Context, aRef ref.AlarmRef, req componen
 			delete(p.AlarmsByID, existingID)
 		}
 	})
+	return nil, err
+}
+
+// setAndLeaseAlarm atomically persists an alarm with any required actor placement and lease
+func (p *Provider) setAndLeaseAlarm(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) (*ref.AlarmLease, error) {
+	key := NewAlarmKey(aRef.ActorType, aRef.ActorID, aRef.Name)
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+
+	changes := NewChanges()
+	defer changes.Release()
+
+	// Build the stored alarm while preserving an existing lease when the properties are identical
+	now := p.Clock.Now()
+	data := req.Data
+	if data != nil && len(data) == 0 {
+		data = nil
+	}
+
+	p.Mu.RLock()
+	existing, exists := p.Alarms[key]
+	sameProps := exists && existing.EqualProperties(AlarmProperties{
+		DueTime:  req.DueTime,
+		Interval: req.Interval,
+		TTL:      req.TTL,
+		Data:     req.Data,
+	})
+
+	var alarm *Alarm
+	if sameProps {
+		alarm = existing
+	} else {
+		alarmIDObj, err := uuid.NewV7()
+		if err != nil {
+			p.Mu.RUnlock()
+			return nil, err
+		}
+		alarm = &Alarm{
+			ID:              alarmIDObj.String(),
+			ActorType:       aRef.ActorType,
+			ActorID:         aRef.ActorID,
+			Name:            aRef.Name,
+			DueTime:         req.DueTime,
+			Interval:        req.Interval,
+			Cron:            "",
+			TTL:             req.TTL,
+			Data:            data,
+			LeaseID:         nil,
+			LeaseExpiration: nil,
+			Kind:            string(components.AlarmKindAlarm),
+			JobMethod:       "",
+		}
+	}
+
+	// A future alarm or an identical alarm with a live lease needs no placement or new lease
+	eligible := !alarm.DueTime.After(now.Add(p.Cfg.AlarmsFetchAheadInterval))
+	hasLiveLease := alarm.LeaseID != nil && alarm.LeaseExpiration != nil && !alarm.LeaseExpiration.Before(now)
+	if !eligible || hasLiveLease {
+		p.Mu.RUnlock()
+		return p.persistSetAlarmOnly(ctx, key, existing, exists, alarm, sameProps, changes)
+	}
+
+	// Resolve an existing healthy placement without moving an actor that belongs to a different runtime
+	actorKey := NewActorKey(aRef.ActorType, aRef.ActorID)
+	existingActor, actorExists := p.ActiveActors[actorKey]
+	var newActor *ActiveActor
+	canLease := false
+	if actorExists {
+		host, hostExists := p.Hosts[existingActor.HostID]
+		if hostExists && p.IsHostHealthy(host) {
+			canLease = slices.Contains(req.LeaseImmediate, existingActor.HostID)
+		} else {
+			actorExists = false
+		}
+	}
+
+	if !actorExists {
+		host, idleTimeout := p.findHostWithCapacity(aRef.ActorType, req.LeaseImmediate)
+		if host != nil {
+			activation := now
+			if alarm.DueTime.After(activation) {
+				activation = alarm.DueTime
+			}
+			newActor = &ActiveActor{
+				ActorType:   aRef.ActorType,
+				ActorID:     aRef.ActorID,
+				HostID:      host.ID,
+				IdleTimeout: idleTimeout,
+				Activation:  activation,
+			}
+			canLease = true
+		}
+	}
+
+	// Stage one lease together with the alarm and any new placement
+	var lease *ref.AlarmLease
+	if canLease {
+		leaseIDObj, err := uuid.NewV7()
+		if err != nil {
+			p.Mu.RUnlock()
+			return nil, fmt.Errorf("failed to generate alarm lease ID: %w", err)
+		}
+		leaseID := leaseIDObj.String() + "_" + alarm.ID
+		leaseExpiration := now.Add(p.Cfg.AlarmsLeaseDuration)
+		alarm = alarm.Clone()
+		alarm.LeaseID = &leaseID
+		alarm.LeaseExpiration = &leaseExpiration
+		lease = ref.NewAlarmLease(aRef, alarm.ID, alarm.DueTime, leaseID)
+	}
+	p.Mu.RUnlock()
+
+	// Persist the complete change set before exposing the lease to the runtime
+	if exists && !sameProps {
+		changes.Alarms.Delete = append(changes.Alarms.Delete, existing.ID)
+	}
+	if !sameProps || canLease {
+		changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: alarm.ID, Value: alarm})
+	}
+	if newActor != nil {
+		changes.ActiveActors.Set = append(changes.ActiveActors.Set, ActiveActorChange{Key: actorKey, Value: newActor})
+	}
+
+	err := p.persistThenApply(ctx, &p.Mu, changes, func() {
+		if !sameProps || canLease {
+			p.Alarms[key] = alarm
+			p.AlarmsByID[alarm.ID] = alarm
+		}
+		if exists && !sameProps && existing.ID != alarm.ID {
+			delete(p.AlarmsByID, existing.ID)
+		}
+		if newActor != nil {
+			p.ActiveActors[actorKey] = newActor
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	return lease, nil
+}
+
+// persistSetAlarmOnly stores a changed alarm when the slow path cannot or need not acquire a lease
+func (p *Provider) persistSetAlarmOnly(ctx context.Context, key AlarmKey, existing *Alarm, exists bool, alarm *Alarm, sameProps bool, changes *Changes) (*ref.AlarmLease, error) {
+	if sameProps {
+		return nil, nil
+	}
+	if exists {
+		changes.Alarms.Delete = append(changes.Alarms.Delete, existing.ID)
+	}
+	changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: alarm.ID, Value: alarm})
+
+	err := p.persistThenApply(ctx, &p.Mu, changes, func() {
+		p.Alarms[key] = alarm
+		p.AlarmsByID[alarm.ID] = alarm
+		if exists && existing.ID != alarm.ID {
+			delete(p.AlarmsByID, existing.ID)
+		}
+	})
+	return nil, err
 }
 
 func (p *Provider) DeleteAlarm(ctx context.Context, aRef ref.AlarmRef) error {

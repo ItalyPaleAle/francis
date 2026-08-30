@@ -40,6 +40,7 @@ func (s Suite) RunTests(t *testing.T) {
 
 	t.Run("get alarm", s.TestGetAlarm)
 	t.Run("set alarm", s.TestSetAlarm)
+	t.Run("set and lease alarm", s.TestSetAndLeaseAlarm)
 	t.Run("delete alarm", s.TestDeleteAlarm)
 
 	t.Run("fetch alarms", s.TestFetchAlarms)
@@ -2319,7 +2320,7 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 				DueTime: s.p.Now().Add(-time.Second),
 			},
 		}
-		err = s.p.SetAlarm(ctx, alarmRef, alarmReq)
+		_, err = s.p.SetAlarm(ctx, alarmRef, alarmReq)
 		require.NoError(t, err)
 
 		// Fetch and lease the alarm
@@ -2738,8 +2739,9 @@ func (s Suite) TestGetAlarm(t *testing.T) {
 			},
 		}
 
-		err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
+		lease, err := s.p.SetAlarm(t.Context(), alarmRef, setReq)
 		require.NoError(t, err)
+		assert.Nil(t, lease)
 
 		// Get the alarm
 		res, err := s.p.GetAlarm(t.Context(), alarmRef)
@@ -2775,7 +2777,7 @@ func (s Suite) TestGetAlarm(t *testing.T) {
 			},
 		}
 
-		err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
+		_, err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
 		require.NoError(t, err)
 
 		// Get the alarm
@@ -2833,7 +2835,7 @@ func (s Suite) TestSetAlarm(t *testing.T) {
 			},
 		}
 
-		err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
+		_, err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
 		require.NoError(t, err)
 
 		// Verify the alarm was created by getting it
@@ -2868,7 +2870,7 @@ func (s Suite) TestSetAlarm(t *testing.T) {
 			},
 		}
 
-		err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
+		_, err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
 		require.NoError(t, err)
 
 		// Verify the alarm was created
@@ -2907,7 +2909,7 @@ func (s Suite) TestSetAlarm(t *testing.T) {
 			},
 		}
 
-		err = s.p.SetAlarm(t.Context(), alarmRef, initialReq)
+		_, err = s.p.SetAlarm(t.Context(), alarmRef, initialReq)
 		require.NoError(t, err)
 
 		// Update the alarm with different values
@@ -2924,7 +2926,7 @@ func (s Suite) TestSetAlarm(t *testing.T) {
 			},
 		}
 
-		err = s.p.SetAlarm(t.Context(), alarmRef, updateReq)
+		_, err = s.p.SetAlarm(t.Context(), alarmRef, updateReq)
 		require.NoError(t, err)
 
 		// Verify the alarm was updated
@@ -2964,7 +2966,7 @@ func (s Suite) TestSetAlarm(t *testing.T) {
 			},
 		}
 
-		err = s.p.SetAlarm(t.Context(), alarmRef, initialReq)
+		_, err = s.p.SetAlarm(t.Context(), alarmRef, initialReq)
 		require.NoError(t, err)
 
 		// Update with minimal fields (should clear optional fields)
@@ -2977,7 +2979,7 @@ func (s Suite) TestSetAlarm(t *testing.T) {
 			},
 		}
 
-		err = s.p.SetAlarm(t.Context(), alarmRef, updateReq)
+		_, err = s.p.SetAlarm(t.Context(), alarmRef, updateReq)
 		require.NoError(t, err)
 
 		// Verify optional fields were cleared
@@ -3011,7 +3013,7 @@ func (s Suite) TestSetAlarm(t *testing.T) {
 			},
 		}
 
-		err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
+		_, err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
 		require.NoError(t, err)
 
 		// Verify empty data becomes nil
@@ -3065,7 +3067,7 @@ func (s Suite) TestSetAlarm(t *testing.T) {
 			},
 		}
 
-		err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
+		_, err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
 		require.NoError(t, err)
 
 		// Get the alarm spec again to verify the lease is preserved
@@ -3152,7 +3154,7 @@ func (s Suite) TestSetAlarm(t *testing.T) {
 			},
 		}
 
-		err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
+		_, err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
 		require.NoError(t, err)
 
 		// Get the alarm spec again to verify the lease is nullified
@@ -3206,7 +3208,7 @@ func (s Suite) TestSetAlarm(t *testing.T) {
 		// Replace the alarm with different properties. This generates a new alarm ID
 		// and must invalidate the prior lease (which referenced the old alarm ID).
 		newDueTime := oldLease.DueTime().Add(1 * time.Hour)
-		err = s.p.SetAlarm(ctx, aRef, components.SetAlarmReq{
+		_, err = s.p.SetAlarm(ctx, aRef, components.SetAlarmReq{
 			AlarmProperties: ref.AlarmProperties{
 				DueTime: newDueTime,
 				Data:    []byte("replaced"),
@@ -3232,6 +3234,332 @@ func (s Suite) TestSetAlarm(t *testing.T) {
 		require.NoError(t, err)
 		assert.WithinDuration(t, newDueTime, res.DueTime, time.Second)
 		assert.Equal(t, []byte("replaced"), res.Data)
+	})
+}
+
+func (s Suite) TestSetAndLeaseAlarm(t *testing.T) {
+	registerHost := func(t *testing.T, actorType string) string {
+		t.Helper()
+
+		res, err := s.p.RegisterHost(t.Context(), components.RegisterHostReq{
+			Address:            "192.168.20.1:8080",
+			ExistingHostID:     "",
+			JoinToken:          "",
+			JoinTokenExpiresAt: time.Time{},
+			ActorTypes: []components.ActorHostType{{
+				ActorType:           actorType,
+				IdleTimeout:         time.Minute,
+				ConcurrencyLimit:    0,
+				DeactivationTimeout: 0,
+				MaxAttempts:         0,
+				InitialRetryDelay:   0,
+			}},
+		})
+		require.NoError(t, err)
+		return res.HostID
+	}
+	getAlarmSpec := func(t *testing.T, alarmRef ref.AlarmRef) AlarmSpec {
+		t.Helper()
+
+		spec, err := s.p.GetAllHosts(t.Context())
+		require.NoError(t, err)
+		for i := range spec.Alarms {
+			alarm := spec.Alarms[i]
+			if alarm.ActorType == alarmRef.ActorType && alarm.ActorID == alarmRef.ActorID && alarm.Name == alarmRef.Name {
+				return alarm
+			}
+		}
+
+		t.Fatalf("alarm %s was not found", alarmRef)
+		return AlarmSpec{}
+	}
+
+	t.Run("leases an upcoming alarm whose actor is not active", func(t *testing.T) {
+		// Start with one healthy host that can execute the alarm
+		err := s.p.Seed(t.Context(), Spec{
+			Hosts:          nil,
+			HostActorTypes: nil,
+			ActiveActors:   nil,
+			Alarms:         nil,
+		})
+		require.NoError(t, err)
+		hostID := registerHost(t, "LeaseActor")
+
+		// Store an alarm close enough to qualify for fetch-ahead scheduling
+		alarmRef := ref.NewAlarmRef("LeaseActor", "actor-1", "wake")
+		lease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{
+				DueTime:  s.p.Now().Add(time.Second),
+				Interval: "",
+				Cron:     "",
+				TTL:      nil,
+				Data:     nil,
+			},
+			Kind:           components.AlarmKindAlarm,
+			JobMethod:      "",
+			LeaseImmediate: []string{hostID},
+		})
+		require.NoError(t, err)
+
+		// Verify the lease returned by the atomic store authorizes access
+		require.NotNil(t, lease)
+		assert.Equal(t, alarmRef, lease.AlarmRef())
+
+		stored, err := s.p.GetLeasedAlarm(t.Context(), lease)
+		require.NoError(t, err)
+		assert.Equal(t, alarmRef, stored.AlarmRef)
+		placement, err := s.p.LookupActor(t.Context(), alarmRef.ActorRef(), components.LookupActorOpts{ActiveOnly: true})
+		require.NoError(t, err)
+		assert.Equal(t, hostID, placement.HostID)
+
+		// Repeating the same request must preserve the live lease without returning it for duplicate enqueueing
+		duplicateLease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{DueTime: lease.DueTime()},
+			LeaseImmediate:  []string{hostID},
+		})
+		require.NoError(t, err)
+		assert.Nil(t, duplicateLease)
+		_, err = s.p.GetLeasedAlarm(t.Context(), lease)
+		require.NoError(t, err)
+	})
+
+	t.Run("leases an upcoming alarm whose actor is active on an allowed host", func(t *testing.T) {
+		// Place the actor before storing its alarm
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
+		hostID := registerHost(t, "LeaseActor")
+		actorRef := ref.NewActorRef("LeaseActor", "actor-active")
+		placement, err := s.p.LookupActor(t.Context(), actorRef, components.LookupActorOpts{Hosts: []string{hostID}})
+		require.NoError(t, err)
+		require.Equal(t, hostID, placement.HostID)
+
+		// Reuse the allowed placement while acquiring the alarm lease
+		alarmRef := ref.NewAlarmRef(actorRef.ActorType, actorRef.ActorID, "wake")
+		lease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{DueTime: s.p.Now().Add(time.Second)},
+			LeaseImmediate:  []string{hostID},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, lease)
+
+		stored, err := s.p.GetLeasedAlarm(t.Context(), lease)
+		require.NoError(t, err)
+		assert.Equal(t, alarmRef, stored.AlarmRef)
+		placement, err = s.p.LookupActor(t.Context(), actorRef, components.LookupActorOpts{ActiveOnly: true})
+		require.NoError(t, err)
+		assert.Equal(t, hostID, placement.HostID)
+	})
+
+	t.Run("replaces an unleased alarm and leases the replacement", func(t *testing.T) {
+		// Store the original alarm without requesting a lease
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
+		hostID := registerHost(t, "LeaseActor")
+		alarmRef := ref.NewAlarmRef("LeaseActor", "replace-unleased", "wake")
+		initialLease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{
+				DueTime: s.p.Now().Add(2 * time.Second),
+				Data:    []byte("original"),
+			},
+		})
+		require.NoError(t, err)
+		require.Nil(t, initialLease)
+		original := getAlarmSpec(t, alarmRef)
+		require.Nil(t, original.LeaseID)
+
+		// Replace it inside fetch-ahead and acquire a lease for the new row
+		updatedDueTime := s.p.Now().Add(3 * time.Second)
+		replacementLease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{
+				DueTime: updatedDueTime,
+				Data:    []byte("replacement"),
+			},
+			LeaseImmediate: []string{hostID},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, replacementLease)
+
+		replacement := getAlarmSpec(t, alarmRef)
+		assert.NotEqual(t, original.AlarmID, replacement.AlarmID)
+		assert.Equal(t, replacementLease.Key(), replacement.AlarmID)
+		require.NotNil(t, replacement.LeaseID)
+		stored, err := s.p.GetLeasedAlarm(t.Context(), replacementLease)
+		require.NoError(t, err)
+		assert.WithinDuration(t, updatedDueTime, stored.DueTime, time.Second)
+		assert.Equal(t, []byte("replacement"), stored.Data)
+	})
+
+	t.Run("replaces a leased alarm and leases the upcoming replacement", func(t *testing.T) {
+		// Lease the original alarm and record its durable identity
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
+		hostID := registerHost(t, "LeaseActor")
+		alarmRef := ref.NewAlarmRef("LeaseActor", "replace-leased-upcoming", "wake")
+		originalLease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{
+				DueTime: s.p.Now().Add(2 * time.Second),
+				Data:    []byte("original"),
+			},
+			LeaseImmediate: []string{hostID},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, originalLease)
+
+		// Replacing it inside fetch-ahead invalidates the old lease and returns a lease for the new row
+		updatedDueTime := s.p.Now().Add(4 * time.Second)
+		replacementLease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{
+				DueTime: updatedDueTime,
+				Data:    []byte("replacement"),
+			},
+			LeaseImmediate: []string{hostID},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, replacementLease)
+		assert.NotEqual(t, originalLease.Key(), replacementLease.Key())
+
+		_, err = s.p.GetLeasedAlarm(t.Context(), originalLease)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
+		stored, err := s.p.GetLeasedAlarm(t.Context(), replacementLease)
+		require.NoError(t, err)
+		assert.WithinDuration(t, updatedDueTime, stored.DueTime, time.Second)
+		assert.Equal(t, []byte("replacement"), stored.Data)
+	})
+
+	t.Run("replaces a leased alarm without leasing a replacement outside fetch-ahead", func(t *testing.T) {
+		// Lease the original alarm while its due time is inside fetch-ahead
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
+		hostID := registerHost(t, "LeaseActor")
+		alarmRef := ref.NewAlarmRef("LeaseActor", "replace-leased-future", "wake")
+		originalLease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{
+				DueTime: s.p.Now().Add(2 * time.Second),
+				Data:    []byte("original"),
+			},
+			LeaseImmediate: []string{hostID},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, originalLease)
+
+		// Moving it outside fetch-ahead uses the fast path and leaves the new row unleased
+		updatedDueTime := s.p.Now().Add(2 * time.Minute)
+		replacementLease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{
+				DueTime: updatedDueTime,
+				Data:    []byte("replacement"),
+			},
+			LeaseImmediate: []string{hostID},
+		})
+		require.NoError(t, err)
+		require.Nil(t, replacementLease)
+
+		_, err = s.p.GetLeasedAlarm(t.Context(), originalLease)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
+		replacement := getAlarmSpec(t, alarmRef)
+		assert.NotEqual(t, originalLease.Key(), replacement.AlarmID)
+		assert.Nil(t, replacement.LeaseID)
+		stored, err := s.p.GetAlarm(t.Context(), alarmRef)
+		require.NoError(t, err)
+		assert.WithinDuration(t, updatedDueTime, stored.DueTime, time.Second)
+		assert.Equal(t, []byte("replacement"), stored.Data)
+	})
+
+	t.Run("leaves a future alarm unleased", func(t *testing.T) {
+		// A capable host alone is insufficient when the alarm is outside the fetch-ahead horizon
+		err := s.p.Seed(t.Context(), Spec{
+			Hosts:          nil,
+			HostActorTypes: nil,
+			ActiveActors:   nil,
+			Alarms:         nil,
+		})
+		require.NoError(t, err)
+		hostID := registerHost(t, "LeaseActor")
+		alarmRef := ref.NewAlarmRef("LeaseActor", "actor-2", "wake")
+		lease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{
+				DueTime:  s.p.Now().Add(24 * time.Hour),
+				Interval: "",
+				Cron:     "",
+				TTL:      nil,
+				Data:     nil,
+			},
+			Kind:           components.AlarmKindAlarm,
+			JobMethod:      "",
+			LeaseImmediate: []string{hostID},
+		})
+		require.NoError(t, err)
+		assert.Nil(t, lease)
+		_, err = s.p.GetAlarm(t.Context(), alarmRef)
+		require.NoError(t, err)
+		_, err = s.p.LookupActor(t.Context(), alarmRef.ActorRef(), components.LookupActorOpts{ActiveOnly: true})
+		require.ErrorIs(t, err, components.ErrNoActor)
+	})
+
+	t.Run("leaves an upcoming alarm unleased without an eligible host", func(t *testing.T) {
+		// The allowed host does not advertise the alarm's actor type
+		err := s.p.Seed(t.Context(), Spec{
+			Hosts:          nil,
+			HostActorTypes: nil,
+			ActiveActors:   nil,
+			Alarms:         nil,
+		})
+		require.NoError(t, err)
+		hostID := registerHost(t, "OtherActor")
+		alarmRef := ref.NewAlarmRef("LeaseActor", "actor-3", "wake")
+		lease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{
+				DueTime:  s.p.Now().Add(time.Second),
+				Interval: "",
+				Cron:     "",
+				TTL:      nil,
+				Data:     nil,
+			},
+			Kind:           components.AlarmKindAlarm,
+			JobMethod:      "",
+			LeaseImmediate: []string{hostID},
+		})
+		require.NoError(t, err)
+		assert.Nil(t, lease)
+		_, err = s.p.GetAlarm(t.Context(), alarmRef)
+		require.NoError(t, err)
+	})
+
+	t.Run("does not move an actor from a healthy disallowed host", func(t *testing.T) {
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
+		actorType := components.ActorHostType{ActorType: "LeaseActor", IdleTimeout: time.Minute}
+		firstHost, err := s.p.RegisterHost(t.Context(), components.RegisterHostReq{
+			Address:    "192.168.20.1:8080",
+			ActorTypes: []components.ActorHostType{actorType},
+		})
+		require.NoError(t, err)
+		secondHost, err := s.p.RegisterHost(t.Context(), components.RegisterHostReq{
+			Address:    "192.168.20.2:8080",
+			ActorTypes: []components.ActorHostType{actorType},
+		})
+		require.NoError(t, err)
+
+		// Pin the actor to the first runtime before asking the second runtime to store and lease its alarm
+		actorRef := ref.NewActorRef("LeaseActor", "actor-4")
+		placement, err := s.p.LookupActor(t.Context(), actorRef, components.LookupActorOpts{Hosts: []string{firstHost.HostID}})
+		require.NoError(t, err)
+		require.Equal(t, firstHost.HostID, placement.HostID)
+
+		alarmRef := ref.NewAlarmRef(actorRef.ActorType, actorRef.ActorID, "wake")
+		lease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{DueTime: s.p.Now().Add(time.Second)},
+			LeaseImmediate:  []string{secondHost.HostID},
+		})
+		require.NoError(t, err)
+		assert.Nil(t, lease)
+
+		// The alarm is durable but the existing placement remains owned by the first runtime
+		_, err = s.p.GetAlarm(t.Context(), alarmRef)
+		require.NoError(t, err)
+		placement, err = s.p.LookupActor(t.Context(), actorRef, components.LookupActorOpts{ActiveOnly: true})
+		require.NoError(t, err)
+		assert.Equal(t, firstHost.HostID, placement.HostID)
 	})
 }
 
@@ -3299,7 +3627,7 @@ func (s Suite) TestDeleteAlarm(t *testing.T) {
 				},
 			}
 
-			err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
+			_, err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
 			require.NoError(t, err)
 		}
 
@@ -3345,7 +3673,7 @@ func (s Suite) TestDeleteAlarm(t *testing.T) {
 				},
 			}
 
-			err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
+			_, err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
 			require.NoError(t, err)
 		}
 

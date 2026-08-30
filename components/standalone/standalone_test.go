@@ -217,7 +217,7 @@ func TestStandalonePostgresTimestampsStoredAsUTC(t *testing.T) {
 			ActorID:   "utc-actor",
 			Name:      "utc-alarm",
 		}
-		err := p.SetAlarm(t.Context(), aRef, components.SetAlarmReq{
+		_, err := p.SetAlarm(t.Context(), aRef, components.SetAlarmReq{
 			AlarmProperties: ref.AlarmProperties{DueTime: dueTime},
 		})
 		require.NoError(t, err)
@@ -248,7 +248,7 @@ func TestStandaloneSQLiteTimestampsStoredAsUnixMillis(t *testing.T) {
 		ActorID:   "utc-actor",
 		Name:      "utc-alarm",
 	}
-	err := p.SetAlarm(t.Context(), aRef, components.SetAlarmReq{
+	_, err := p.SetAlarm(t.Context(), aRef, components.SetAlarmReq{
 		AlarmProperties: ref.AlarmProperties{DueTime: dueTime},
 	})
 	require.NoError(t, err)
@@ -1318,7 +1318,7 @@ func TestPersistHook_SetAlarm(t *testing.T) {
 		},
 	}
 
-	err := p.SetAlarm(t.Context(), alarmRef, req)
+	_, err := p.SetAlarm(t.Context(), alarmRef, req)
 	require.NoError(t, err)
 
 	// Verify PersistChanges was called
@@ -1344,7 +1344,7 @@ func TestPersistHook_DeleteAlarm(t *testing.T) {
 	dueTime := p.Clock.Now().Add(time.Hour)
 
 	// First set an alarm
-	err := p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{AlarmProperties: ref.AlarmProperties{DueTime: dueTime}})
+	_, err := p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{AlarmProperties: ref.AlarmProperties{DueTime: dueTime}})
 	require.NoError(t, err)
 
 	mock.Reset()
@@ -1381,7 +1381,7 @@ func TestPersistHook_FetchAndLeaseUpcomingAlarms(t *testing.T) {
 	alarmRef := ref.AlarmRef{ActorType: "myactor", ActorID: "actor1", Name: "reminder"}
 	dueTime := p.Clock.Now().Add(5 * time.Second) // Due in 5 seconds (within fetch ahead interval)
 
-	err = p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{AlarmProperties: ref.AlarmProperties{DueTime: dueTime}})
+	_, err = p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{AlarmProperties: ref.AlarmProperties{DueTime: dueTime}})
 	require.NoError(t, err)
 
 	mock.Reset()
@@ -1427,7 +1427,7 @@ func TestPersistHook_GetLeasedAlarm_NoChanges(t *testing.T) {
 	alarmRef := ref.AlarmRef{ActorType: "myactor", ActorID: "actor1", Name: "reminder"}
 	dueTime := p.Clock.Now().Add(5 * time.Second)
 
-	err = p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{AlarmProperties: ref.AlarmProperties{DueTime: dueTime, Data: []byte("test-data")}})
+	_, err = p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{AlarmProperties: ref.AlarmProperties{DueTime: dueTime, Data: []byte("test-data")}})
 	require.NoError(t, err)
 
 	// Fetch and lease
@@ -1465,7 +1465,7 @@ func TestPersistHook_RenewAlarmLeases(t *testing.T) {
 	alarmRef := ref.AlarmRef{ActorType: "myactor", ActorID: "actor1", Name: "reminder"}
 	dueTime := p.Clock.Now().Add(5 * time.Second)
 
-	err = p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{AlarmProperties: ref.AlarmProperties{DueTime: dueTime}})
+	_, err = p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{AlarmProperties: ref.AlarmProperties{DueTime: dueTime}})
 	require.NoError(t, err)
 
 	// Fetch and lease
@@ -1512,7 +1512,7 @@ func TestPersistHook_ReleaseAlarmLease(t *testing.T) {
 	alarmRef := ref.AlarmRef{ActorType: "myactor", ActorID: "actor1", Name: "reminder"}
 	dueTime := p.Clock.Now().Add(5 * time.Second)
 
-	err = p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{AlarmProperties: ref.AlarmProperties{DueTime: dueTime}})
+	_, err = p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{AlarmProperties: ref.AlarmProperties{DueTime: dueTime}})
 	require.NoError(t, err)
 
 	// Fetch and lease
@@ -1556,7 +1556,7 @@ func TestPersistHook_UpdateLeasedAlarm(t *testing.T) {
 	alarmRef := ref.AlarmRef{ActorType: "myactor", ActorID: "actor1", Name: "reminder"}
 	dueTime := p.Clock.Now().Add(5 * time.Second)
 
-	err = p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{AlarmProperties: ref.AlarmProperties{DueTime: dueTime}})
+	_, err = p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{AlarmProperties: ref.AlarmProperties{DueTime: dueTime}})
 	require.NoError(t, err)
 
 	// Fetch and lease
@@ -1605,7 +1605,7 @@ func TestPersistHook_DeleteLeasedAlarm(t *testing.T) {
 	alarmRef := ref.AlarmRef{ActorType: "myactor", ActorID: "actor1", Name: "reminder"}
 	dueTime := p.Clock.Now().Add(5 * time.Second)
 
-	err = p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{AlarmProperties: ref.AlarmProperties{DueTime: dueTime}})
+	_, err = p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{AlarmProperties: ref.AlarmProperties{DueTime: dueTime}})
 	require.NoError(t, err)
 
 	// Fetch and lease
@@ -1716,7 +1716,7 @@ func TestPersistHook_RemoveActor(t *testing.T) {
 	// Set an alarm with a lease
 	alarmRef := ref.AlarmRef{ActorType: "myactor", ActorID: "actor1", Name: "reminder"}
 	dueTime := p.Clock.Now().Add(5 * time.Second)
-	err = p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{AlarmProperties: ref.AlarmProperties{DueTime: dueTime}})
+	_, err = p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{AlarmProperties: ref.AlarmProperties{DueTime: dueTime}})
 	require.NoError(t, err)
 
 	// Fetch and lease the alarm
@@ -1897,7 +1897,7 @@ func TestPersistHook_Rollback_SetAlarm(t *testing.T) {
 	alarmRef := ref.AlarmRef{ActorType: "myactor", ActorID: "actor1", Name: "reminder"}
 	dueTime := p.Clock.Now().Add(time.Hour)
 
-	err := p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{AlarmProperties: ref.AlarmProperties{DueTime: dueTime}})
+	_, err := p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{AlarmProperties: ref.AlarmProperties{DueTime: dueTime}})
 
 	// Should return error
 	require.Error(t, err)
@@ -1906,6 +1906,61 @@ func TestPersistHook_Rollback_SetAlarm(t *testing.T) {
 	// Verify alarm was not stored in memory
 	_, err = p.GetAlarm(t.Context(), alarmRef)
 	require.ErrorIs(t, err, components.ErrNoAlarm)
+}
+
+func TestPersistHook_Rollback_SetAndLeaseAlarm(t *testing.T) {
+	p, mock := initProviderWithMockHook(t)
+
+	// Establish an eligible host before failing the combined alarm mutation
+	hostRes, err := p.RegisterHost(t.Context(), components.RegisterHostReq{
+		Address:            "localhost:8080",
+		ExistingHostID:     "",
+		JoinToken:          "",
+		JoinTokenExpiresAt: time.Time{},
+		ActorTypes: []components.ActorHostType{{
+			ActorType:           "myactor",
+			IdleTimeout:         time.Minute,
+			ConcurrencyLimit:    0,
+			DeactivationTimeout: 0,
+			MaxAttempts:         0,
+			InitialRetryDelay:   0,
+		}},
+	})
+	require.NoError(t, err)
+	mock.Reset()
+	mock.ErrFunc = func() error {
+		return errors.New("simulated persistence error")
+	}
+
+	// The alarm, placement, and lease are submitted as one persistence operation
+	alarmRef := ref.AlarmRef{ActorType: "myactor", ActorID: "actor1", Name: "reminder"}
+	lease, err := p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
+		AlarmProperties: ref.AlarmProperties{
+			DueTime:  p.Clock.Now().Add(time.Second),
+			Interval: "",
+			Cron:     "",
+			TTL:      nil,
+			Data:     nil,
+		},
+		Kind:           components.AlarmKindAlarm,
+		JobMethod:      "",
+		LeaseImmediate: []string{hostRes.HostID},
+	})
+	require.Error(t, err)
+	require.Nil(t, lease)
+
+	calls := mock.GetCalls()
+	require.Len(t, calls, 1)
+	require.Len(t, calls[0].Alarms.Set, 1)
+	require.Len(t, calls[0].ActiveActors.Set, 1)
+
+	// A failed persistence operation leaves neither half of the combined mutation visible in memory
+	_, err = p.GetAlarm(t.Context(), alarmRef)
+	require.ErrorIs(t, err, components.ErrNoAlarm)
+	p.Mu.RLock()
+	_, active := p.ActiveActors[internal.NewActorKey(alarmRef.ActorType, alarmRef.ActorID)]
+	p.Mu.RUnlock()
+	require.False(t, active)
 }
 
 func TestPersistHook_Rollback_FetchAndLeaseUpcomingAlarms(t *testing.T) {
@@ -1924,7 +1979,7 @@ func TestPersistHook_Rollback_FetchAndLeaseUpcomingAlarms(t *testing.T) {
 	// Set an alarm (this should also succeed)
 	alarmRef := ref.AlarmRef{ActorType: "myactor", ActorID: "actor1", Name: "reminder"}
 	dueTime := p.Clock.Now().Add(5 * time.Second)
-	err = p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{AlarmProperties: ref.AlarmProperties{DueTime: dueTime}})
+	_, err = p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{AlarmProperties: ref.AlarmProperties{DueTime: dueTime}})
 	require.NoError(t, err)
 
 	// Now configure mock to return error

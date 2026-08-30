@@ -67,7 +67,14 @@ func (s *SQLiteProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res co
 	return res, nil
 }
 
-func (s *SQLiteProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req components.SetAlarmReq) error {
+type setAlarmResult struct {
+	alarmID             string
+	dueTime             int64
+	leaseID             *string
+	leaseExpirationTime *int64
+}
+
+func (s *SQLiteProvider) SetAlarm(ctx context.Context, alarmRef ref.AlarmRef, req components.SetAlarmReq) (*ref.AlarmLease, error) {
 	var (
 		interval *string
 		ttlTime  *int64
@@ -85,17 +92,34 @@ func (s *SQLiteProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req com
 
 	alarmID, err := uuid.NewV7()
 	if err != nil {
-		return fmt.Errorf("failed to generate alarm ID: %w", err)
+		return nil, fmt.Errorf("failed to generate alarm ID: %w", err)
 	}
+	alarmIDStr := alarmID.String()
 
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	// We do an upsert to replace alarms with the same actor ID, actor type, and alarm name
-	// Any upsert will cause the lease to be lost
+	// Trying to acquire a lease requires using the slower path
+	// We skip that when there are no allowed hosts or when the local clock places the alarm outside of the fetch-ahead interval
+	if len(req.LeaseImmediate) > 0 && !req.DueTime.After(s.clock.Now().Add(s.cfg.AlarmsFetchAheadInterval)) {
+		return s.setAndLeaseAlarm(queryCtx, alarmRef, req, alarmIDStr, interval, ttlTime)
+	}
+
+	// The fast path uses the same upsert but ignores the returned row
+	_, _, err = s.setAlarm(queryCtx, s.db, alarmRef, req, alarmIDStr, interval, ttlTime)
+	if err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+// setAlarm stores or replaces an alarm through either a database handle or an existing transaction
+func (s *SQLiteProvider) setAlarm(ctx context.Context, q querier, alarmRef ref.AlarmRef, req components.SetAlarmReq, alarmID string, interval *string, ttlTime *int64) (res setAlarmResult, returned bool, err error) {
+	// Store or replace the alarm while preserving a lease when the properties are identical
+	// Return the resulting row directly so inserts and replacements need no follow-up query
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	_, err = s.db.
-		ExecContext(queryCtx,
+	err = q.
+		QueryRowContext(ctx,
 			`INSERT INTO `+s.tablePrefix+`alarms
 				(alarm_id, actor_type, actor_id, alarm_name,
 				alarm_due_time, alarm_interval, alarm_ttl_time, alarm_data,
@@ -114,13 +138,94 @@ func (s *SQLiteProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req com
 				`+s.tablePrefix+`alarms.alarm_due_time != EXCLUDED.alarm_due_time
 				OR `+s.tablePrefix+`alarms.alarm_interval IS NOT EXCLUDED.alarm_interval
 				OR `+s.tablePrefix+`alarms.alarm_ttl_time IS NOT EXCLUDED.alarm_ttl_time
-				OR `+s.tablePrefix+`alarms.alarm_data IS NOT EXCLUDED.alarm_data`,
-			alarmID, ref.ActorType, ref.ActorID, ref.Name,
-			req.DueTime.UnixMilli(), interval, ttlTime, req.Data)
-	if err != nil {
-		return fmt.Errorf("failed to create alarm: %w", err)
+				OR `+s.tablePrefix+`alarms.alarm_data IS NOT EXCLUDED.alarm_data
+			RETURNING alarm_id, alarm_due_time, alarm_lease_id, alarm_lease_expiration_time`,
+			alarmID, alarmRef.ActorType, alarmRef.ActorID, alarmRef.Name,
+			req.DueTime.UnixMilli(), interval, ttlTime, req.Data,
+		).
+		Scan(&res.alarmID, &res.dueTime, &res.leaseID, &res.leaseExpirationTime)
+	if errors.Is(err, sql.ErrNoRows) {
+		return res, false, nil
+	} else if err != nil {
+		return res, false, fmt.Errorf("failed to create alarm: %w", err)
 	}
-	return nil
+	return res, true, nil
+}
+
+// setAndLeaseAlarm atomically stores, places, and leases an alarm
+func (s *SQLiteProvider) setAndLeaseAlarm(ctx context.Context, alarmRef ref.AlarmRef, req components.SetAlarmReq, alarmID string, interval *string, ttlTime *int64) (*ref.AlarmLease, error) {
+	return sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (*ref.AlarmLease, error) {
+		// Store the alarm and capture its current lease state in the same statement
+		stored, returned, err := s.setAlarm(ctx, tx, alarmRef, req, alarmID, interval, ttlTime)
+		if err != nil {
+			return nil, err
+		}
+		if !returned {
+			// SQLite suppresses RETURNING for an identical upsert, so inspect the unchanged row while still holding the write transaction
+			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+			err = tx.
+				QueryRowContext(ctx,
+					`SELECT alarm_id, alarm_due_time, alarm_lease_id, alarm_lease_expiration_time
+					FROM `+s.tablePrefix+`alarms
+					WHERE actor_type = ? AND actor_id = ? AND alarm_name = ?`,
+					alarmRef.ActorType, alarmRef.ActorID, alarmRef.Name,
+				).
+				Scan(&stored.alarmID, &stored.dueTime, &stored.leaseID, &stored.leaseExpirationTime)
+			if err != nil {
+				return nil, fmt.Errorf("failed to inspect unchanged alarm: %w", err)
+			}
+		}
+
+		// Reject rows that became ineligible before actor placement
+		now := s.clock.Now()
+		if stored.dueTime > now.Add(s.cfg.AlarmsFetchAheadInterval).UnixMilli() {
+			// Alarm is not due within the lookahead interval
+			return nil, nil
+		}
+		if stored.leaseID != nil && stored.leaseExpirationTime != nil && *stored.leaseExpirationTime >= now.UnixMilli() {
+			// Alarm is already leased
+			return nil, nil
+		}
+
+		// Place the actor only on one of the hosts connected to the requesting runtime
+		_, err = s.lookupActorInTransaction(ctx, tx, alarmRef.ActorRef(), req.LeaseImmediate, time.UnixMilli(stored.dueTime))
+		if errors.Is(err, components.ErrNoHost) {
+			return nil, nil
+		} else if err != nil {
+			return nil, fmt.Errorf("failed to place alarm actor: %w", err)
+		}
+
+		// Acquire the lease before committing the alarm and actor placement
+		leaseIDObj, err := uuid.NewV7()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate alarm lease ID: %w", err)
+		}
+		storedLeaseIDValue := leaseIDObj.String()
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		err = tx.
+			QueryRowContext(ctx,
+				`UPDATE `+s.tablePrefix+`alarms
+				SET alarm_lease_id = ?, alarm_lease_expiration_time = ?
+				WHERE
+					alarm_id = ?
+					AND (
+						alarm_lease_id IS NULL
+						OR alarm_lease_expiration_time IS NULL
+						OR alarm_lease_expiration_time < ?
+					)
+				RETURNING alarm_lease_id`,
+				storedLeaseIDValue, now.Add(s.cfg.AlarmsLeaseDuration).UnixMilli(),
+				stored.alarmID, now.UnixMilli(),
+			).
+			Scan(&storedLeaseIDValue)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		} else if err != nil {
+			return nil, fmt.Errorf("failed to lease alarm: %w", err)
+		}
+
+		return ref.NewAlarmLease(alarmRef, stored.alarmID, time.UnixMilli(stored.dueTime), storedLeaseIDValue), nil
+	})
 }
 
 func (s *SQLiteProvider) DeleteAlarm(ctx context.Context, ref ref.AlarmRef) error {

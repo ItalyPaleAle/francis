@@ -718,7 +718,7 @@ func (h *Host) SetAlarm(ctx context.Context, actorType string, actorID string, n
 		return err
 	}
 
-	err = h.actorProvider.SetAlarm(ctx, ref.NewAlarmRef(actorType, actorID, name), req)
+	_, err = h.actorProvider.SetAlarm(ctx, ref.NewAlarmRef(actorType, actorID, name), req)
 	if err != nil {
 		return fmt.Errorf("failed to set alarm: %w", err)
 	}

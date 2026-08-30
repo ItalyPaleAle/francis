@@ -28,6 +28,7 @@ linters:
     - errchkjson
     - exhaustive
     - exhaustruct
+    - exhaustruct_v5
     - fatcontext
     - forbidigo
     - funcorder

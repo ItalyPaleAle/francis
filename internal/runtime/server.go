@@ -62,7 +62,7 @@ type Runtime struct {
 	// alarmProcessor schedules leased alarms for dispatch at their due time
 	alarmProcessor *eventqueue.Processor[string, *ref.AlarmLease]
 	// activeAlarms and retryingAlarms track in-flight and retrying alarms by key, guarded by activeAlarmsLock
-	activeAlarmsLock sync.Mutex
+	activeAlarmsLock sync.RWMutex
 	activeAlarms     map[string]struct{}
 	retryingAlarms   map[string]struct{}
 	// alarmsDraining is set during shutdown to stop new executions from starting, also guarded by activeAlarmsLock
@@ -193,6 +193,9 @@ func (rt *Runtime) Run(parentCtx context.Context) error {
 		MaxTTL: rt.placementCacheTTL(),
 	})
 	defer rt.placementCache.Stop()
+
+	// Create the alarm processor before accepting host requests so newly-created alarms can be enqueued immediately
+	rt.ensureAlarmProcessor()
 
 	rt.log.InfoContext(ctx, "Starting Francis runtime", slog.String("bind", rt.bind))
 

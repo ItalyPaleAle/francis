@@ -514,162 +514,171 @@ func (s *SQLiteProvider) LookupActor(ctx context.Context, ref ref.ActorRef, opts
 	}
 
 	return sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (res components.LookupActorRes, err error) {
-		now := s.clock.Now().UnixMilli()
+		return s.lookupActorInTransaction(ctx, tx, ref, opts.Hosts, time.Time{})
+	})
+}
 
-		params := make([]any, 0, len(opts.Hosts)+8)
-		params = append(params,
-			// Parameters for existing_actor CTE
-			ref.ActorType, ref.ActorID, now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
-			// Parameters for available_host CTE
-			ref.ActorType, now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
+// lookupActorInTransaction resolves or creates an actor placement using the caller's transaction
+func (s *SQLiteProvider) lookupActorInTransaction(ctx context.Context, tx *sql.Tx, ref ref.ActorRef, hosts []string, activationTime time.Time) (res components.LookupActorRes, err error) {
+	now := s.clock.Now().UnixMilli()
+	actorActivation := now
+	if !activationTime.IsZero() && activationTime.UnixMilli() > actorActivation {
+		actorActivation = activationTime.UnixMilli()
+	}
+
+	params := make([]any, 0, len(hosts)+8)
+	params = append(params,
+		// Parameters for existing_actor CTE
+		ref.ActorType, ref.ActorID, now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
+		// Parameters for available_host CTE
+		ref.ActorType, now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
+	)
+
+	// Build host restrictions clause
+	hostClause, params := buildLookupActorHostClause(hosts, params)
+
+	// Parameters for insert_new_actor CTE
+	params = append(params,
+		ref.ActorType, ref.ActorID, actorActivation,
+	)
+
+	// How this query works:
+	//
+	// 1. existing_actor:
+	//    This CTE checks for an active actor on a healthy host.
+	//    This will return a row with "found_existing = 1" if the actor is active and the host it's on is healthy.
+	//    Note we don't apply a host filter (if any) here, to avoid the actor being considered as inactive (and replaced later in the query)
+	//    We will need to filter the result in the Go code at the end.
+	// 2. available_host:
+	//    This CTE selects a host with capacity to activate the actor on. It considers host filters (if any) too.
+	//    Note the `NOT EXISTS (SELECT 1 FROM existing_actor)` clause, which means the CTE will return 0 rows if existing_actor found something previously.
+	// 3. actor_to_use:
+	//    This CTE combines the results of existing_actor and available_host in a UNION.
+	//    Because available_host doesn't return anything if there was an existing actor, this CTE will return *at most* one row (it could be zero if there's no existing actor, and if no host is available).
+	// 4. Insert into the temporary table:
+	//    We insert the result of actor_to_use (including whether it was previously active or not) into the temporary table.
+	//    We need to do this because in SQLite we cannot have an INSERT (or REPLACE) query inside a CTE.
+	// 5. Activate a new actor if needed:
+	//    The REPLACE query activates a new actor if there's one with "found_existing = 0" in the temporary table.
+	//    We perform an upsert query here. This is because the actor (with same type and ID) may already be present in the table, where it's active on a host that has failed but hasn't been garbage-collected yet.
+	// 6. Return the result:
+	//    Finally, we return the result from the lookup_result table.
+	//    Note the "lookup_result" temporary table is connection-local and thus not prefixed
+	// #nosec G202 -- the only concatenated values are the static table prefix and an internally-built host clause, not user input
+	q := `
+	PRAGMA temp_store = MEMORY;
+
+	CREATE TEMPORARY TABLE IF NOT EXISTS lookup_result (
+		host_id text NOT NULL,
+		host_address text NOT NULL,
+		actor_idle_timeout integer NOT NULL,
+		found_existing integer NOT NULL
+	) STRICT;
+
+	DELETE FROM lookup_result;
+
+	WITH
+		existing_actor AS (
+			SELECT 
+				h.host_id,
+				h.host_address,
+				aa.actor_idle_timeout,
+				1 AS found_existing
+			FROM ` + s.tablePrefix + `active_actors AS aa
+			JOIN ` + s.tablePrefix + `hosts AS h ON
+				aa.host_id = h.host_id
+			WHERE
+				aa.actor_type = ?
+				AND aa.actor_id = ?
+				AND h.host_last_health_check >= ?
+			LIMIT 1
+		),
+		available_host AS (
+			SELECT 
+				h.host_id,
+				h.host_address,
+				hat.actor_idle_timeout,
+				0 AS found_existing
+			FROM ` + s.tablePrefix + `hosts AS h
+			INNER JOIN ` + s.tablePrefix + `host_actor_types AS hat ON
+				h.host_id = hat.host_id
+			LEFT JOIN ` + s.tablePrefix + `host_active_actor_count AS haac ON
+				h.host_id = haac.host_id
+				AND hat.actor_type = haac.actor_type
+			WHERE 
+				NOT EXISTS (SELECT 1 FROM existing_actor)
+				AND hat.actor_type = ?
+				AND h.host_last_health_check >= ?
+				AND (
+					hat.actor_concurrency_limit = 0
+					OR COALESCE(haac.active_count, 0) < hat.actor_concurrency_limit
+				)
+				` + hostClause + `
+			ORDER BY random()
+			LIMIT 1
+		),
+		actor_to_use AS (
+			SELECT host_id, host_address, actor_idle_timeout, found_existing 
+			FROM existing_actor
+
+			UNION ALL
+
+			SELECT host_id, host_address, actor_idle_timeout, found_existing 
+			FROM available_host
 		)
+	INSERT INTO lookup_result (host_id, host_address, actor_idle_timeout, found_existing)
+	SELECT host_id, host_address, actor_idle_timeout, found_existing
+	FROM actor_to_use;
 
-		// Build host restrictions clause
-		hostClause, params := buildLookupActorHostClause(opts.Hosts, params)
+	REPLACE INTO ` + s.tablePrefix + `active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation)
+	SELECT ?, ?, host_id, actor_idle_timeout, ?
+	FROM lookup_result
+	WHERE
+		found_existing = 0
+		AND host_id IS NOT NULL;
 
-		// Parameters for insert_new_actor CTE
-		params = append(params,
-			ref.ActorType, ref.ActorID, now,
-		)
+	SELECT host_id, host_address, actor_idle_timeout
+	FROM lookup_result
+	WHERE host_id IS NOT NULL;`
 
-		// How this query works:
-		//
-		// 1. existing_actor:
-		//    This CTE checks for an active actor on a healthy host.
-		//    This will return a row with "found_existing = 1" if the actor is active and the host it's on is healthy.
-		//    Note we don't apply a host filter (if any) here, to avoid the actor being considered as inactive (and replaced later in the query)
-		//    We will need to filter the result in the Go code at the end.
-		// 2. available_host:
-		//    This CTE selects a host with capacity to activate the actor on. It considers host filters (if any) too.
-		//    Note the `NOT EXISTS (SELECT 1 FROM existing_actor)` clause, which means the CTE will return 0 rows if existing_actor found something previously.
-		// 3. actor_to_use:
-		//    This CTE combines the results of existing_actor and available_host in a UNION.
-		//    Because available_host doesn't return anything if there was an existing actor, this CTE will return *at most* one row (it could be zero if there's no existing actor, and if no host is available).
-		// 4. Insert into the temporary table:
-		//    We insert the result of actor_to_use (including whether it was previously active or not) into the temporary table.
-		//    We need to do this because in SQLite we cannot have an INSERT (or REPLACE) query inside a CTE.
-		// 5. Activate a new actor if needed:
-		//    The REPLACE query activates a new actor if there's one with "found_existing = 0" in the temporary table.
-		//    We perform an upsert query here. This is because the actor (with same type and ID) may already be present in the table, where it's active on a host that has failed but hasn't been garbage-collected yet.
-		// 6. Return the result:
-		//    Finally, we return the result from the lookup_result table.
-		//    Note the "lookup_result" temporary table is connection-local and thus not prefixed
-		// #nosec G202 -- the only concatenated values are the static table prefix and an internally-built host clause, not user input
-		q := `
-		PRAGMA temp_store = MEMORY;
+	// Single atomic query that:
+	// 1. First checks for existing active actor on healthy host
+	// 2. If not found, finds available host and atomically inserts the actor
+	// 3. Returns the result (either existing or newly created)
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
 
-		CREATE TEMPORARY TABLE IF NOT EXISTS lookup_result (
-			host_id text NOT NULL,
-			host_address text NOT NULL,
-			actor_idle_timeout integer NOT NULL,
-			found_existing integer NOT NULL
-		) STRICT;
+	var idleTimeoutMs int64
+	err = tx.
+		QueryRowContext(queryCtx, q, params...).
+		Scan(&res.HostID, &res.Address, &idleTimeoutMs)
 
-		DELETE FROM lookup_result;
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// If no row was retrieved, the actor is currently not active and not activable
+		return components.LookupActorRes{}, components.ErrNoHost
+	case err != nil:
+		// Query error
+		return res, fmt.Errorf("error looking up actor: %w", err)
+	default:
+		// We have an active actor
+		res.IdleTimeout = time.Duration(idleTimeoutMs) * time.Millisecond
 
-		WITH
-			existing_actor AS (
-				SELECT 
-					h.host_id,
-					h.host_address,
-					aa.actor_idle_timeout,
-					1 AS found_existing
-				FROM ` + s.tablePrefix + `active_actors AS aa
-				JOIN ` + s.tablePrefix + `hosts AS h ON
-					aa.host_id = h.host_id
-				WHERE
-					aa.actor_type = ?
-					AND aa.actor_id = ?
-					AND h.host_last_health_check >= ?
-				LIMIT 1
-			),
-			available_host AS (
-				SELECT 
-					h.host_id,
-					h.host_address,
-					hat.actor_idle_timeout,
-					0 AS found_existing
-				FROM ` + s.tablePrefix + `hosts AS h
-				INNER JOIN ` + s.tablePrefix + `host_actor_types AS hat ON
-					h.host_id = hat.host_id
-				LEFT JOIN ` + s.tablePrefix + `host_active_actor_count AS haac ON
-					h.host_id = haac.host_id
-					AND hat.actor_type = haac.actor_type
-				WHERE 
-					NOT EXISTS (SELECT 1 FROM existing_actor)
-					AND hat.actor_type = ?
-					AND h.host_last_health_check >= ?
-					AND (
-						hat.actor_concurrency_limit = 0
-						OR COALESCE(haac.active_count, 0) < hat.actor_concurrency_limit
-					)
-					` + hostClause + `
-				ORDER BY random()
-				LIMIT 1
-			),
-			actor_to_use AS (
-				SELECT host_id, host_address, actor_idle_timeout, found_existing 
-				FROM existing_actor
-
-				UNION ALL
-
-				SELECT host_id, host_address, actor_idle_timeout, found_existing 
-				FROM available_host
-			)
-		INSERT INTO lookup_result (host_id, host_address, actor_idle_timeout, found_existing)
-		SELECT host_id, host_address, actor_idle_timeout, found_existing
-		FROM actor_to_use;
-
-		REPLACE INTO ` + s.tablePrefix + `active_actors (actor_type, actor_id, host_id, actor_idle_timeout, actor_activation)
-		SELECT ?, ?, host_id, actor_idle_timeout, ?
-		FROM lookup_result
-		WHERE
-			found_existing = 0
-			AND host_id IS NOT NULL;
-
-		SELECT host_id, host_address, actor_idle_timeout
-		FROM lookup_result
-		WHERE host_id IS NOT NULL;`
-
-		// Single atomic query that:
-		// 1. First checks for existing active actor on healthy host
-		// 2. If not found, finds available host and atomically inserts the actor
-		// 3. Returns the result (either existing or newly created)
-		queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
-		defer cancel()
-
-		var idleTimeoutMs int64
-		err = tx.
-			QueryRowContext(queryCtx, q, params...).
-			Scan(&res.HostID, &res.Address, &idleTimeoutMs)
-
-		switch {
-		case errors.Is(err, sql.ErrNoRows):
-			// If no row was retrieved, the actor is currently not active and not activable
-			return components.LookupActorRes{}, components.ErrNoHost
-		case err != nil:
-			// Query error
-			return res, fmt.Errorf("error looking up actor: %w", err)
-		default:
-			// We have an active actor
-			res.IdleTimeout = time.Duration(idleTimeoutMs) * time.Millisecond
-
-			// However, the query did not enforce conditions such as host restrictions, so we need to check that
-			if len(opts.Hosts) > 0 {
-				if slices.Contains(opts.Hosts, res.HostID) {
-					// The host is one of those in the allowlist, so we can return the row
-					return res, nil
-				}
-
-				// The actor is active on a host that was not allowed, so we return ErrNoHost
-				// Note we return a new struct to avoid returning data in addition to the error
-				return components.LookupActorRes{}, components.ErrNoHost
+		// However, the query did not enforce conditions such as host restrictions, so we need to check that
+		if len(hosts) > 0 {
+			if slices.Contains(hosts, res.HostID) {
+				// The host is one of those in the allowlist, so we can return the row
+				return res, nil
 			}
 
-			// No host restrictions, so we're good to return the actor
-			return res, nil
+			// The actor is active on a host that was not allowed, so we return ErrNoHost
+			// Note we return a new struct to avoid returning data in addition to the error
+			return components.LookupActorRes{}, components.ErrNoHost
 		}
-	})
+
+		// No host restrictions, so we're good to return the actor
+		return res, nil
+	}
 }
 
 func (s *SQLiteProvider) RemoveActor(ctx context.Context, ref ref.ActorRef) error {

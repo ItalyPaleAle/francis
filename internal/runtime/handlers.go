@@ -589,14 +589,38 @@ func (rt *Runtime) handleSetAlarm(parentCtx context.Context, _ *hostConn, req *p
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
 	}
 
+	// Give the provider every connected host when this runtime is ready to retain a lease
+	alarmProperties := protocolAlarmPropsToRef(payload.AlarmProperties)
+	setReq := components.SetAlarmReq{
+		AlarmProperties: alarmProperties,
+		Kind:            components.AlarmKindAlarm,
+		JobMethod:       "",
+		LeaseImmediate:  nil,
+	}
+	rt.activeAlarmsLock.RLock()
+	processorReady := rt.alarmProcessor != nil && !rt.alarmsDraining
+	rt.activeAlarmsLock.RUnlock()
+	if processorReady {
+		setReq.LeaseImmediate = rt.hosts.ConnectedHostIDs()
+	}
+
+	// Store the alarm and acquire any immediate lease in the same provider operation
+	alarmRef := ref.NewAlarmRef(payload.ActorType, payload.ActorID, payload.Name)
 	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
 	defer cancel()
-	err = rt.provider.SetAlarm(ctx, ref.NewAlarmRef(payload.ActorType, payload.ActorID, payload.Name), components.SetAlarmReq{
-		AlarmProperties: protocolAlarmPropsToRef(payload.AlarmProperties),
-	})
+	lease, err := rt.provider.SetAlarm(ctx, alarmRef, setReq)
 	if err != nil {
 		rt.log.ErrorContext(ctx, "Failed to set alarm", slog.Any("error", err))
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to set alarm"))
+	}
+
+	// Hand an acquired durable lease to the in-memory scheduler before replying to the client
+	if lease != nil {
+		err = rt.enqueueAlarms(lease)
+		if err != nil {
+			rt.log.ErrorContext(ctx, "Failed to enqueue newly-created alarm", slog.Any("error", err))
+			return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to schedule alarm"))
+		}
 	}
 
 	return req.Reply(protocol.KindSetAlarmResponse, nil)

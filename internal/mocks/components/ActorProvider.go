@@ -1059,8 +1059,10 @@ func (_mock *MockActorProvider) HealthCheckPolicy() *components.HealthCheckPolic
 	var r0 *components.HealthCheckPolicy
 	if returnFunc, ok := ret.Get(0).(func() *components.HealthCheckPolicy); ok {
 		r0 = returnFunc()
-	} else if ret.Get(0) != nil {
-		r0 = ret.Get(0).(*components.HealthCheckPolicy)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*components.HealthCheckPolicy)
+		}
 	}
 	return r0
 }
@@ -2011,20 +2013,31 @@ func (_c *MockActorProvider_Run_Call) RunAndReturn(run func(ctx context.Context)
 }
 
 // SetAlarm provides a mock function for the type MockActorProvider
-func (_mock *MockActorProvider) SetAlarm(ctx context.Context, ref1 ref.AlarmRef, req components.SetAlarmReq) error {
+func (_mock *MockActorProvider) SetAlarm(ctx context.Context, ref1 ref.AlarmRef, req components.SetAlarmReq) (*ref.AlarmLease, error) {
 	ret := _mock.Called(ctx, ref1, req)
 
 	if len(ret) == 0 {
 		panic("no return value specified for SetAlarm")
 	}
 
-	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, ref.AlarmRef, components.SetAlarmReq) error); ok {
+	var r0 *ref.AlarmLease
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, ref.AlarmRef, components.SetAlarmReq) (*ref.AlarmLease, error)); ok {
+		return returnFunc(ctx, ref1, req)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, ref.AlarmRef, components.SetAlarmReq) *ref.AlarmLease); ok {
 		r0 = returnFunc(ctx, ref1, req)
 	} else {
-		r0 = ret.Error(0)
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*ref.AlarmLease)
+		}
 	}
-	return r0
+	if returnFunc, ok := ret.Get(1).(func(context.Context, ref.AlarmRef, components.SetAlarmReq) error); ok {
+		r1 = returnFunc(ctx, ref1, req)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
 }
 
 // MockActorProvider_SetAlarm_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SetAlarm'
@@ -2063,12 +2076,12 @@ func (_c *MockActorProvider_SetAlarm_Call) Run(run func(ctx context.Context, ref
 	return _c
 }
 
-func (_c *MockActorProvider_SetAlarm_Call) Return(err error) *MockActorProvider_SetAlarm_Call {
-	_c.Call.Return(err)
+func (_c *MockActorProvider_SetAlarm_Call) Return(alarmLease *ref.AlarmLease, err error) *MockActorProvider_SetAlarm_Call {
+	_c.Call.Return(alarmLease, err)
 	return _c
 }
 
-func (_c *MockActorProvider_SetAlarm_Call) RunAndReturn(run func(ctx context.Context, ref1 ref.AlarmRef, req components.SetAlarmReq) error) *MockActorProvider_SetAlarm_Call {
+func (_c *MockActorProvider_SetAlarm_Call) RunAndReturn(run func(ctx context.Context, ref1 ref.AlarmRef, req components.SetAlarmReq) (*ref.AlarmLease, error)) *MockActorProvider_SetAlarm_Call {
 	_c.Call.Return(run)
 	return _c
 }

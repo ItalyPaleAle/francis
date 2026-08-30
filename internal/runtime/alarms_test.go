@@ -37,11 +37,29 @@ func connectTestHost(t *testing.T, rt *Runtime, prov *standalone.StandaloneMemor
 	return c
 }
 
+// recordingSetAlarmProvider captures immediate-lease requests and results while preserving the provider's normal behavior
+type recordingSetAlarmProvider struct {
+	components.ActorProvider
+
+	requests chan components.SetAlarmReq
+	leases   chan *ref.AlarmLease
+}
+
+func (p *recordingSetAlarmProvider) SetAlarm(ctx context.Context, alarmRef ref.AlarmRef, req components.SetAlarmReq) (*ref.AlarmLease, error) {
+	lease, err := p.ActorProvider.SetAlarm(ctx, alarmRef, req)
+	p.requests <- req
+	if lease != nil {
+		p.leases <- lease
+	}
+	return lease, err
+}
+
 // leaseTestAlarm sets an alarm and leases it through the provider, returning the resulting lease
 func leaseTestAlarm(t *testing.T, prov *standalone.StandaloneMemory, hostID string, aref ref.AlarmRef, props ref.AlarmProperties) *ref.AlarmLease {
 	t.Helper()
 
-	require.NoError(t, prov.SetAlarm(t.Context(), aref, components.SetAlarmReq{AlarmProperties: props}))
+	_, err := prov.SetAlarm(t.Context(), aref, components.SetAlarmReq{AlarmProperties: props})
+	require.NoError(t, err)
 
 	leases, err := prov.FetchAndLeaseUpcomingAlarms(t.Context(), components.FetchAndLeaseUpcomingAlarmsReq{Hosts: []string{hostID}})
 	require.NoError(t, err)
@@ -359,9 +377,10 @@ func TestRunAlarmFetcherInitialFetchWithLongPollInterval(t *testing.T) {
 	rt, prov := newTestRuntime(t, WithAlarmsPollInterval(10*time.Minute))
 	_ = connectTestHost(t, rt, prov, "10.1.0.30:1", protocol.ActorHostType{ActorType: "T", MaxAttempts: 3, InitialRetryDelayMs: 100})
 
-	require.NoError(t, prov.SetAlarm(t.Context(), ref.NewAlarmRef("T", "a1", "wake"), components.SetAlarmReq{
+	_, err := prov.SetAlarm(t.Context(), ref.NewAlarmRef("T", "a1", "wake"), components.SetAlarmReq{
 		AlarmProperties: ref.AlarmProperties{DueTime: time.Now().Add(-time.Second)},
-	}))
+	})
+	require.NoError(t, err)
 
 	dispatched := make(chan protocol.ExecuteAlarmRequest, 1)
 	rt.sendToHost = func(_ context.Context, _ *hostConn, env *protocol.Envelope) (*protocol.Envelope, error) {
@@ -401,9 +420,10 @@ func TestRunAlarmFetcherInitialFetchWaitsForConnectedHost(t *testing.T) {
 	time.Sleep(alarmsInitialFetchDelay + 500*time.Millisecond)
 
 	_ = connectTestHost(t, rt, prov, "10.1.0.31:1", protocol.ActorHostType{ActorType: "T", MaxAttempts: 3, InitialRetryDelayMs: 100})
-	require.NoError(t, prov.SetAlarm(t.Context(), ref.NewAlarmRef("T", "a1", "wake"), components.SetAlarmReq{
+	_, err := prov.SetAlarm(t.Context(), ref.NewAlarmRef("T", "a1", "wake"), components.SetAlarmReq{
 		AlarmProperties: ref.AlarmProperties{DueTime: time.Now().Add(-time.Second)},
-	}))
+	})
+	require.NoError(t, err)
 
 	select {
 	case req := <-dispatched:
@@ -439,9 +459,10 @@ func TestFetchAndEnqueueAlarmsScopedToConnectedHosts(t *testing.T) {
 	_ = connectTestHost(t, rt, prov, "10.1.0.9:1", protocol.ActorHostType{ActorType: "T", MaxAttempts: 3, InitialRetryDelayMs: 100})
 
 	aref := ref.NewAlarmRef("T", "a1", "wake")
-	require.NoError(t, prov.SetAlarm(t.Context(), aref, components.SetAlarmReq{
+	_, err := prov.SetAlarm(t.Context(), aref, components.SetAlarmReq{
 		AlarmProperties: ref.AlarmProperties{DueTime: time.Now().Add(-time.Second)},
-	}))
+	})
+	require.NoError(t, err)
 
 	// The due alarm is dispatched to the connected host
 	dispatched := make(chan protocol.ExecuteAlarmRequest, 1)
@@ -462,6 +483,106 @@ func TestFetchAndEnqueueAlarmsScopedToConnectedHosts(t *testing.T) {
 	}
 }
 
+func TestHandleSetAlarmLeasesAndEnqueuesBeforePoll(t *testing.T) {
+	rt, prov := newTestRuntime(t, WithAlarmsPollInterval(time.Hour))
+	recordedRequests := make(chan components.SetAlarmReq, 1)
+	recordedLeases := make(chan *ref.AlarmLease, 1)
+	rt.provider = &recordingSetAlarmProvider{
+		ActorProvider: prov,
+		requests:      recordedRequests,
+		leases:        recordedLeases,
+	}
+	c := connectTestHost(t, rt, prov, "10.1.0.40:1", protocol.ActorHostType{
+		ActorType:             "T",
+		IdleTimeoutMs:         0,
+		ConcurrencyLimit:      0,
+		DeactivationTimeoutMs: 0,
+		MaxAttempts:           3,
+		InitialRetryDelayMs:   100,
+	})
+	rt.ensureAlarmProcessor()
+	defer func() {
+		err := rt.alarmProcessor.Close()
+		require.NoError(t, err)
+	}()
+
+	// Capture dispatches so the test can prove the alarm fired without starting the periodic fetcher
+	dispatched := make(chan protocol.ExecuteAlarmRequest, 1)
+	rt.sendToHost = func(_ context.Context, conn *hostConn, env *protocol.Envelope) (*protocol.Envelope, error) {
+		assert.Equal(t, c.hostID, conn.hostID)
+		var alarmReq protocol.ExecuteAlarmRequest
+		err := env.DecodePayload(&alarmReq)
+		require.NoError(t, err)
+		dispatched <- alarmReq
+		return env.ReplyWith(protocol.KindExecuteAlarmResponse, protocol.ExecuteAlarmResponse{ExecutionTimeUnixMs: 0})
+	}
+
+	// Create an alarm inside the fetch-ahead interval through the client-facing runtime handler
+	dueTime := time.Now().Add(500 * time.Millisecond)
+	resp := dispatchReq(t, rt, c, protocol.KindSetAlarm, protocol.SetAlarmRequest{
+		AlarmRef: protocol.AlarmRef{ActorType: "T", ActorID: "a1", Name: "wake"},
+		AlarmProperties: protocol.AlarmProperties{
+			DueTimeUnixMs: dueTime.UnixMilli(),
+			Interval:      "",
+			TTLUnixMs:     0,
+			Data:          nil,
+		},
+	})
+	require.Equal(t, protocol.KindSetAlarmResponse, resp.Kind)
+	setReq := <-recordedRequests
+	assert.Equal(t, []string{c.hostID}, setReq.LeaseImmediate)
+
+	// The handler must return only after the exact provider row accepts the returned lease token
+	lease := <-recordedLeases
+	_, err := prov.GetLeasedAlarm(t.Context(), lease)
+	require.NoError(t, err)
+
+	// The in-memory queue fires at the due time even though the hour-long poller was never started
+	select {
+	case alarmReq := <-dispatched:
+		assert.Equal(t, "T", alarmReq.ActorType)
+		assert.Equal(t, "a1", alarmReq.ActorID)
+		assert.Equal(t, "wake", alarmReq.Name)
+	case <-time.After(3 * time.Second):
+		t.Fatal("expected the pre-leased alarm to execute without a polling cycle")
+	}
+	rt.alarmWg.Wait()
+}
+
+func TestHandleSetAlarmLetsProviderChooseFastPathOutsideFetchAheadHorizon(t *testing.T) {
+	rt, prov := newTestRuntime(t)
+	recordedRequests := make(chan components.SetAlarmReq, 1)
+	rt.provider = &recordingSetAlarmProvider{
+		ActorProvider: prov,
+		requests:      recordedRequests,
+		leases:        make(chan *ref.AlarmLease, 1),
+	}
+	c := connectTestHost(t, rt, prov, "10.1.0.41:1", protocol.ActorHostType{ActorType: "T"})
+	rt.ensureAlarmProcessor()
+	defer func() {
+		err := rt.alarmProcessor.Close()
+		require.NoError(t, err)
+	}()
+
+	// The runtime always forwards its connected hosts and leaves the horizon decision to the provider
+	resp := dispatchReq(t, rt, c, protocol.KindSetAlarm, protocol.SetAlarmRequest{
+		AlarmRef: protocol.AlarmRef{ActorType: "T", ActorID: "a1", Name: "wake"},
+		AlarmProperties: protocol.AlarmProperties{
+			DueTimeUnixMs: time.Now().Add(time.Hour).UnixMilli(),
+		},
+	})
+	require.Equal(t, protocol.KindSetAlarmResponse, resp.Kind)
+	setReq := <-recordedRequests
+	assert.Equal(t, []string{c.hostID}, setReq.LeaseImmediate)
+
+	// The provider's fast path stores the future alarm without placing its actor or acquiring a lease
+	alarmRef := ref.NewAlarmRef("T", "a1", "wake")
+	_, err := prov.GetAlarm(t.Context(), alarmRef)
+	require.NoError(t, err)
+	_, err = prov.LookupActor(t.Context(), alarmRef.ActorRef(), components.LookupActorOpts{ActiveOnly: true})
+	require.ErrorIs(t, err, components.ErrNoActor)
+}
+
 func TestExecuteAlarmDispatchesOffTheProcessorLoop(t *testing.T) {
 	rt, prov := newTestRuntime(t)
 	c := connectTestHost(t, rt, prov, "10.1.0.20:1", protocol.ActorHostType{
@@ -471,12 +592,12 @@ func TestExecuteAlarmDispatchesOffTheProcessorLoop(t *testing.T) {
 	})
 
 	// Lease two due alarms for the same host
-	err := prov.SetAlarm(t.Context(), ref.NewAlarmRef("T", "a1", "wake"), components.SetAlarmReq{
+	_, err := prov.SetAlarm(t.Context(), ref.NewAlarmRef("T", "a1", "wake"), components.SetAlarmReq{
 		AlarmProperties: ref.AlarmProperties{DueTime: time.Now().Add(-time.Second)},
 	})
 	require.NoError(t, err)
 
-	err = prov.SetAlarm(t.Context(), ref.NewAlarmRef("T", "a2", "wake"), components.SetAlarmReq{
+	_, err = prov.SetAlarm(t.Context(), ref.NewAlarmRef("T", "a2", "wake"), components.SetAlarmReq{
 		AlarmProperties: ref.AlarmProperties{DueTime: time.Now().Add(-time.Second)},
 	})
 	require.NoError(t, err)

@@ -64,7 +64,7 @@ func TestSQLiteTimestampsStoredAsUnixMillis(t *testing.T) {
 		ActorID:   "utc-actor",
 		Name:      "utc-alarm",
 	}
-	err := s.SetAlarm(t.Context(), aRef, components.SetAlarmReq{
+	_, err := s.SetAlarm(t.Context(), aRef, components.SetAlarmReq{
 		AlarmProperties: ref.AlarmProperties{DueTime: dueTime},
 	})
 	require.NoError(t, err)

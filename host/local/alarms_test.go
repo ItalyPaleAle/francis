@@ -304,7 +304,7 @@ func TestSetAlarm(t *testing.T) {
 		// Set up provider expectations
 		provider.
 			On("SetAlarm", mock.MatchedBy(testutil.MatchContextInterface), alarmRef, expectedReq).
-			Return(nil).
+			Return(nil, nil).
 			Once()
 
 		// Test setting the alarm
@@ -340,7 +340,7 @@ func TestSetAlarm(t *testing.T) {
 		// Set up provider expectations
 		provider.
 			On("SetAlarm", mock.MatchedBy(testutil.MatchContextInterface), alarmRef, expectedReq).
-			Return(nil).
+			Return(nil, nil).
 			Once()
 
 		// Test setting the alarm
@@ -374,7 +374,7 @@ func TestSetAlarm(t *testing.T) {
 		// Set up provider expectations
 		provider.
 			On("SetAlarm", mock.MatchedBy(testutil.MatchContextInterface), alarmRef, expectedReq).
-			Return(nil).
+			Return(nil, nil).
 			Once()
 
 		// Test setting the alarm
@@ -409,7 +409,7 @@ func TestSetAlarm(t *testing.T) {
 		// Set up provider expectations
 		provider.
 			On("SetAlarm", mock.MatchedBy(testutil.MatchContextInterface), alarmRef, expectedReq).
-			Return(providerErr).
+			Return(nil, providerErr).
 			Once()
 
 		// Test setting alarm with provider error

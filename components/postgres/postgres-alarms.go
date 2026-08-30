@@ -57,7 +57,7 @@ func (p *PostgresProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res 
 	return res, nil
 }
 
-func (p *PostgresProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req components.SetAlarmReq) error {
+func (p *PostgresProvider) SetAlarm(ctx context.Context, alarmRef ref.AlarmRef, req components.SetAlarmReq) (*ref.AlarmLease, error) {
 	var interval *string
 	if req.Interval != "" {
 		interval = &req.Interval
@@ -69,11 +69,17 @@ func (p *PostgresProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req c
 
 	alarmID, err := uuid.NewV7()
 	if err != nil {
-		return fmt.Errorf("failed to generate alarm ID: %w", err)
+		return nil, fmt.Errorf("failed to generate alarm ID: %w", err)
 	}
 
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
+
+	// Trying to acquire a lease requires using the slower path
+	// We skip that when there are no allowed hosts or when the local clock places the alarm outside of the fetch-ahead interval
+	if len(req.LeaseImmediate) > 0 && !req.DueTime.After(p.clock.Now().Add(p.cfg.AlarmsFetchAheadInterval)) {
+		return p.setAndLeaseAlarm(queryCtx, alarmRef, req, alarmID, interval)
+	}
 
 	// We do an upsert to replace alarms with the same actor ID, actor type, and alarm name
 	// Any upsert will cause the lease to be lost
@@ -103,12 +109,45 @@ func (p *PostgresProvider) SetAlarm(ctx context.Context, ref ref.AlarmRef, req c
 				OR `+p.tablePrefix+`alarms.alarm_data IS DISTINCT FROM EXCLUDED.alarm_data
 			`,
 			// alarm_due_time and alarm_ttl_time are stored as UTC
-			alarmID, ref.ActorType, ref.ActorID, ref.Name,
+			alarmID, alarmRef.ActorType, alarmRef.ActorID, alarmRef.Name,
 			req.DueTime.UTC(), interval, utcPtr(req.TTL), req.Data)
 	if err != nil {
-		return fmt.Errorf("failed to create alarm: %w", err)
+		return nil, fmt.Errorf("failed to create alarm: %w", err)
 	}
-	return nil
+	return nil, nil
+}
+
+// setAndLeaseAlarm atomically stores an alarm and attempts to place and lease it
+func (p *PostgresProvider) setAndLeaseAlarm(ctx context.Context, alarmRef ref.AlarmRef, req components.SetAlarmReq, alarmID uuid.UUID, interval *string) (*ref.AlarmLease, error) {
+	hostUUIDs, err := hostIDsToUUIDs(req.LeaseImmediate)
+	if err != nil {
+		return nil, err
+	}
+
+	// The database rechecks its own clock and returns no row when the stored alarm is not currently eligible for a lease
+	var (
+		storedAlarmID uuid.UUID
+		dueTime       time.Time
+		leaseID       uuid.UUID
+	)
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	err = p.db.
+		QueryRow(ctx,
+			`SELECT r_alarm_id, r_alarm_due_time, r_lease_id
+		FROM `+p.tablePrefix+`set_and_lease_alarm_v1($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+			alarmID, alarmRef.ActorType, alarmRef.ActorID, alarmRef.Name,
+			req.DueTime.UTC(), interval,
+			utcPtr(req.TTL), req.Data, hostUUIDs,
+			p.cfg.HostHealthCheckDeadline, p.cfg.AlarmsFetchAheadInterval, p.cfg.AlarmsLeaseDuration,
+		).
+		Scan(&storedAlarmID, &dueTime, &leaseID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("failed to atomically set and lease alarm: %w", err)
+	}
+
+	return ref.NewAlarmLease(alarmRef, storedAlarmID.String(), dueTime, leaseID.String()), nil
 }
 
 func (p *PostgresProvider) DeleteAlarm(ctx context.Context, ref ref.AlarmRef) error {

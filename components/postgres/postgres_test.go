@@ -98,6 +98,7 @@ func TestPostgresTablePrefix(t *testing.T) {
 		assert.Contains(t, names, "francis_metadata")
 		assert.Contains(t, names, "francis_fetch_and_lease_upcoming_alarms_v1")
 		assert.Contains(t, names, "francis_lookup_allocate_actor_v1")
+		assert.Contains(t, names, "francis_set_and_lease_alarm_v1")
 		// No francis-owned object should exist under its bare, unprefixed name
 		assert.NotContains(t, names, "hosts")
 		assert.NotContains(t, names, "alarms")
@@ -113,6 +114,7 @@ func TestPostgresTablePrefix(t *testing.T) {
 		assert.Contains(t, names, "myapp_alarms")
 		assert.Contains(t, names, "myapp_metadata")
 		assert.Contains(t, names, "myapp_fetch_and_lease_upcoming_alarms_v1")
+		assert.Contains(t, names, "myapp_set_and_lease_alarm_v1")
 	})
 
 	t.Run("custom prefix is functional end-to-end", func(t *testing.T) {
@@ -647,7 +649,7 @@ func TestPostgresTimestampsStoredAsUTC(t *testing.T) {
 			ActorID:   "utc-actor",
 			Name:      "utc-alarm",
 		}
-		err := p.SetAlarm(t.Context(), aRef, components.SetAlarmReq{
+		_, err := p.SetAlarm(t.Context(), aRef, components.SetAlarmReq{
 			AlarmProperties: ref.AlarmProperties{DueTime: dueTime},
 		})
 		require.NoError(t, err)

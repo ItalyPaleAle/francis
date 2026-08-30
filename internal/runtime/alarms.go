@@ -31,15 +31,8 @@ func (rt *Runtime) runAlarmFetcher(ctx context.Context) error {
 	rt.log.DebugContext(ctx, "Starting background alarm fetcher", slog.Any("interval", rt.alarmsPollInterval))
 	defer rt.log.Debug("Stopped background alarm fetcher")
 
-	// Clear any draining state from a previous run
-	rt.activeAlarmsLock.Lock()
-	rt.alarmsDraining = false
-	rt.activeAlarmsLock.Unlock()
-
-	// Start the processor that fires alarms at their due time
-	rt.alarmProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ref.AlarmLease]{
-		ExecuteFn: rt.executeAlarm,
-	})
+	// Ensure direct tests and nonstandard callers also have the processor normally created by Run
+	rt.ensureAlarmProcessor()
 	defer func() {
 		apErr := rt.alarmProcessor.Close()
 		if apErr != nil {
@@ -97,6 +90,20 @@ func (rt *Runtime) runAlarmFetcher(ctx context.Context) error {
 			rt.drainActiveAlarms()
 			return ctx.Err()
 		}
+	}
+}
+
+// ensureAlarmProcessor creates the scheduler before alarm-producing request handlers become reachable
+func (rt *Runtime) ensureAlarmProcessor() {
+	rt.activeAlarmsLock.Lock()
+	defer rt.activeAlarmsLock.Unlock()
+
+	rt.alarmsDraining = false
+	if rt.alarmProcessor == nil {
+		rt.alarmProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ref.AlarmLease]{
+			ExecuteFn: rt.executeAlarm,
+			Clock:     rt.clock,
+		})
 	}
 }
 
@@ -319,9 +326,9 @@ func (rt *Runtime) executeActiveAlarm(lease *ref.AlarmLease) {
 		lease.IncreaseAttempts(rt.clock.Now().Add(delay))
 
 		// Do not re-enqueue once the runtime is draining: the processor is being torn down, so let the lease expire and another replica pick the alarm up
-		rt.activeAlarmsLock.Lock()
+		rt.activeAlarmsLock.RLock()
 		draining := rt.alarmsDraining
-		rt.activeAlarmsLock.Unlock()
+		rt.activeAlarmsLock.RUnlock()
 		if !draining {
 			enqErr := rt.alarmProcessor.Enqueue(lease)
 			if enqErr != nil {

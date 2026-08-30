@@ -65,8 +65,8 @@ type ActorProvider interface {
 	// It returns ErrNoAlarm if it doesn't exist.
 	GetAlarm(ctx context.Context, ref ref.AlarmRef) (GetAlarmRes, error)
 
-	// SetAlarm sets or replaces an alarm configured for an actor.
-	SetAlarm(ctx context.Context, ref ref.AlarmRef, req SetAlarmReq) error
+	// SetAlarm sets or replaces an alarm configured for an actor and optionally returns a lease acquired while storing it
+	SetAlarm(ctx context.Context, ref ref.AlarmRef, req SetAlarmReq) (*ref.AlarmLease, error)
 
 	// DeleteAlarm removes an alarm configured for an actor.
 	// If the alarm doesn't exist, returns ErrNoAlarm.
@@ -292,6 +292,9 @@ type SetAlarmReq struct {
 	Kind AlarmKind
 	// JobMethod is the job handler method, set only for jobs
 	JobMethod string
+	// LeaseImmediate lists the hosts eligible to own an immediate lease when the alarm is within the provider's fetch-ahead interval
+	// An empty list or an alarm outside the interval does not attempt to acquire a lease
+	LeaseImmediate []string
 }
 
 // FetchAndLeaseUpcomingAlarmsReq is the request object for the FetchAndLeaseUpcomingAlarms method.
