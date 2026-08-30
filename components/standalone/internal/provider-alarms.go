@@ -27,13 +27,11 @@ func (p *Provider) GetAlarm(ctx context.Context, aRef ref.AlarmRef) (components.
 	}
 
 	res := components.GetAlarmRes{
-		AlarmProperties: ref.AlarmProperties{
-			DueTime:  a.DueTime,
-			Interval: a.Interval,
-			Cron:     a.Cron,
-			TTL:      a.TTL,
-			Data:     a.Data,
-		},
+		DueTime:   a.DueTime,
+		Interval:  a.Interval,
+		Cron:      a.Cron,
+		TTL:       a.TTL,
+		Data:      a.Data,
 		Kind:      components.AlarmKind(a.Kind),
 		JobMethod: a.JobMethod,
 	}
@@ -588,18 +586,14 @@ func (p *Provider) GetLeasedAlarm(ctx context.Context, lease *ref.AlarmLease) (c
 	}
 
 	return components.GetLeasedAlarmRes{
-		AlarmRef: ref.AlarmRef{
-			ActorType: a.ActorType,
-			ActorID:   a.ActorID,
-			Name:      a.Name,
-		},
-		AlarmProperties: ref.AlarmProperties{
-			DueTime:  a.DueTime,
-			Interval: a.Interval,
-			Cron:     a.Cron,
-			TTL:      a.TTL,
-			Data:     a.Data,
-		},
+		ActorType: a.ActorType,
+		ActorID:   a.ActorID,
+		Name:      a.Name,
+		DueTime:   a.DueTime,
+		Interval:  a.Interval,
+		Cron:      a.Cron,
+		TTL:       a.TTL,
+		Data:      a.Data,
 		Kind:      components.AlarmKind(a.Kind),
 		JobMethod: a.JobMethod,
 	}, nil

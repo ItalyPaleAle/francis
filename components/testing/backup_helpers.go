@@ -138,13 +138,11 @@ func SeedBackupSample(t testing.TB, ctx context.Context, p components.ActorProvi
 	// A plain alarm with the optional fields populated
 	ttl := now.Add(24 * time.Hour)
 	_, err = p.SetAlarm(ctx, ref.NewAlarmRef(actorType, "alarm-actor", "alarm-1"), components.SetAlarmReq{
-		AlarmProperties: ref.AlarmProperties{
-			DueTime:  now.Add(time.Hour),
-			Interval: "PT5M",
-			TTL:      &ttl,
-			Data:     []byte("alarm-data"),
-		},
-		Kind: components.AlarmKindAlarm,
+		DueTime:  now.Add(time.Hour),
+		Interval: "PT5M",
+		TTL:      &ttl,
+		Data:     []byte("alarm-data"),
+		Kind:     components.AlarmKindAlarm,
 	})
 	require.NoError(t, err)
 
