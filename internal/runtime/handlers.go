@@ -668,12 +668,10 @@ func (rt *Runtime) handleDispatchJob(parentCtx context.Context, _ *hostConn, req
 
 	// Translate the wire properties into a job alarm row, with the Kind discriminator that drives delivery and dead-lettering
 	setReq := components.SetAlarmReq{
-		AlarmProperties: ref.AlarmProperties{
-			DueTime:  time.UnixMilli(payload.DueTimeUnixMs),
-			Interval: payload.Interval,
-			Cron:     payload.Cron,
-			Data:     payload.Data,
-		},
+		DueTime:   time.UnixMilli(payload.DueTimeUnixMs),
+		Interval:  payload.Interval,
+		Cron:      payload.Cron,
+		Data:      payload.Data,
 		Kind:      components.AlarmKindJob,
 		JobMethod: payload.Method,
 	}

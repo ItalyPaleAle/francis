@@ -767,10 +767,8 @@ func alarmPropertiesFromAlarmRes(res components.GetAlarmRes) (actor.AlarmPropert
 
 func alarmPropertiesToAlarmReq(o actor.AlarmProperties) (components.SetAlarmReq, error) {
 	req := components.SetAlarmReq{
-		AlarmProperties: ref.AlarmProperties{
-			DueTime:  o.DueTime,
-			Interval: o.Interval,
-		},
+		DueTime:  o.DueTime,
+		Interval: o.Interval,
 	}
 
 	if o.Data != nil {

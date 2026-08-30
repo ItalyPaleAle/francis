@@ -158,12 +158,10 @@ func TestGetAlarm(t *testing.T) {
 		provider.
 			On("GetAlarm", mock.MatchedBy(testutil.MatchContextInterface), alarmRef).
 			Return(components.GetAlarmRes{
-				AlarmProperties: ref.AlarmProperties{
-					DueTime:  dueTime,
-					Interval: "1h",
-					Data:     testData,
-					TTL:      &ttl,
-				},
+				DueTime:  dueTime,
+				Interval: "1h",
+				Data:     testData,
+				TTL:      &ttl,
 			}, nil).
 			Once()
 
@@ -191,12 +189,9 @@ func TestGetAlarm(t *testing.T) {
 		provider.
 			On("GetAlarm", mock.MatchedBy(testutil.MatchContextInterface), alarmRef).
 			Return(components.GetAlarmRes{
-				AlarmProperties: ref.AlarmProperties{
-					DueTime:  dueTime,
-					Interval: "2h",
-					Data:     testData,
-					TTL:      nil,
-				},
+				DueTime:  dueTime,
+				Interval: "2h",
+				Data:     testData,
 			}, nil).
 			Once()
 
@@ -293,12 +288,10 @@ func TestSetAlarm(t *testing.T) {
 		}
 
 		expectedReq := components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime:  dueTime,
-				Interval: "PT1H",
-				Data:     testData,
-				TTL:      &ttl,
-			},
+			DueTime:  dueTime,
+			Interval: "PT1H",
+			Data:     testData,
+			TTL:      &ttl,
 		}
 
 		// Set up provider expectations
@@ -329,11 +322,9 @@ func TestSetAlarm(t *testing.T) {
 		}
 
 		expectedReq := components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime:  dueTime,
-				Interval: "PT2H",
-				Data:     testData,
-			},
+			DueTime:  dueTime,
+			Interval: "PT2H",
+			Data:     testData,
 			// TTL should be nil when not set
 		}
 
@@ -364,11 +355,9 @@ func TestSetAlarm(t *testing.T) {
 		}
 
 		expectedReq := components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime:  dueTime,
-				Interval: "PT30M",
-				Data:     nil,
-			},
+			DueTime:  dueTime,
+			Interval: "PT30M",
+			Data:     nil,
 		}
 
 		// Set up provider expectations
@@ -399,11 +388,9 @@ func TestSetAlarm(t *testing.T) {
 		}
 
 		expectedReq := components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime:  dueTime,
-				Interval: "PT1H",
-				Data:     testData,
-			},
+			DueTime:  dueTime,
+			Interval: "PT1H",
+			Data:     testData,
 		}
 
 		// Set up provider expectations
@@ -543,12 +530,10 @@ func TestAlarmPropertiesConversion(t *testing.T) {
 		ttl := time.Now().Add(24 * time.Hour)
 
 		res := components.GetAlarmRes{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime:  dueTime,
-				Interval: "1h",
-				Data:     []byte("test-data"),
-				TTL:      &ttl,
-			},
+			DueTime:  dueTime,
+			Interval: "1h",
+			Data:     []byte("test-data"),
+			TTL:      &ttl,
 		}
 
 		properties, err := alarmPropertiesFromAlarmRes(res)
@@ -564,12 +549,10 @@ func TestAlarmPropertiesConversion(t *testing.T) {
 		dueTime := time.Now().Add(time.Hour)
 
 		res := components.GetAlarmRes{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime:  dueTime,
-				Interval: "2h",
-				Data:     []byte("test-data-2"),
-				TTL:      nil,
-			},
+			DueTime:  dueTime,
+			Interval: "2h",
+			Data:     []byte("test-data-2"),
+			TTL:      nil,
 		}
 
 		properties, err := alarmPropertiesFromAlarmRes(res)
@@ -586,12 +569,10 @@ func TestAlarmPropertiesConversion(t *testing.T) {
 		// Intentionally invalid msgpack data
 		invalidData := []byte{0xD8}
 		res := components.GetAlarmRes{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime:  dueTime,
-				Interval: "1h",
-				Data:     invalidData,
-				TTL:      nil,
-			},
+			DueTime:  dueTime,
+			Interval: "1h",
+			Data:     invalidData,
+			TTL:      nil,
 		}
 		_, err := alarmPropertiesFromAlarmRes(res)
 		require.Error(t, err)

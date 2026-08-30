@@ -650,7 +650,7 @@ func TestPostgresTimestampsStoredAsUTC(t *testing.T) {
 			Name:      "utc-alarm",
 		}
 		_, err := p.SetAlarm(t.Context(), aRef, components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{DueTime: dueTime},
+			DueTime: dueTime,
 		})
 		require.NoError(t, err)
 

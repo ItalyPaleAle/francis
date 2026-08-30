@@ -140,8 +140,9 @@ func TestHandlerDoesNotLeakProviderErrorDetail(t *testing.T) {
 		sessionID: "s1",
 	}
 	req, err := protocol.NewRequest(protocol.KindSetState, protocol.SetStateRequest{
-		ActorRef: protocol.ActorRef{ActorType: "T", ActorID: "a1"},
-		Data:     []byte("data"),
+		ActorType: "T",
+		ActorID:   "a1",
+		Data:      []byte("data"),
 	})
 	require.NoError(t, err)
 
@@ -342,19 +343,19 @@ func TestHandleRemoveActor(t *testing.T) {
 		require.True(t, cached, "lookup should have cached the placement")
 
 		// Removing the actor acknowledges and drops the cache entry
-		removeResp := dispatchReq(t, rt, c, protocol.KindRemoveActor, protocol.RemoveActorRequest{ActorRef: protocol.ActorRef{ActorType: "T", ActorID: "a1"}})
+		removeResp := dispatchReq(t, rt, c, protocol.KindRemoveActor, protocol.RemoveActorRequest{ActorType: "T", ActorID: "a1"})
 		assert.Equal(t, protocol.KindRemoveActorResponse, removeResp.Kind)
 		_, stillCached := rt.placementCache.Get(ref.NewActorRef("T", "a1").String())
 		assert.False(t, stillCached, "remove should have cleared the cached placement")
 	})
 
 	t.Run("reports not active for an actor that is not active", func(t *testing.T) {
-		resp := dispatchReq(t, rt, c, protocol.KindRemoveActor, protocol.RemoveActorRequest{ActorRef: protocol.ActorRef{ActorType: "T", ActorID: "never-activated"}})
+		resp := dispatchReq(t, rt, c, protocol.KindRemoveActor, protocol.RemoveActorRequest{ActorType: "T", ActorID: "never-activated"})
 		requireError(t, resp, protocol.ErrCodeActorNotActive)
 	})
 
 	t.Run("missing actor identity is a bad request", func(t *testing.T) {
-		resp := dispatchReq(t, rt, c, protocol.KindRemoveActor, protocol.RemoveActorRequest{ActorRef: protocol.ActorRef{ActorType: "T"}})
+		resp := dispatchReq(t, rt, c, protocol.KindRemoveActor, protocol.RemoveActorRequest{ActorType: "T"})
 		requireError(t, resp, protocol.ErrCodeBadRequest)
 	})
 }
@@ -368,14 +369,13 @@ func TestHandleState(t *testing.T) {
 
 	t.Run("set then get round-trips the state", func(t *testing.T) {
 		setResp := dispatchReq(t, rt, c, protocol.KindSetState, protocol.SetStateRequest{
-			ActorRef: protocol.ActorRef{ActorType: "T", ActorID: "a1"},
-			Data:     data,
+			ActorType: "T",
+			ActorID:   "a1",
+			Data:      data,
 		})
 		assert.Equal(t, protocol.KindSetStateResponse, setResp.Kind)
 
-		getResp := dispatchReq(t, rt, c, protocol.KindGetState, protocol.GetStateRequest{
-			ActorRef: protocol.ActorRef{ActorType: "T", ActorID: "a1"},
-		})
+		getResp := dispatchReq(t, rt, c, protocol.KindGetState, protocol.GetStateRequest{ActorType: "T", ActorID: "a1"})
 		require.Equal(t, protocol.KindGetStateResponse, getResp.Kind)
 		var out protocol.GetStateResponse
 		require.NoError(t, getResp.DecodePayload(&out))
@@ -383,27 +383,19 @@ func TestHandleState(t *testing.T) {
 	})
 
 	t.Run("get for missing state reports not found", func(t *testing.T) {
-		resp := dispatchReq(t, rt, c, protocol.KindGetState, protocol.GetStateRequest{
-			ActorRef: protocol.ActorRef{ActorType: "T", ActorID: "missing"},
-		})
+		resp := dispatchReq(t, rt, c, protocol.KindGetState, protocol.GetStateRequest{ActorType: "T", ActorID: "missing"})
 		requireError(t, resp, protocol.ErrCodeStateNotFound)
 	})
 
 	t.Run("delete removes the state", func(t *testing.T) {
-		delResp := dispatchReq(t, rt, c, protocol.KindDeleteState, protocol.DeleteStateRequest{
-			ActorRef: protocol.ActorRef{ActorType: "T", ActorID: "a1"},
-		})
+		delResp := dispatchReq(t, rt, c, protocol.KindDeleteState, protocol.DeleteStateRequest{ActorType: "T", ActorID: "a1"})
 		assert.Equal(t, protocol.KindDeleteStateResponse, delResp.Kind)
 
-		getResp := dispatchReq(t, rt, c, protocol.KindGetState, protocol.GetStateRequest{
-			ActorRef: protocol.ActorRef{ActorType: "T", ActorID: "a1"},
-		})
+		getResp := dispatchReq(t, rt, c, protocol.KindGetState, protocol.GetStateRequest{ActorType: "T", ActorID: "a1"})
 		requireError(t, getResp, protocol.ErrCodeStateNotFound)
 
 		// Deleting again reports not found
-		delAgain := dispatchReq(t, rt, c, protocol.KindDeleteState, protocol.DeleteStateRequest{
-			ActorRef: protocol.ActorRef{ActorType: "T", ActorID: "a1"},
-		})
+		delAgain := dispatchReq(t, rt, c, protocol.KindDeleteState, protocol.DeleteStateRequest{ActorType: "T", ActorID: "a1"})
 		requireError(t, delAgain, protocol.ErrCodeStateNotFound)
 	})
 }
@@ -418,8 +410,10 @@ func TestHandleAlarm(t *testing.T) {
 
 	t.Run("set then get round-trips the alarm", func(t *testing.T) {
 		setResp := dispatchReq(t, rt, c, protocol.KindSetAlarm, protocol.SetAlarmRequest{
-			AlarmRef:        aref,
-			AlarmProperties: protocol.AlarmProperties{DueTimeUnixMs: dueMs, Interval: "PT1M", Data: []byte("d")},
+			AlarmRef:      aref,
+			DueTimeUnixMs: dueMs,
+			Interval:      "PT1M",
+			Data:          []byte("d"),
 		})
 		assert.Equal(t, protocol.KindSetAlarmResponse, setResp.Kind)
 
@@ -434,7 +428,9 @@ func TestHandleAlarm(t *testing.T) {
 
 	t.Run("get for missing alarm reports not found", func(t *testing.T) {
 		resp := dispatchReq(t, rt, c, protocol.KindGetAlarm, protocol.GetAlarmRequest{
-			AlarmRef: protocol.AlarmRef{ActorType: "T", ActorID: "a1", Name: "missing"},
+			ActorType: "T",
+			ActorID:   "a1",
+			Name:      "missing",
 		})
 		requireError(t, resp, protocol.ErrCodeAlarmNotFound)
 	})

@@ -2315,10 +2315,8 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 			Name:      "test-alarm",
 		}
 		alarmReq := components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				// Overdue so it's fetched right away
-				DueTime: s.p.Now().Add(-time.Second),
-			},
+			// Overdue so it's fetched right away
+			DueTime: s.p.Now().Add(-time.Second),
 		}
 		_, err = s.p.SetAlarm(ctx, alarmRef, alarmReq)
 		require.NoError(t, err)
@@ -2731,12 +2729,10 @@ func (s Suite) TestGetAlarm(t *testing.T) {
 		ttl := now.Add(24 * time.Hour)
 
 		setReq := components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime:  dueTime,
-				Interval: "1h",
-				TTL:      &ttl,
-				Data:     alarmData,
-			},
+			DueTime:  dueTime,
+			Interval: "1h",
+			TTL:      &ttl,
+			Data:     alarmData,
 		}
 
 		lease, err := s.p.SetAlarm(t.Context(), alarmRef, setReq)
@@ -2827,14 +2823,11 @@ func (s Suite) TestSetAlarm(t *testing.T) {
 		ttl := now.Add(24 * time.Hour)
 
 		setReq := components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime:  dueTime,
-				Interval: "1h",
-				TTL:      &ttl,
-				Data:     alarmData,
-			},
+			DueTime:  dueTime,
+			Interval: "1h",
+			TTL:      &ttl,
+			Data:     alarmData,
 		}
-
 		_, err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
 		require.NoError(t, err)
 
@@ -2865,9 +2858,7 @@ func (s Suite) TestSetAlarm(t *testing.T) {
 		dueTime := now.Add(1 * time.Hour)
 
 		setReq := components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime: dueTime,
-			},
+			DueTime: dueTime,
 		}
 
 		_, err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
@@ -2901,12 +2892,10 @@ func (s Suite) TestSetAlarm(t *testing.T) {
 		initialTTL := now.Add(12 * time.Hour)
 
 		initialReq := components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime:  initialDueTime,
-				Interval: "1h",
-				TTL:      &initialTTL,
-				Data:     initialData,
-			},
+			DueTime:  initialDueTime,
+			Interval: "1h",
+			TTL:      &initialTTL,
+			Data:     initialData,
 		}
 
 		_, err = s.p.SetAlarm(t.Context(), alarmRef, initialReq)
@@ -2918,12 +2907,10 @@ func (s Suite) TestSetAlarm(t *testing.T) {
 		updatedTTL := now.Add(24 * time.Hour)
 
 		updateReq := components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime:  updatedDueTime,
-				Interval: "2h",
-				TTL:      &updatedTTL,
-				Data:     updatedData,
-			},
+			DueTime:  updatedDueTime,
+			Interval: "2h",
+			TTL:      &updatedTTL,
+			Data:     updatedData,
 		}
 
 		_, err = s.p.SetAlarm(t.Context(), alarmRef, updateReq)
@@ -2958,12 +2945,10 @@ func (s Suite) TestSetAlarm(t *testing.T) {
 		initialTTL := now.Add(12 * time.Hour)
 
 		initialReq := components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime:  initialDueTime,
-				Interval: "1h",
-				TTL:      &initialTTL,
-				Data:     initialData,
-			},
+			DueTime:  initialDueTime,
+			Interval: "1h",
+			TTL:      &initialTTL,
+			Data:     initialData,
 		}
 
 		_, err = s.p.SetAlarm(t.Context(), alarmRef, initialReq)
@@ -3059,12 +3044,10 @@ func (s Suite) TestSetAlarm(t *testing.T) {
 
 		// Now call SetAlarm with exactly the same properties
 		setReq := components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime:  originalAlarm.DueTime,
-				Interval: originalAlarm.Interval,
-				TTL:      originalAlarm.TTL,
-				Data:     originalAlarm.Data,
-			},
+			DueTime:  originalAlarm.DueTime,
+			Interval: originalAlarm.Interval,
+			TTL:      originalAlarm.TTL,
+			Data:     originalAlarm.Data,
 		}
 
 		_, err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
@@ -3146,12 +3129,10 @@ func (s Suite) TestSetAlarm(t *testing.T) {
 		// Now call SetAlarm with different properties (change due time)
 		newDueTime := originalAlarm.DueTime.Add(1 * time.Hour)
 		setReq := components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime:  newDueTime,
-				Interval: originalAlarm.Interval,
-				TTL:      originalAlarm.TTL,
-				Data:     originalAlarm.Data,
-			},
+			DueTime:  newDueTime,
+			Interval: originalAlarm.Interval,
+			TTL:      originalAlarm.TTL,
+			Data:     originalAlarm.Data,
 		}
 
 		_, err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
@@ -3209,10 +3190,8 @@ func (s Suite) TestSetAlarm(t *testing.T) {
 		// and must invalidate the prior lease (which referenced the old alarm ID).
 		newDueTime := oldLease.DueTime().Add(1 * time.Hour)
 		_, err = s.p.SetAlarm(ctx, aRef, components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime: newDueTime,
-				Data:    []byte("replaced"),
-			},
+			DueTime: newDueTime,
+			Data:    []byte("replaced"),
 		})
 		require.NoError(t, err)
 
@@ -3288,15 +3267,8 @@ func (s Suite) TestSetAndLeaseAlarm(t *testing.T) {
 		// Store an alarm close enough to qualify for fetch-ahead scheduling
 		alarmRef := ref.NewAlarmRef("LeaseActor", "actor-1", "wake")
 		lease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime:  s.p.Now().Add(time.Second),
-				Interval: "",
-				Cron:     "",
-				TTL:      nil,
-				Data:     nil,
-			},
+			DueTime:        s.p.Now().Add(time.Second),
 			Kind:           components.AlarmKindAlarm,
-			JobMethod:      "",
 			LeaseImmediate: []string{hostID},
 		})
 		require.NoError(t, err)
@@ -3314,8 +3286,8 @@ func (s Suite) TestSetAndLeaseAlarm(t *testing.T) {
 
 		// Repeating the same request must preserve the live lease without returning it for duplicate enqueueing
 		duplicateLease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{DueTime: lease.DueTime()},
-			LeaseImmediate:  []string{hostID},
+			DueTime:        lease.DueTime(),
+			LeaseImmediate: []string{hostID},
 		})
 		require.NoError(t, err)
 		assert.Nil(t, duplicateLease)
@@ -3336,8 +3308,8 @@ func (s Suite) TestSetAndLeaseAlarm(t *testing.T) {
 		// Reuse the allowed placement while acquiring the alarm lease
 		alarmRef := ref.NewAlarmRef(actorRef.ActorType, actorRef.ActorID, "wake")
 		lease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{DueTime: s.p.Now().Add(time.Second)},
-			LeaseImmediate:  []string{hostID},
+			DueTime:        s.p.Now().Add(time.Second),
+			LeaseImmediate: []string{hostID},
 		})
 		require.NoError(t, err)
 		require.NotNil(t, lease)
@@ -3357,10 +3329,8 @@ func (s Suite) TestSetAndLeaseAlarm(t *testing.T) {
 		hostID := registerHost(t, "LeaseActor")
 		alarmRef := ref.NewAlarmRef("LeaseActor", "replace-unleased", "wake")
 		initialLease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime: s.p.Now().Add(2 * time.Second),
-				Data:    []byte("original"),
-			},
+			DueTime: s.p.Now().Add(2 * time.Second),
+			Data:    []byte("original"),
 		})
 		require.NoError(t, err)
 		require.Nil(t, initialLease)
@@ -3370,10 +3340,8 @@ func (s Suite) TestSetAndLeaseAlarm(t *testing.T) {
 		// Replace it inside fetch-ahead and acquire a lease for the new row
 		updatedDueTime := s.p.Now().Add(3 * time.Second)
 		replacementLease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime: updatedDueTime,
-				Data:    []byte("replacement"),
-			},
+			DueTime:        updatedDueTime,
+			Data:           []byte("replacement"),
 			LeaseImmediate: []string{hostID},
 		})
 		require.NoError(t, err)
@@ -3396,10 +3364,8 @@ func (s Suite) TestSetAndLeaseAlarm(t *testing.T) {
 		hostID := registerHost(t, "LeaseActor")
 		alarmRef := ref.NewAlarmRef("LeaseActor", "replace-leased-upcoming", "wake")
 		originalLease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime: s.p.Now().Add(2 * time.Second),
-				Data:    []byte("original"),
-			},
+			DueTime:        s.p.Now().Add(2 * time.Second),
+			Data:           []byte("original"),
 			LeaseImmediate: []string{hostID},
 		})
 		require.NoError(t, err)
@@ -3408,10 +3374,8 @@ func (s Suite) TestSetAndLeaseAlarm(t *testing.T) {
 		// Replacing it inside fetch-ahead invalidates the old lease and returns a lease for the new row
 		updatedDueTime := s.p.Now().Add(4 * time.Second)
 		replacementLease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime: updatedDueTime,
-				Data:    []byte("replacement"),
-			},
+			DueTime:        updatedDueTime,
+			Data:           []byte("replacement"),
 			LeaseImmediate: []string{hostID},
 		})
 		require.NoError(t, err)
@@ -3433,10 +3397,8 @@ func (s Suite) TestSetAndLeaseAlarm(t *testing.T) {
 		hostID := registerHost(t, "LeaseActor")
 		alarmRef := ref.NewAlarmRef("LeaseActor", "replace-leased-future", "wake")
 		originalLease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime: s.p.Now().Add(2 * time.Second),
-				Data:    []byte("original"),
-			},
+			DueTime:        s.p.Now().Add(2 * time.Second),
+			Data:           []byte("original"),
 			LeaseImmediate: []string{hostID},
 		})
 		require.NoError(t, err)
@@ -3445,10 +3407,8 @@ func (s Suite) TestSetAndLeaseAlarm(t *testing.T) {
 		// Moving it outside fetch-ahead uses the fast path and leaves the new row unleased
 		updatedDueTime := s.p.Now().Add(2 * time.Minute)
 		replacementLease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime: updatedDueTime,
-				Data:    []byte("replacement"),
-			},
+			DueTime:        updatedDueTime,
+			Data:           []byte("replacement"),
 			LeaseImmediate: []string{hostID},
 		})
 		require.NoError(t, err)
@@ -3477,13 +3437,11 @@ func (s Suite) TestSetAndLeaseAlarm(t *testing.T) {
 		hostID := registerHost(t, "LeaseActor")
 		alarmRef := ref.NewAlarmRef("LeaseActor", "actor-2", "wake")
 		lease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime:  s.p.Now().Add(24 * time.Hour),
-				Interval: "",
-				Cron:     "",
-				TTL:      nil,
-				Data:     nil,
-			},
+			DueTime:        s.p.Now().Add(24 * time.Hour),
+			Interval:       "",
+			Cron:           "",
+			TTL:            nil,
+			Data:           nil,
 			Kind:           components.AlarmKindAlarm,
 			JobMethod:      "",
 			LeaseImmediate: []string{hostID},
@@ -3508,15 +3466,8 @@ func (s Suite) TestSetAndLeaseAlarm(t *testing.T) {
 		hostID := registerHost(t, "OtherActor")
 		alarmRef := ref.NewAlarmRef("LeaseActor", "actor-3", "wake")
 		lease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{
-				DueTime:  s.p.Now().Add(time.Second),
-				Interval: "",
-				Cron:     "",
-				TTL:      nil,
-				Data:     nil,
-			},
+			DueTime:        s.p.Now().Add(time.Second),
 			Kind:           components.AlarmKindAlarm,
-			JobMethod:      "",
 			LeaseImmediate: []string{hostID},
 		})
 		require.NoError(t, err)
@@ -3548,8 +3499,8 @@ func (s Suite) TestSetAndLeaseAlarm(t *testing.T) {
 
 		alarmRef := ref.NewAlarmRef(actorRef.ActorType, actorRef.ActorID, "wake")
 		lease, err := s.p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
-			AlarmProperties: ref.AlarmProperties{DueTime: s.p.Now().Add(time.Second)},
-			LeaseImmediate:  []string{secondHost.HostID},
+			DueTime:        s.p.Now().Add(time.Second),
+			LeaseImmediate: []string{secondHost.HostID},
 		})
 		require.NoError(t, err)
 		assert.Nil(t, lease)
@@ -3621,10 +3572,8 @@ func (s Suite) TestDeleteAlarm(t *testing.T) {
 
 		for i, alarmRef := range []ref.AlarmRef{alarm1Ref, alarm2Ref, alarm3Ref} {
 			setReq := components.SetAlarmReq{
-				AlarmProperties: ref.AlarmProperties{
-					DueTime: now.Add(time.Duration(i+1) * time.Hour),
-					Data:    fmt.Appendf(nil, `{"alarm": %d}`, i+1),
-				},
+				DueTime: now.Add(time.Duration(i+1) * time.Hour),
+				Data:    fmt.Appendf(nil, `{"alarm": %d}`, i+1),
 			}
 
 			_, err = s.p.SetAlarm(t.Context(), alarmRef, setReq)
@@ -3667,10 +3616,8 @@ func (s Suite) TestDeleteAlarm(t *testing.T) {
 
 		for _, alarmRef := range []ref.AlarmRef{alarm1Ref, alarm2Ref} {
 			setReq := components.SetAlarmReq{
-				AlarmProperties: ref.AlarmProperties{
-					DueTime: now.Add(1 * time.Hour),
-					Data:    fmt.Appendf(nil, `{"type": "%s"}`, alarmRef.ActorType),
-				},
+				DueTime: now.Add(1 * time.Hour),
+				Data:    fmt.Appendf(nil, `{"type": "%s"}`, alarmRef.ActorType),
 			}
 
 			_, err = s.p.SetAlarm(t.Context(), alarmRef, setReq)

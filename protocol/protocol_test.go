@@ -57,8 +57,9 @@ func TestWriteReadMessageRoundTrip(t *testing.T) {
 	e.HostID = "host-abc"
 	e.SessionID = "sess-1"
 	require.NoError(t, e.SetPayload(SetStateRequest{
-		ActorRef: ActorRef{ActorType: "t", ActorID: "id"},
-		Data:     []byte("state-bytes"),
+		ActorType: "t",
+		ActorID:   "id",
+		Data:      []byte("state-bytes"),
 	}))
 
 	var buf bytes.Buffer
@@ -223,8 +224,12 @@ func TestErrorAsErrorWrappedChain(t *testing.T) {
 
 func TestAlarmDTORoundTrip(t *testing.T) {
 	in := SetAlarmRequest{
-		AlarmRef:        AlarmRef{ActorType: "t", ActorID: "id", Name: "wake"},
-		AlarmProperties: AlarmProperties{DueTimeUnixMs: 123456, Interval: "PT1M", Data: []byte("d")},
+		ActorType:     "t",
+		ActorID:       "id",
+		Name:          "wake",
+		DueTimeUnixMs: 123456,
+		Interval:      "PT1M",
+		Data:          []byte("d"),
 	}
 
 	b, err := Marshal(in)

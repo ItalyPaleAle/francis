@@ -378,7 +378,7 @@ func TestRunAlarmFetcherInitialFetchWithLongPollInterval(t *testing.T) {
 	_ = connectTestHost(t, rt, prov, "10.1.0.30:1", protocol.ActorHostType{ActorType: "T", MaxAttempts: 3, InitialRetryDelayMs: 100})
 
 	_, err := prov.SetAlarm(t.Context(), ref.NewAlarmRef("T", "a1", "wake"), components.SetAlarmReq{
-		AlarmProperties: ref.AlarmProperties{DueTime: time.Now().Add(-time.Second)},
+		DueTime: time.Now().Add(-time.Second),
 	})
 	require.NoError(t, err)
 
@@ -421,7 +421,7 @@ func TestRunAlarmFetcherInitialFetchWaitsForConnectedHost(t *testing.T) {
 
 	_ = connectTestHost(t, rt, prov, "10.1.0.31:1", protocol.ActorHostType{ActorType: "T", MaxAttempts: 3, InitialRetryDelayMs: 100})
 	_, err := prov.SetAlarm(t.Context(), ref.NewAlarmRef("T", "a1", "wake"), components.SetAlarmReq{
-		AlarmProperties: ref.AlarmProperties{DueTime: time.Now().Add(-time.Second)},
+		DueTime: time.Now().Add(-time.Second),
 	})
 	require.NoError(t, err)
 
@@ -460,7 +460,7 @@ func TestFetchAndEnqueueAlarmsScopedToConnectedHosts(t *testing.T) {
 
 	aref := ref.NewAlarmRef("T", "a1", "wake")
 	_, err := prov.SetAlarm(t.Context(), aref, components.SetAlarmReq{
-		AlarmProperties: ref.AlarmProperties{DueTime: time.Now().Add(-time.Second)},
+		DueTime: time.Now().Add(-time.Second),
 	})
 	require.NoError(t, err)
 
@@ -520,13 +520,10 @@ func TestHandleSetAlarmLeasesAndEnqueuesBeforePoll(t *testing.T) {
 	// Create an alarm inside the fetch-ahead interval through the client-facing runtime handler
 	dueTime := time.Now().Add(500 * time.Millisecond)
 	resp := dispatchReq(t, rt, c, protocol.KindSetAlarm, protocol.SetAlarmRequest{
-		AlarmRef: protocol.AlarmRef{ActorType: "T", ActorID: "a1", Name: "wake"},
-		AlarmProperties: protocol.AlarmProperties{
-			DueTimeUnixMs: dueTime.UnixMilli(),
-			Interval:      "",
-			TTLUnixMs:     0,
-			Data:          nil,
-		},
+		ActorType:     "T",
+		ActorID:       "a1",
+		Name:          "wake",
+		DueTimeUnixMs: dueTime.UnixMilli(),
 	})
 	require.Equal(t, protocol.KindSetAlarmResponse, resp.Kind)
 	setReq := <-recordedRequests
@@ -566,10 +563,10 @@ func TestHandleSetAlarmLetsProviderChooseFastPathOutsideFetchAheadHorizon(t *tes
 
 	// The runtime always forwards its connected hosts and leaves the horizon decision to the provider
 	resp := dispatchReq(t, rt, c, protocol.KindSetAlarm, protocol.SetAlarmRequest{
-		AlarmRef: protocol.AlarmRef{ActorType: "T", ActorID: "a1", Name: "wake"},
-		AlarmProperties: protocol.AlarmProperties{
-			DueTimeUnixMs: time.Now().Add(time.Hour).UnixMilli(),
-		},
+		ActorType:     "T",
+		ActorID:       "a1",
+		Name:          "wake",
+		DueTimeUnixMs: time.Now().Add(time.Hour).UnixMilli(),
 	})
 	require.Equal(t, protocol.KindSetAlarmResponse, resp.Kind)
 	setReq := <-recordedRequests
@@ -593,12 +590,12 @@ func TestExecuteAlarmDispatchesOffTheProcessorLoop(t *testing.T) {
 
 	// Lease two due alarms for the same host
 	_, err := prov.SetAlarm(t.Context(), ref.NewAlarmRef("T", "a1", "wake"), components.SetAlarmReq{
-		AlarmProperties: ref.AlarmProperties{DueTime: time.Now().Add(-time.Second)},
+		DueTime: time.Now().Add(-time.Second),
 	})
 	require.NoError(t, err)
 
 	_, err = prov.SetAlarm(t.Context(), ref.NewAlarmRef("T", "a2", "wake"), components.SetAlarmReq{
-		AlarmProperties: ref.AlarmProperties{DueTime: time.Now().Add(-time.Second)},
+		DueTime: time.Now().Add(-time.Second),
 	})
 	require.NoError(t, err)
 

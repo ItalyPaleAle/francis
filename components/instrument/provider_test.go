@@ -48,15 +48,8 @@ func TestWrapProviderReturnsImmediateAlarmLease(t *testing.T) {
 	alarmRef := ref.NewAlarmRef("testType", "actor-1", "wake")
 	dueTime := time.Now().Add(time.Second)
 	req := components.SetAlarmReq{
-		AlarmProperties: ref.AlarmProperties{
-			DueTime:  dueTime,
-			Interval: "",
-			Cron:     "",
-			TTL:      nil,
-			Data:     nil,
-		},
+		DueTime:        dueTime,
 		Kind:           components.AlarmKindAlarm,
-		JobMethod:      "",
 		LeaseImmediate: []string{"host-1"},
 	}
 	want := ref.NewAlarmLease(alarmRef, "alarm-id", dueTime, "lease-id")

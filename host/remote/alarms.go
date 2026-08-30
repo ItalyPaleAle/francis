@@ -32,7 +32,9 @@ func (h *Host) GetAlarm(ctx context.Context, actorType string, actorID string, n
 	reqCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
 	defer cancel()
 	res, err := h.runtimeClient.GetAlarm(reqCtx, protocol.GetAlarmRequest{
-		AlarmRef: protocol.AlarmRef{ActorType: actorType, ActorID: actorID, Name: name},
+		ActorType: actorType,
+		ActorID:   actorID,
+		Name:      name,
 	})
 	if isProtocolErrorCode(err, protocol.ErrCodeAlarmNotFound) {
 		// A missing alarm is reported as the public ErrAlarmNotFound
@@ -65,7 +67,9 @@ func (h *Host) SetAlarm(ctx context.Context, actorType string, actorID string, n
 	reqCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
 	defer cancel()
 	err = h.runtimeClient.SetAlarm(reqCtx, protocol.SetAlarmRequest{
-		AlarmRef:        protocol.AlarmRef{ActorType: actorType, ActorID: actorID, Name: name},
+		ActorType:       actorType,
+		ActorID:         actorID,
+		Name:            name,
 		AlarmProperties: props,
 	})
 	if err != nil {
@@ -85,7 +89,9 @@ func (h *Host) DeleteAlarm(ctx context.Context, actorType string, actorID string
 	reqCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
 	defer cancel()
 	err = h.runtimeClient.DeleteAlarm(reqCtx, protocol.DeleteAlarmRequest{
-		AlarmRef: protocol.AlarmRef{ActorType: actorType, ActorID: actorID, Name: name},
+		ActorType: actorType,
+		ActorID:   actorID,
+		Name:      name,
 	})
 	if isProtocolErrorCode(err, protocol.ErrCodeAlarmNotFound) {
 		// A missing alarm is reported as the public ErrAlarmNotFound

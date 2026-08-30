@@ -46,9 +46,10 @@ func (h *Host) SetState(ctx context.Context, actorType string, actorID string, s
 	reqCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
 	defer cancel()
 	err = h.runtimeClient.SetState(reqCtx, protocol.SetStateRequest{
-		ActorRef: protocol.ActorRef{ActorType: actorType, ActorID: actorID},
-		Data:     data,
-		TTLMs:    ttl.Milliseconds(),
+		ActorType: actorType,
+		ActorID:   actorID,
+		Data:      data,
+		TTLMs:     ttl.Milliseconds(),
 	})
 	if err != nil {
 		return fmt.Errorf("failed saving state: %w", err)
@@ -79,7 +80,8 @@ func (h *Host) GetState(ctx context.Context, actorType string, actorID string, d
 	reqCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
 	defer cancel()
 	res, err := h.runtimeClient.GetState(reqCtx, protocol.GetStateRequest{
-		ActorRef: protocol.ActorRef{ActorType: actorType, ActorID: actorID},
+		ActorType: actorType,
+		ActorID:   actorID,
 	})
 	if isProtocolErrorCode(err, protocol.ErrCodeStateNotFound) {
 		// A missing state is reported as the public ErrStateNotFound
@@ -170,7 +172,8 @@ func (h *Host) DeleteState(ctx context.Context, actorType string, actorID string
 	reqCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
 	defer cancel()
 	err = h.runtimeClient.DeleteState(reqCtx, protocol.DeleteStateRequest{
-		ActorRef: protocol.ActorRef{ActorType: actorType, ActorID: actorID},
+		ActorType: actorType,
+		ActorID:   actorID,
 	})
 	if isProtocolErrorCode(err, protocol.ErrCodeStateNotFound) {
 		// A missing state is reported as the public ErrStateNotFound

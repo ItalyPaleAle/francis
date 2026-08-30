@@ -115,11 +115,9 @@ func (h *Host) RetryJob(ctx context.Context, jobID string) (string, error) {
 // jobPropertiesToSetAlarmReq builds a provider job request from the public job properties, encoding the input as MessagePack.
 func jobPropertiesToSetAlarmReq(p actor.JobProperties, method string, input any, now time.Time) (components.SetAlarmReq, error) {
 	req := components.SetAlarmReq{
-		AlarmProperties: ref.AlarmProperties{
-			DueTime:  p.EffectiveDueTime(now),
-			Interval: p.Interval,
-			Cron:     p.Cron,
-		},
+		DueTime:   p.EffectiveDueTime(now),
+		Interval:  p.Interval,
+		Cron:      p.Cron,
 		Kind:      components.AlarmKindJob,
 		JobMethod: method,
 	}

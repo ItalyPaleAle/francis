@@ -84,7 +84,8 @@ func (h *Host) ListJobs(ctx context.Context, actorType string, actorID string) (
 	reqCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
 	defer cancel()
 	res, err := h.runtimeClient.ListJobs(reqCtx, protocol.ListJobsRequest{
-		ActorRef: protocol.ActorRef{ActorType: actorType, ActorID: actorID},
+		ActorType: actorType,
+		ActorID:   actorID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list jobs: %w", err)
