@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/italypaleale/go-kit/eventqueue"
 	"github.com/italypaleale/go-kit/servicerunner"
 	"github.com/italypaleale/go-kit/ttlcache"
@@ -108,7 +108,7 @@ func NewRuntime(provider components.ActorProvider, opts ...RuntimeOption) (*Runt
 	// Default the runtime ID to a random value so its server certificate has a stable identity for the process lifetime
 	runtimeID := options.runtimeID
 	if runtimeID == "" {
-		runtimeID = uuid.NewString()
+		runtimeID = uuid.NewV4().String()
 	}
 
 	// Mint the runtime server certificate from the primary CA, which hosts verify against the pinned or in-band CA bundle

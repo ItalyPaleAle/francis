@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	sqltransactions "github.com/italypaleale/go-sql-utils/transactions/sql"
 
 	"github.com/italypaleale/francis/components"
@@ -33,11 +33,7 @@ func (s *SQLiteProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req
 		req.Data = nil
 	}
 
-	alarmIDObj, err := uuid.NewV7()
-	if err != nil {
-		return "", fmt.Errorf("failed to generate job ID: %w", err)
-	}
-	alarmID := alarmIDObj.String()
+	alarmID := uuid.NewV7().String()
 
 	// Insert the job, or keep the existing one when an idempotency key (alarm name) already maps to a job
 	// SQLite cannot insert from a CTE, so we insert (ignoring conflicts) then read back the resulting ID, both in one transaction
@@ -132,10 +128,7 @@ func (s *SQLiteProvider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLe
 
 		// Re-create the recurrence for its next occurrence so a repeating job survives the dead-lettering of one occurrence
 		if req.Reschedule {
-			newIDObj, genErr := uuid.NewV7()
-			if genErr != nil {
-				return struct{}{}, fmt.Errorf("failed to generate job ID for rescheduled occurrence: %w", genErr)
-			}
+			newID := uuid.NewV7().String()
 
 			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 			_, txErr = tx.ExecContext(ctx, `
@@ -146,7 +139,7 @@ func (s *SQLiteProvider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLe
 					alarm_lease_id, alarm_lease_expiration_time)
 				VALUES
 					(?, ?, ?, ?, ?, ?, ?, ?, ?, 'job', ?, NULL, NULL)`,
-				newIDObj.String(), actorType, actorID, alarmName,
+				newID, actorType, actorID, alarmName,
 				req.NextDueTime.UnixMilli(), interval, cron, ttl, data, method,
 			)
 			if txErr != nil {
@@ -394,11 +387,7 @@ func (s *SQLiteProvider) DeleteDeadJob(ctx context.Context, jobID string) error 
 }
 
 func (s *SQLiteProvider) RetryDeadJob(ctx context.Context, jobID string) (string, error) {
-	newIDObj, err := uuid.NewV7()
-	if err != nil {
-		return "", fmt.Errorf("failed to generate job ID: %w", err)
-	}
-	newID := newIDObj.String()
+	newID := uuid.NewV7().String()
 	now := s.clock.Now().UnixMilli()
 
 	// Remove the dead-letter record and re-dispatch in a single transaction
@@ -430,7 +419,7 @@ func (s *SQLiteProvider) RetryDeadJob(ctx context.Context, jobID string) (string
 				alarm_lease_id, alarm_lease_expiration_time)
 			VALUES
 				(?, ?, ?, ?, ?, ?, 'job', ?, NULL, NULL)`,
-			newID, actorType, actorID, uuid.NewString(), now, data, method,
+			newID, actorType, actorID, uuid.NewV4().String(), now, data, method,
 		)
 		if txErr != nil {
 			return "", fmt.Errorf("error re-dispatching job: %w", txErr)

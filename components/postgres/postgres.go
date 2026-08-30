@@ -11,8 +11,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	postgresadapter "github.com/italypaleale/go-sql-utils/adapter/postgres"
 	"github.com/italypaleale/go-sql-utils/cleanup"
 	"github.com/italypaleale/go-sql-utils/migrations"

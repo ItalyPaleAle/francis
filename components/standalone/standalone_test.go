@@ -14,8 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
@@ -514,7 +514,7 @@ func (p *StandaloneMemory) Seed(ctx context.Context, spec comptesting.Spec) erro
 		if a.LeaseTTL != nil {
 			leaseExp := now.Add(*a.LeaseTTL)
 			alm.LeaseExpiration = &leaseExp
-			alm.LeaseID = new(uuid.New().String())
+			alm.LeaseID = new(uuid.NewV4().String())
 		}
 
 		p.Alarms[key] = alm
@@ -732,7 +732,7 @@ func (p *StandaloneSQLiteBacked) Seed(ctx context.Context, spec comptesting.Spec
 		if a.LeaseTTL != nil {
 			leaseExp := now.Add(*a.LeaseTTL)
 			alm.LeaseExpiration = &leaseExp
-			alm.LeaseID = new(uuid.New().String())
+			alm.LeaseID = new(uuid.NewV4().String())
 		}
 
 		p.Alarms[key] = alm
@@ -949,7 +949,7 @@ func (p *StandalonePostgresBacked) Seed(ctx context.Context, spec comptesting.Sp
 		if a.LeaseTTL != nil {
 			leaseExp := now.Add(*a.LeaseTTL)
 			alm.LeaseExpiration = &leaseExp
-			alm.LeaseID = new(uuid.New().String())
+			alm.LeaseID = new(uuid.NewV4().String())
 		}
 
 		p.Alarms[key] = alm

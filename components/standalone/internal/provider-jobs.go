@@ -3,8 +3,7 @@ package internal
 import (
 	"context"
 	"time"
-
-	"github.com/google/uuid"
+	"uuid"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
@@ -35,11 +34,7 @@ func (p *Provider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req compo
 		data = nil
 	}
 
-	alarmIDObj, err := uuid.NewV7()
-	if err != nil {
-		return "", err
-	}
-	alarmID := alarmIDObj.String()
+	alarmID := uuid.NewV7().String()
 
 	a := &Alarm{
 		ID:        alarmID,
@@ -59,7 +54,7 @@ func (p *Provider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req compo
 	defer changes.Release()
 	changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: alarmID, Value: a})
 
-	err = p.persistThenApply(ctx, &p.Mu, changes, func() {
+	err := p.persistThenApply(ctx, &p.Mu, changes, func() {
 		p.Alarms[key] = a
 		p.AlarmsByID[alarmID] = a
 	})
@@ -104,13 +99,8 @@ func (p *Provider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLease, r
 
 		// Re-create the recurrence (same name, fresh ID) so a repeating job survives the dead-lettering of one occurrence
 		if req.Reschedule {
-			newIDObj, genErr := uuid.NewV7()
-			if genErr != nil {
-				p.Mu.RUnlock()
-				return genErr
-			}
 			newAlarm = a.Clone()
-			newAlarm.ID = newIDObj.String()
+			newAlarm.ID = uuid.NewV7().String()
 			newAlarm.DueTime = req.NextDueTime
 			newAlarm.LeaseID = nil
 			newAlarm.LeaseExpiration = nil
@@ -324,18 +314,14 @@ func (p *Provider) RetryDeadJob(ctx context.Context, jobID string) (string, erro
 		return "", components.ErrNoJob
 	}
 
-	newIDObj, err := uuid.NewV7()
-	if err != nil {
-		return "", err
-	}
-	newID := newIDObj.String()
+	newID := uuid.NewV7().String()
 
 	// Re-dispatch as a fresh, immediate one-shot job with the same method and data, under a new random name
 	newAlarm := &Alarm{
 		ID:        newID,
 		ActorType: actorType,
 		ActorID:   actorID,
-		Name:      uuid.NewString(),
+		Name:      uuid.NewV4().String(),
 		DueTime:   p.Clock.Now(),
 		Kind:      string(components.AlarmKindJob),
 		JobMethod: method,
@@ -349,7 +335,7 @@ func (p *Provider) RetryDeadJob(ctx context.Context, jobID string) (string, erro
 	changes.DeadJobs.Delete = append(changes.DeadJobs.Delete, jobID)
 	changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: newID, Value: newAlarm})
 
-	err = p.persistThenApply(ctx, &p.Mu, changes, func() {
+	err := p.persistThenApply(ctx, &p.Mu, changes, func() {
 		delete(p.DeadJobs, jobID)
 		p.Alarms[key] = newAlarm
 		p.AlarmsByID[newID] = newAlarm

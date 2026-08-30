@@ -9,8 +9,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	sqltransactions "github.com/italypaleale/go-sql-utils/transactions/sql"
 
 	"github.com/italypaleale/francis/components"
@@ -23,13 +23,9 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 		return s.reattachHost(ctx, req)
 	}
 
-	hostIDObj, oErr := uuid.NewV7()
-	if oErr != nil {
-		return components.RegisterHostRes{}, fmt.Errorf("failed to generate host ID: %w", oErr)
-	}
-	hostID := hostIDObj.String()
+	hostID := uuid.NewV7().String()
 
-	_, oErr = sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
+	_, oErr := sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
 		now := s.clock.Now().UnixMilli()
 
 		// To start, we need to delete any actor host with the same address that has not sent a health check in the maximum allotted time
@@ -104,17 +100,13 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 // A brand-new registration is also created when the previous one no longer exists at all
 func (s *SQLiteProvider) reattachHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {
 	// Generate a fresh ID up front, used only if we have to fall back to a new registration
-	newHostIDObj, oErr := uuid.NewV7()
-	if oErr != nil {
-		return components.RegisterHostRes{}, fmt.Errorf("failed to generate host ID: %w", oErr)
-	}
-	newHostID := newHostIDObj.String()
+	newHostID := uuid.NewV7().String()
 
 	var (
 		hostID     string
 		reattached bool
 	)
-	_, oErr = sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
+	_, oErr := sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
 		now := s.clock.Now().UnixMilli()
 		cutoff := now - s.cfg.HostHealthCheckDeadline.Milliseconds()
 

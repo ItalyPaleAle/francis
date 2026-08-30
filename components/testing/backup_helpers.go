@@ -148,10 +148,8 @@ func SeedBackupSample(t testing.TB, ctx context.Context, p components.ActorProvi
 
 	// A live job, due far in the future so the fetcher leaves it alone
 	_, err = p.DispatchJob(ctx, ref.NewAlarmRef(actorType, "job-actor", "live-job"), components.SetAlarmReq{
-		AlarmProperties: ref.AlarmProperties{
-			DueTime: now.Add(time.Hour),
-			Data:    []byte("live-job-data"),
-		},
+		DueTime:   now.Add(time.Hour),
+		Data:      []byte("live-job-data"),
 		Kind:      components.AlarmKindJob,
 		JobMethod: "Process",
 	})
@@ -159,10 +157,8 @@ func SeedBackupSample(t testing.TB, ctx context.Context, p components.ActorProvi
 
 	// A dead job: dispatch a job due now, lease it through the fetcher, then dead-letter it
 	deadJobID, err := p.DispatchJob(ctx, ref.NewAlarmRef(actorType, "dead-actor", "dead-job"), components.SetAlarmReq{
-		AlarmProperties: ref.AlarmProperties{
-			DueTime: now,
-			Data:    []byte("dead-job-data"),
-		},
+		DueTime:   now,
+		Data:      []byte("dead-job-data"),
 		Kind:      components.AlarmKindJob,
 		JobMethod: "Process",
 	})
@@ -196,8 +192,9 @@ func AddExtraBackupData(t testing.TB, ctx context.Context, p components.ActorPro
 	require.NoError(t, err)
 
 	_, err = p.SetAlarm(ctx, ref.NewAlarmRef("EXTRA", "extra-actor", "extra-alarm"), components.SetAlarmReq{
-		AlarmProperties: ref.AlarmProperties{DueTime: now.Add(2 * time.Hour), Data: []byte("extra-alarm")},
-		Kind:            components.AlarmKindAlarm,
+		DueTime: now.Add(2 * time.Hour),
+		Data:    []byte("extra-alarm"),
+		Kind:    components.AlarmKindAlarm,
 	})
 	require.NoError(t, err)
 }

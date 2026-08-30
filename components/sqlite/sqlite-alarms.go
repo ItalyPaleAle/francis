@@ -9,8 +9,8 @@ import (
 	"math/rand/v2"
 	"strings"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	sqltransactions "github.com/italypaleale/go-sql-utils/transactions/sql"
 
 	"github.com/italypaleale/francis/components"
@@ -90,11 +90,7 @@ func (s *SQLiteProvider) SetAlarm(ctx context.Context, alarmRef ref.AlarmRef, re
 		req.Data = nil
 	}
 
-	alarmID, err := uuid.NewV7()
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate alarm ID: %w", err)
-	}
-	alarmIDStr := alarmID.String()
+	alarmID := uuid.NewV7().String()
 
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
@@ -102,11 +98,11 @@ func (s *SQLiteProvider) SetAlarm(ctx context.Context, alarmRef ref.AlarmRef, re
 	// Trying to acquire a lease requires using the slower path
 	// We skip that when there are no allowed hosts or when the local clock places the alarm outside of the fetch-ahead interval
 	if len(req.LeaseImmediate) > 0 && !req.DueTime.After(s.clock.Now().Add(s.cfg.AlarmsFetchAheadInterval)) {
-		return s.setAndLeaseAlarm(queryCtx, alarmRef, req, alarmIDStr, interval, ttlTime)
+		return s.setAndLeaseAlarm(queryCtx, alarmRef, req, alarmID, interval, ttlTime)
 	}
 
 	// The fast path uses the same upsert but ignores the returned row
-	_, _, err = s.setAlarm(queryCtx, s.db, alarmRef, req, alarmIDStr, interval, ttlTime)
+	_, _, err := s.setAlarm(queryCtx, s.db, alarmRef, req, alarmID, interval, ttlTime)
 	if err != nil {
 		return nil, err
 	}
@@ -196,11 +192,7 @@ func (s *SQLiteProvider) setAndLeaseAlarm(ctx context.Context, alarmRef ref.Alar
 		}
 
 		// Acquire the lease before committing the alarm and actor placement
-		leaseIDObj, err := uuid.NewV7()
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate alarm lease ID: %w", err)
-		}
-		storedLeaseIDValue := leaseIDObj.String()
+		storedLeaseIDValue := uuid.NewV7().String()
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		err = tx.
 			QueryRowContext(ctx,
@@ -789,11 +781,7 @@ func (u *upcomingAlarmFetcher) allocateActors(ctx context.Context, activeHosts *
 func (u *upcomingAlarmFetcher) obtainLeases(ctx context.Context, fetchedUpcoming fetchedUpcomingAlarmsList) ([]*ref.AlarmLease, error) {
 	// Because SQLite doesn't support updating multiple rows with different values, we use a deterministic lease ID
 	// This allows us to perform a single query to update all rows efficiently
-	leaseIDObj, err := uuid.NewV7()
-	if err != nil {
-		return nil, fmt.Errorf("error generating lease ID: %w", err)
-	}
-	leaseID := leaseIDObj.String()
+	leaseID := uuid.NewV7().String()
 
 	// Build all arguments
 	alarmIDs := make([]string, len(fetchedUpcoming))

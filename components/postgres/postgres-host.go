@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	postgresadapter "github.com/italypaleale/go-sql-utils/adapter/postgres"
 	postgrestransactions "github.com/italypaleale/go-sql-utils/transactions/postgres"
 	"github.com/jackc/pgx/v5"
@@ -23,13 +23,9 @@ func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.Regi
 		return p.reattachHost(ctx, req)
 	}
 
-	hostIDObj, oErr := uuid.NewV7()
-	if oErr != nil {
-		return components.RegisterHostRes{}, fmt.Errorf("failed to generate host ID: %w", oErr)
-	}
-	hostID := hostIDObj.String()
+	hostID := uuid.NewV7().String()
 
-	_, oErr = postgrestransactions.ExecuteInTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (zero struct{}, err error) {
+	_, oErr := postgrestransactions.ExecuteInTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (zero struct{}, err error) {
 		// To start, we need to delete any actor host with the same address that has not sent a health check in the maximum allotted time
 		// We need to do this because the hosts table has a unique index on the address, so two apps can't have the same address
 		// If it's the same app that's restarted after a crash, then it will be able to re-register once the health checks have timed out
@@ -100,17 +96,13 @@ func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.Regi
 // A registration whose health record has expired is not reclaimable: the cluster has already written that host off and may have placed its actors elsewhere, so it is cleaned up like any other dead host and the caller is given a brand-new registration, whose Reattached of false tells it to drop everything it was still holding
 // A brand-new registration is also created when the previous one no longer exists at all
 func (p *PostgresProvider) reattachHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {
-	newHostIDObj, oErr := uuid.NewV7()
-	if oErr != nil {
-		return components.RegisterHostRes{}, fmt.Errorf("failed to generate host ID: %w", oErr)
-	}
-	newHostID := newHostIDObj.String()
+	newHostID := uuid.NewV7().String()
 
 	var (
 		hostID     string
 		reattached bool
 	)
-	_, oErr = postgrestransactions.ExecuteInTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (zero struct{}, err error) {
+	_, oErr := postgrestransactions.ExecuteInTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (zero struct{}, err error) {
 		// Clean up unhealthy hosts
 		queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 		defer cancel()

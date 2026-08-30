@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -67,10 +67,7 @@ func (p *PostgresProvider) SetAlarm(ctx context.Context, alarmRef ref.AlarmRef, 
 		req.Data = nil
 	}
 
-	alarmID, err := uuid.NewV7()
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate alarm ID: %w", err)
-	}
+	alarmID := uuid.NewV7()
 
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
@@ -85,7 +82,7 @@ func (p *PostgresProvider) SetAlarm(ctx context.Context, alarmRef ref.AlarmRef, 
 	// Any upsert will cause the lease to be lost
 	// To avoid updating rows if there's nothing changed and canceling leases, we add conditions so if the alarm being added is the same as the existing, nothing is changed
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	_, err = p.db.
+	_, err := p.db.
 		Exec(queryCtx,
 			`
 			INSERT INTO `+p.tablePrefix+`alarms

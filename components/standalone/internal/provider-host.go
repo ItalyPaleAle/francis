@@ -5,8 +5,7 @@ import (
 	"math/rand/v2"
 	"slices"
 	"time"
-
-	"github.com/google/uuid"
+	"uuid"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
@@ -55,11 +54,7 @@ func (p *Provider) RegisterHost(ctx context.Context, req components.RegisterHost
 	}
 
 	// Generate a new host ID
-	hostIDObj, err := uuid.NewV7()
-	if err != nil {
-		return components.RegisterHostRes{}, err
-	}
-	hostID := hostIDObj.String()
+	hostID := uuid.NewV7().String()
 
 	// Create the host
 	h := &Host{
@@ -85,7 +80,7 @@ func (p *Provider) RegisterHost(ctx context.Context, req components.RegisterHost
 		}
 	}
 
-	err = p.persistThenApply(ctx, &p.Mu, changes, func() {
+	err := p.persistThenApply(ctx, &p.Mu, changes, func() {
 		cleanupApply()
 		p.Hosts[hostID] = h
 		p.HostsByAddress[req.Address] = hostID
@@ -241,11 +236,7 @@ func (p *Provider) reattachHost(ctx context.Context, req components.RegisterHost
 	}
 
 	// The existing registration was not found: create a new one with a fresh host ID
-	hostIDObj, err := uuid.NewV7()
-	if err != nil {
-		return components.RegisterHostRes{}, err
-	}
-	hostID := hostIDObj.String()
+	hostID := uuid.NewV7().String()
 
 	h := &Host{
 		ID:              hostID,
@@ -255,7 +246,7 @@ func (p *Provider) reattachHost(ctx context.Context, req components.RegisterHost
 	changes.Hosts.Set = append(changes.Hosts.Set, HostChange{Key: hostID, Value: h})
 	freshHats := buildHostActorTypes(hostID, req.ActorTypes, changes)
 
-	err = p.persistThenApply(ctx, &p.Mu, changes, func() {
+	err := p.persistThenApply(ctx, &p.Mu, changes, func() {
 		applyCleanup()
 
 		p.Hosts[hostID] = h

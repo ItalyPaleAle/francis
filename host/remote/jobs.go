@@ -5,8 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"uuid"
 
-	"github.com/google/uuid"
 	msgpack "github.com/vmihailenco/msgpack/v5"
 
 	"github.com/italypaleale/francis/actor"
@@ -36,11 +36,7 @@ func (h *Host) Dispatch(ctx context.Context, actorType string, actorID string, m
 			return "", err
 		}
 	} else {
-		nameObj, err := uuid.NewRandom()
-		if err != nil {
-			return "", fmt.Errorf("failed to generate UUID: %w", err)
-		}
-		name = nameObj.String()
+		name = uuid.NewV4().String()
 	}
 
 	props, err := actorJobPropsToProtocol(properties, data, h.clock.Now())

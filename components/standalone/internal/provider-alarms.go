@@ -8,8 +8,7 @@ import (
 	"slices"
 	"sort"
 	"time"
-
-	"github.com/google/uuid"
+	"uuid"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
@@ -81,11 +80,7 @@ func (p *Provider) SetAlarm(ctx context.Context, aRef ref.AlarmRef, req componen
 	}
 
 	// Generate a new alarm ID
-	alarmIDObj, err := uuid.NewV7()
-	if err != nil {
-		return nil, err
-	}
-	alarmID := alarmIDObj.String()
+	alarmID := uuid.NewV7().String()
 
 	a := &Alarm{
 		ID:        alarmID,
@@ -108,7 +103,7 @@ func (p *Provider) SetAlarm(ctx context.Context, aRef ref.AlarmRef, req componen
 	}
 	changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: alarmID, Value: a})
 
-	err = p.persistThenApply(ctx, &p.Mu, changes, func() {
+	err := p.persistThenApply(ctx, &p.Mu, changes, func() {
 		p.Alarms[key] = a
 		p.AlarmsByID[alarmID] = a
 		// When replacing an existing alarm, the new alarm gets a fresh ID, so we drop the previous ID's mapping to avoid leaking it (and to invalidate any stale lease still referencing the old alarm ID)
@@ -148,13 +143,8 @@ func (p *Provider) setAndLeaseAlarm(ctx context.Context, aRef ref.AlarmRef, req 
 	if sameProps {
 		alarm = existing
 	} else {
-		alarmIDObj, err := uuid.NewV7()
-		if err != nil {
-			p.Mu.RUnlock()
-			return nil, err
-		}
 		alarm = &Alarm{
-			ID:              alarmIDObj.String(),
+			ID:              uuid.NewV7().String(),
 			ActorType:       aRef.ActorType,
 			ActorID:         aRef.ActorID,
 			Name:            aRef.Name,
@@ -213,12 +203,7 @@ func (p *Provider) setAndLeaseAlarm(ctx context.Context, aRef ref.AlarmRef, req 
 	// Stage one lease together with the alarm and any new placement
 	var lease *ref.AlarmLease
 	if canLease {
-		leaseIDObj, err := uuid.NewV7()
-		if err != nil {
-			p.Mu.RUnlock()
-			return nil, fmt.Errorf("failed to generate alarm lease ID: %w", err)
-		}
-		leaseID := leaseIDObj.String() + "_" + alarm.ID
+		leaseID := uuid.NewV7().String() + "_" + alarm.ID
 		leaseExpiration := now.Add(p.Cfg.AlarmsLeaseDuration)
 		alarm = alarm.Clone()
 		alarm.LeaseID = &leaseID
@@ -480,12 +465,7 @@ func (p *Provider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req componen
 	}
 
 	// Generate a single lease ID prefix shared by this batch
-	leaseIDPrefixObj, err := uuid.NewV7()
-	if err != nil {
-		p.Mu.RUnlock()
-		return nil, err
-	}
-	leaseIDPrefix := leaseIDPrefixObj.String()
+	leaseIDPrefix := uuid.NewV7().String()
 
 	result = make([]*ref.AlarmLease, 0, len(candidates))
 	for _, c := range candidates {
@@ -555,7 +535,7 @@ func (p *Provider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req componen
 	}
 	p.Mu.RUnlock()
 
-	err = p.persistThenApply(ctx, &p.Mu, changes, func() {
+	err := p.persistThenApply(ctx, &p.Mu, changes, func() {
 		for _, pl := range placements {
 			p.ActiveActors[pl.key] = pl.actor
 		}

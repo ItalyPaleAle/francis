@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/italypaleale/francis/components"
@@ -28,10 +28,7 @@ func (p *PostgresProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, r
 		req.Data = nil
 	}
 
-	alarmID, err := uuid.NewV7()
-	if err != nil {
-		return "", fmt.Errorf("failed to generate job ID: %w", err)
-	}
+	alarmID := uuid.NewV7()
 
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
@@ -40,7 +37,7 @@ func (p *PostgresProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, r
 	// The data-modifying CTE only sees rows that existed before the statement, so exactly one branch yields the row: the freshly inserted one, or the pre-existing one on conflict
 	var jobID uuid.UUID
 	// #nosec G202 -- the only concatenated values are static table prefixes, not user input
-	err = p.db.
+	err := p.db.
 		QueryRow(queryCtx, `
 			WITH ins AS (
 				INSERT INTO `+p.tablePrefix+`alarms
@@ -164,10 +161,7 @@ func (p *PostgresProvider) DeadLetterAlarm(ctx context.Context, lease *ref.Alarm
 	}
 
 	// Re-create the recurrence for its next occurrence so a repeating job survives the dead-lettering of one occurrence
-	newID, err := uuid.NewV7()
-	if err != nil {
-		return fmt.Errorf("failed to generate job ID for rescheduled occurrence: %w", err)
-	}
+	newID := uuid.NewV7()
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	_, err = tx.Exec(queryCtx, `
 		INSERT INTO `+p.tablePrefix+`alarms
@@ -436,15 +430,8 @@ func (p *PostgresProvider) RetryDeadJob(ctx context.Context, jobID string) (stri
 		return "", components.ErrNoJob
 	}
 
-	newID, err := uuid.NewV7()
-	if err != nil {
-		return "", fmt.Errorf("failed to generate job ID: %w", err)
-	}
-
-	alarmNameObj, err := uuid.NewRandom()
-	if err != nil {
-		return "", fmt.Errorf("failed to generate alarm name: %w", err)
-	}
+	newID := uuid.NewV7()
+	alarmName := uuid.NewV4().String()
 
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
@@ -466,7 +453,7 @@ func (p *PostgresProvider) RetryDeadJob(ctx context.Context, jobID string) (stri
 		SELECT $2, actor_type, actor_id, $3, $4, job_data, 'job', job_method, NULL, NULL
 		FROM deleted`,
 		// alarm_due_time is stored as UTC
-		id, newID, alarmNameObj.String(), p.clock.Now().UTC(),
+		id, newID, alarmName, p.clock.Now().UTC(),
 	)
 	if err != nil {
 		return "", fmt.Errorf("error re-dispatching job: %w", err)

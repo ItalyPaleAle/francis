@@ -13,8 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -134,7 +134,7 @@ func postgresOptions(t *testing.T) postgres.PostgresProviderOptions {
 	}
 
 	// Isolate migrations and queries in a schema owned by this test
-	schema := "test_observability_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	schema := "test_observability_" + strings.ReplaceAll(uuid.NewV4().String(), "-", "")
 	admin, err := pgxpool.New(t.Context(), connString)
 	require.NoError(t, err)
 	schemaIdentifier := pgx.Identifier{schema}.Sanitize()

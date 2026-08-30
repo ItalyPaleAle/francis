@@ -5,8 +5,8 @@ import (
 	"errors"
 	"log/slog"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
@@ -298,7 +298,7 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 
 	// Record the host identity and session on the connection
 	c.hostID = res.HostID
-	c.sessionID = uuid.NewString()
+	c.sessionID = uuid.NewV4().String()
 	c.address = payload.Address
 	c.setActorTypes(payload.ActorTypes)
 	c.protocolVersion = negotiatedVersion

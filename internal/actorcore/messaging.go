@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"io"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	msgpack "github.com/vmihailenco/msgpack/v5"
 	"go.opentelemetry.io/otel/trace"
 
@@ -78,11 +78,7 @@ func (m *Manager) Invoke(parentCtx context.Context, resolver PlacementResolver, 
 	}
 
 	// Generate a stable request ID once so both the first attempt and any retry carry the same ID, allowing the owning host to coalesce them if the first is still in flight
-	requestUUID, err := uuid.NewRandom()
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate request ID: %w", err)
-	}
-	requestID := requestUUID.String()
+	requestID := uuid.NewV4().String()
 	span.SetAttributes(tracing.RequestID(requestID))
 
 	env, retry, retryAfter, err := m.doInvokeObject(ctx, resolver, peer, r, ap, method, data, activeOnly, readOnly, requestID)

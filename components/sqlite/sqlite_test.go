@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	sqltransactions "github.com/italypaleale/go-sql-utils/transactions/sql"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -271,7 +271,7 @@ func (s *SQLiteProvider) Seed(ctx context.Context, spec comptesting.Spec) error 
 			)
 			if a.LeaseTTL != nil {
 				leaseExp = new(now.UnixMilli() + a.LeaseTTL.Milliseconds())
-				leaseID = new(uuid.New().String())
+				leaseID = new(uuid.NewV4().String())
 			}
 
 			_, err = insAlarm.ExecContext(ctx,

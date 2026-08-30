@@ -12,7 +12,6 @@ require (
 	github.com/alphadose/haxmap v1.4.1
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/google/uuid v1.6.0
 	github.com/italypaleale/go-kit v1.0.0
 	github.com/italypaleale/go-sql-utils v0.3.5
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
@@ -50,6 +49,7 @@ require (
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
 	github.com/huandu/xstrings v1.5.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
