@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -114,30 +115,31 @@ func (s *Server) Run(ctx context.Context) error {
 		go s.serveSession(ctx, session)
 	})
 
+	// Bind before serving so shutdown never races WebTransport's internal startup bookkeeping
+	udpAddr, err := net.ResolveUDPAddr("udp", s.cfg.Bind)
+	if err != nil {
+		return fmt.Errorf("error resolving peer WebTransport bind address: %w", err)
+	}
+	conn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		return fmt.Errorf("error listening for peer WebTransport connections: %w", err)
+	}
+	defer conn.Close()
+
 	s.cfg.Log.InfoContext(ctx, "Peer WebTransport server started", slog.String("bind", s.cfg.Bind))
 
-	// Start the server in a goroutine
-	srvErrCh := make(chan error, 1)
-	go func() {
-		rErr := srv.ListenAndServe()
-		if wt.IsServeError(rErr) {
-			srvErrCh <- fmt.Errorf("error running peer WebTransport server: %w", rErr)
-			return
-		}
-		srvErrCh <- nil
-	}()
-
-	select {
-	case err := <-srvErrCh:
-		return err
-	case <-ctx.Done():
-		// Fall through to graceful shutdown
+	// Coordinate startup and shutdown so Close cannot race Serve and active peers receive a clean connection close
+	serveErr, closeErr := wt.ServeWithContext(ctx, srv, conn)
+	if closeErr != nil {
+		s.cfg.Log.WarnContext(ctx, "Peer WebTransport server shutdown error", slog.Any("error", closeErr))
 	}
 
-	// Close the server, terminating all peer sessions
-	err := srv.Close()
-	if err != nil {
-		s.cfg.Log.WarnContext(ctx, "Peer WebTransport server shutdown error", slog.Any("error", err))
+	// A closed packet connection is the expected result of context-driven shutdown
+	switch {
+	case ctx.Err() != nil:
+		return nil
+	case wt.IsServeError(serveErr):
+		return fmt.Errorf("error running peer WebTransport server: %w", serveErr)
 	}
 
 	return nil

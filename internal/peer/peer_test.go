@@ -69,6 +69,24 @@ func freeUDPAddr(t *testing.T) string {
 	return addr
 }
 
+func TestPeerServerImmediateShutdown(t *testing.T) {
+	serverTLS, _ := peerTLSPair(t)
+
+	// Repeat the canceled startup path so the race detector exercises shutdown at every point in server initialization
+	for range 100 {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		ps := NewServer(ServerConfig{
+			Bind:      "127.0.0.1:0",
+			TLSConfig: serverTLS,
+			Log:       slog.New(slog.DiscardHandler),
+		})
+		err := ps.Run(ctx)
+		require.NoError(t, err)
+	}
+}
+
 // echoHandler returns the request argument as the result, or a structured error for the "boom" method
 func echoHandler(_ context.Context, req protocol.InvokeActorRequest) (protocol.InvokeActorResponse, *protocol.Error) {
 	if req.Method == "boom" {

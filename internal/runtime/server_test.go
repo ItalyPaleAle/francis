@@ -35,6 +35,19 @@ func freeUDPAddr(t *testing.T) string {
 	return addr
 }
 
+func TestRuntimeServerImmediateShutdown(t *testing.T) {
+	rt, _ := newTestRuntime(t)
+
+	// Repeat the canceled startup path so the race detector exercises shutdown at every point in server initialization
+	for range 100 {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		err := rt.runServer(ctx)
+		require.NoError(t, err)
+	}
+}
+
 // runRuntimeServer starts a Runtime over WebTransport on a free port and returns it, its provider, and its address
 func runRuntimeServer(t *testing.T) (*Runtime, *standalone.StandaloneMemory, string) {
 	t.Helper()

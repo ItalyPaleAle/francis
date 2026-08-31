@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -252,34 +253,35 @@ func (rt *Runtime) runServer(ctx context.Context) error {
 		})
 	})
 
+	// Bind before serving so shutdown never races WebTransport's internal startup bookkeeping
+	udpAddr, err := net.ResolveUDPAddr("udp", rt.bind)
+	if err != nil {
+		return fmt.Errorf("error resolving WebTransport bind address: %w", err)
+	}
+	conn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		return fmt.Errorf("error listening for WebTransport connections: %w", err)
+	}
+	defer conn.Close()
+
 	rt.log.InfoContext(ctx, "Runtime WebTransport server started", slog.String("bind", rt.bind))
 
-	srvErr := make(chan error, 1)
-	go func() {
-		// Blocks until the server is closed
-		rErr := wtServer.ListenAndServe()
-		if wt.IsServeError(rErr) {
-			srvErr <- fmt.Errorf("error running WebTransport server: %w", rErr)
-			return
-		}
-		srvErr <- nil
-	}()
-
-	select {
-	case err := <-srvErr:
-		return err
-	case <-ctx.Done():
-		// Fall through to graceful shutdown
-	}
-
-	// Close the server - this terminates all active sessions
-	err := wtServer.Close()
-	if err != nil {
-		rt.log.WarnContext(ctx, "Runtime WebTransport server shutdown error", slog.Any("error", err))
+	// Coordinate startup and shutdown so Close cannot race Serve and active hosts receive a clean connection close
+	serveErr, closeErr := wt.ServeWithContext(ctx, wtServer, conn)
+	if closeErr != nil {
+		rt.log.WarnContext(ctx, "Runtime WebTransport server shutdown error", slog.Any("error", closeErr))
 	}
 
 	// Close waits for upgrades to finish, so no new session can be added while this waits for every accepted session and stream to drain
 	handlers.Wait()
+
+	// A closed packet connection is the expected result of context-driven shutdown
+	switch {
+	case ctx.Err() != nil:
+		return nil
+	case wt.IsServeError(serveErr):
+		return fmt.Errorf("error running WebTransport server: %w", serveErr)
+	}
 
 	return nil
 }

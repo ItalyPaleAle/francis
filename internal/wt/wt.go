@@ -2,9 +2,13 @@
 package wt
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
+	"net"
 	"net/http"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -55,6 +59,61 @@ func NewServer(addr string, tlsConfig *tls.Config, handler http.Handler, opts ..
 	return srv
 }
 
+// startupPacketConn signals when webtransport.Server.Serve has reached the packet connection after registering its internal wait group
+type startupPacketConn struct {
+	*net.UDPConn
+
+	ready chan struct{}
+	once  sync.Once
+}
+
+// SyscallConn is the first packet connection method quic-go calls while initializing its transport
+func (c *startupPacketConn) SyscallConn() (syscall.RawConn, error) {
+	c.once.Do(func() {
+		close(c.ready)
+	})
+	return c.UDPConn.SyscallConn()
+}
+
+// ServeWithContext serves WebTransport until the context is canceled and closes active sessions before returning
+// Waiting until Serve touches the packet connection ensures Close cannot race its internal wait-group registration
+func ServeWithContext(ctx context.Context, srv *webtransport.Server, conn *net.UDPConn) (serveErr error, closeErr error) {
+	readyConn := &startupPacketConn{
+		UDPConn: conn,
+		ready:   make(chan struct{}),
+	}
+	serveDone := false
+
+	// Start Serve with a buffered result so shutdown can wait inside Close without blocking its return
+	serveErrCh := make(chan error, 1)
+	go func() {
+		serveErrCh <- srv.Serve(readyConn)
+	}()
+
+	// Wait until Serve has registered its internal reference or has failed before touching Close
+	select {
+	case serveErr = <-serveErrCh:
+		serveDone = true
+	case <-readyConn.ready:
+		// Keep serving until the listener fails or the caller requests shutdown
+		select {
+		case serveErr = <-serveErrCh:
+			serveDone = true
+		case <-ctx.Done():
+		}
+	}
+
+	// Close while the UDP socket is still open so peers receive QUIC connection-close frames
+	closeErr = srv.Close()
+
+	// Close waits for Serve to finish after cancellation, but a listener error may already have supplied the result
+	if !serveDone {
+		serveErr = <-serveErrCh
+	}
+
+	return serveErr, closeErr
+}
+
 // NewDialer builds a WebTransport client dialer with the required QUIC settings
 // The provided tlsConfig must already advertise the HTTP/3 ALPN
 func NewDialer(tlsConfig *tls.Config, opts ...Option) *webtransport.Transport {
@@ -64,7 +123,7 @@ func NewDialer(tlsConfig *tls.Config, opts ...Option) *webtransport.Transport {
 	}
 }
 
-// IsServeError returns true if an error returned by webtransport.Server's ListenAndServe is a serve error to report, usually during initialization
+// IsServeError returns true if an error returned by a webtransport.Server serve method is an error to report, usually during initialization
 // It ignores the ErrServerClosed errors
 func IsServeError(err error) bool {
 	return err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, quic.ErrServerClosed)
