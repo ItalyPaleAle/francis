@@ -19,6 +19,7 @@ import (
 	"math/rand/v2"
 	"strconv"
 	"time"
+	"uuid"
 
 	"github.com/robfig/cron/v3"
 
@@ -40,15 +41,17 @@ const (
 
 	// methodRun delivers scheduled occurrences to the user-supplied job
 	methodRun = "run"
-	// methodScheduledRun delivers one occurrence of a jittered schedule, which unlike "run" also plans the occurrence that follows it
+	// methodScheduledRun delivers one occurrence of a jittered schedule to the runner
 	methodScheduledRun = "scheduled-run"
+	// methodPlanScheduledRun asks the scheduler to plan the occurrence after the one in the payload
+	methodPlanScheduledRun = "plan-scheduled-run"
 	// methodTrigger asks the scheduler to dispatch a one-shot immediate run, and backs CronJob.Trigger
 	methodTrigger = "trigger"
 
 	// runJobIdempotencyKey keys the recurring job so re-dispatch (e.g. on a retried registration) returns the same job rather than creating a duplicate
 	runJobIdempotencyKey = "run"
-	// firstScheduledRunKey keys the occurrence that starts a jittered chain, so a retried registration re-uses it instead of starting a second chain
-	firstScheduledRunKey = "run-scheduled"
+	// firstScheduledRunKeyPrefix namespaces the occurrence that starts each jittered chain
+	firstScheduledRunKeyPrefix = "run-scheduled-"
 	// scheduledRunKeyPrefix namespaces every later occurrence of a jittered chain, keyed by the occurrence that planned it so that a re-delivered occurrence plans its successor only once
 	scheduledRunKeyPrefix = "run-after-"
 	// immediateJobIdempotencyKey keys the one-shot immediate occurrence used by WithImmediate when the recurring job does not itself run at registration time
@@ -136,13 +139,13 @@ func New(name string, opts ...Option) (*CronJob, error) {
 			// The same reserved type backs two instances: the runner executes the job, every other ID is the scheduler singleton
 			if actorID == runnerActorID {
 				return &cronJobRunner{
-					job:      o.job,
-					interval: o.interval,
-					cron:     o.cron,
-					jitter:   o.jitter,
-					// self is bound to the runner itself, which is where planned runs are dispatched
-					self: builtinactor.NewClient[struct{}](actorType, runnerActorID, service),
-					log:  log,
+					job: o.job,
+					// Planning on the scheduler serializes each successor with unregister without putting the user callback on the scheduler's turn
+					planNext: func(ctx context.Context, payload scheduledRunPayload) error {
+						_, rErr := builtinactor.Invoke(ctx, service, actorType, methodPlanScheduledRun, payload)
+						return rErr
+					},
+					log: log,
 				}
 			}
 
@@ -230,6 +233,8 @@ type cronJobState struct {
 	// JobID is the ID of the recurring job registered by the actor
 	// This is empty until registered, and stays empty for a jittered schedule, which is a chain of one-shot runs rather than one recurring job
 	JobID string `json:"jobID"`
+	// ChainID identifies one registration of a jittered chain so an occurrence from an older registration cannot extend the current one
+	ChainID string `json:"chainID,omitempty"`
 	// ChainInterval and ChainCron record the schedule a jittered chain was registered for
 	ChainInterval string `json:"chainInterval,omitempty"`
 	ChainCron     string `json:"chainCron,omitempty"`
@@ -237,13 +242,15 @@ type cronJobState struct {
 
 // scheduledRunPayload travels with every occurrence of a jittered schedule
 type scheduledRunPayload struct {
+	// ChainID ties the occurrence to the registration that created it
+	ChainID string `msgpack:"chainID"`
 	// Nominal is the time this occurrence was scheduled for, before jitter was applied
 	// The occurrence after it is computed from this rather than from when the run executes, so the offset drawn for one occurrence does not shift the ones that follow
 	Nominal time.Time `msgpack:"nominal"`
 }
 
 // cronJobScheduler is the cluster-wide singleton that owns one recurring job for the cluster
-// It implements actor.ActorBootstrapper for registration (driven by the host at startup) and actor.ActorInvoke for the unregister and trigger lifecycle methods, dispatching the actual runs to the separate runner instance
+// It implements actor.ActorBootstrapper for registration and actor.ActorInvoke for lifecycle methods and jittered-chain planning, dispatching the actual user runs to the separate runner instance
 // Clients cannot invoke it directly because the Service rejects built-in actor types
 type cronJobScheduler struct {
 	interval  string
@@ -265,12 +272,14 @@ func (a *cronJobScheduler) Bootstrap(ctx context.Context, _ actor.Envelope) erro
 	return a.register(ctx)
 }
 
-// Invoke handles the unregister and trigger lifecycle methods, which the framework drives synchronously
-// Registration is not handled here: the host drives it through Bootstrap
-func (a *cronJobScheduler) Invoke(ctx context.Context, method string, _ actor.Envelope) (any, error) {
+// Invoke handles lifecycle requests and serialized successor planning
+// Registration is not handled here because the host drives it through Bootstrap
+func (a *cronJobScheduler) Invoke(ctx context.Context, method string, data actor.Envelope) (any, error) {
 	switch method {
 	case builtinactor.MethodUnregister:
 		return nil, a.unregister(ctx)
+	case methodPlanScheduledRun:
+		return nil, a.planScheduledRun(ctx, data)
 	case methodTrigger:
 		return nil, a.trigger(ctx)
 	default:
@@ -337,7 +346,7 @@ func (a *cronJobScheduler) registerChain(ctx context.Context, state cronJobState
 	}
 
 	// A live chain registered for the configured schedule is left alone, which is what makes bootstrapping from every host a no-op after the first
-	if len(live) > 0 && state.JobID == "" && state.ChainInterval == a.interval && state.ChainCron == a.cron {
+	if len(live) > 0 && state.JobID == "" && state.ChainID != "" && state.ChainInterval == a.interval && state.ChainCron == a.cron {
 		if a.log != nil {
 			a.log.Info("Cron job already registered")
 		}
@@ -378,19 +387,80 @@ func (a *cronJobScheduler) registerChainNew(ctx context.Context, preserveDueTime
 		jitter = a.jitter
 	}
 
-	due, err := planRun(ctx, a.runner, nominal, jitter, firstScheduledRunKey)
+	// Every registration gets a new identity so a delayed occurrence from a replaced chain cannot extend the replacement
+	chainID := uuid.NewV7().String()
+	due, err := planRun(ctx, a.runner, nominal, jitter, chainID, firstScheduledRunKeyPrefix+chainID)
 	if err != nil {
 		return err
 	}
 
 	// Persist the schedule rather than a job ID: the chain outlives any single one of its jobs, since each occurrence is a new job
-	err = a.state.SetState(ctx, cronJobState{ChainInterval: a.interval, ChainCron: a.cron}, nil)
+	err = a.state.SetState(ctx, cronJobState{ChainID: chainID, ChainInterval: a.interval, ChainCron: a.cron}, nil)
 	if err != nil {
 		return fmt.Errorf("failed to save cron job state: %w", err)
 	}
 
 	if a.log != nil {
 		a.log.Info("Cron job registered", slog.Time("dueTime", due))
+	}
+
+	return nil
+}
+
+// planScheduledRun advances a jittered chain while holding the scheduler's turn lock, which makes successor creation mutually exclusive with unregister and registration changes
+func (a *cronJobScheduler) planScheduledRun(ctx context.Context, data actor.Envelope) error {
+	// Decode the occurrence identity supplied by the runner
+	var payload scheduledRunPayload
+	if data != nil {
+		err := data.Decode(&payload)
+		if err != nil {
+			return fmt.Errorf("%w: failed to decode scheduled cron job run: %w", actor.ErrJobPermanentFailure, err)
+		}
+	}
+	if payload.ChainID == "" {
+		return fmt.Errorf("%w: scheduled cron job run is missing its chain ID", actor.ErrJobPermanentFailure)
+	}
+	if payload.Nominal.IsZero() {
+		return fmt.Errorf("%w: scheduled cron job run is missing the occurrence it belongs to", actor.ErrJobPermanentFailure)
+	}
+
+	// Ignore work from a chain that unregister or a later registration has superseded
+	state, err := a.state.GetState(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to read cron job state: %w", err)
+	}
+	if state.ChainID != payload.ChainID {
+		if a.log != nil {
+			a.log.Debug("Skipped planning from an inactive cron job chain", slog.String("chainID", payload.ChainID))
+		}
+		return nil
+	}
+
+	// Advance from the nominal occurrence so jitter on one run does not shift the rest of the schedule
+	nominal, err := nextOccurrence(a.cron, a.interval, payload.Nominal)
+	if err != nil {
+		// The schedule is validated in New
+		return fmt.Errorf("%w: %w", actor.ErrJobPermanentFailure, err)
+	}
+
+	// Skip missed occurrences so a delayed run resumes the schedule instead of chasing an outage
+	now := time.Now()
+	if !nominal.After(now) {
+		nominal, err = nextOccurrence(a.cron, a.interval, now)
+		if err != nil {
+			return fmt.Errorf("%w: %w", actor.ErrJobPermanentFailure, err)
+		}
+	}
+
+	// The chain and source occurrence together make retries idempotent without colliding with another registration
+	key := scheduledRunKeyPrefix + payload.ChainID + "-" + strconv.FormatInt(payload.Nominal.UnixMilli(), 10)
+	due, err := planRun(ctx, a.runner, nominal, a.jitter, payload.ChainID, key)
+	if err != nil {
+		return err
+	}
+
+	if a.log != nil {
+		a.log.Debug("Planned next cron job run", slog.Time("dueTime", due))
 	}
 
 	return nil
@@ -579,7 +649,7 @@ func (a *cronJobScheduler) cancelChain(ctx context.Context) (time.Time, error) {
 
 // cancelScheduledRuns cancels the given occurrences of a chain, returning the earliest due time among them so a replacement can pick the schedule up where this one left it
 // Occurrences are cancelled whatever their status
-// The one case this cannot cover is an occurrence that is executing right now and has not yet dispatched its successor: that successor survives until the next registration reconciles the chain
+// Successor planning holds this scheduler's turn lock, so a concurrent planner either finishes before this snapshot or observes the cleared or replaced chain afterward
 func (a *cronJobScheduler) cancelScheduledRuns(ctx context.Context, live []actor.JobInfo) (earliest time.Time, err error) {
 	now := time.Now()
 
@@ -603,12 +673,9 @@ func (a *cronJobScheduler) cancelScheduledRuns(ctx context.Context, live []actor
 // It implements actor.ActorJob, and each occurrence (scheduled, immediate, or triggered) arrives as a durable run job
 // Splitting it from the scheduler gives the two independent turn locks, so a long-running job does not block the scheduler's lifecycle invocations
 type cronJobRunner struct {
-	job      func(ctx context.Context) error
-	interval string
-	cron     string
-	jitter   time.Duration
-	// self is bound to this same runner instance, where planned runs are dispatched
-	self actor.Client[struct{}]
+	job func(ctx context.Context) error
+	// planNext asks the scheduler to advance a jittered chain while holding its turn lock
+	planNext func(ctx context.Context, payload scheduledRunPayload) error
 	// log reports run start/completion events
 	log *slog.Logger
 }
@@ -643,46 +710,21 @@ func (a *cronJobRunner) scheduledRun(ctx context.Context, data actor.Envelope) e
 	if payload.Nominal.IsZero() {
 		return fmt.Errorf("%w: scheduled cron job run is missing the occurrence it belongs to", actor.ErrJobPermanentFailure)
 	}
+	if payload.ChainID == "" {
+		return fmt.Errorf("%w: scheduled cron job run is missing its chain ID", actor.ErrJobPermanentFailure)
+	}
 
 	// Plan first: a run that executed but failed to hand the schedule on would end the schedule there
-	err := a.planNext(ctx, payload.Nominal)
+	if a.planNext == nil {
+		return fmt.Errorf("%w: scheduled cron job runner has no planner", actor.ErrJobPermanentFailure)
+	}
+	err := a.planNext(ctx, payload)
 	if err != nil {
 		// The user function has not run yet, so the retry executes both steps and nothing runs twice
 		return err
 	}
 
 	return a.run(ctx)
-}
-
-// planNext dispatches the occurrence that follows the one nominally due at prev, spread around its own nominal time by the configured jitter
-func (a *cronJobRunner) planNext(ctx context.Context, prev time.Time) error {
-	// The schedule advances from the occurrence this run belongs to rather than from the clock, so the offset drawn for one occurrence does not shift the ones after it
-	nominal, err := nextOccurrence(a.cron, a.interval, prev)
-	if err != nil {
-		// The schedule is validated in New
-		return fmt.Errorf("%w: %w", actor.ErrJobPermanentFailure, err)
-	}
-
-	// An occurrence that is already past is skipped, and we schedule the next one compared to the current time
-	now := time.Now()
-	if !nominal.After(now) {
-		nominal, err = nextOccurrence(a.cron, a.interval, now)
-		if err != nil {
-			return fmt.Errorf("%w: %w", actor.ErrJobPermanentFailure, err)
-		}
-	}
-
-	// Keying on the occurrence doing the planning, rather than on the one being planned, is what keeps a retry of this run from starting a second chain when the two resolve to different times
-	due, err := planRun(ctx, a.self, nominal, a.jitter, scheduledRunKeyPrefix+strconv.FormatInt(prev.UnixMilli(), 10))
-	if err != nil {
-		return err
-	}
-
-	if a.log != nil {
-		a.log.Debug("Planned next cron job run", slog.Time("dueTime", due))
-	}
-
-	return nil
 }
 
 // run executes the user function for a single occurrence (from the schedule, WithImmediate, or an explicit trigger)
@@ -711,10 +753,10 @@ func (a *cronJobRunner) run(ctx context.Context) error {
 
 // planRun dispatches one occurrence of a jittered schedule, due at its nominal time offset by the given jitter, and returns the due time it landed on
 // The occurrence carries its own nominal time so that the run it delivers can compute the one after it, and the caller supplies an idempotency key that identifies the occurrence, so dispatching it twice yields a single run
-func planRun(ctx context.Context, runner actor.Client[struct{}], nominal time.Time, jitter time.Duration, key string) (time.Time, error) {
+func planRun(ctx context.Context, runner actor.Client[struct{}], nominal time.Time, jitter time.Duration, chainID string, key string) (time.Time, error) {
 	due := jitterDueTime(nominal, jitter)
 
-	_, err := runner.Dispatch(ctx, methodScheduledRun, scheduledRunPayload{Nominal: nominal},
+	_, err := runner.Dispatch(ctx, methodScheduledRun, scheduledRunPayload{ChainID: chainID, Nominal: nominal},
 		actor.WithJobDueTime(due),
 		actor.WithIdempotencyKey(key),
 	)

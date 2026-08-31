@@ -319,7 +319,9 @@ func TestCronJobRegisterWithJitter(t *testing.T) {
 		assert.Equal(t, methodScheduledRun, first.method)
 		assert.Empty(t, first.props.Interval, "an occurrence of a chain is a one-shot")
 		assert.Empty(t, first.props.Cron)
-		assert.Equal(t, firstScheduledRunKey, first.props.IdempotencyKey, "a retried registration must re-use the occurrence rather than start a second chain")
+		firstPayload := scheduledPayload(t, first)
+		assert.NotEmpty(t, firstPayload.ChainID)
+		assert.Equal(t, firstScheduledRunKeyPrefix+firstPayload.ChainID, first.props.IdempotencyKey, "the first occurrence must be scoped to its chain")
 		assertWithinJitter(t, before.Add(time.Minute), first.props.DueTime, jitter+time.Second)
 
 		// The occurrence carries the time it was scheduled for, which is what the run it delivers advances the schedule from
@@ -327,7 +329,7 @@ func TestCronJobRegisterWithJitter(t *testing.T) {
 
 		// The schedule is persisted, since the chain's jobs do not carry it the way a recurring job does
 		require.Len(t, state.setStateCalls, 1)
-		assert.Equal(t, cronJobState{ChainInterval: "PT1M"}, state.setStateCalls[0])
+		assert.Equal(t, cronJobState{ChainID: firstPayload.ChainID, ChainInterval: "PT1M"}, state.setStateCalls[0])
 	})
 
 	t.Run("starts the chain at the next cron tick", func(t *testing.T) {
@@ -343,7 +345,8 @@ func TestCronJobRegisterWithJitter(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, runner.dispatches, 1)
 		assertWithinJitter(t, sched.Next(before), runner.dispatches[0].props.DueTime, jitter)
-		assert.Equal(t, cronJobState{ChainCron: "0 9 * * *"}, state.setStateCalls[0])
+		payload := scheduledPayload(t, runner.dispatches[0])
+		assert.Equal(t, cronJobState{ChainID: payload.ChainID, ChainCron: "0 9 * * *"}, state.setStateCalls[0])
 	})
 
 	t.Run("immediate runs now and starts the chain one occurrence out", func(t *testing.T) {
@@ -367,7 +370,7 @@ func TestCronJobRegisterWithJitter(t *testing.T) {
 
 	t.Run("is a no-op when the chain is already registered for the same schedule", func(t *testing.T) {
 		state := &fakeClient[cronJobState]{
-			state: cronJobState{ChainInterval: "PT1M"},
+			state: cronJobState{ChainID: "chain-1", ChainInterval: "PT1M"},
 		}
 		runner := &fakeClient[struct{}]{
 			dispatchID: "job-4",
@@ -386,8 +389,29 @@ func TestCronJobRegisterWithJitter(t *testing.T) {
 		assert.Empty(t, state.setStateCalls)
 	})
 
-	t.Run("restarts the chain when nothing is live", func(t *testing.T) {
+	t.Run("replaces a legacy chain without a generation", func(t *testing.T) {
 		state := &fakeClient[cronJobState]{state: cronJobState{ChainInterval: "PT1M"}}
+		runner := &fakeClient[struct{}]{
+			dispatchID: "job-migrated",
+			jobs: []actor.JobInfo{
+				{JobID: "legacy", Method: methodScheduledRun, Status: actor.JobStatusPending},
+			},
+		}
+		a := &cronJobScheduler{interval: "PT1M", jitter: jitter, state: state, runner: runner}
+
+		err := a.register(ctx)
+		require.NoError(t, err)
+
+		// Legacy occurrences cannot coordinate with unregister, so bootstrap replaces them with a generation-aware chain
+		assert.Equal(t, []string{"legacy"}, runner.cancelled)
+		require.Len(t, runner.dispatches, 1)
+		payload := scheduledPayload(t, runner.dispatches[0])
+		assert.NotEmpty(t, payload.ChainID)
+		assert.Equal(t, payload.ChainID, state.setStateCalls[0].ChainID)
+	})
+
+	t.Run("restarts the chain when nothing is live", func(t *testing.T) {
+		state := &fakeClient[cronJobState]{state: cronJobState{ChainID: "chain-old", ChainInterval: "PT1M"}}
 		runner := &fakeClient[struct{}]{
 			dispatchID: "job-5",
 			// The last occurrence was dead-lettered without planning a successor, so the chain ended
@@ -408,7 +432,7 @@ func TestCronJobRegisterWithJitter(t *testing.T) {
 	t.Run("replaces the chain when the schedule changed, preserving the next occurrence", func(t *testing.T) {
 		oldDue := time.Now().Add(3 * time.Hour)
 		state := &fakeClient[cronJobState]{
-			state: cronJobState{ChainInterval: "PT5M"},
+			state: cronJobState{ChainID: "chain-old", ChainInterval: "PT5M"},
 		}
 		runner := &fakeClient[struct{}]{
 			dispatchID: "job-6",
@@ -431,7 +455,8 @@ func TestCronJobRegisterWithJitter(t *testing.T) {
 		require.Len(t, runner.dispatches, 1)
 		assert.True(t, oldDue.Equal(runner.dispatches[0].props.DueTime), "expected due time %s, got %s", oldDue, runner.dispatches[0].props.DueTime)
 		assert.True(t, oldDue.Equal(payloadNominal(t, runner.dispatches[0])))
-		assert.Equal(t, cronJobState{ChainInterval: "PT1M"}, state.setStateCalls[0])
+		payload := scheduledPayload(t, runner.dispatches[0])
+		assert.Equal(t, cronJobState{ChainID: payload.ChainID, ChainInterval: "PT1M"}, state.setStateCalls[0])
 	})
 
 	t.Run("replaces a recurring job when jitter is turned on", func(t *testing.T) {
@@ -446,12 +471,13 @@ func TestCronJobRegisterWithJitter(t *testing.T) {
 		assert.Equal(t, []string{"existing"}, runner.cancelled)
 		require.Len(t, runner.dispatches, 1)
 		assert.Equal(t, methodScheduledRun, runner.dispatches[0].method)
-		assert.Equal(t, cronJobState{ChainInterval: "PT1M"}, state.setStateCalls[0], "the replaced job ID must not be left behind in state")
+		payload := scheduledPayload(t, runner.dispatches[0])
+		assert.Equal(t, cronJobState{ChainID: payload.ChainID, ChainInterval: "PT1M"}, state.setStateCalls[0], "the replaced job ID must not be left behind in state")
 	})
 
 	t.Run("replaces the chain with a recurring job when jitter is turned off", func(t *testing.T) {
 		oldDue := time.Now().Add(3 * time.Hour)
-		state := &fakeClient[cronJobState]{state: cronJobState{ChainInterval: "PT1M"}}
+		state := &fakeClient[cronJobState]{state: cronJobState{ChainID: "chain-old", ChainInterval: "PT1M"}}
 		runner := &fakeClient[struct{}]{
 			dispatchID: "job-8",
 			jobs: []actor.JobInfo{
@@ -479,108 +505,145 @@ func TestCronJobScheduledRun(t *testing.T) {
 
 	t.Run("plans the next occurrence before running the job", func(t *testing.T) {
 		nominal := time.Now().Truncate(time.Second)
-		self := &fakeClient[struct{}]{dispatchID: "next-1"}
+		payload := scheduledRunPayload{ChainID: "chain-1", Nominal: nominal}
 
+		var planned scheduledRunPayload
 		var ranAfterPlanning bool
 		a := &cronJobRunner{
-			interval: "PT1M",
-			jitter:   jitter,
-			self:     self,
+			planNext: func(_ context.Context, got scheduledRunPayload) error {
+				planned = got
+				return nil
+			},
 			job: func(context.Context) error {
-				ranAfterPlanning = len(self.dispatches) == 1
+				ranAfterPlanning = !planned.Nominal.IsZero()
 				return nil
 			},
 		}
 
-		err := a.Job(ctx, methodScheduledRun, envelopeFor(t, scheduledRunPayload{Nominal: nominal}))
+		err := a.Job(ctx, methodScheduledRun, envelopeFor(t, payload))
 		require.NoError(t, err)
 
+		assert.Equal(t, payload, planned)
 		assert.True(t, ranAfterPlanning, "the successor must be planned before the user function runs, so a failing run cannot end the schedule")
-
-		// The next occurrence is measured from this one's nominal time, not from when it ran, so the jitter does not accumulate
-		require.Len(t, self.dispatches, 1)
-		assert.Equal(t, methodScheduledRun, self.dispatches[0].method)
-		assertWithinJitter(t, nominal.Add(time.Minute), self.dispatches[0].props.DueTime, jitter)
-		assert.True(t, nominal.Add(time.Minute).Equal(payloadNominal(t, self.dispatches[0])))
-
-		// Keying on the occurrence that plans, rather than the one planned, keeps a retry of this run from starting a second chain
-		assert.Equal(t, scheduledRunKeyPrefix+strconv.FormatInt(nominal.UnixMilli(), 10), self.dispatches[0].props.IdempotencyKey)
 	})
 
 	t.Run("plans the next cron occurrence", func(t *testing.T) {
 		nominal := time.Now().Truncate(time.Second)
-		self := &fakeClient[struct{}]{dispatchID: "next-2"}
-		a := &cronJobRunner{cron: "0 9 * * *", jitter: jitter, self: self, job: noopJob}
+		state := &fakeClient[cronJobState]{state: cronJobState{ChainID: "chain-2", ChainCron: "0 9 * * *"}}
+		runner := &fakeClient[struct{}]{dispatchID: "next-2"}
+		a := &cronJobScheduler{cron: "0 9 * * *", jitter: jitter, state: state, runner: runner}
 
-		err := a.Job(ctx, methodScheduledRun, envelopeFor(t, scheduledRunPayload{Nominal: nominal}))
+		err := a.planScheduledRun(ctx, envelopeFor(t, scheduledRunPayload{ChainID: "chain-2", Nominal: nominal}))
 		require.NoError(t, err)
 
 		sched, err := cron.ParseStandard("0 9 * * *")
 		require.NoError(t, err)
-		require.Len(t, self.dispatches, 1)
-		assertWithinJitter(t, sched.Next(nominal), self.dispatches[0].props.DueTime, jitter)
+		require.Len(t, runner.dispatches, 1)
+		assertWithinJitter(t, sched.Next(nominal), runner.dispatches[0].props.DueTime, jitter)
 	})
 
 	t.Run("resumes one interval out when the schedule fell behind", func(t *testing.T) {
 		// An hour-long outage leaves this run standing in for every occurrence that came due meanwhile
 		// It is the one catch-up run: the schedule resumes an interval from here rather than working through the ones it missed
 		nominal := time.Now().Add(-time.Hour)
-		self := &fakeClient[struct{}]{dispatchID: "next-3"}
-		a := &cronJobRunner{interval: "PT1M", jitter: jitter, self: self, job: noopJob}
+		state := &fakeClient[cronJobState]{state: cronJobState{ChainID: "chain-3", ChainInterval: "PT1M"}}
+		runner := &fakeClient[struct{}]{dispatchID: "next-3"}
+		a := &cronJobScheduler{interval: "PT1M", jitter: jitter, state: state, runner: runner}
 
 		before := time.Now()
-		err := a.Job(ctx, methodScheduledRun, envelopeFor(t, scheduledRunPayload{Nominal: nominal}))
+		err := a.planScheduledRun(ctx, envelopeFor(t, scheduledRunPayload{ChainID: "chain-3", Nominal: nominal}))
 		require.NoError(t, err)
 
-		require.Len(t, self.dispatches, 1)
-		assertWithinJitter(t, before.Add(time.Minute), self.dispatches[0].props.DueTime, jitter+time.Second)
-		assert.WithinDuration(t, before.Add(time.Minute), payloadNominal(t, self.dispatches[0]), time.Second, "the schedule re-anchors, so the occurrences after it do not chase the outage either")
+		require.Len(t, runner.dispatches, 1)
+		assertWithinJitter(t, before.Add(time.Minute), runner.dispatches[0].props.DueTime, jitter+time.Second)
+		assert.WithinDuration(t, before.Add(time.Minute), payloadNominal(t, runner.dispatches[0]), time.Second, "the schedule re-anchors, so the occurrences after it do not chase the outage either")
 	})
 
 	t.Run("keeps the schedule's own grid when the next occurrence is still ahead", func(t *testing.T) {
 		// A run delivered a little late is not behind: the occurrence it plans has not come due yet, so it stays where the schedule puts it
 		nominal := time.Now().Add(-30 * time.Second)
-		self := &fakeClient[struct{}]{dispatchID: "next-4"}
-		a := &cronJobRunner{interval: "PT1M", jitter: jitter, self: self, job: noopJob}
+		state := &fakeClient[cronJobState]{state: cronJobState{ChainID: "chain-4", ChainInterval: "PT1M"}}
+		runner := &fakeClient[struct{}]{dispatchID: "next-4"}
+		a := &cronJobScheduler{interval: "PT1M", jitter: jitter, state: state, runner: runner}
 
-		err := a.Job(ctx, methodScheduledRun, envelopeFor(t, scheduledRunPayload{Nominal: nominal}))
+		err := a.planScheduledRun(ctx, envelopeFor(t, scheduledRunPayload{ChainID: "chain-4", Nominal: nominal}))
 		require.NoError(t, err)
 
-		require.Len(t, self.dispatches, 1)
-		assertWithinJitter(t, nominal.Add(time.Minute), self.dispatches[0].props.DueTime, jitter)
-		assert.Equal(t, nominal.Add(time.Minute).UnixMilli(), payloadNominal(t, self.dispatches[0]).UnixMilli())
+		require.Len(t, runner.dispatches, 1)
+		assertWithinJitter(t, nominal.Add(time.Minute), runner.dispatches[0].props.DueTime, jitter)
+		assert.Equal(t, nominal.Add(time.Minute).UnixMilli(), payloadNominal(t, runner.dispatches[0]).UnixMilli())
+		assert.Equal(t, "chain-4", scheduledPayload(t, runner.dispatches[0]).ChainID)
+
+		// The chain and source occurrence scope the idempotency key to one generation and one handoff
+		expectedKey := scheduledRunKeyPrefix + "chain-4-" + strconv.FormatInt(nominal.UnixMilli(), 10)
+		assert.Equal(t, expectedKey, runner.dispatches[0].props.IdempotencyKey)
 	})
 
 	t.Run("does not run the job when planning fails", func(t *testing.T) {
-		self := &fakeClient[struct{}]{dispatchErr: errors.New("boom")}
 		var ran bool
 		a := &cronJobRunner{
-			interval: "PT1M",
-			jitter:   jitter,
-			self:     self,
+			planNext: func(context.Context, scheduledRunPayload) error { return errors.New("boom") },
 			job:      func(context.Context) error { ran = true; return nil },
 		}
 
-		err := a.Job(ctx, methodScheduledRun, envelopeFor(t, scheduledRunPayload{Nominal: time.Now()}))
+		err := a.Job(ctx, methodScheduledRun, envelopeFor(t, scheduledRunPayload{ChainID: "chain-5", Nominal: time.Now()}))
 		require.Error(t, err)
-		require.NotErrorIs(t, err, actor.ErrJobPermanentFailure, "a transient dispatch failure should be retried")
 		assert.False(t, ran, "the retry runs both steps, so the job must not have run already")
 	})
 
-	t.Run("dead-letters an occurrence with no schedule to advance", func(t *testing.T) {
-		a := &cronJobRunner{jitter: jitter, self: &fakeClient[struct{}]{}, job: noopJob}
+	t.Run("returns a retryable error when dispatch fails", func(t *testing.T) {
+		state := &fakeClient[cronJobState]{state: cronJobState{ChainID: "chain-6", ChainInterval: "PT1M"}}
+		runner := &fakeClient[struct{}]{dispatchErr: errors.New("boom")}
+		a := &cronJobScheduler{interval: "PT1M", jitter: jitter, state: state, runner: runner}
+
+		err := a.planScheduledRun(ctx, envelopeFor(t, scheduledRunPayload{ChainID: "chain-6", Nominal: time.Now()}))
+		require.Error(t, err)
+		require.NotErrorIs(t, err, actor.ErrJobPermanentFailure, "a transient dispatch failure should be retried")
+	})
+
+	t.Run("dead-letters an occurrence with no nominal time", func(t *testing.T) {
+		a := &cronJobRunner{planNext: func(context.Context, scheduledRunPayload) error { return nil }, job: noopJob}
+
+		err := a.Job(ctx, methodScheduledRun, envelopeFor(t, scheduledRunPayload{ChainID: "chain-7"}))
+		require.Error(t, err)
+		assert.ErrorIs(t, err, actor.ErrJobPermanentFailure)
+	})
+
+	t.Run("dead-letters an occurrence with no chain ID", func(t *testing.T) {
+		a := &cronJobRunner{planNext: func(context.Context, scheduledRunPayload) error { return nil }, job: noopJob}
 
 		err := a.Job(ctx, methodScheduledRun, envelopeFor(t, scheduledRunPayload{Nominal: time.Now()}))
+		require.Error(t, err)
+		assert.ErrorIs(t, err, actor.ErrJobPermanentFailure)
+	})
+
+	t.Run("dead-letters an occurrence with no schedule to advance", func(t *testing.T) {
+		state := &fakeClient[cronJobState]{state: cronJobState{ChainID: "chain-8"}}
+		a := &cronJobScheduler{jitter: jitter, state: state, runner: &fakeClient[struct{}]{}}
+
+		err := a.planScheduledRun(ctx, envelopeFor(t, scheduledRunPayload{ChainID: "chain-8", Nominal: time.Now()}))
 		require.Error(t, err)
 		assert.ErrorIs(t, err, actor.ErrJobPermanentFailure, "a schedule that cannot be advanced is not fixed by retrying")
 	})
 
-	t.Run("dead-letters an occurrence with no nominal time", func(t *testing.T) {
-		a := &cronJobRunner{interval: "PT1M", jitter: jitter, self: &fakeClient[struct{}]{}, job: noopJob}
+	t.Run("does not extend an unregistered chain", func(t *testing.T) {
+		state := &fakeClient[cronJobState]{}
+		runner := &fakeClient[struct{}]{dispatchID: "next-9"}
+		a := &cronJobScheduler{interval: "PT1M", jitter: jitter, state: state, runner: runner}
 
-		err := a.Job(ctx, methodScheduledRun, nil)
-		require.Error(t, err)
-		assert.ErrorIs(t, err, actor.ErrJobPermanentFailure)
+		err := a.planScheduledRun(ctx, envelopeFor(t, scheduledRunPayload{ChainID: "chain-old", Nominal: time.Now()}))
+		require.NoError(t, err)
+		assert.Empty(t, runner.dispatches, "a late occurrence must not resurrect the chain after unregister")
+	})
+
+	t.Run("does not extend a replaced chain", func(t *testing.T) {
+		state := &fakeClient[cronJobState]{state: cronJobState{ChainID: "chain-new", ChainInterval: "PT1M"}}
+		runner := &fakeClient[struct{}]{dispatchID: "next-10"}
+		a := &cronJobScheduler{interval: "PT1M", jitter: jitter, state: state, runner: runner}
+
+		err := a.planScheduledRun(ctx, envelopeFor(t, scheduledRunPayload{ChainID: "chain-old", Nominal: time.Now()}))
+		require.NoError(t, err)
+		assert.Empty(t, runner.dispatches, "an occurrence from the old generation must not join the replacement chain")
 	})
 }
 
@@ -693,7 +756,7 @@ func TestCronJobUnknownMethod(t *testing.T) {
 	a := &cronJobRunner{}
 
 	// The runner only services run jobs, so lifecycle methods, the trigger message, and bogus names are all unknown
-	for _, method := range []string{"bogus", ref.MethodBootstrap, builtinactor.MethodUnregister, methodTrigger} {
+	for _, method := range []string{"bogus", ref.MethodBootstrap, builtinactor.MethodUnregister, methodPlanScheduledRun, methodTrigger} {
 		err := a.Job(t.Context(), method, nil)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, actor.ErrJobPermanentFailure, "an unknown job method should dead-letter, not retry forever")
@@ -725,6 +788,16 @@ func TestCronJobInvoke(t *testing.T) {
 		// The recurring job is cancelled on the runner, where it was dispatched
 		assert.Equal(t, []string{"job-1"}, runner.cancelled)
 		assert.True(t, state.deleted)
+	})
+
+	t.Run("scheduled planning routes through the scheduler invocation", func(t *testing.T) {
+		state := &fakeClient[cronJobState]{state: cronJobState{ChainID: "chain-1", ChainInterval: "PT1M"}}
+		runner := &fakeClient[struct{}]{dispatchID: "next"}
+		a := &cronJobScheduler{interval: "PT1M", jitter: time.Second, state: state, runner: runner}
+
+		_, err := a.Invoke(ctx, methodPlanScheduledRun, envelopeFor(t, scheduledRunPayload{ChainID: "chain-1", Nominal: time.Now()}))
+		require.NoError(t, err)
+		require.Len(t, runner.dispatches, 1)
 	})
 
 	t.Run("rejects an unknown lifecycle method", func(t *testing.T) {
@@ -771,7 +844,7 @@ func TestCronJobUnregister(t *testing.T) {
 	})
 
 	t.Run("cancels the chain when jitter is configured", func(t *testing.T) {
-		state := &fakeClient[cronJobState]{state: cronJobState{ChainInterval: "PT1M"}}
+		state := &fakeClient[cronJobState]{state: cronJobState{ChainID: "chain-old", ChainInterval: "PT1M"}}
 		runner := &fakeClient[struct{}]{
 			jobs: []actor.JobInfo{
 				{JobID: "pending", Method: methodScheduledRun, Status: actor.JobStatusPending},
@@ -789,6 +862,11 @@ func TestCronJobUnregister(t *testing.T) {
 		// A leased occurrence counts as active before it has run, so it is cancelled too, while a dead-lettered one is already gone and a triggered run was never part of the schedule
 		assert.Equal(t, []string{"pending", "running"}, runner.cancelled)
 		assert.True(t, state.deleted)
+
+		// An occurrence already fetched by the runner may ask to plan after cancellation, but the cleared generation keeps it from reviving the chain
+		err = a.planScheduledRun(ctx, envelopeFor(t, scheduledRunPayload{ChainID: "chain-old", Nominal: time.Now()}))
+		require.NoError(t, err)
+		assert.Empty(t, runner.dispatches)
 	})
 
 	t.Run("does not list runs without jitter", func(t *testing.T) {
@@ -820,10 +898,16 @@ func envelopeFor(t *testing.T, payload scheduledRunPayload) actor.Envelope {
 // payloadNominal returns the occurrence a recorded dispatch was scheduled for
 func payloadNominal(t *testing.T, call dispatchCall) time.Time {
 	t.Helper()
+	return scheduledPayload(t, call).Nominal
+}
+
+// scheduledPayload returns the typed payload carried by a recorded jittered occurrence
+func scheduledPayload(t *testing.T, call dispatchCall) scheduledRunPayload {
+	t.Helper()
 
 	payload, ok := call.input.(scheduledRunPayload)
 	require.True(t, ok, "expected a scheduled run payload, got %T", call.input)
-	return payload.Nominal
+	return payload
 }
 
 // assertWithinJitter asserts that a planned due time landed inside the window the jitter is allowed to move it to
@@ -895,6 +979,8 @@ func (f *fakeClient[T]) DeleteState(context.Context) error {
 	if f.deleteErr != nil {
 		return f.deleteErr
 	}
+	var zero T
+	f.state = zero
 	f.deleted = true
 	return nil
 }
