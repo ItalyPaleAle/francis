@@ -67,7 +67,7 @@ jobs:
 
       - name: "Test"
         run: |
-          go test -v -tags unit ./...
+          go test -v -race -tags unit ./...
 
       - name: "Integration tests"
         run: |

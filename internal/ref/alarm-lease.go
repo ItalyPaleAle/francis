@@ -1,4 +1,3 @@
-//nolint:recvcheck
 package ref
 
 import (
@@ -28,33 +27,33 @@ func NewAlarmLease(ref AlarmRef, alarmID string, dueTime time.Time, leaseID any)
 
 // Key returns the key for the alarm.
 // This is implemented to comply with the queueable interface.
-func (r AlarmLease) Key() string {
+func (r *AlarmLease) Key() string {
 	return r.alarmID
 }
 
 // DueTime returns the due time for the alarm.
 // This is implemented to comply with the queueable interface.
-func (r AlarmLease) DueTime() time.Time {
+func (r *AlarmLease) DueTime() time.Time {
 	return r.dueTime
 }
 
 // LeaseID returns the value of the leaseID property.
-func (r AlarmLease) LeaseID() any {
+func (r *AlarmLease) LeaseID() any {
 	return r.leaseID
 }
 
 // AlarmRef returns the alarm reference for the alarm.
-func (r AlarmLease) AlarmRef() AlarmRef {
+func (r *AlarmLease) AlarmRef() AlarmRef {
 	return r.ref
 }
 
 // ActorRef returns the actor reference for the alarm.
-func (r AlarmLease) ActorRef() ActorRef {
+func (r *AlarmLease) ActorRef() ActorRef {
 	return r.ref.ActorRef()
 }
 
 // Attempts returns the number of attempts for this alarm.
-func (r AlarmLease) Attempts() int {
+func (r *AlarmLease) Attempts() int {
 	return r.attempts
 }
 
@@ -81,12 +80,12 @@ func (r *AlarmLease) SetExecutionTime(t time.Time) {
 }
 
 // ExecutionTime returns the time the alarm was executed at
-func (r AlarmLease) ExecutionTime() time.Time {
+func (r *AlarmLease) ExecutionTime() time.Time {
 	return r.executionTime
 }
 
 // String implements fmt.Stringer and it's used for debugging.
-func (r AlarmLease) String() string {
+func (r *AlarmLease) String() string {
 	const RFC3339MilliNoTZ = "2006-01-02T15:04:05.999"
 
 	return fmt.Sprintf(
