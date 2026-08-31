@@ -49,24 +49,45 @@ func (s *parallel) Run(t *testing.T) {
 
 	const actors = 8
 
-	// Each distinct actor gets one holding invocation, all launched together
-	// If the host serialized across actors, the global peak concurrency would be one
-	shared.ProbeObserver.ResetGlobalConcurrency()
+	// Arm every actor before launching the calls so the first arrivals remain blocked while slower actors finish activating
+	actorIDs := make([]string, actors)
+	for i := range actors {
+		actorIDs[i] = "parallel-" + strconv.Itoa(i)
+		shared.ProbeObserver.ArmBlock(actorIDs[i])
+	}
+	defer func() {
+		for _, actorID := range actorIDs {
+			shared.ProbeObserver.ReleaseBlock(actorID)
+		}
+	}()
 
+	// Launch one invocation per actor and retain each result until the barrier is released
 	var wg sync.WaitGroup
 	errs := make([]error, actors)
-	for i := range actors {
+	for i, actorID := range actorIDs {
 		wg.Go(func() {
-			actorID := "parallel-" + strconv.Itoa(i)
-			_, errs[i] = svc.Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodHold, nil)
+			_, errs[i] = svc.Invoke(ctx, shared.ProbeActorType, actorID, shared.ProbeMethodBlock, nil)
 		})
+	}
+
+	// Every distinct actor must enter while the others remain blocked, proving their turn locks are independent without relying on scheduler timing
+	assert.Eventually(t, func() bool {
+		for _, actorID := range actorIDs {
+			if shared.ProbeObserver.BlockEnteredCount(actorID) == 0 {
+				return false
+			}
+		}
+		return true
+	}, 15*time.Second, 50*time.Millisecond, "invocations to distinct actors should run concurrently")
+
+	// Release every invocation before waiting so a failed overlap assertion cannot wedge test cleanup
+	for _, actorID := range actorIDs {
+		shared.ProbeObserver.ReleaseBlock(actorID)
 	}
 	wg.Wait()
 
+	// Verify that synchronization did not hide any invocation errors
 	for _, err := range errs {
 		require.NoError(t, err)
 	}
-
-	// Distinct actors must be able to run at the same time, so the peak crosses one
-	assert.Greater(t, shared.ProbeObserver.MaxGlobalConcurrency(), 1, "invocations to distinct actors should run concurrently")
 }
