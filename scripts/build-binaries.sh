@@ -24,7 +24,7 @@ export CGO_ENABLED=0
 
 # Every binary that ships in a release archive, as "<name>:<package>"
 BINARIES=(
-  "runtime:./cmd/runtime"
+  "francis:./cmd/runtime"
 )
 
 usage() {
