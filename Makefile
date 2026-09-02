@@ -10,9 +10,12 @@ test-race:
 test-integration:
 	go test -tags integration -count=1 -timeout 15m ./tests/integration/...
 
-.PHONY: lint
+.PHONY: lint lint-e2e
 lint:
 	golangci-lint run
+
+lint-e2e:
+	cd tests/e2e && golangci-lint run
 
 # Regenerate the mocks in internal/mocks from the interfaces listed in .mockery.yml
 # Run this after changing any mocked interface (for example actor.Host or components.ActorProvider)

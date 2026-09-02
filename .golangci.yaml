@@ -99,6 +99,9 @@ linters:
                 skipPackageNameChecks: true
           severity: warning
           disabled: false
+    modernize:
+      disable:
+        - embedlit
   exclusions:
     generated: lax
     presets:
