@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"slices"
 	"time"
 	"uuid"
 
@@ -9,7 +10,13 @@ import (
 	"github.com/italypaleale/francis/internal/ref"
 )
 
-func (p *Provider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) (string, error) {
+func (p *Provider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) (string, *ref.AlarmLease, error) {
+	// Trying to acquire a lease requires using the slower path
+	// Requests outside fetch-ahead stay on the storage-only path even when an idempotency conflict retains an earlier due time
+	if len(req.LeaseImmediate) > 0 && !req.DueTime.After(p.Clock.Now().Add(p.Cfg.AlarmsFetchAheadInterval)) {
+		return p.dispatchAndLeaseJob(ctx, aRef, req)
+	}
+
 	key := NewAlarmKey(aRef.ActorType, aRef.ActorID, aRef.Name)
 
 	p.writeMu.Lock()
@@ -25,7 +32,7 @@ func (p *Provider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req compo
 	p.Mu.RUnlock()
 
 	if exists {
-		return existingID, nil
+		return existingID, nil, nil
 	}
 
 	// Normalize empty data to nil
@@ -59,10 +66,118 @@ func (p *Provider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req compo
 		p.AlarmsByID[alarmID] = a
 	})
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
-	return alarmID, nil
+	return alarmID, nil, nil
+}
+
+// dispatchAndLeaseJob atomically persists a new idempotent job with any required actor placement and lease
+func (p *Provider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) (string, *ref.AlarmLease, error) {
+	key := NewAlarmKey(aRef.ActorType, aRef.ActorID, aRef.Name)
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+
+	changes := NewChanges()
+	defer changes.Release()
+
+	// Preserve the first job stored for an idempotency key while allowing an unleased occurrence to become immediately schedulable
+	now := p.Clock.Now()
+	p.Mu.RLock()
+	existing, exists := p.Alarms[key]
+	var job *Alarm
+	if exists {
+		job = existing
+		hasLiveLease := job.LeaseID != nil && job.LeaseExpiration != nil && !job.LeaseExpiration.Before(now)
+		if job.DueTime.After(now.Add(p.Cfg.AlarmsFetchAheadInterval)) || hasLiveLease {
+			jobID := job.ID
+			p.Mu.RUnlock()
+			return jobID, nil, nil
+		}
+	} else {
+		data := req.Data
+		if data != nil && len(data) == 0 {
+			data = nil
+		}
+		job = &Alarm{
+			ID:        uuid.NewV7().String(),
+			ActorType: aRef.ActorType,
+			ActorID:   aRef.ActorID,
+			Name:      aRef.Name,
+			DueTime:   req.DueTime,
+			Interval:  req.Interval,
+			Cron:      req.Cron,
+			TTL:       req.TTL,
+			Data:      data,
+			Kind:      string(components.AlarmKindJob),
+			JobMethod: req.JobMethod,
+		}
+	}
+
+	// Resolve placement only when the stored occurrence is inside fetch-ahead
+	actorKey := NewActorKey(aRef.ActorType, aRef.ActorID)
+	var newActor *ActiveActor
+	canLease := false
+	if !job.DueTime.After(now.Add(p.Cfg.AlarmsFetchAheadInterval)) {
+		existingActor, actorExists := p.ActiveActors[actorKey]
+		if actorExists {
+			host, hostExists := p.Hosts[existingActor.HostID]
+			if hostExists && p.IsHostHealthy(host) {
+				canLease = slices.Contains(req.LeaseImmediate, existingActor.HostID)
+			} else {
+				actorExists = false
+			}
+		}
+		if !actorExists {
+			host, idleTimeout := p.findHostWithCapacity(aRef.ActorType, req.LeaseImmediate)
+			if host != nil {
+				activation := now
+				if job.DueTime.After(activation) {
+					activation = job.DueTime
+				}
+				newActor = &ActiveActor{
+					ActorType:   aRef.ActorType,
+					ActorID:     aRef.ActorID,
+					HostID:      host.ID,
+					IdleTimeout: idleTimeout,
+					Activation:  activation,
+				}
+				canLease = true
+			}
+		}
+	}
+
+	// Acquire the lease in the same change set as the job and any new placement
+	var lease *ref.AlarmLease
+	if canLease {
+		job = job.Clone()
+		leaseID := uuid.NewV7().String() + "_" + job.ID
+		leaseExpiration := now.Add(p.Cfg.AlarmsLeaseDuration)
+		job.LeaseID = &leaseID
+		job.LeaseExpiration = &leaseExpiration
+		lease = ref.NewAlarmLease(aRef, job.ID, job.DueTime, leaseID)
+	}
+	p.Mu.RUnlock()
+	if exists && !canLease {
+		return job.ID, nil, nil
+	}
+
+	// Expose the job and lease only after their complete durable change set succeeds
+	changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: job.ID, Value: job})
+	if newActor != nil {
+		changes.ActiveActors.Set = append(changes.ActiveActors.Set, ActiveActorChange{Key: actorKey, Value: newActor})
+	}
+	err := p.persistThenApply(ctx, &p.Mu, changes, func() {
+		p.Alarms[key] = job
+		p.AlarmsByID[job.ID] = job
+		if newActor != nil {
+			p.ActiveActors[actorKey] = newActor
+		}
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	return job.ID, lease, nil
 }
 
 func (p *Provider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLease, req components.DeadLetterAlarmReq) error {

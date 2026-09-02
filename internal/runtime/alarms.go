@@ -107,6 +107,16 @@ func (rt *Runtime) ensureAlarmProcessor() {
 	}
 }
 
+func (rt *Runtime) immediateLeaseHosts() []string {
+	rt.activeAlarmsLock.RLock()
+	processorReady := rt.alarmProcessor != nil && !rt.alarmsDraining
+	rt.activeAlarmsLock.RUnlock()
+	if !processorReady {
+		return nil
+	}
+	return rt.hosts.ConnectedHostIDs()
+}
+
 // drainActiveAlarms stops new alarm executions from starting and waits for in-flight ones to finish
 // The wait is bounded by the shutdown grace period, after which remaining alarms are left to their leases expiring
 func (rt *Runtime) drainActiveAlarms() {

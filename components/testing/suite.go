@@ -60,6 +60,7 @@ func (s Suite) RunTests(t *testing.T) {
 func (s Suite) RunConcurrencyTests(t *testing.T) {
 	t.Run("lookup actor", s.TestConcurrentLookupActor)
 	t.Run("fetch alarms", s.TestConcurrentFetchAlarms)
+	t.Run("dispatch jobs", s.TestConcurrentDispatchJobs)
 }
 
 func (s Suite) TestRegisterHost(t *testing.T) {
@@ -2106,6 +2107,128 @@ func (s Suite) TestConcurrentFetchAlarms(t *testing.T) {
 		}
 
 		t.Logf("Successfully distributed 40 alarms across overlapping host capabilities")
+	})
+}
+
+func (s Suite) TestConcurrentDispatchJobs(t *testing.T) {
+	const (
+		jobHost = "0b000000-0000-4000-8000-0000000000c1"
+		workers = 12
+	)
+
+	jobSeed := Spec{
+		Hosts: HostSpecCollection{
+			{HostID: jobHost, Address: "127.0.0.1:7200", LastHealthAgo: time.Second},
+		},
+		HostActorTypes: HostActorTypeSpecCollection{
+			{HostID: jobHost, ActorType: "CONCURRENT_JOB", ActorIdleTimeout: 5 * time.Minute},
+		},
+	}
+
+	t.Run("immediate same-key dispatch returns one lease", func(t *testing.T) {
+		ctx := t.Context()
+		err := s.p.Seed(ctx, jobSeed)
+		require.NoError(t, err)
+
+		// Release every caller together so the provider must serialize both insertion and lease acquisition
+		jobRef := ref.NewAlarmRef("CONCURRENT_JOB", "immediate", "same-key")
+		start := make(chan struct{})
+		type dispatchResult struct {
+			jobID string
+			lease *ref.AlarmLease
+			err   error
+		}
+		results := make(chan dispatchResult, workers)
+		var wg sync.WaitGroup
+		for range workers {
+			wg.Go(func() {
+				<-start
+				jobID, lease, dispatchErr := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+					DueTime:        s.p.Now().Add(time.Second),
+					Kind:           components.AlarmKindJob,
+					JobMethod:      "process",
+					LeaseImmediate: []string{jobHost},
+				})
+				results <- dispatchResult{jobID: jobID, lease: lease, err: dispatchErr}
+			})
+		}
+		close(start)
+		wg.Wait()
+		close(results)
+
+		// Every caller observes one durable identity and only the lease winner can enqueue it
+		var firstID string
+		var leased []*ref.AlarmLease
+		for result := range results {
+			require.NoError(t, result.err)
+			require.NotEmpty(t, result.jobID)
+			if firstID == "" {
+				firstID = result.jobID
+			}
+			assert.Equal(t, firstID, result.jobID)
+			if result.lease != nil {
+				leased = append(leased, result.lease)
+			}
+		}
+		require.Len(t, leased, 1)
+		assert.Equal(t, firstID, leased[0].Key())
+		_, err = s.p.GetLeasedAlarm(ctx, leased[0])
+		require.NoError(t, err)
+
+		jobs, err := s.p.ListJobs(ctx, jobRef.ActorType, jobRef.ActorID)
+		require.NoError(t, err)
+		require.Len(t, jobs, 1)
+		assert.Equal(t, firstID, jobs[0].JobID)
+	})
+
+	t.Run("future same-key dispatch always returns the stored ID", func(t *testing.T) {
+		ctx := t.Context()
+		err := s.p.Seed(ctx, jobSeed)
+		require.NoError(t, err)
+
+		// Future dispatches use the storage-only path but must retain the same concurrency contract
+		jobRef := ref.NewAlarmRef("CONCURRENT_JOB", "future", "same-key")
+		start := make(chan struct{})
+		type dispatchResult struct {
+			jobID string
+			lease *ref.AlarmLease
+			err   error
+		}
+		results := make(chan dispatchResult, workers)
+		var wg sync.WaitGroup
+		wg.Add(workers)
+		for i := 0; i < workers; i++ {
+			go func() {
+				defer wg.Done()
+				<-start
+				jobID, lease, dispatchErr := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+					DueTime:   s.p.Now().Add(time.Hour),
+					Kind:      components.AlarmKindJob,
+					JobMethod: "process",
+				})
+				results <- dispatchResult{jobID: jobID, lease: lease, err: dispatchErr}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		close(results)
+
+		// A conflict must return the winner's ID even when its insert committed after another statement began
+		var firstID string
+		for result := range results {
+			require.NoError(t, result.err)
+			require.NotEmpty(t, result.jobID)
+			assert.Nil(t, result.lease)
+			if firstID == "" {
+				firstID = result.jobID
+			}
+			assert.Equal(t, firstID, result.jobID)
+		}
+
+		jobs, err := s.p.ListJobs(ctx, jobRef.ActorType, jobRef.ActorID)
+		require.NoError(t, err)
+		require.Len(t, jobs, 1)
+		assert.Equal(t, firstID, jobs[0].JobID)
 	})
 }
 
@@ -5170,7 +5293,7 @@ func (s Suite) TestJobs(t *testing.T) {
 	dispatch := func(t *testing.T, ctx context.Context, actorID string, name string, method string, props ref.AlarmProperties, data []byte) string {
 		t.Helper()
 		props.Data = data
-		jobID, err := s.p.DispatchJob(ctx, ref.NewAlarmRef("JOB", actorID, name), components.SetAlarmReq{
+		jobID, _, err := s.p.DispatchJob(ctx, ref.NewAlarmRef("JOB", actorID, name), components.SetAlarmReq{
 			AlarmProperties: props,
 			Kind:            components.AlarmKindJob,
 			JobMethod:       method,
@@ -5208,6 +5331,326 @@ func (s Suite) TestJobs(t *testing.T) {
 		assert.Equal(t, "process", info.Method)
 		assert.Equal(t, components.JobStatusPending, info.Status)
 		assert.False(t, info.CreatedAt.IsZero(), "created at should be derived from the UUIDv7 job ID")
+	})
+
+	t.Run("dispatch leases an upcoming new job", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		// Store a fully-populated job close enough to qualify for fetch-ahead scheduling
+		jobRef := ref.NewAlarmRef("JOB", "preleased", "key")
+		dueTime := s.p.Now().Add(time.Second)
+		ttl := s.p.Now().Add(2 * time.Hour)
+		jobID, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+			DueTime:        dueTime,
+			Interval:       "PT1H",
+			TTL:            &ttl,
+			Data:           []byte("payload"),
+			Kind:           components.AlarmKindJob,
+			JobMethod:      "process",
+			LeaseImmediate: []string{jobHost},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, lease)
+		assert.Equal(t, jobID, lease.Key())
+		assert.Equal(t, jobRef, lease.AlarmRef())
+
+		// Verify the returned lease authorizes the exact stored job row
+		stored, err := s.p.GetLeasedAlarm(ctx, lease)
+		require.NoError(t, err)
+		assert.Equal(t, components.AlarmKindJob, stored.Kind)
+		assert.WithinDuration(t, dueTime, stored.DueTime, time.Second)
+		assert.Equal(t, "PT1H", stored.Interval)
+		assert.Empty(t, stored.Cron)
+		require.NotNil(t, stored.TTL)
+		assert.WithinDuration(t, ttl, *stored.TTL, time.Second)
+		assert.Equal(t, []byte("payload"), stored.Data)
+		assert.Equal(t, "process", stored.JobMethod)
+		placement, err := s.p.LookupActor(ctx, jobRef.ActorRef(), components.LookupActorOpts{ActiveOnly: true})
+		require.NoError(t, err)
+		assert.Equal(t, jobHost, placement.HostID)
+
+		// Re-dispatching the idempotency key preserves the first job and does not return its live lease twice
+		duplicateID, duplicateLease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+			DueTime:        dueTime.Add(time.Second),
+			Kind:           components.AlarmKindJob,
+			JobMethod:      "different",
+			LeaseImmediate: []string{jobHost},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, jobID, duplicateID)
+		assert.Nil(t, duplicateLease)
+		_, err = s.p.GetLeasedAlarm(ctx, lease)
+		require.NoError(t, err)
+	})
+
+	t.Run("re-dispatch leases an existing unleased job", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		// Create the idempotent job without offering a host for immediate scheduling
+		jobRef := ref.NewAlarmRef("JOB", "existing-unleased", "key")
+		dueTime := s.p.Now().Add(time.Second)
+		jobID, initialLease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+			DueTime:   dueTime,
+			Kind:      components.AlarmKindJob,
+			JobMethod: "original",
+			Data:      []byte("original"),
+		})
+		require.NoError(t, err)
+		require.Nil(t, initialLease)
+
+		// Re-dispatching can acquire its lease but must retain the first dispatch's properties
+		duplicateID, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+			DueTime:        dueTime.Add(time.Second),
+			Kind:           components.AlarmKindJob,
+			JobMethod:      "replacement",
+			Data:           []byte("replacement"),
+			LeaseImmediate: []string{jobHost},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, lease)
+		assert.Equal(t, jobID, duplicateID)
+		assert.Equal(t, jobID, lease.Key())
+
+		stored, err := s.p.GetLeasedAlarm(ctx, lease)
+		require.NoError(t, err)
+		assert.WithinDuration(t, dueTime, stored.DueTime, time.Second)
+		assert.Equal(t, "original", stored.JobMethod)
+		assert.Equal(t, []byte("original"), stored.Data)
+	})
+
+	t.Run("re-dispatch uses the storage-only path for an incoming future schedule", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		// Store an upcoming occurrence without offering an immediate host
+		jobRef := ref.NewAlarmRef("JOB", "incoming-future", "key")
+		dueTime := s.p.Now().Add(time.Second)
+		jobID, initialLease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+			DueTime:   dueTime,
+			Kind:      components.AlarmKindJob,
+			JobMethod: "original",
+			Data:      []byte("original"),
+		})
+		require.NoError(t, err)
+		require.Nil(t, initialLease)
+
+		// A duplicate request outside fetch-ahead avoids the transactional lease path even though the stored row is earlier
+		duplicateID, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+			DueTime:        s.p.Now().Add(time.Hour),
+			Kind:           components.AlarmKindJob,
+			JobMethod:      "replacement",
+			Data:           []byte("replacement"),
+			LeaseImmediate: []string{jobHost},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, jobID, duplicateID)
+		assert.Nil(t, lease)
+
+		info, err := s.p.GetJob(ctx, jobID)
+		require.NoError(t, err)
+		assert.WithinDuration(t, dueTime, info.DueTime, time.Second)
+		assert.Equal(t, "original", info.Method)
+		assert.Equal(t, components.JobStatusPending, info.Status)
+		_, err = s.p.LookupActor(ctx, jobRef.ActorRef(), components.LookupActorOpts{ActiveOnly: true})
+		require.ErrorIs(t, err, components.ErrNoActor)
+	})
+
+	t.Run("re-dispatch keeps an existing future job unleased", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		// The first dispatch establishes a future schedule that an idempotency conflict cannot replace
+		jobRef := ref.NewAlarmRef("JOB", "existing-future", "key")
+		dueTime := s.p.Now().Add(time.Hour)
+		jobID, initialLease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+			DueTime:   dueTime,
+			Kind:      components.AlarmKindJob,
+			JobMethod: "original",
+		})
+		require.NoError(t, err)
+		require.Nil(t, initialLease)
+
+		// An immediate duplicate request must not lease or place the retained future occurrence
+		duplicateID, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+			DueTime:        s.p.Now(),
+			Kind:           components.AlarmKindJob,
+			JobMethod:      "replacement",
+			LeaseImmediate: []string{jobHost},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, jobID, duplicateID)
+		assert.Nil(t, lease)
+
+		info, err := s.p.GetJob(ctx, jobID)
+		require.NoError(t, err)
+		assert.WithinDuration(t, dueTime, info.DueTime, time.Second)
+		assert.Equal(t, "original", info.Method)
+		assert.Equal(t, components.JobStatusPending, info.Status)
+		_, err = s.p.LookupActor(ctx, jobRef.ActorRef(), components.LookupActorOpts{ActiveOnly: true})
+		require.ErrorIs(t, err, components.ErrNoActor)
+	})
+
+	t.Run("dispatch leases a job whose actor is active on an allowed host", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		// Place the actor on the host that will be offered for immediate execution
+		jobRef := ref.NewAlarmRef("JOB", "active-allowed", "key")
+		placement, err := s.p.LookupActor(ctx, jobRef.ActorRef(), components.LookupActorOpts{Hosts: []string{jobHost}})
+		require.NoError(t, err)
+		require.Equal(t, jobHost, placement.HostID)
+
+		// Dispatching reuses the placement while acquiring the job lease
+		jobID, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+			DueTime:        s.p.Now().Add(time.Second),
+			Kind:           components.AlarmKindJob,
+			JobMethod:      "process",
+			LeaseImmediate: []string{jobHost},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, lease)
+		assert.Equal(t, jobID, lease.Key())
+
+		placement, err = s.p.LookupActor(ctx, jobRef.ActorRef(), components.LookupActorOpts{ActiveOnly: true})
+		require.NoError(t, err)
+		assert.Equal(t, jobHost, placement.HostID)
+	})
+
+	t.Run("dispatch leaves an upcoming job durable without an eligible host", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, Spec{
+			Hosts: HostSpecCollection{
+				{HostID: jobHost, Address: "127.0.0.1:7100", LastHealthAgo: time.Second},
+			},
+			HostActorTypes: HostActorTypeSpecCollection{
+				{HostID: jobHost, ActorType: "OTHER", ActorIdleTimeout: 5 * time.Minute},
+			},
+		}))
+
+		// The offered host cannot execute this actor type, so only the durable job is created
+		jobRef := ref.NewAlarmRef("JOB", "no-host", "key")
+		jobID, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+			DueTime:        s.p.Now().Add(time.Second),
+			Kind:           components.AlarmKindJob,
+			JobMethod:      "process",
+			LeaseImmediate: []string{jobHost},
+		})
+		require.NoError(t, err)
+		assert.Nil(t, lease)
+
+		info, err := s.p.GetJob(ctx, jobID)
+		require.NoError(t, err)
+		assert.Equal(t, components.JobStatusPending, info.Status)
+		_, err = s.p.LookupActor(ctx, jobRef.ActorRef(), components.LookupActorOpts{ActiveOnly: true})
+		require.ErrorIs(t, err, components.ErrNoActor)
+	})
+
+	t.Run("dispatch does not move an actor from a healthy disallowed host", func(t *testing.T) {
+		const secondJobHost = "0b000000-0000-4000-8000-0000000000b2"
+
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, Spec{
+			Hosts: HostSpecCollection{
+				{HostID: jobHost, Address: "127.0.0.1:7100", LastHealthAgo: time.Second},
+				{HostID: secondJobHost, Address: "127.0.0.1:7101", LastHealthAgo: time.Second},
+			},
+			HostActorTypes: HostActorTypeSpecCollection{
+				{HostID: jobHost, ActorType: "JOB", ActorIdleTimeout: 5 * time.Minute},
+				{HostID: secondJobHost, ActorType: "JOB", ActorIdleTimeout: 5 * time.Minute},
+			},
+		}))
+
+		// Pin the actor to the first host before offering only the second host for the job lease
+		jobRef := ref.NewAlarmRef("JOB", "active-disallowed", "key")
+		placement, err := s.p.LookupActor(ctx, jobRef.ActorRef(), components.LookupActorOpts{Hosts: []string{jobHost}})
+		require.NoError(t, err)
+		require.Equal(t, jobHost, placement.HostID)
+
+		jobID, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+			DueTime:        s.p.Now().Add(time.Second),
+			Kind:           components.AlarmKindJob,
+			JobMethod:      "process",
+			LeaseImmediate: []string{secondJobHost},
+		})
+		require.NoError(t, err)
+		assert.Nil(t, lease)
+		_, err = s.p.GetJob(ctx, jobID)
+		require.NoError(t, err)
+
+		placement, err = s.p.LookupActor(ctx, jobRef.ActorRef(), components.LookupActorOpts{ActiveOnly: true})
+		require.NoError(t, err)
+		assert.Equal(t, jobHost, placement.HostID)
+	})
+
+	t.Run("re-dispatch replaces an expired job lease", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		// Acquire the first lease while the original host is healthy
+		jobRef := ref.NewAlarmRef("JOB", "expired-lease", "key")
+		jobID, originalLease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+			DueTime:        s.p.Now().Add(time.Second),
+			Kind:           components.AlarmKindJob,
+			JobMethod:      "process",
+			LeaseImmediate: []string{jobHost},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, originalLease)
+
+		// Advance past both lease expiry and host health, then add a fresh eligible host
+		err = s.p.AdvanceClock(2 * time.Minute)
+		require.NoError(t, err)
+		hostRes, err := s.p.RegisterHost(ctx, components.RegisterHostReq{
+			Address: "127.0.0.1:7102",
+			ActorTypes: []components.ActorHostType{{
+				ActorType:   "JOB",
+				IdleTimeout: 5 * time.Minute,
+			}},
+		})
+		require.NoError(t, err)
+
+		// The same occurrence gets a fresh lease rather than a new durable identity
+		duplicateID, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+			DueTime:        s.p.Now(),
+			Kind:           components.AlarmKindJob,
+			JobMethod:      "replacement",
+			LeaseImmediate: []string{hostRes.HostID},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, lease)
+		assert.Equal(t, jobID, duplicateID)
+		assert.Equal(t, jobID, lease.Key())
+		assert.NotEqual(t, originalLease.LeaseID(), lease.LeaseID())
+
+		_, err = s.p.GetLeasedAlarm(ctx, originalLease)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
+		_, err = s.p.GetLeasedAlarm(ctx, lease)
+		require.NoError(t, err)
+	})
+
+	t.Run("dispatch leaves a future job unleased", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		jobRef := ref.NewAlarmRef("JOB", "future", "key")
+		dueTime := s.p.Now().Add(time.Hour)
+		jobID, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+			DueTime:        dueTime,
+			Kind:           components.AlarmKindJob,
+			JobMethod:      "process",
+			LeaseImmediate: []string{jobHost},
+		})
+		require.NoError(t, err)
+		assert.NotEmpty(t, jobID)
+		assert.Nil(t, lease)
+		info, err := s.p.GetJob(ctx, jobID)
+		require.NoError(t, err)
+		assert.Equal(t, components.JobStatusPending, info.Status)
+		assert.WithinDuration(t, dueTime, info.DueTime, time.Second)
+		_, err = s.p.LookupActor(ctx, jobRef.ActorRef(), components.LookupActorOpts{ActiveOnly: true})
+		require.ErrorIs(t, err, components.ErrNoActor)
 	})
 
 	t.Run("idempotency key dedups re-dispatch", func(t *testing.T) {

@@ -14,7 +14,7 @@ import (
 	"github.com/italypaleale/francis/internal/ref"
 )
 
-func (s *SQLiteProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) (string, error) {
+func (s *SQLiteProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) (string, *ref.AlarmLease, error) {
 	var (
 		interval *string
 		cron     *string
@@ -35,44 +35,120 @@ func (s *SQLiteProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req
 
 	alarmID := uuid.NewV7().String()
 
-	// Insert the job, or keep the existing one when an idempotency key (alarm name) already maps to a job
-	// SQLite cannot insert from a CTE, so we insert (ignoring conflicts) then read back the resulting ID, both in one transaction
-	jobID, err := sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (string, error) {
-		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-		_, txErr := tx.ExecContext(ctx, `
-			INSERT INTO `+s.tablePrefix+`alarms
-				(alarm_id, actor_type, actor_id, alarm_name,
-				alarm_due_time, alarm_interval, alarm_cron, alarm_ttl_time, alarm_data,
-				alarm_kind, job_method,
-				alarm_lease_id, alarm_lease_expiration_time)
-			VALUES
-				(?, ?, ?, ?, ?, ?, ?, ?, ?, 'job', ?, NULL, NULL)
-			ON CONFLICT (actor_type, actor_id, alarm_name) DO NOTHING`,
-			alarmID, aRef.ActorType, aRef.ActorID, aRef.Name,
-			req.DueTime.UnixMilli(), interval, cron, ttl, req.Data, req.JobMethod,
-		)
-		if txErr != nil {
-			return "", fmt.Errorf("failed to insert job: %w", txErr)
-		}
-
-		var id string
-		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-		txErr = tx.
-			QueryRowContext(ctx, `SELECT alarm_id FROM `+s.tablePrefix+`alarms WHERE actor_type = ? AND actor_id = ? AND alarm_name = ?`,
-				aRef.ActorType, aRef.ActorID, aRef.Name,
-			).
-			Scan(&id)
-		if txErr != nil {
-			return "", fmt.Errorf("failed to read back job ID: %w", txErr)
-		}
-
-		return id, nil
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to dispatch job: %w", err)
+	// Trying to acquire a lease requires using the slower transactional path
+	// Requests outside fetch-ahead stay on the storage-only path even when an idempotency conflict retains an earlier due time
+	if len(req.LeaseImmediate) > 0 && !req.DueTime.After(s.clock.Now().Add(s.cfg.AlarmsFetchAheadInterval)) {
+		return s.dispatchAndLeaseJob(ctx, aRef, req, alarmID, interval, cron, ttl)
 	}
 
-	return jobID, nil
+	// Keep the insert and ID lookup atomic because SQLite cannot insert from a data-modifying CTE
+	jobID, err := sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (string, error) {
+		stored, txErr := s.insertJob(ctx, tx, aRef, req, alarmID, interval, cron, ttl)
+		return stored.alarmID, txErr
+	})
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to dispatch job: %w", err)
+	}
+
+	return jobID, nil, nil
+}
+
+// insertJob creates a job when its idempotency key is new and always returns the stored job
+func (s *SQLiteProvider) insertJob(ctx context.Context, q querier, aRef ref.AlarmRef, req components.SetAlarmReq, alarmID string, interval *string, cron *string, ttl *int64) (stored setAlarmResult, err error) {
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	_, err = q.ExecContext(ctx, `
+		INSERT INTO `+s.tablePrefix+`alarms
+			(alarm_id, actor_type, actor_id, alarm_name,
+			alarm_due_time, alarm_interval, alarm_cron, alarm_ttl_time, alarm_data,
+			alarm_kind, job_method,
+			alarm_lease_id, alarm_lease_expiration_time)
+		VALUES
+			(?, ?, ?, ?, ?, ?, ?, ?, ?, 'job', ?, NULL, NULL)
+		ON CONFLICT (actor_type, actor_id, alarm_name) DO NOTHING`,
+		alarmID, aRef.ActorType, aRef.ActorID, aRef.Name,
+		req.DueTime.UnixMilli(), interval, cron, ttl, req.Data, req.JobMethod,
+	)
+	if err != nil {
+		return stored, fmt.Errorf("failed to insert job: %w", err)
+	}
+
+	// Read the durable row back so an idempotency conflict can reuse an eligible unleased occurrence
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	err = q.
+		QueryRowContext(ctx, `SELECT alarm_id, alarm_due_time, alarm_lease_id, alarm_lease_expiration_time FROM `+s.tablePrefix+`alarms WHERE actor_type = ? AND actor_id = ? AND alarm_name = ?`,
+			aRef.ActorType, aRef.ActorID, aRef.Name,
+		).
+		Scan(&stored.alarmID, &stored.dueTime, &stored.leaseID, &stored.leaseExpirationTime)
+	if err != nil {
+		return stored, fmt.Errorf("failed to read back job: %w", err)
+	}
+	return stored, nil
+}
+
+// dispatchAndLeaseJob atomically stores a new idempotent job with any required actor placement and lease
+func (s *SQLiteProvider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq, alarmID string, interval *string, cron *string, ttl *int64) (string, *ref.AlarmLease, error) {
+	type dispatchResult struct {
+		jobID string
+		lease *ref.AlarmLease
+	}
+
+	res, err := sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (dispatchResult, error) {
+		// Preserve the first job stored for an idempotency key while allowing an unleased occurrence to become immediately schedulable
+		stored, txErr := s.insertJob(ctx, tx, aRef, req, alarmID, interval, cron, ttl)
+		if txErr != nil {
+			return dispatchResult{}, txErr
+		}
+
+		// Keep ineligible or already-leased jobs on their existing schedule
+		now := s.clock.Now()
+		if stored.dueTime > now.Add(s.cfg.AlarmsFetchAheadInterval).UnixMilli() {
+			return dispatchResult{jobID: stored.alarmID}, nil
+		}
+		hasLiveLease := stored.leaseID != nil && stored.leaseExpirationTime != nil && *stored.leaseExpirationTime >= now.UnixMilli()
+		if hasLiveLease {
+			return dispatchResult{jobID: stored.alarmID}, nil
+		}
+
+		// Keep the job unleased when no allowed host can own its actor
+		dueTime := time.UnixMilli(stored.dueTime)
+		_, txErr = s.lookupActorInTransaction(ctx, tx, aRef.ActorRef(), req.LeaseImmediate, dueTime)
+		if errors.Is(txErr, components.ErrNoHost) {
+			return dispatchResult{jobID: stored.alarmID}, nil
+		} else if txErr != nil {
+			return dispatchResult{}, fmt.Errorf("failed to place job actor: %w", txErr)
+		}
+
+		// Acquire the lease before committing the job and actor placement
+		leaseID := uuid.NewV7().String()
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		txErr = tx.
+			QueryRowContext(ctx,
+				`UPDATE `+s.tablePrefix+`alarms
+				SET alarm_lease_id = ?, alarm_lease_expiration_time = ?
+				WHERE
+					alarm_id = ?
+					AND (
+						alarm_lease_id IS NULL
+						OR alarm_lease_expiration_time IS NULL
+						OR alarm_lease_expiration_time < ?
+					)
+				RETURNING alarm_lease_id`,
+				leaseID, now.Add(s.cfg.AlarmsLeaseDuration).UnixMilli(), stored.alarmID, now.UnixMilli(),
+			).
+			Scan(&leaseID)
+		if errors.Is(txErr, sql.ErrNoRows) {
+			return dispatchResult{jobID: stored.alarmID}, nil
+		} else if txErr != nil {
+			return dispatchResult{}, fmt.Errorf("failed to lease job: %w", txErr)
+		}
+
+		lease := ref.NewAlarmLease(aRef, stored.alarmID, dueTime, leaseID)
+		return dispatchResult{jobID: stored.alarmID, lease: lease}, nil
+	})
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to dispatch job: %w", err)
+	}
+	return res.jobID, res.lease, nil
 }
 
 func (s *SQLiteProvider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLease, req components.DeadLetterAlarmReq) error {

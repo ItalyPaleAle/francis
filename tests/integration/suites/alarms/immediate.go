@@ -27,34 +27,33 @@ const (
 	immediateAlarmTick         = 100 * time.Millisecond
 	futureAlarmDelay           = 4 * time.Second
 	futureAlarmObservation     = futureAlarmDelay + time.Second
+	canceledAlarmDelay         = time.Second
+	canceledAlarmObservation   = 2 * time.Second
 )
 
-var immediateAlarmVariants = []provider.Variant{
-	provider.SQLite,
-	provider.Postgres,
-	provider.StandaloneMemory,
-}
-
-// Register immediate alarm leasing once for each distinct provider implementation
+// Register immediate alarm leasing for both runtime topologies and every distinct provider implementation
 func init() {
-	for _, variant := range immediateAlarmVariants {
-		suite.Register(&immediateAlarms{variant: variant})
+	for _, kind := range []cluster.Kind{cluster.Local, cluster.Remote} {
+		for _, variant := range []provider.Variant{provider.SQLite, provider.Postgres, provider.StandaloneMemory} {
+			suite.Register(&immediateAlarms{kind: kind, variant: variant})
+		}
 	}
 }
 
 // immediateAlarms separates immediate leasing from the periodic fetcher with a poll interval much longer than every assertion
 type immediateAlarms struct {
+	kind    cluster.Kind
 	variant provider.Variant
 	cluster *cluster.Cluster
 }
 
 func (s *immediateAlarms) Name() string {
-	return "alarms/immediate/remote/" + string(s.variant)
+	return "alarms/immediate/" + string(s.kind) + "/" + string(s.variant)
 }
 
 func (s *immediateAlarms) Setup(t *testing.T) []framework.Option {
 	s.cluster = cluster.New(t, cluster.Options{
-		Kind:    cluster.Remote,
+		Kind:    s.kind,
 		Variant: s.variant,
 		Hosts:   1,
 		Actors: []frameworkhost.ActorReg{
@@ -76,7 +75,7 @@ func (s *immediateAlarms) Run(t *testing.T) {
 
 	// An alarm inside fetch-ahead must execute without waiting for the one-minute periodic poll
 	t.Run("inside fetch-ahead executes immediately", func(t *testing.T) {
-		actorID := "immediate-" + string(s.variant)
+		actorID := "immediate-" + string(s.kind) + "-" + string(s.variant)
 		alarmName := "immediate"
 		alarmData := "pre-leased"
 		err := svc.SetAlarm(ctx, shared.ProbeActorType, actorID, alarmName, actor.AlarmProperties{
@@ -97,7 +96,7 @@ func (s *immediateAlarms) Run(t *testing.T) {
 
 	// An alarm outside fetch-ahead must stay on the storage-only fast path until a later poll fetches it
 	t.Run("outside fetch-ahead is not enqueued", func(t *testing.T) {
-		actorID := "future-" + string(s.variant)
+		actorID := "future-" + string(s.kind) + "-" + string(s.variant)
 		err := svc.SetAlarm(ctx, shared.ProbeActorType, actorID, "future", actor.AlarmProperties{
 			DueTime: time.Now().Add(futureAlarmDelay),
 		})
@@ -112,5 +111,21 @@ func (s *immediateAlarms) Run(t *testing.T) {
 
 		err = svc.DeleteAlarm(ctx, shared.ProbeActorType, actorID, "future")
 		require.NoError(t, err)
+	})
+
+	// Deleting a pre-leased alarm invalidates the queued lease before it can execute
+	t.Run("delete pre-leased alarm", func(t *testing.T) {
+		actorID := "delete-preleased-" + string(s.kind) + "-" + string(s.variant)
+		alarmName := "delete-before-due"
+		err := svc.SetAlarm(ctx, shared.ProbeActorType, actorID, alarmName, actor.AlarmProperties{
+			DueTime: time.Now().Add(canceledAlarmDelay),
+		})
+		require.NoError(t, err)
+		err = svc.DeleteAlarm(ctx, shared.ProbeActorType, actorID, alarmName)
+		require.NoError(t, err)
+
+		assert.Never(t, func() bool {
+			return shared.ProbeObserver.AlarmCount(actorID) > 0
+		}, canceledAlarmObservation, immediateAlarmTick, "a deleted pre-leased alarm must not execute")
 	})
 }

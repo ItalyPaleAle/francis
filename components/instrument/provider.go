@@ -285,12 +285,12 @@ func (w *providerWrapper) DeleteAlarm(ctx context.Context, alarmRef ref.AlarmRef
 }
 
 // DispatchJob implements components.ActorProvider
-func (w *providerWrapper) DispatchJob(ctx context.Context, alarmRef ref.AlarmRef, req components.SetAlarmReq) (jobID string, err error) {
+func (w *providerWrapper) DispatchJob(ctx context.Context, alarmRef ref.AlarmRef, req components.SetAlarmReq) (jobID string, lease *ref.AlarmLease, err error) {
 	spanCtx, span, start := w.beginOp(ctx, "DispatchJob")
-	jobID, err = w.base.DispatchJob(spanCtx, alarmRef, req)
+	jobID, lease, err = w.base.DispatchJob(spanCtx, alarmRef, req)
 	w.finishOp(spanCtx, span, "DispatchJob", start, err)
 
-	return jobID, err
+	return jobID, lease, err
 }
 
 // DeadLetterAlarm implements components.ActorProvider

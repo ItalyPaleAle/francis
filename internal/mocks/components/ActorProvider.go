@@ -577,7 +577,7 @@ func (_c *MockActorProvider_DeleteState_Call) RunAndReturn(run func(ctx context.
 }
 
 // DispatchJob provides a mock function for the type MockActorProvider
-func (_mock *MockActorProvider) DispatchJob(ctx context.Context, ref1 ref.AlarmRef, req components.SetAlarmReq) (string, error) {
+func (_mock *MockActorProvider) DispatchJob(ctx context.Context, ref1 ref.AlarmRef, req components.SetAlarmReq) (string, *ref.AlarmLease, error) {
 	ret := _mock.Called(ctx, ref1, req)
 
 	if len(ret) == 0 {
@@ -585,21 +585,33 @@ func (_mock *MockActorProvider) DispatchJob(ctx context.Context, ref1 ref.AlarmR
 	}
 
 	var r0 string
-	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, ref.AlarmRef, components.SetAlarmReq) (string, error)); ok {
-		return returnFunc(ctx, ref1, req)
+	var r1 *ref.AlarmLease
+	var r2 error
+	returnAll, ok := ret.Get(0).(func(context.Context, ref.AlarmRef, components.SetAlarmReq) (string, *ref.AlarmLease, error))
+	if ok {
+		return returnAll(ctx, ref1, req)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, ref.AlarmRef, components.SetAlarmReq) string); ok {
-		r0 = returnFunc(ctx, ref1, req)
+	returnString, ok := ret.Get(0).(func(context.Context, ref.AlarmRef, components.SetAlarmReq) string)
+	if ok {
+		r0 = returnString(ctx, ref1, req)
 	} else {
 		r0 = ret.Get(0).(string)
 	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, ref.AlarmRef, components.SetAlarmReq) error); ok {
-		r1 = returnFunc(ctx, ref1, req)
+	returnLease, ok := ret.Get(1).(func(context.Context, ref.AlarmRef, components.SetAlarmReq) *ref.AlarmLease)
+	if ok {
+		r1 = returnLease(ctx, ref1, req)
 	} else {
-		r1 = ret.Error(1)
+		if ret.Get(1) != nil {
+			r1 = ret.Get(1).(*ref.AlarmLease)
+		}
 	}
-	return r0, r1
+	returnError, ok := ret.Get(2).(func(context.Context, ref.AlarmRef, components.SetAlarmReq) error)
+	if ok {
+		r2 = returnError(ctx, ref1, req)
+	} else {
+		r2 = ret.Error(2)
+	}
+	return r0, r1, r2
 }
 
 // MockActorProvider_DispatchJob_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DispatchJob'
@@ -638,12 +650,12 @@ func (_c *MockActorProvider_DispatchJob_Call) Run(run func(ctx context.Context, 
 	return _c
 }
 
-func (_c *MockActorProvider_DispatchJob_Call) Return(jobID string, err error) *MockActorProvider_DispatchJob_Call {
-	_c.Call.Return(jobID, err)
+func (_c *MockActorProvider_DispatchJob_Call) Return(jobID string, lease *ref.AlarmLease, err error) *MockActorProvider_DispatchJob_Call {
+	_c.Call.Return(jobID, lease, err)
 	return _c
 }
 
-func (_c *MockActorProvider_DispatchJob_Call) RunAndReturn(run func(ctx context.Context, ref1 ref.AlarmRef, req components.SetAlarmReq) (string, error)) *MockActorProvider_DispatchJob_Call {
+func (_c *MockActorProvider_DispatchJob_Call) RunAndReturn(run func(ctx context.Context, ref1 ref.AlarmRef, req components.SetAlarmReq) (string, *ref.AlarmLease, error)) *MockActorProvider_DispatchJob_Call {
 	_c.Call.Return(run)
 	return _c
 }

@@ -8,12 +8,13 @@ import (
 	"uuid"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
 )
 
-func (p *PostgresProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) (string, error) {
+func (p *PostgresProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) (string, *ref.AlarmLease, error) {
 	var (
 		interval *string
 		cron     *string
@@ -33,37 +34,73 @@ func (p *PostgresProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, r
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
-	// Insert the job, or keep the existing one when an idempotency key (alarm name) already maps to a job
-	// The data-modifying CTE only sees rows that existed before the statement, so exactly one branch yields the row: the freshly inserted one, or the pre-existing one on conflict
+	// Trying to acquire a lease requires using the slower database-side transaction
+	// Requests outside fetch-ahead stay on the storage-only path even when an idempotency conflict retains an earlier due time
+	if len(req.LeaseImmediate) > 0 && !req.DueTime.After(p.clock.Now().Add(p.cfg.AlarmsFetchAheadInterval)) {
+		return p.dispatchAndLeaseJob(queryCtx, aRef, req, alarmID, interval, cron)
+	}
+
+	// Insert the job or lock and return the existing first-write-wins row when the idempotency key is already present
+	// The self-assignment on conflict is intentional because it makes RETURNING atomically yield the winner of a concurrent insert
 	var jobID uuid.UUID
 	// #nosec G202 -- the only concatenated values are static table prefixes, not user input
 	err := p.db.
 		QueryRow(queryCtx, `
-			WITH ins AS (
-				INSERT INTO `+p.tablePrefix+`alarms
-					(alarm_id, actor_type, actor_id, alarm_name,
-					alarm_due_time, alarm_interval, alarm_cron, alarm_ttl_time, alarm_data,
-					alarm_kind, job_method,
-					alarm_lease_id, alarm_lease_expiration_time)
-				VALUES
-					($1, $2, $3, $4, $5, $6, $7, $8, $9, 'job', $10, NULL, NULL)
-				ON CONFLICT (actor_type, actor_id, alarm_name) DO NOTHING
-				RETURNING alarm_id
-			)
-			SELECT alarm_id FROM ins
-			UNION ALL
-			SELECT alarm_id FROM `+p.tablePrefix+`alarms WHERE actor_type = $2 AND actor_id = $3 AND alarm_name = $4
-			LIMIT 1`,
+			INSERT INTO `+p.tablePrefix+`alarms AS stored
+				(alarm_id, actor_type, actor_id, alarm_name,
+				alarm_due_time, alarm_interval, alarm_cron, alarm_ttl_time, alarm_data,
+				alarm_kind, job_method,
+				alarm_lease_id, alarm_lease_expiration_time)
+			VALUES
+				($1, $2, $3, $4, $5, $6, $7, $8, $9, 'job', $10, NULL, NULL)
+			ON CONFLICT (actor_type, actor_id, alarm_name) DO UPDATE
+			SET alarm_id = stored.alarm_id
+			RETURNING alarm_id`,
 			// alarm_due_time and alarm_ttl_time are stored as UTC
 			alarmID, aRef.ActorType, aRef.ActorID, aRef.Name,
 			req.DueTime.UTC(), interval, cron, utcPtr(req.TTL), req.Data, req.JobMethod,
 		).
 		Scan(&jobID)
 	if err != nil {
-		return "", fmt.Errorf("failed to dispatch job: %w", err)
+		return "", nil, fmt.Errorf("failed to dispatch job: %w", err)
 	}
 
-	return jobID.String(), nil
+	return jobID.String(), nil, nil
+}
+
+// dispatchAndLeaseJob atomically stores a new idempotent job with any required actor placement and lease
+func (p *PostgresProvider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq, alarmID uuid.UUID, interval *string, cron *string) (string, *ref.AlarmLease, error) {
+	hostUUIDs, err := hostIDsToUUIDs(req.LeaseImmediate)
+	if err != nil {
+		return "", nil, err
+	}
+
+	// The database always returns the durable job ID and includes lease fields only when this call inserted and leased it
+	var (
+		jobID   uuid.UUID
+		dueTime time.Time
+		leaseID pgtype.UUID
+	)
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	err = p.db.
+		QueryRow(ctx,
+			`SELECT r_job_id, r_job_due_time, r_lease_id
+			FROM `+p.tablePrefix+`dispatch_and_lease_job_v1($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+			alarmID, aRef.ActorType, aRef.ActorID, aRef.Name,
+			req.DueTime.UTC(), interval, cron, utcPtr(req.TTL), req.Data, req.JobMethod, hostUUIDs,
+			p.cfg.HostHealthCheckDeadline, p.cfg.AlarmsFetchAheadInterval, p.cfg.AlarmsLeaseDuration,
+		).
+		Scan(&jobID, &dueTime, &leaseID)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to atomically dispatch and lease job: %w", err)
+	}
+	if !leaseID.Valid {
+		return jobID.String(), nil, nil
+	}
+
+	leaseUUID := uuid.UUID(leaseID.Bytes)
+	lease := ref.NewAlarmLease(aRef, jobID.String(), dueTime, leaseUUID.String())
+	return jobID.String(), lease, nil
 }
 
 func (p *PostgresProvider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLease, req components.DeadLetterAlarmReq) error {

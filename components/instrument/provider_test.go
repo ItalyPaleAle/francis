@@ -69,6 +69,34 @@ func TestWrapProviderReturnsImmediateAlarmLease(t *testing.T) {
 	assert.NotEqual(t, codes.Error, span.Status().Code)
 }
 
+func TestWrapProviderReturnsImmediateJobLease(t *testing.T) {
+	sr := setupSpanRecorder(t)
+	jobRef := ref.NewAlarmRef("testType", "actor-1", "job-key")
+	dueTime := time.Now().Add(time.Second)
+	req := components.SetAlarmReq{
+		DueTime:        dueTime,
+		Kind:           components.AlarmKindJob,
+		JobMethod:      "process",
+		LeaseImmediate: []string{"host-1"},
+	}
+	want := ref.NewAlarmLease(jobRef, "job-id", dueTime, "lease-id")
+
+	base := components_mocks.NewMockActorProvider(t)
+	base.EXPECT().
+		DispatchJob(mock.Anything, jobRef, req).
+		Return("job-id", want, nil)
+
+	p := WrapProvider(base, nil, components.OperationLogConfig{})
+	jobID, got, err := p.DispatchJob(t.Context(), jobRef, req)
+	require.NoError(t, err)
+	assert.Equal(t, "job-id", jobID)
+	assert.Same(t, want, got)
+
+	span := spansByName(t, sr)["provider.DispatchJob"]
+	require.NotNil(t, span)
+	assert.NotEqual(t, codes.Error, span.Status().Code)
+}
+
 func TestWrapProviderRecordsErrors(t *testing.T) {
 	sr := setupSpanRecorder(t)
 

@@ -84,7 +84,8 @@ type Host struct {
 	address string
 
 	// Host ID for the registered host
-	hostID string
+	hostIDLock sync.RWMutex
+	hostID     string
 
 	running  atomic.Bool
 	draining atomic.Bool
@@ -113,6 +114,8 @@ type Host struct {
 	holder *certholder.Holder
 
 	alarmProcessor *eventqueue.Processor[string, *ref.AlarmLease]
+	// alarmsDraining is protected by activeAlarmsLock so no alarm execution can increment alarmWg after shutdown starts waiting
+	alarmsDraining bool
 	// alarmWg counts all in-flight alarm goroutines so shutdown can wait for them to finish
 	alarmWg sync.WaitGroup
 
@@ -346,8 +349,8 @@ func (h *Host) Run(parentCtx context.Context) error {
 		return fmt.Errorf("failed to register actor host: %w", err)
 	}
 
-	h.hostID = res.HostID
-	h.log = h.logSource.With(slog.String("hostId", h.hostID))
+	h.setHostID(res.HostID)
+	h.log = h.logSource.With(slog.String("hostId", res.HostID))
 	h.core.SetLogger(h.log)
 
 	// Self-issue this host's workload certificate now that its ID is known, so the peer server can present it and peers can verify it
@@ -357,6 +360,14 @@ func (h *Host) Run(parentCtx context.Context) error {
 	}
 
 	h.log.InfoContext(ctx, "Registered actor host", slog.String("address", h.address))
+
+	// Create the alarm processor before exposing readiness so newly-created alarms can be enqueued immediately
+	h.activeAlarmsLock.Lock()
+	h.alarmsDraining = false
+	h.alarmProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ref.AlarmLease]{
+		ExecuteFn: h.executeAlarm,
+	})
+	h.activeAlarmsLock.Unlock()
 
 	// Signal readiness now that the host is registered and its fields are initialized
 	// Closing the channel also publishes those writes to any goroutine that waits on Ready
@@ -389,7 +400,7 @@ func (h *Host) Run(parentCtx context.Context) error {
 		}
 
 		h.log.InfoContext(ctx, "Unregistered actor host")
-		h.hostID = ""
+		h.setHostID("")
 	}()
 
 	// Halt all remaining actors before the host unregisters
@@ -400,12 +411,6 @@ func (h *Host) Run(parentCtx context.Context) error {
 			h.log.Warn("Error halting actors", slog.Any("error", haltErr))
 		}
 	}()
-
-	// Create the alarm processor here before the services start
-	// The close is handled by runAlarmFetcher's defer, which intentionally leaves the field non-nil so in-flight re-enqueues receive ErrProcessorStopped instead of a nil-pointer panic
-	h.alarmProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ref.AlarmLease]{
-		ExecuteFn: h.executeAlarm,
-	})
 
 	// Run all services
 	// This blocks until the context is canceled or one of the services returns
@@ -436,7 +441,8 @@ func (h *Host) issueSelfCert() error {
 		return fmt.Errorf("failed to generate workload key: %w", err)
 	}
 
-	der, err := h.cas[0].IssueWorkloadCert(ca.HostURI(h.hostID), pub, localCertTTL)
+	hostID := h.HostID()
+	der, err := h.cas[0].IssueWorkloadCert(ca.HostURI(hostID), pub, localCertTTL)
 	if err != nil {
 		return err
 	}
@@ -501,7 +507,15 @@ func (h *Host) Ready() <-chan struct{} {
 
 // HostID returns the ID of the host.
 func (h *Host) HostID() string {
+	h.hostIDLock.RLock()
+	defer h.hostIDLock.RUnlock()
 	return h.hostID
+}
+
+func (h *Host) setHostID(hostID string) {
+	h.hostIDLock.Lock()
+	h.hostID = hostID
+	h.hostIDLock.Unlock()
 }
 
 // Halt gracefully halts an actor that is hosted on the current host
@@ -548,7 +562,8 @@ func (h *Host) runHealthChecks(parentCtx context.Context) error {
 			_, err = backoff.Retry(parentCtx, func() (r struct{}, rErr error) {
 				ctx, cancel := context.WithTimeout(parentCtx, policy.AttemptTimeout())
 				defer cancel()
-				rErr = h.actorProvider.UpdateActorHost(ctx, h.hostID, components.UpdateActorHostReq{
+				hostID := h.HostID()
+				rErr = h.actorProvider.UpdateActorHost(ctx, hostID, components.UpdateActorHostReq{
 					UpdateLastHealthCheck: true,
 					Retry:                 policy.Attempts() > 0,
 				})

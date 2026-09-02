@@ -35,6 +35,7 @@ func TestStandaloneMemory(t *testing.T) {
 	// Run the test suites
 	suite := comptesting.NewSuite(p)
 	t.Run("suite", suite.RunTests)
+	t.Run("concurrent dispatch jobs", suite.TestConcurrentDispatchJobs)
 }
 
 func TestStandaloneSQLiteBacked(t *testing.T) {
@@ -43,6 +44,7 @@ func TestStandaloneSQLiteBacked(t *testing.T) {
 	// Run the test suites
 	suite := comptesting.NewSuite(p)
 	t.Run("suite", suite.RunTests)
+	t.Run("concurrent dispatch jobs", suite.TestConcurrentDispatchJobs)
 }
 
 // Name of the environmental variable containing the connection string to the test database.
@@ -55,6 +57,7 @@ func TestStandalonePostgresBacked(t *testing.T) {
 	// Run the test suites
 	suite := comptesting.NewSuite(p)
 	t.Run("suite", suite.RunTests)
+	t.Run("concurrent dispatch jobs", suite.TestConcurrentDispatchJobs)
 }
 
 func TestStandaloneTablePrefix(t *testing.T) {
@@ -1952,6 +1955,67 @@ func TestPersistHook_Rollback_SetAndLeaseAlarm(t *testing.T) {
 	_, active := p.ActiveActors[internal.NewActorKey(alarmRef.ActorType, alarmRef.ActorID)]
 	p.Mu.RUnlock()
 	require.False(t, active)
+}
+
+func TestPersistHook_Rollback_DispatchAndLeaseJob(t *testing.T) {
+	p, mock := initProviderWithMockHook(t)
+
+	// Establish an eligible host before failing the combined job mutation
+	hostRes, err := p.RegisterHost(t.Context(), components.RegisterHostReq{
+		Address: "localhost:8080",
+		ActorTypes: []components.ActorHostType{{
+			ActorType:   "myactor",
+			IdleTimeout: time.Minute,
+		}},
+	})
+	require.NoError(t, err)
+	mock.Reset()
+	mock.ErrFunc = func() error {
+		return errors.New("simulated persistence error")
+	}
+
+	// The job, placement, and lease are submitted as one persistence operation
+	jobRef := ref.NewAlarmRef("myactor", "actor1", "job-key")
+	jobID, lease, err := p.DispatchJob(t.Context(), jobRef, components.SetAlarmReq{
+		DueTime:        p.Clock.Now().Add(time.Second),
+		Kind:           components.AlarmKindJob,
+		JobMethod:      "process",
+		LeaseImmediate: []string{hostRes.HostID},
+	})
+	require.Error(t, err)
+	require.Empty(t, jobID)
+	require.Nil(t, lease)
+
+	calls := mock.GetCalls()
+	require.Len(t, calls, 1)
+	require.Len(t, calls[0].Alarms.Set, 1)
+	require.Len(t, calls[0].ActiveActors.Set, 1)
+	require.NotNil(t, calls[0].Alarms.Set[0].Value.LeaseID)
+
+	// A failed persistence operation leaves no part of the combined mutation visible
+	jobs, err := p.ListJobs(t.Context(), jobRef.ActorType, jobRef.ActorID)
+	require.NoError(t, err)
+	require.Empty(t, jobs)
+	p.Mu.RLock()
+	_, active := p.ActiveActors[internal.NewActorKey(jobRef.ActorType, jobRef.ActorID)]
+	p.Mu.RUnlock()
+	require.False(t, active)
+
+	// Retrying after persistence recovers creates the complete mutation once
+	mock.Reset()
+	mock.ErrFunc = nil
+	jobID, lease, err = p.DispatchJob(t.Context(), jobRef, components.SetAlarmReq{
+		DueTime:        p.Clock.Now().Add(time.Second),
+		Kind:           components.AlarmKindJob,
+		JobMethod:      "process",
+		LeaseImmediate: []string{hostRes.HostID},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, jobID)
+	require.NotNil(t, lease)
+	require.Equal(t, jobID, lease.Key())
+	_, err = p.GetLeasedAlarm(t.Context(), lease)
+	require.NoError(t, err)
 }
 
 func TestPersistHook_Rollback_FetchAndLeaseUpcomingAlarms(t *testing.T) {

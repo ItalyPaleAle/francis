@@ -54,6 +54,23 @@ func (p *recordingSetAlarmProvider) SetAlarm(ctx context.Context, alarmRef ref.A
 	return lease, err
 }
 
+// recordingDispatchJobProvider captures immediate-lease requests and results while preserving the provider's normal behavior
+type recordingDispatchJobProvider struct {
+	components.ActorProvider
+
+	requests chan components.SetAlarmReq
+	leases   chan *ref.AlarmLease
+}
+
+func (p *recordingDispatchJobProvider) DispatchJob(ctx context.Context, alarmRef ref.AlarmRef, req components.SetAlarmReq) (string, *ref.AlarmLease, error) {
+	jobID, lease, err := p.ActorProvider.DispatchJob(ctx, alarmRef, req)
+	p.requests <- req
+	if lease != nil {
+		p.leases <- lease
+	}
+	return jobID, lease, err
+}
+
 // leaseTestAlarm sets an alarm and leases it through the provider, returning the resulting lease
 func leaseTestAlarm(t *testing.T, prov *standalone.StandaloneMemory, hostID string, aref ref.AlarmRef, props ref.AlarmProperties) *ref.AlarmLease {
 	t.Helper()
@@ -65,6 +82,36 @@ func leaseTestAlarm(t *testing.T, prov *standalone.StandaloneMemory, hostID stri
 	require.NoError(t, err)
 	require.Len(t, leases, 1)
 	return leases[0]
+}
+
+func TestImmediateLeaseHosts(t *testing.T) {
+	rt, prov := newTestRuntime(t)
+
+	// A runtime without a scheduler cannot retain an immediate lease
+	assert.Nil(t, rt.immediateLeaseHosts())
+
+	// A ready scheduler with no connected hosts has nobody to execute the lease
+	rt.ensureAlarmProcessor()
+	defer func() {
+		err := rt.alarmProcessor.Close()
+		require.NoError(t, err)
+	}()
+	assert.Empty(t, rt.immediateLeaseHosts())
+
+	// Connected hosts are offered while both the runtime and host are accepting work
+	c := connectTestHost(t, rt, prov, "10.1.0.50:1", protocol.ActorHostType{ActorType: "T"})
+	assert.Equal(t, []string{c.hostID}, rt.immediateLeaseHosts())
+
+	// A draining host stays connected but is excluded from immediate work
+	c.setDraining()
+	assert.Empty(t, rt.immediateLeaseHosts())
+	c.draining.Store(false)
+
+	// Runtime shutdown suppresses all new immediate leases
+	rt.activeAlarmsLock.Lock()
+	rt.alarmsDraining = true
+	rt.activeAlarmsLock.Unlock()
+	assert.Nil(t, rt.immediateLeaseHosts())
 }
 
 func TestDispatchAlarmCompleted(t *testing.T) {
@@ -578,6 +625,127 @@ func TestHandleSetAlarmLetsProviderChooseFastPathOutsideFetchAheadHorizon(t *tes
 	require.NoError(t, err)
 	_, err = prov.LookupActor(t.Context(), alarmRef.ActorRef(), components.LookupActorOpts{ActiveOnly: true})
 	require.ErrorIs(t, err, components.ErrNoActor)
+}
+
+func TestHandleDispatchJobLeasesAndEnqueuesBeforePoll(t *testing.T) {
+	rt, prov := newTestRuntime(t, WithAlarmsPollInterval(time.Hour))
+	recordedRequests := make(chan components.SetAlarmReq, 1)
+	recordedLeases := make(chan *ref.AlarmLease, 1)
+	rt.provider = &recordingDispatchJobProvider{
+		ActorProvider: prov,
+		requests:      recordedRequests,
+		leases:        recordedLeases,
+	}
+	c := connectTestHost(t, rt, prov, "10.1.0.42:1", protocol.ActorHostType{
+		ActorType:             "T",
+		IdleTimeoutMs:         0,
+		ConcurrencyLimit:      0,
+		DeactivationTimeoutMs: 0,
+		MaxAttempts:           3,
+		InitialRetryDelayMs:   100,
+	})
+	rt.ensureAlarmProcessor()
+	defer func() {
+		err := rt.alarmProcessor.Close()
+		require.NoError(t, err)
+	}()
+
+	// Capture dispatches so the test can prove the job fired without starting the periodic fetcher
+	dispatched := make(chan protocol.ExecuteAlarmRequest, 1)
+	rt.sendToHost = func(_ context.Context, conn *hostConn, env *protocol.Envelope) (*protocol.Envelope, error) {
+		assert.Equal(t, c.hostID, conn.hostID)
+		var jobReq protocol.ExecuteAlarmRequest
+		err := env.DecodePayload(&jobReq)
+		require.NoError(t, err)
+		dispatched <- jobReq
+		return env.ReplyWith(protocol.KindExecuteAlarmResponse, protocol.ExecuteAlarmResponse{ExecutionTimeUnixMs: time.Now().UnixMilli()})
+	}
+
+	// Create a job inside fetch-ahead through the remote runtime handler
+	dueTime := time.Now().Add(500 * time.Millisecond)
+	resp := dispatchReq(t, rt, c, protocol.KindDispatchJob, protocol.DispatchJobRequest{
+		ActorType:     "T",
+		ActorID:       "a1",
+		Name:          "job-key",
+		Method:        "process",
+		DueTimeUnixMs: dueTime.UnixMilli(),
+	})
+	require.Equal(t, protocol.KindDispatchJobResponse, resp.Kind)
+	setReq := <-recordedRequests
+	assert.Equal(t, []string{c.hostID}, setReq.LeaseImmediate)
+
+	// The returned job ID and lease refer to the same provider row
+	var dispatchRes protocol.DispatchJobResponse
+	err := resp.DecodePayload(&dispatchRes)
+	require.NoError(t, err)
+	lease := <-recordedLeases
+	assert.Equal(t, lease.Key(), dispatchRes.JobID)
+	_, err = prov.GetLeasedAlarm(t.Context(), lease)
+	require.NoError(t, err)
+
+	// The in-memory queue dispatches the job before the hour-long poll interval elapses
+	select {
+	case jobReq := <-dispatched:
+		assert.Equal(t, "T", jobReq.ActorType)
+		assert.Equal(t, "a1", jobReq.ActorID)
+		assert.Equal(t, components.AlarmKindJob, components.AlarmKind(jobReq.Kind))
+		assert.Equal(t, "process", jobReq.JobMethod)
+	case <-time.After(3 * time.Second):
+		t.Fatal("expected the pre-leased job to execute without a polling cycle")
+	}
+	rt.alarmWg.Wait()
+}
+
+func TestImmediateLeaseEnqueueFailurePreservesProtocolSuccess(t *testing.T) {
+	setup := func(t *testing.T, address string) (*Runtime, *standalone.StandaloneMemory, *hostConn) {
+		t.Helper()
+
+		rt, prov := newTestRuntime(t)
+		c := connectTestHost(t, rt, prov, address, protocol.ActorHostType{ActorType: "T"})
+		rt.ensureAlarmProcessor()
+		err := rt.alarmProcessor.Close()
+		require.NoError(t, err)
+		return rt, prov, c
+	}
+
+	t.Run("alarm", func(t *testing.T) {
+		rt, prov, c := setup(t, "10.1.0.51:1")
+
+		// The provider can acquire a lease after the processor stops in the narrow shutdown race
+		alarmRef := ref.NewAlarmRef("T", "alarm-enqueue-error", "wake")
+		resp := dispatchReq(t, rt, c, protocol.KindSetAlarm, protocol.SetAlarmRequest{
+			ActorType:     alarmRef.ActorType,
+			ActorID:       alarmRef.ActorID,
+			Name:          alarmRef.Name,
+			DueTimeUnixMs: time.Now().Add(time.Second).UnixMilli(),
+		})
+		require.Equal(t, protocol.KindSetAlarmResponse, resp.Kind)
+		_, isError := resp.AsError()
+		assert.False(t, isError)
+		_, err := prov.GetAlarm(t.Context(), alarmRef)
+		require.NoError(t, err)
+	})
+
+	t.Run("job", func(t *testing.T) {
+		rt, prov, c := setup(t, "10.1.0.52:1")
+
+		// Job dispatch still returns the durable ID when the in-memory handoff fails
+		resp := dispatchReq(t, rt, c, protocol.KindDispatchJob, protocol.DispatchJobRequest{
+			ActorType:     "T",
+			ActorID:       "job-enqueue-error",
+			Name:          "job-key",
+			Method:        "process",
+			DueTimeUnixMs: time.Now().Add(time.Second).UnixMilli(),
+		})
+		require.Equal(t, protocol.KindDispatchJobResponse, resp.Kind)
+		var dispatchRes protocol.DispatchJobResponse
+		err := resp.DecodePayload(&dispatchRes)
+		require.NoError(t, err)
+		assert.NotEmpty(t, dispatchRes.JobID)
+		job, err := prov.GetJob(t.Context(), dispatchRes.JobID)
+		require.NoError(t, err)
+		assert.Equal(t, dispatchRes.JobID, job.JobID)
+	})
 }
 
 func TestExecuteAlarmDispatchesOffTheProcessorLoop(t *testing.T) {

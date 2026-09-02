@@ -595,12 +595,7 @@ func (rt *Runtime) handleSetAlarm(parentCtx context.Context, _ *hostConn, req *p
 		AlarmProperties: alarmProperties,
 		Kind:            components.AlarmKindAlarm,
 	}
-	rt.activeAlarmsLock.RLock()
-	processorReady := rt.alarmProcessor != nil && !rt.alarmsDraining
-	rt.activeAlarmsLock.RUnlock()
-	if processorReady {
-		setReq.LeaseImmediate = rt.hosts.ConnectedHostIDs()
-	}
+	setReq.LeaseImmediate = rt.immediateLeaseHosts()
 
 	// Store the alarm and acquire any immediate lease in the same provider operation
 	alarmRef := ref.NewAlarmRef(payload.ActorType, payload.ActorID, payload.Name)
@@ -612,12 +607,11 @@ func (rt *Runtime) handleSetAlarm(parentCtx context.Context, _ *hostConn, req *p
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to set alarm"))
 	}
 
-	// Hand an acquired durable lease to the in-memory scheduler before replying to the client
+	// Attempt the in-memory handoff while preserving durable success because an unqueued lease is fetched again after expiration
 	if lease != nil {
 		err = rt.enqueueAlarms(lease)
 		if err != nil {
-			rt.log.ErrorContext(ctx, "Failed to enqueue newly-created alarm", slog.Any("error", err))
-			return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to schedule alarm"))
+			rt.log.ErrorContext(ctx, "Failed to enqueue newly-created alarm; it will be fetched after the lease expires", slog.Any("error", err))
 		}
 	}
 
@@ -673,19 +667,28 @@ func (rt *Runtime) handleDispatchJob(parentCtx context.Context, _ *hostConn, req
 		Kind:      components.AlarmKindJob,
 		JobMethod: payload.Method,
 	}
+	setReq.LeaseImmediate = rt.immediateLeaseHosts()
 	// A zero TTL on the wire means no deadline
 	if payload.TTLUnixMs > 0 {
 		ttl := time.UnixMilli(payload.TTLUnixMs)
 		setReq.TTL = &ttl
 	}
 
-	// Persist the job and return its server-issued ID, which the provider keeps stable for an idempotency-key re-dispatch
+	// Persist the job and acquire any immediate lease while keeping the ID stable for an idempotency-key re-dispatch
 	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
 	defer cancel()
-	jobID, err := rt.provider.DispatchJob(ctx, ref.NewAlarmRef(payload.ActorType, payload.ActorID, payload.Name), setReq)
+	jobID, lease, err := rt.provider.DispatchJob(ctx, ref.NewAlarmRef(payload.ActorType, payload.ActorID, payload.Name), setReq)
 	if err != nil {
 		rt.log.ErrorContext(ctx, "Failed to dispatch job", slog.Any("error", err))
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to dispatch job"))
+	}
+
+	// Attempt the in-memory handoff while preserving the durable job ID because an unqueued lease is fetched again after expiration
+	if lease != nil {
+		err = rt.enqueueAlarms(lease)
+		if err != nil {
+			rt.log.ErrorContext(ctx, "Failed to enqueue newly-created job; it will be fetched after the lease expires", slog.Any("error", err))
+		}
 	}
 
 	return rt.reply(req, protocol.KindDispatchJobResponse, protocol.DispatchJobResponse{

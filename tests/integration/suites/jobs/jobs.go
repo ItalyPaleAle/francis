@@ -159,12 +159,12 @@ func (s *jobs) Run(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	// Dispatching twice with the same idempotency key yields a single execution
+	// Dispatching twice while the first idempotent job is live yields a single execution
 	t.Run("idempotency key dedups", func(t *testing.T) {
 		actorID := "idem-1-" + string(s.kind) + "-" + string(s.variant)
-		id1, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithIdempotencyKey("k"))
+		id1, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobDelay(2*time.Second), actor.WithIdempotencyKey("k"))
 		require.NoError(t, err)
-		id2, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithIdempotencyKey("k"))
+		id2, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobDelay(2*time.Second), actor.WithIdempotencyKey("k"))
 		require.NoError(t, err)
 		assert.Equal(t, id1, id2, "re-dispatching with the same key returns the same job")
 

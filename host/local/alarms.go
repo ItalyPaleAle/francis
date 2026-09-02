@@ -32,16 +32,7 @@ func (h *Host) runAlarmFetcher(ctx context.Context) error {
 	defer h.log.Debug("Stopped background alarm fetcher")
 
 	// Close the processor when the fetcher exits, then wait for all in-flight alarm goroutines to finish
-	// The processor is intentionally left non-nil after close so in-flight re-enqueues receive ErrProcessorStopped instead of panicking
-	defer func() {
-		apErr := h.alarmProcessor.Close()
-		if apErr != nil {
-			h.log.Error("Failed to close alarm processor", slog.Any("error", apErr))
-		}
-
-		// Drain goroutines spawned by both the processor callback and the immediate-fire path
-		h.alarmWg.Wait()
-	}()
+	defer h.closeAndDrainAlarmProcessor()
 
 	t := h.clock.NewTicker(h.alarmsPollInterval)
 	defer t.Stop()
@@ -56,7 +47,7 @@ func (h *Host) runAlarmFetcher(ctx context.Context) error {
 	}
 
 	var err error
-	hostList := []string{h.hostID}
+	hostList := []string{h.HostID()}
 	for {
 		select {
 		case <-initialCh:
@@ -78,6 +69,26 @@ func (h *Host) runAlarmFetcher(ctx context.Context) error {
 	}
 }
 
+// closeAndDrainAlarmProcessor prevents new executions before waiting for every execution that already crossed the drain barrier
+func (h *Host) closeAndDrainAlarmProcessor() {
+	// Establish the shutdown barrier under the same lock used by both WaitGroup Add sites
+	h.activeAlarmsLock.Lock()
+	h.alarmsDraining = true
+	processor := h.alarmProcessor
+	h.activeAlarmsLock.Unlock()
+
+	// Stop queued alarms while leaving the processor field intact so late re-enqueues fail without panicking
+	if processor != nil {
+		apErr := processor.Close()
+		if apErr != nil {
+			h.log.Error("Failed to close alarm processor", slog.Any("error", apErr))
+		}
+	}
+
+	// Every future Add is now excluded, so waiting concurrently with caller goroutines is safe
+	h.alarmWg.Wait()
+}
+
 func (h *Host) fetchAndEnqueueAlarms(ctx context.Context, hostList []string) error {
 	// Fetch all upcoming alarms
 	res, err := h.actorProvider.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
@@ -94,6 +105,12 @@ func (h *Host) fetchAndEnqueueAlarms(ctx context.Context, hostList []string) err
 func (h *Host) enqueueAlarms(leases []*ref.AlarmLease) (err error) {
 	// Get the lock
 	h.activeAlarmsLock.Lock()
+
+	// Do not start new executions after shutdown has established the drain barrier
+	if h.alarmsDraining {
+		h.activeAlarmsLock.Unlock()
+		return nil
+	}
 
 	var (
 		i  int
@@ -157,6 +174,10 @@ const (
 func (h *Host) executeAlarm(lease *ref.AlarmLease) {
 	// Mark the alarm as active before spawning the goroutine so concurrent processor firings cannot start duplicate executions
 	h.activeAlarmsLock.Lock()
+	if h.alarmsDraining {
+		h.activeAlarmsLock.Unlock()
+		return
+	}
 	_, active := h.activeAlarms[lease.Key()]
 	if active {
 		// Already active, so nothing to do
@@ -657,7 +678,7 @@ func (h *Host) runLeaseRenewal(parentCtx context.Context) (err error) {
 	t := h.clock.NewTicker(interval)
 	defer t.Stop()
 
-	hostList := []string{h.hostID}
+	hostList := []string{h.HostID()}
 	for {
 		select {
 		case <-t.C():
@@ -718,12 +739,35 @@ func (h *Host) SetAlarm(ctx context.Context, actorType string, actorID string, n
 		return err
 	}
 
-	_, err = h.actorProvider.SetAlarm(ctx, ref.NewAlarmRef(actorType, actorID, name), req)
+	// Offer this host for an immediate lease only when its in-memory scheduler can retain it
+	req.LeaseImmediate = h.immediateLeaseHosts()
+
+	// Store the alarm and acquire any immediate lease in the same provider operation
+	lease, err := h.actorProvider.SetAlarm(ctx, ref.NewAlarmRef(actorType, actorID, name), req)
 	if err != nil {
 		return fmt.Errorf("failed to set alarm: %w", err)
 	}
 
+	// Attempt the in-memory handoff while preserving durable success because an unqueued lease is fetched again after expiration
+	if lease != nil {
+		err = h.enqueueAlarms([]*ref.AlarmLease{lease})
+		if err != nil {
+			h.log.ErrorContext(ctx, "Failed to enqueue newly-created alarm; it will be fetched after the lease expires", slog.Any("error", err))
+		}
+	}
+
 	return nil
+}
+
+func (h *Host) immediateLeaseHosts() []string {
+	hostID := h.HostID()
+	h.activeAlarmsLock.Lock()
+	defer h.activeAlarmsLock.Unlock()
+
+	if h.alarmProcessor == nil || h.alarmsDraining || h.draining.Load() || hostID == "" {
+		return nil
+	}
+	return []string{hostID}
 }
 
 func (h *Host) DeleteAlarm(ctx context.Context, actorType string, actorID string, name string) error {

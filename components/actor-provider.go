@@ -71,9 +71,9 @@ type ActorProvider interface {
 	// If the alarm doesn't exist, returns ErrNoAlarm.
 	DeleteAlarm(ctx context.Context, ref ref.AlarmRef) error
 
-	// DispatchJob creates a job as an alarm row with Kind = job, returning the job ID (the alarm_id).
-	// When req carries an alarm name (an idempotency key), a job with the same (actor_type, actor_id, name) is kept and its existing job ID is returned, so re-dispatching with the same key is idempotent (first-write-wins).
-	DispatchJob(ctx context.Context, ref ref.AlarmRef, req SetAlarmReq) (jobID string, err error)
+	// DispatchJob creates a job as an alarm row with Kind = job, returning the job ID and any lease acquired while storing it
+	// When req carries an alarm name (an idempotency key), a job with the same (actor_type, actor_id, name) is kept and its existing job ID is returned, so re-dispatching with the same key is idempotent (first-write-wins)
+	DispatchJob(ctx context.Context, ref ref.AlarmRef, req SetAlarmReq) (jobID string, lease *ref.AlarmLease, err error)
 
 	// DeadLetterAlarm atomically moves a leased job from the alarms table to the dead_jobs store.
 	// When req.Reschedule is set, the recurrence is re-created for its next occurrence in the same transaction, so a repeating job survives the dead-lettering of one occurrence.

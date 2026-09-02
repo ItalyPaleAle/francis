@@ -117,7 +117,8 @@ func (h *Host) confirmLocal(parentCtx context.Context, aRef ref.ActorRef) error 
 // isLocal reports whether the placement points at the current host
 func (h *Host) isLocal(ap *actorcore.Placement) bool {
 	// If the host ID is different from the current, the invocation is for a remote actor
-	return h.hostID != "" && ap.HostID == h.hostID
+	hostID := h.HostID()
+	return hostID != "" && ap.HostID == hostID
 }
 
 // invalidatePlacement drops any cached placement for an actor so the next lookup re-resolves it

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 	"uuid"
 
@@ -43,9 +44,21 @@ func (h *Host) Dispatch(ctx context.Context, actorType string, actorID string, m
 		return "", err
 	}
 
-	jobID, err := h.actorProvider.DispatchJob(ctx, ref.NewAlarmRef(actorType, actorID, name), req)
+	// Offer this host for an immediate lease only when its in-memory scheduler can retain it
+	req.LeaseImmediate = h.immediateLeaseHosts()
+
+	// Store the job and acquire any immediate lease in the same provider operation
+	jobID, lease, err := h.actorProvider.DispatchJob(ctx, ref.NewAlarmRef(actorType, actorID, name), req)
 	if err != nil {
 		return "", fmt.Errorf("failed to dispatch job: %w", err)
+	}
+
+	// Attempt the in-memory handoff while preserving the durable job ID because an unqueued lease is fetched again after expiration
+	if lease != nil {
+		err = h.enqueueAlarms([]*ref.AlarmLease{lease})
+		if err != nil {
+			h.log.ErrorContext(ctx, "Failed to enqueue newly-created job; it will be fetched after the lease expires", slog.Any("error", err))
+		}
 	}
 
 	return jobID, nil

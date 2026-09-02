@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/italypaleale/go-kit/eventqueue"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -42,7 +43,7 @@ func TestHostDispatch(t *testing.T) {
 					return req.Kind == components.AlarmKindJob && req.JobMethod == "send" && req.DueTime.Equal(clock.Now())
 				}),
 			).
-			Return("job-id-1", nil).
+			Return("job-id-1", nil, nil).
 			Once()
 
 		jobID, err := host.Dispatch(t.Context(), "T", "a1", "send", nil, actor.JobProperties{IdempotencyKey: "key-1"})
@@ -64,12 +65,81 @@ func TestHostDispatch(t *testing.T) {
 					return req.Kind == components.AlarmKindJob && req.JobMethod == "send"
 				}),
 			).
-			Return("job-id-2", nil).
+			Return("job-id-2", nil, nil).
 			Once()
 
 		jobID, err := host.Dispatch(t.Context(), "T", "a1", "send", nil, actor.JobProperties{})
 		require.NoError(t, err)
 		assert.Equal(t, "job-id-2", jobID)
+		provider.AssertExpectations(t)
+	})
+
+	t.Run("immediate lease is requested and scheduled locally", func(t *testing.T) {
+		host, provider := newJobsTestHost(t, clock)
+		host.hostID = "test-host-123"
+		host.alarmProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ref.AlarmLease]{
+			ExecuteFn: func(*ref.AlarmLease) {},
+			Clock:     clock,
+		})
+		defer func() {
+			err := host.alarmProcessor.Close()
+			require.NoError(t, err)
+		}()
+
+		alarmRef := ref.NewAlarmRef("T", "a1", "key-immediate")
+		dueTime := clock.Now().Add(time.Hour)
+		lease := ref.NewAlarmLease(alarmRef, "job-id-immediate", dueTime, "lease-id")
+		provider.
+			On("DispatchJob",
+				mock.MatchedBy(testutil.MatchContextInterface),
+				alarmRef,
+				mock.MatchedBy(func(req components.SetAlarmReq) bool {
+					return req.Kind == components.AlarmKindJob && req.JobMethod == "send" && req.DueTime.Equal(dueTime) && len(req.LeaseImmediate) == 1 && req.LeaseImmediate[0] == host.hostID
+				}),
+			).
+			Return("job-id-immediate", lease, nil).
+			Once()
+
+		jobID, err := host.Dispatch(t.Context(), "T", "a1", "send", nil, actor.JobProperties{
+			Delay:          time.Hour,
+			IdempotencyKey: "key-immediate",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "job-id-immediate", jobID)
+		assert.Equal(t, 1, host.alarmProcessor.Count())
+		provider.AssertExpectations(t)
+	})
+
+	t.Run("enqueue failure preserves the durable job result", func(t *testing.T) {
+		host, provider := newJobsTestHost(t, clock)
+		host.hostID = "test-host-closed"
+		host.alarmProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ref.AlarmLease]{
+			ExecuteFn: func(*ref.AlarmLease) {},
+			Clock:     clock,
+		})
+		err := host.alarmProcessor.Close()
+		require.NoError(t, err)
+
+		jobRef := ref.NewAlarmRef("T", "a1", "key-closed")
+		dueTime := clock.Now().Add(time.Hour)
+		lease := ref.NewAlarmLease(jobRef, "job-id-closed", dueTime, "lease-id")
+		provider.
+			On("DispatchJob",
+				mock.MatchedBy(testutil.MatchContextInterface),
+				jobRef,
+				mock.MatchedBy(func(req components.SetAlarmReq) bool {
+					return req.DueTime.Equal(dueTime) && len(req.LeaseImmediate) == 1 && req.LeaseImmediate[0] == host.hostID
+				}),
+			).
+			Return("job-id-closed", lease, nil).
+			Once()
+
+		jobID, err := host.Dispatch(t.Context(), "T", "a1", "send", nil, actor.JobProperties{
+			DueTime:        dueTime,
+			IdempotencyKey: jobRef.Name,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "job-id-closed", jobID)
 		provider.AssertExpectations(t)
 	})
 

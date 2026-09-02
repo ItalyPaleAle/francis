@@ -342,6 +342,66 @@ func TestSetAlarm(t *testing.T) {
 		provider.AssertExpectations(t)
 	})
 
+	t.Run("immediate lease is requested and scheduled locally", func(t *testing.T) {
+		host, provider := newHost()
+		host.hostID = "test-host-123"
+		host.alarmProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ref.AlarmLease]{
+			ExecuteFn: func(*ref.AlarmLease) {},
+			Clock:     clock,
+		})
+		defer func() {
+			err := host.alarmProcessor.Close()
+			require.NoError(t, err)
+		}()
+
+		alarmRef := ref.NewAlarmRef("testactor", "actor1", "alarm-immediate")
+		dueTime := clock.Now().Add(time.Hour)
+		properties := actor.AlarmProperties{
+			DueTime: dueTime,
+		}
+		expectedReq := components.SetAlarmReq{
+			DueTime:        dueTime,
+			LeaseImmediate: []string{host.hostID},
+		}
+		lease := ref.NewAlarmLease(alarmRef, "alarm-id", dueTime, "lease-id")
+
+		provider.
+			On("SetAlarm", mock.MatchedBy(testutil.MatchContextInterface), alarmRef, expectedReq).
+			Return(lease, nil).
+			Once()
+
+		err := host.SetAlarm(t.Context(), "testactor", "actor1", "alarm-immediate", properties)
+		require.NoError(t, err)
+		assert.Equal(t, 1, host.alarmProcessor.Count())
+		provider.AssertExpectations(t)
+	})
+
+	t.Run("enqueue failure preserves the durable alarm result", func(t *testing.T) {
+		host, provider := newHost()
+		host.hostID = "test-host-closed"
+		host.alarmProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ref.AlarmLease]{
+			ExecuteFn: func(*ref.AlarmLease) {},
+			Clock:     clock,
+		})
+		err := host.alarmProcessor.Close()
+		require.NoError(t, err)
+
+		alarmRef := ref.NewAlarmRef("testactor", "actor1", "alarm-closed")
+		dueTime := clock.Now().Add(time.Hour)
+		lease := ref.NewAlarmLease(alarmRef, "alarm-id", dueTime, "lease-id")
+		provider.
+			On("SetAlarm", mock.MatchedBy(testutil.MatchContextInterface), alarmRef, components.SetAlarmReq{
+				DueTime:        dueTime,
+				LeaseImmediate: []string{host.hostID},
+			}).
+			Return(lease, nil).
+			Once()
+
+		err = host.SetAlarm(t.Context(), alarmRef.ActorType, alarmRef.ActorID, alarmRef.Name, actor.AlarmProperties{DueTime: dueTime})
+		require.NoError(t, err)
+		provider.AssertExpectations(t)
+	})
+
 	t.Run("set alarm with empty data", func(t *testing.T) {
 		host, provider := newHost()
 
@@ -408,6 +468,63 @@ func TestSetAlarm(t *testing.T) {
 		// Assert expectations
 		provider.AssertExpectations(t)
 	})
+}
+
+func TestImmediateLeaseHosts(t *testing.T) {
+	clock := clocktesting.NewFakeClock(time.Now())
+	host := &Host{hostID: "test-host"}
+
+	// A host without a scheduler cannot retain a lease
+	assert.Nil(t, host.immediateLeaseHosts())
+
+	// A ready scheduler makes this host eligible
+	host.alarmProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ref.AlarmLease]{
+		ExecuteFn: func(*ref.AlarmLease) {},
+		Clock:     clock,
+	})
+	defer func() {
+		err := host.alarmProcessor.Close()
+		if !errors.Is(err, eventqueue.ErrProcessorStopped) {
+			require.NoError(t, err)
+		}
+	}()
+	assert.Equal(t, []string{"test-host"}, host.immediateLeaseHosts())
+
+	// Registration must finish before the host can offer itself
+	host.hostID = ""
+	assert.Nil(t, host.immediateLeaseHosts())
+	host.hostID = "test-host"
+
+	// Draining suppresses new leases even while the processor still exists
+	host.draining.Store(true)
+	assert.Nil(t, host.immediateLeaseHosts())
+}
+
+func TestCloseAndDrainAlarmProcessorStopsNewExecutions(t *testing.T) {
+	clock := clocktesting.NewFakeClock(time.Now())
+	host := &Host{
+		log:            slog.New(slog.DiscardHandler),
+		clock:          clock,
+		activeAlarms:   map[string]struct{}{},
+		retryingAlarms: map[string]struct{}{},
+	}
+	host.alarmProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ref.AlarmLease]{
+		ExecuteFn: host.executeAlarm,
+		Clock:     clock,
+	})
+
+	// Shutdown closes admission under the same lock used by both alarm execution entry points
+	host.closeAndDrainAlarmProcessor()
+
+	lease := ref.NewAlarmLease(ref.NewAlarmRef("T", "a1", "wake"), "alarm-id", clock.Now(), "lease-id")
+	err := host.enqueueAlarms([]*ref.AlarmLease{lease})
+	require.NoError(t, err)
+	host.executeAlarm(lease)
+
+	// Neither the caller fast path nor a late processor callback may register work after the drain starts waiting
+	host.activeAlarmsLock.Lock()
+	assert.Empty(t, host.activeAlarms)
+	host.activeAlarmsLock.Unlock()
 }
 
 func TestDeleteAlarm(t *testing.T) {
