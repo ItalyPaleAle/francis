@@ -1934,12 +1934,7 @@ func TestPersistHook_Rollback_SetAndLeaseAlarm(t *testing.T) {
 	alarmRef := ref.AlarmRef{ActorType: "myactor", ActorID: "actor1", Name: "reminder"}
 	lease, err := p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{
 		DueTime:        p.Clock.Now().Add(time.Second),
-		Interval:       "",
-		Cron:           "",
-		TTL:            nil,
-		Data:           nil,
 		Kind:           components.AlarmKindAlarm,
-		JobMethod:      "",
 		LeaseImmediate: []string{hostRes.HostID},
 	})
 	require.Error(t, err)

@@ -594,8 +594,6 @@ func (rt *Runtime) handleSetAlarm(parentCtx context.Context, _ *hostConn, req *p
 	setReq := components.SetAlarmReq{
 		AlarmProperties: alarmProperties,
 		Kind:            components.AlarmKindAlarm,
-		JobMethod:       "",
-		LeaseImmediate:  nil,
 	}
 	rt.activeAlarmsLock.RLock()
 	processorReady := rt.alarmProcessor != nil && !rt.alarmsDraining

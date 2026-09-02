@@ -1,6 +1,7 @@
 package ref
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"time"
@@ -77,4 +78,18 @@ func (a AlarmProperties) nextCronExecution(executionTime time.Time) (time.Time, 
 	}
 
 	return t, nil
+}
+
+// String implements fmt.Stringer and it's used for debugging.
+func (r AlarmProperties) String() string {
+	const RFC3339MilliNoTZ = "2006-01-02T15:04:05.999"
+
+	ttl := "(nil)"
+	if r.TTL != nil {
+		ttl = r.TTL.Format(RFC3339MilliNoTZ)
+	}
+	return fmt.Sprintf(
+		"AlarmProperties:[DueTime=%q Interval=%q Cron=%q TTL=%q Data=%q]",
+		r.DueTime.Format(RFC3339MilliNoTZ), r.Interval, r.Cron, ttl, base64.StdEncoding.EncodeToString(r.Data),
+	)
 }
