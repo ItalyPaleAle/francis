@@ -2196,10 +2196,8 @@ func (s Suite) TestConcurrentDispatchJobs(t *testing.T) {
 		}
 		results := make(chan dispatchResult, workers)
 		var wg sync.WaitGroup
-		wg.Add(workers)
-		for i := 0; i < workers; i++ {
-			go func() {
-				defer wg.Done()
+		for range workers {
+			wg.Go(func() {
 				<-start
 				jobID, lease, dispatchErr := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
 					DueTime:   s.p.Now().Add(time.Hour),
@@ -2207,7 +2205,7 @@ func (s Suite) TestConcurrentDispatchJobs(t *testing.T) {
 					JobMethod: "process",
 				})
 				results <- dispatchResult{jobID: jobID, lease: lease, err: dispatchErr}
-			}()
+			})
 		}
 		close(start)
 		wg.Wait()
