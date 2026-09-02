@@ -321,9 +321,6 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
 
-    permissions:
-      contents: write
-
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
