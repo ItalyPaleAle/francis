@@ -8,14 +8,15 @@ tool (
 )
 
 require (
-	github.com/MicahParks/keyfunc/v3 v3.8.2
 	github.com/alphadose/haxmap v1.4.1
 	github.com/cenkalti/backoff/v5 v5.0.3
-	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/italypaleale/go-kit v1.1.1
 	github.com/italypaleale/go-sql-utils v0.3.8
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
 	github.com/jackc/pgx/v5 v5.11.0
+	github.com/jwx-go/jwkfetch/v4 v4.0.4
+	github.com/lestrrat-go/httprc/v3 v3.0.6
+	github.com/lestrrat-go/jwx/v4 v4.4.0
 	github.com/lmittmann/tint v1.2.0
 	github.com/mattn/go-isatty v0.0.24
 	github.com/quic-go/quic-go v0.62.0
@@ -36,7 +37,6 @@ require (
 )
 
 require (
-	github.com/MicahParks/jwkset v0.11.3 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/brunoga/deep v1.3.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -64,6 +64,11 @@ require (
 	github.com/knadh/koanf/providers/posflag v1.0.1 // indirect
 	github.com/knadh/koanf/providers/structs v1.0.0 // indirect
 	github.com/knadh/koanf/v2 v2.3.2 // indirect
+	github.com/lestrrat-go/blackmagic v1.0.4 // indirect
+	github.com/lestrrat-go/dsig v1.4.0 // indirect
+	github.com/lestrrat-go/httpcc v1.0.1 // indirect
+	github.com/lestrrat-go/option/v2 v2.0.0 // indirect
+	github.com/lestrrat-go/option/v3 v3.0.0-alpha1 // indirect
 	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-runewidth v0.0.19 // indirect
 	github.com/mitchellh/copystructure v1.2.0 // indirect
@@ -82,6 +87,7 @@ require (
 	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/stretchr/objx v0.5.3 // indirect
+	github.com/valyala/fastjson v1.6.10 // indirect
 	github.com/vektra/mockery/v3 v3.7.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	github.com/xeipuuv/gojsonpointer v0.0.0-20190905194746-02993c407bfb // indirect
