@@ -5,5 +5,15 @@
     "golang.org/x/*"
   ],
   "allow": [
+    {
+      "module": "github.com/jackc/pgx/v5",
+      "version": "v5.11.0",
+      "reason": ""
+    },
+    {
+      "module": "github.com/MicahParks/keyfunc/v3",
+      "version": "v3.8.2",
+      "reason": ""
+    }
   ]
 }
