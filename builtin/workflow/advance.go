@@ -45,7 +45,8 @@ type event struct {
 // The returned value reports whether the event changed nothing, so the turn can count how often ordering invariant 2 is doing its job
 func apply(st *instanceState, def *definition, ev *event, now time.Time) (duplicate bool) {
 	// A terminated instance ignores everything, so a late report or a repeated cancel cannot revive it
-	if st.Status.IsTerminal() {
+	// The one exception is unwind, the verb only a parent may send, which exists precisely to move a completed child back into compensating
+	if st.Status.IsTerminal() && ev.kind != evUnwind {
 		return true
 	}
 
@@ -285,8 +286,16 @@ func applyUnwind(st *instanceState, def *definition, ev *event, now time.Time) b
 	if reason == "" {
 		reason = "unwound by parent"
 	}
-	st.Suspended = nil
+
+	// A completed instance is reopened: its terminal outcome is cleared so the unwind can run and report a compensation of its own
+	st.CompletedAt = time.Time{}
+	st.Compensation = ""
 	st.Reported = false
+	st.Suspended = nil
+
+	// The unwind gets the instance timeout as its own budget, since the forward run's is long since spent
+	st.StartedAt = now
+
 	recordUnwoundBy(st, ev)
 	beginUnwind(st, def, reason, StatusCancelled, now)
 	return false

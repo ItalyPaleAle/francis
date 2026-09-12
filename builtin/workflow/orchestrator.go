@@ -215,7 +215,8 @@ func (o *orchestrator) turn(ctx context.Context, ev *event) (err error) {
 	if err != nil {
 		return fmt.Errorf("failed to read the workflow journal: %w", err)
 	}
-	if st.Status.IsTerminal() {
+	// A terminated instance ignores everything but the unwind a parent sends, which is what moves a completed child back into compensating
+	if st.Status.IsTerminal() && ev.kind != evUnwind {
 		return nil
 	}
 
