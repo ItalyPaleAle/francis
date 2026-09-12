@@ -10,7 +10,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
+	"github.com/lestrrat-go/jwx/v4/jwa"
+	"github.com/lestrrat-go/jwx/v4/jwt"
 
 	"github.com/italypaleale/francis/internal/bootstrapauth"
 )
@@ -56,17 +57,20 @@ func (j *JWTBootstrap) RuntimeConfig() bootstrapauth.JWTConfig {
 // The subject becomes the host's platform identity that the runtime reads from the validated token
 func (j *JWTBootstrap) Token(subject string, ttl time.Duration) (string, error) {
 	now := time.Now()
-	tok := jwt.NewWithClaims(jwt.SigningMethodEdDSA, jwt.RegisteredClaims{
-		Issuer:    j.Issuer,
-		Subject:   subject,
-		Audience:  jwt.ClaimStrings{j.Audience},
-		IssuedAt:  jwt.NewNumericDate(now),
-		ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
-	})
+	tok, err := jwt.NewBuilder().
+		Issuer(j.Issuer).
+		Subject(subject).
+		Audience([]string{j.Audience}).
+		IssuedAt(now).
+		Expiration(now.Add(ttl)).
+		Build()
+	if err != nil {
+		return "", fmt.Errorf("failed to build token: %w", err)
+	}
 
-	signed, err := tok.SignedString(j.priv)
+	signed, err := jwt.Sign(tok, jwt.WithKey(jwa.EdDSA(), j.priv))
 	if err != nil {
 		return "", fmt.Errorf("failed to sign token: %w", err)
 	}
-	return signed, nil
+	return string(signed), nil
 }
