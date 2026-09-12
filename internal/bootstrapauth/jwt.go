@@ -5,19 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/jwx-go/jwkfetch/v4"
 	"github.com/lestrrat-go/httprc/v3"
+	"github.com/lestrrat-go/jwx/v4/jwa"
 	"github.com/lestrrat-go/jwx/v4/jwk"
 	"github.com/lestrrat-go/jwx/v4/jws"
 	"github.com/lestrrat-go/jwx/v4/jwt"
 )
-
-// jwtValidMethods is the allowlist of signing algorithms, chosen to exclude "none" and symmetric algorithms that would be unsafe with public keys
-// Both "EdDSA" and "Ed25519" are accepted because RFC 9864 made them distinct identifiers for the same Ed25519 signatures and issuers are split between the two
-var jwtValidMethods = []string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512", "EdDSA", "Ed25519"}
 
 // maxJWTLifetime caps how far in the future the exp claim may be set to bound the window a captured token remains usable
 const maxJWTLifetime = time.Hour
@@ -134,7 +130,7 @@ func (v *JWTValidator) Validate(token string) (subject, joinToken string, expire
 	return subject, jti, exp, nil
 }
 
-// checkSigningAlgorithm rejects tokens whose "alg" header is outside jwtValidMethods
+// checkSigningAlgorithm rejects tokens signed with an algorithm we do not accept
 // It is a separate step because jwx takes the verification algorithm from the key in the JWK set rather than from the token, so this is the only place the token's own choice is constrained
 func checkSigningAlgorithm(raw []byte) error {
 	msg, err := jws.Parse(raw)
@@ -157,11 +153,18 @@ func checkSigningAlgorithm(raw []byte) error {
 	if !ok {
 		return errors.New("token validation failed: token does not declare a signing algorithm")
 	}
-	if !slices.Contains(jwtValidMethods, alg.String()) {
+
+	// The accepted algorithms are the asymmetric ones, which leaves out "none" and the symmetric algorithms that would be unsafe against a set of public keys
+	// Both EdDSA and Ed25519 are accepted because RFC 9864 made them distinct identifiers for the same Ed25519 signatures and issuers are split between the two
+	switch alg {
+	case jwa.RS256(), jwa.RS384(), jwa.RS512(),
+		jwa.PS256(), jwa.PS384(), jwa.PS512(),
+		jwa.ES256(), jwa.ES384(), jwa.ES512(),
+		jwa.EdDSA(), jwa.EdDSAEd25519():
+		return nil
+	default:
 		return fmt.Errorf("token validation failed: signing algorithm %q is not allowed", alg)
 	}
-
-	return nil
 }
 
 // newCachedJWKS returns a key set backed by a remote JWKS endpoint that is refreshed in the background
