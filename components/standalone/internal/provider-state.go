@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"maps"
 	"slices"
 
 	"github.com/italypaleale/francis/components"
@@ -35,8 +36,12 @@ func (p *Provider) SetState(ctx context.Context, r ref.ActorRef, data []byte, op
 	p.stateWriteMu.Lock()
 	defer p.stateWriteMu.Unlock()
 
+	// The labels passed in replace whatever the actor had, so a nil or empty map simply leaves none behind
 	entry := &StateEntry{
 		Data: data,
+	}
+	if len(opts.Labels) > 0 {
+		entry.Labels = maps.Clone(opts.Labels)
 	}
 	if opts.TTL > 0 {
 		entry.Expiration = new(p.Clock.Now().Add(opts.TTL))
@@ -68,6 +73,11 @@ func (p *Provider) ListStates(ctx context.Context, req components.ListStatesReq)
 		}
 
 		if key.ActorID <= req.After {
+			continue
+		}
+
+		// A label filter narrows the listing to the actors carrying every requested pair, matching what the SQL providers do with an indexed equality
+		if !state.MatchesLabels(req.Labels) {
 			continue
 		}
 

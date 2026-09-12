@@ -136,6 +136,20 @@ func (h *Host) RetryJob(ctx context.Context, jobID string) (string, error) {
 	return res.JobID, nil
 }
 
+// DeleteJob removes a dead-lettered job's record without re-dispatching it.
+func (h *Host) DeleteJob(ctx context.Context, jobID string) error {
+	reqCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
+	defer cancel()
+	err := h.runtimeClient.DeleteJob(reqCtx, protocol.DeleteJobRequest{JobID: jobID})
+	if isProtocolErrorCode(err, protocol.ErrCodeJobNotFound) {
+		return actor.ErrJobNotFound
+	} else if err != nil {
+		return fmt.Errorf("failed to delete job: %w", err)
+	}
+
+	return nil
+}
+
 // jobFailed runs an actor's optional JobFailed hook at the runtime's request, after the runtime has dead-lettered a job
 // It is best-effort: an actor that does not implement the hook is a no-op, and the dead-letter record is already the source of truth
 func (h *Host) jobFailed(ctx context.Context, req protocol.JobFailedRequest) *protocol.Error {

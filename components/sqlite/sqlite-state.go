@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
@@ -44,16 +45,52 @@ func (s *SQLiteProvider) SetState(ctx context.Context, ref ref.ActorRef, data []
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	// Performs a upsert
+	// The state and its labels are written in one transaction, so a listing filtered on a label can never see one without the other
+	tx, err := s.db.BeginTx(queryCtx, nil)
+	if err != nil {
+		return fmt.Errorf("error starting transaction: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// An upsert rather than a REPLACE, because REPLACE deletes the row first and the labels would cascade away with it
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	_, err := s.db.ExecContext(queryCtx,
-		`REPLACE INTO `+s.tablePrefix+`actor_state
+	_, err = tx.ExecContext(queryCtx,
+		`INSERT INTO `+s.tablePrefix+`actor_state
 			(actor_type, actor_id, actor_state_data, actor_state_expiration_time)
-		VALUES (?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT (actor_type, actor_id) DO UPDATE SET
+			actor_state_data = excluded.actor_state_data,
+			actor_state_expiration_time = excluded.actor_state_expiration_time`,
 		ref.ActorType, ref.ActorID, data, exp,
 	)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)
+	}
+
+	// The labels passed in replace whatever the actor had, so the previous set goes first and an empty map simply leaves none behind
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	_, err = tx.ExecContext(queryCtx,
+		`DELETE FROM `+s.tablePrefix+`actor_state_labels WHERE actor_type = ? AND actor_id = ?`,
+		ref.ActorType, ref.ActorID,
+	)
+	if err != nil {
+		return fmt.Errorf("error executing query: %w", err)
+	}
+
+	for k, v := range opts.Labels {
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		_, err = tx.ExecContext(queryCtx,
+			`INSERT INTO `+s.tablePrefix+`actor_state_labels (actor_type, actor_id, label_key, label_value) VALUES (?, ?, ?, ?)`,
+			ref.ActorType, ref.ActorID, k, v,
+		)
+		if err != nil {
+			return fmt.Errorf("error executing query: %w", err)
+		}
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		return fmt.Errorf("error committing transaction: %w", err)
 	}
 
 	return nil
@@ -73,6 +110,25 @@ func (s *SQLiteProvider) ListStates(ctx context.Context, req components.ListStat
 	// This avoids a second query just to compute HasMore
 	limit := req.EffectiveLimit()
 
+	args := []any{req.ActorType, req.After, s.clock.Now().UnixMilli()}
+
+	// Each requested label becomes an EXISTS clause served by the labels lookup index, which keeps a filtered listing a range scan rather than a walk of every stored state
+	var labelClauses strings.Builder
+	for k, v := range req.Labels {
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		labelClauses.WriteString(`
+			AND EXISTS (
+				SELECT 1 FROM ` + s.tablePrefix + `actor_state_labels l
+				WHERE
+					l.actor_type = ` + s.tablePrefix + `actor_state.actor_type
+					AND l.actor_id = ` + s.tablePrefix + `actor_state.actor_id
+					AND l.label_key = ?
+					AND l.label_value = ?
+			)`)
+		args = append(args, k, v)
+	}
+	args = append(args, limit+1)
+
 	// The (actor_type, actor_id) primary key serves both the range scan and the ordering
 	// An empty cursor selects the first page, since every actor ID sorts after the empty string
 	// #nosec G202 -- the only concatenated values are the static table prefix and a fixed column name, not user input
@@ -82,10 +138,11 @@ func (s *SQLiteProvider) ListStates(ctx context.Context, req components.ListStat
 		WHERE
 			actor_type = ?
 			AND actor_id > ?
-			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > ?)
+			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > ?)`+
+			labelClauses.String()+`
 		ORDER BY actor_id
 		LIMIT ?`,
-		req.ActorType, req.After, s.clock.Now().UnixMilli(), limit+1,
+		args...,
 	)
 	if err != nil {
 		return components.ListStatesRes{}, fmt.Errorf("error executing query: %w", err)
@@ -131,6 +188,7 @@ func (s *SQLiteProvider) DeleteState(ctx context.Context, ref ref.ActorRef) erro
 
 	// We exclude expired state from the deletion because we want to be able to get an appropriate count of affected rows, and return ErrNoState if nothing was deleted
 	// Expired state entries are garbage collected periodically anyways
+	// The labels are removed by the foreign key's cascade, so they never outlive the state they describe
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := s.db.ExecContext(queryCtx,
 		`DELETE FROM `+s.tablePrefix+`actor_state

@@ -284,6 +284,11 @@ type RetryJobResponse struct {
 	JobID string `msgpack:"jobId"`
 }
 
+// DeleteJobRequest removes a dead-lettered job's record
+type DeleteJobRequest struct {
+	JobID string `msgpack:"jobId"`
+}
+
 // GetStateRequest retrieves the persistent state of an actor
 type GetStateRequest struct {
 	ActorRef
@@ -303,6 +308,8 @@ type SetStateRequest struct {
 	// TTLMs is an optional time-to-live for the state, in milliseconds
 	// Zero means no TTL
 	TTLMs int64 `msgpack:"ttl,omitempty"`
+	// Labels is an optional set of short string pairs stored alongside the state, which a listing can filter on by equality
+	Labels map[string]string `msgpack:"labels,omitempty"`
 }
 
 // DeleteStateRequest deletes the persistent state of an actor
@@ -315,6 +322,8 @@ type ListStatesRequest struct {
 	ActorType string `msgpack:"type"`
 	// IncludeData requests the stored state data alongside each actor ID
 	IncludeData bool `msgpack:"includeData,omitempty"`
+	// Labels restricts the listing to actors whose state carries every one of these labels with the given value
+	Labels map[string]string `msgpack:"labels,omitempty"`
 	// After is the pagination cursor, and only actor IDs sorting strictly after it are returned
 	After string `msgpack:"after,omitempty"`
 	// Limit is the maximum number of states to return, where zero means the provider's default

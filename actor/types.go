@@ -32,6 +32,7 @@ type Host interface {
 	ListJobs(ctx context.Context, actorType string, actorID string) ([]JobInfo, error)
 	CancelJob(ctx context.Context, actorType string, actorID string, jobID string) error
 	RetryJob(ctx context.Context, jobID string) (newJobID string, err error)
+	DeleteJob(ctx context.Context, jobID string) error
 
 	SetState(ctx context.Context, actorType string, actorID string, state any, opts *SetStateOpts) error
 	GetState(ctx context.Context, actorType string, actorID string, dest any) error
@@ -43,12 +44,19 @@ type Host interface {
 type SetStateOpts struct {
 	// Optional TTL for the state
 	TTL time.Duration
+	// Labels is an optional set of short string pairs indexed alongside the state, which ListStates can then filter on by equality
+	// They are written in the same operation as the state and expire with it, so an index built from them can never disagree with the state it describes
+	// Passing a nil or empty map removes every label the actor had
+	Labels map[string]string
 }
 
 // ListStatesOpts is the options for the ListStates method
 type ListStatesOpts struct {
 	// When true, the stored state is returned alongside each actor ID
 	IncludeData bool
+	// Labels restricts the listing to actors whose state carries every one of these labels with the given value
+	// Matching is by equality on an indexed column, so a filtered listing is a range scan rather than a walk of every stored state
+	Labels map[string]string
 	// Pagination cursor: only actor IDs sorting strictly after this value are returned
 	After string
 	// Maximum number of states to return

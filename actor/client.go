@@ -45,6 +45,8 @@ type Client[T any] interface {
 	CancelJob(ctx context.Context, jobID string) error
 	// RetryJob re-dispatches a dead-lettered job and returns the new job ID.
 	RetryJob(ctx context.Context, jobID string) (newJobID string, err error)
+	// DeleteJob removes a dead-lettered job's record without re-dispatching it.
+	DeleteJob(ctx context.Context, jobID string) error
 	// Halt the current actor upon returning.
 	Halt()
 }
@@ -302,6 +304,11 @@ func (c *client[T]) CancelJob(ctx context.Context, jobID string) error {
 // RetryJob re-dispatches a dead-lettered job and returns the new job ID.
 func (c *client[T]) RetryJob(ctx context.Context, jobID string) (newJobID string, err error) {
 	return c.service.RetryJob(ctx, jobID)
+}
+
+// DeleteJob removes a dead-lettered job's record without re-dispatching it.
+func (c *client[T]) DeleteJob(ctx context.Context, jobID string) error {
+	return c.service.DeleteJob(ctx, jobID)
 }
 
 // Halt the current actor upon returning.

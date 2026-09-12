@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"maps"
 	"slices"
 	"time"
 )
@@ -211,6 +212,20 @@ type AlarmProperties struct {
 type StateEntry struct {
 	Data       []byte
 	Expiration *time.Time
+	// Labels are the short string pairs stored alongside the state, which ListStates filters on by equality
+	Labels map[string]string
+}
+
+// MatchesLabels returns true when the entry carries every one of the requested labels with the given value
+// An empty request matches every entry, which is what makes an unfiltered listing the same code path as a filtered one
+func (s *StateEntry) MatchesLabels(want map[string]string) bool {
+	for k, v := range want {
+		got, ok := s.Labels[k]
+		if !ok || got != v {
+			return false
+		}
+	}
+	return true
 }
 
 // IsExpired returns true if the state has an expiration and it's in the past
@@ -227,6 +242,9 @@ func (s *StateEntry) Clone() *StateEntry {
 	}
 	if s.Expiration != nil {
 		clone.Expiration = s.Expiration
+	}
+	if s.Labels != nil {
+		clone.Labels = maps.Clone(s.Labels)
 	}
 	return clone
 }

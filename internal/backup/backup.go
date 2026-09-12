@@ -54,10 +54,11 @@ type Header struct {
 // StateRecord is a single actor-state entry
 // Expiration is nil when the state does not expire
 type StateRecord struct {
-	ActorType  string     `msgpack:"actorType"`
-	ActorID    string     `msgpack:"actorId"`
-	Data       []byte     `msgpack:"data,omitempty"`
-	Expiration *time.Time `msgpack:"expiration,omitempty"`
+	ActorType  string            `msgpack:"actorType"`
+	ActorID    string            `msgpack:"actorId"`
+	Data       []byte            `msgpack:"data,omitempty"`
+	Expiration *time.Time        `msgpack:"expiration,omitempty"`
+	Labels     map[string]string `msgpack:"labels,omitempty"`
 }
 
 // AlarmRecord is a single alarm (Kind "alarm") or live job (Kind "job")

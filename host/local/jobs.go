@@ -125,6 +125,18 @@ func (h *Host) RetryJob(ctx context.Context, jobID string) (string, error) {
 	return newID, nil
 }
 
+// DeleteJob removes a dead-lettered job's record without re-dispatching it.
+func (h *Host) DeleteJob(ctx context.Context, jobID string) error {
+	err := h.actorProvider.DeleteDeadJob(ctx, jobID)
+	if errors.Is(err, components.ErrNoJob) {
+		return actor.ErrJobNotFound
+	} else if err != nil {
+		return fmt.Errorf("failed to delete job: %w", err)
+	}
+
+	return nil
+}
+
 // jobPropertiesToSetAlarmReq builds a provider job request from the public job properties, encoding the input as MessagePack.
 func jobPropertiesToSetAlarmReq(p actor.JobProperties, method string, input any, now time.Time) (components.SetAlarmReq, error) {
 	req := components.SetAlarmReq{

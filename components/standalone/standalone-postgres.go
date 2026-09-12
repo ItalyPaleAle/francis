@@ -2,6 +2,7 @@ package standalone
 
 import (
 	"context"
+	"database/sql"
 	"embed"
 	"errors"
 	"fmt"
@@ -405,7 +406,7 @@ func (s *StandalonePostgresBacked) loadDeadJobs(ctx context.Context) error {
 
 func (s *StandalonePostgresBacked) loadActorState(ctx context.Context) error {
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	rows, err := s.db.Query(ctx, "SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time FROM "+s.tablePrefix+"actor_state")
+	rows, err := s.db.Query(ctx, "SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time, actor_state_labels FROM "+s.tablePrefix+"actor_state")
 	if err != nil {
 		return err
 	}
@@ -416,9 +417,10 @@ func (s *StandalonePostgresBacked) loadActorState(ctx context.Context) error {
 			actorType, actorID string
 			data               []byte
 			exp                *time.Time
+			labels             sql.NullString
 		)
 
-		err := rows.Scan(&actorType, &actorID, &data, &exp)
+		err := rows.Scan(&actorType, &actorID, &data, &exp, &labels)
 		if err != nil {
 			return err
 		}
@@ -426,6 +428,7 @@ func (s *StandalonePostgresBacked) loadActorState(ctx context.Context) error {
 		entry := &internal.StateEntry{
 			Data:       data,
 			Expiration: exp,
+			Labels:     decodeStateLabels(labels),
 		}
 
 		key := internal.NewActorKey(actorType, actorID)
@@ -754,12 +757,13 @@ func (s *StandalonePostgresBacked) persistActorStateChanges(ctx context.Context,
 
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.Exec(ctx,
-			`INSERT INTO `+s.tablePrefix+`actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time)
-			VALUES ($1, $2, $3, $4)
+			`INSERT INTO `+s.tablePrefix+`actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time, actor_state_labels)
+			VALUES ($1, $2, $3, $4, $5)
 			ON CONFLICT(actor_type, actor_id) DO UPDATE SET
 				actor_state_data = EXCLUDED.actor_state_data,
-				actor_state_expiration_time = EXCLUDED.actor_state_expiration_time`,
-			key.ActorType, key.ActorID, entry.Data, expVal,
+				actor_state_expiration_time = EXCLUDED.actor_state_expiration_time,
+				actor_state_labels = EXCLUDED.actor_state_labels`,
+			key.ActorType, key.ActorID, entry.Data, expVal, encodeStateLabels(entry.Labels),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to upsert actor state: %w", err)

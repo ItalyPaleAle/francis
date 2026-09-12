@@ -341,6 +341,9 @@ type UpdateLeasedAlarmReq struct {
 // SetStateOpts contains options for SetState
 type SetStateOpts struct {
 	TTL time.Duration
+	// Labels is an optional set of short string pairs stored alongside the state, in the same transaction and with the same expiration, which ListStates filters on by equality
+	// A nil or empty map removes every label previously stored for the actor
+	Labels map[string]string
 }
 
 // ListStatesReq is the request object for the ListStates method.
@@ -349,6 +352,8 @@ type ListStatesReq struct {
 	ActorType string
 	// When true, the stored state data is returned alongside each actor ID
 	IncludeData bool
+	// Labels restricts the listing to actors whose state carries every one of these labels with the given value
+	Labels map[string]string
 	// Pagination cursor: only actor IDs sorting strictly after this value are returned
 	After string
 	// Maximum number of states to return

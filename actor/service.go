@@ -339,6 +339,17 @@ func (s *Service) RetryJob(ctx context.Context, jobID string) (newJobID string, 
 	return s.host.RetryJob(ctx, jobID)
 }
 
+// DeleteJob removes a dead-lettered job's record without re-dispatching it.
+// Use it to discard a dead-lettered job whose work has been accounted for another way, so its record doesn't outlive what it refers to; RetryJob is what re-dispatches one instead.
+// Returns ErrJobNotFound if the dead job cannot be found.
+func (s *Service) DeleteJob(ctx context.Context, jobID string) error {
+	if !s.ready() {
+		return ErrServiceNotInitialized
+	}
+
+	return s.host.DeleteJob(ctx, jobID)
+}
+
 // HaltAll halts all actors currently active on the host.
 func (s *Service) HaltAll() error {
 	if !s.ready() {

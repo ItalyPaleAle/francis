@@ -1039,6 +1039,10 @@ func (f *fakeClient[T]) RetryJob(context.Context, string) (string, error) {
 	return "", nil
 }
 
+func (f *fakeClient[T]) DeleteJob(context.Context, string) error {
+	return nil
+}
+
 func (f *fakeClient[T]) Halt() {
 	// Nop
 }

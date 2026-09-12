@@ -927,6 +927,11 @@ func (rc *runtimeClient) RetryJob(ctx context.Context, req protocol.RetryJobRequ
 	return out, err
 }
 
+// DeleteJob removes a dead-lettered job's record through the runtime
+func (rc *runtimeClient) DeleteJob(ctx context.Context, req protocol.DeleteJobRequest) error {
+	return rc.doRequest(ctx, protocol.KindDeleteJob, req, nil)
+}
+
 // setSession records the active session and its negotiated identity
 func (rc *runtimeClient) setSession(session *webtransport.Session, hostID string, sessionID string) {
 	rc.mu.Lock()

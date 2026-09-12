@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -435,7 +436,7 @@ func (s *StandaloneSQLiteBacked) loadDeadJobs(ctx context.Context) error {
 
 func (s *StandaloneSQLiteBacked) loadActorState(ctx context.Context) error {
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	rows, err := s.db.QueryContext(ctx, "SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time FROM "+s.tablePrefix+"actor_state")
+	rows, err := s.db.QueryContext(ctx, "SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time, actor_state_labels FROM "+s.tablePrefix+"actor_state")
 	if err != nil {
 		return err
 	}
@@ -446,15 +447,17 @@ func (s *StandaloneSQLiteBacked) loadActorState(ctx context.Context) error {
 			actorType, actorID string
 			data               []byte
 			expMs              sql.NullInt64
+			labels             sql.NullString
 		)
 
-		err := rows.Scan(&actorType, &actorID, &data, &expMs)
+		err := rows.Scan(&actorType, &actorID, &data, &expMs, &labels)
 		if err != nil {
 			return err
 		}
 
 		entry := &internal.StateEntry{
-			Data: data,
+			Data:   data,
+			Labels: decodeStateLabels(labels),
 		}
 		if expMs.Valid {
 			t := time.UnixMilli(expMs.Int64)
@@ -748,8 +751,8 @@ func (s *StandaloneSQLiteBacked) persistActorStateChanges(ctx context.Context, t
 
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.ExecContext(ctx,
-			`REPLACE INTO `+s.tablePrefix+`actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time) VALUES (?, ?, ?, ?)`,
-			key.ActorType, key.ActorID, entry.Data, expVal,
+			`REPLACE INTO `+s.tablePrefix+`actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time, actor_state_labels) VALUES (?, ?, ?, ?, ?)`,
+			key.ActorType, key.ActorID, entry.Data, expVal, encodeStateLabels(entry.Labels),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to upsert actor state: %w", err)
@@ -757,4 +760,32 @@ func (s *StandaloneSQLiteBacked) persistActorStateChanges(ctx context.Context, t
 	}
 
 	return nil
+}
+
+// encodeStateLabels serializes an actor state's labels for the backing store, returning nil when there are none so the column stays NULL
+func encodeStateLabels(labels map[string]string) any {
+	if len(labels) == 0 {
+		return nil
+	}
+
+	// The map is small and the encoding never fails for a map of strings, so an error here would be a programming error rather than a runtime condition
+	enc, err := json.Marshal(labels)
+	if err != nil {
+		return nil
+	}
+	return string(enc)
+}
+
+// decodeStateLabels reads an actor state's labels back from the backing store, treating a NULL or unparseable column as no labels
+func decodeStateLabels(raw sql.NullString) map[string]string {
+	if !raw.Valid || raw.String == "" {
+		return nil
+	}
+
+	var labels map[string]string
+	err := json.Unmarshal([]byte(raw.String), &labels)
+	if err != nil {
+		return nil
+	}
+	return labels
 }

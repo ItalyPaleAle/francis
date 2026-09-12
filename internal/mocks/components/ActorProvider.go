@@ -587,27 +587,23 @@ func (_mock *MockActorProvider) DispatchJob(ctx context.Context, ref1 ref.AlarmR
 	var r0 string
 	var r1 *ref.AlarmLease
 	var r2 error
-	returnAll, ok := ret.Get(0).(func(context.Context, ref.AlarmRef, components.SetAlarmReq) (string, *ref.AlarmLease, error))
-	if ok {
-		return returnAll(ctx, ref1, req)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, ref.AlarmRef, components.SetAlarmReq) (string, *ref.AlarmLease, error)); ok {
+		return returnFunc(ctx, ref1, req)
 	}
-	returnString, ok := ret.Get(0).(func(context.Context, ref.AlarmRef, components.SetAlarmReq) string)
-	if ok {
-		r0 = returnString(ctx, ref1, req)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, ref.AlarmRef, components.SetAlarmReq) string); ok {
+		r0 = returnFunc(ctx, ref1, req)
 	} else {
 		r0 = ret.Get(0).(string)
 	}
-	returnLease, ok := ret.Get(1).(func(context.Context, ref.AlarmRef, components.SetAlarmReq) *ref.AlarmLease)
-	if ok {
-		r1 = returnLease(ctx, ref1, req)
+	if returnFunc, ok := ret.Get(1).(func(context.Context, ref.AlarmRef, components.SetAlarmReq) *ref.AlarmLease); ok {
+		r1 = returnFunc(ctx, ref1, req)
 	} else {
 		if ret.Get(1) != nil {
 			r1 = ret.Get(1).(*ref.AlarmLease)
 		}
 	}
-	returnError, ok := ret.Get(2).(func(context.Context, ref.AlarmRef, components.SetAlarmReq) error)
-	if ok {
-		r2 = returnError(ctx, ref1, req)
+	if returnFunc, ok := ret.Get(2).(func(context.Context, ref.AlarmRef, components.SetAlarmReq) error); ok {
+		r2 = returnFunc(ctx, ref1, req)
 	} else {
 		r2 = ret.Error(2)
 	}

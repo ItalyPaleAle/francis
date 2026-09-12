@@ -91,6 +91,10 @@ func (f *fakeHost) RetryJob(context.Context, string) (string, error) {
 	return "", nil
 }
 
+func (f *fakeHost) DeleteJob(context.Context, string) error {
+	return nil
+}
+
 func (f *fakeHost) SetState(context.Context, string, string, any, *SetStateOpts) error { return nil }
 
 func (f *fakeHost) GetState(_ context.Context, _ string, _ string, dest any) error {

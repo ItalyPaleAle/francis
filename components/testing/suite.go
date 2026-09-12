@@ -37,6 +37,7 @@ func (s Suite) RunTests(t *testing.T) {
 
 	t.Run("actor state", s.TestState)
 	t.Run("list actor states", s.TestListStates)
+	t.Run("actor state labels", s.TestStateLabels)
 
 	t.Run("get alarm", s.TestGetAlarm)
 	t.Run("set alarm", s.TestSetAlarm)
@@ -2808,6 +2809,126 @@ func (s Suite) TestListStates(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, res.States, components.DefaultListStatesLimit+1)
 		assert.False(t, res.HasMore)
+	})
+}
+
+func (s Suite) TestStateLabels(t *testing.T) {
+	// setState stores state and labels for an actor of the given type
+	setState := func(t *testing.T, ctx context.Context, actorType string, actorID string, labels map[string]string) {
+		t.Helper()
+		err := s.p.SetState(ctx, ref.ActorRef{ActorType: actorType, ActorID: actorID}, []byte("data"), components.SetStateOpts{Labels: labels})
+		require.NoError(t, err)
+	}
+
+	// listIDs returns the actor IDs in a page, so tests can assert on the ordering without repeating the mapping
+	listIDs := func(t *testing.T, ctx context.Context, req components.ListStatesReq) []string {
+		t.Helper()
+		res, err := s.p.ListStates(ctx, req)
+		require.NoError(t, err)
+
+		ids := make([]string, len(res.States))
+		for i, state := range res.States {
+			ids[i] = state.ActorID
+		}
+		return ids
+	}
+
+	// Seed with empty database
+	require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+
+	t.Run("filters a listing by a single label", func(t *testing.T) {
+		ctx := t.Context()
+
+		setState(t, ctx, "LabelFilter", "actor-01", map[string]string{"status": "running"})
+		setState(t, ctx, "LabelFilter", "actor-02", map[string]string{"status": "done"})
+		setState(t, ctx, "LabelFilter", "actor-03", map[string]string{"status": "running"})
+
+		ids := listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelFilter", Labels: map[string]string{"status": "running"}})
+		assert.Equal(t, []string{"actor-01", "actor-03"}, ids)
+	})
+
+	t.Run("requires every label in the filter to match", func(t *testing.T) {
+		ctx := t.Context()
+
+		setState(t, ctx, "LabelMulti", "actor-01", map[string]string{"status": "running", "version": "1"})
+		setState(t, ctx, "LabelMulti", "actor-02", map[string]string{"status": "running", "version": "2"})
+		setState(t, ctx, "LabelMulti", "actor-03", map[string]string{"status": "done", "version": "2"})
+
+		ids := listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelMulti", Labels: map[string]string{"status": "running", "version": "2"}})
+		assert.Equal(t, []string{"actor-02"}, ids)
+
+		// A label the actor does not carry at all excludes it, just like a mismatched value
+		ids = listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelMulti", Labels: map[string]string{"absent": "x"}})
+		assert.Empty(t, ids)
+	})
+
+	t.Run("an unfiltered listing returns every actor regardless of labels", func(t *testing.T) {
+		ctx := t.Context()
+
+		setState(t, ctx, "LabelUnfiltered", "actor-01", map[string]string{"status": "running"})
+		setState(t, ctx, "LabelUnfiltered", "actor-02", nil)
+
+		ids := listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelUnfiltered"})
+		assert.Equal(t, []string{"actor-01", "actor-02"}, ids)
+	})
+
+	t.Run("a later write replaces the previous labels", func(t *testing.T) {
+		ctx := t.Context()
+
+		setState(t, ctx, "LabelReplace", "actor-01", map[string]string{"status": "running"})
+		setState(t, ctx, "LabelReplace", "actor-01", map[string]string{"status": "done"})
+
+		assert.Empty(t, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelReplace", Labels: map[string]string{"status": "running"}}))
+		assert.Equal(t, []string{"actor-01"}, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelReplace", Labels: map[string]string{"status": "done"}}))
+
+		// Writing with no labels at all clears the set the actor had
+		setState(t, ctx, "LabelReplace", "actor-01", nil)
+		assert.Empty(t, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelReplace", Labels: map[string]string{"status": "done"}}))
+		assert.Equal(t, []string{"actor-01"}, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelReplace"}))
+	})
+
+	t.Run("labels do not outlive the state they describe", func(t *testing.T) {
+		ctx := t.Context()
+
+		setState(t, ctx, "LabelDeleted", "actor-01", map[string]string{"status": "running"})
+		require.NoError(t, s.p.DeleteState(ctx, ref.ActorRef{ActorType: "LabelDeleted", ActorID: "actor-01"}))
+
+		// The state is gone, so a filtered listing must not resurrect it through a stale label row
+		assert.Empty(t, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelDeleted", Labels: map[string]string{"status": "running"}}))
+
+		// And writing the actor again with no labels must not inherit the old ones
+		setState(t, ctx, "LabelDeleted", "actor-01", nil)
+		assert.Empty(t, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelDeleted", Labels: map[string]string{"status": "running"}}))
+	})
+
+	t.Run("a filtered listing pages in actor-ID order", func(t *testing.T) {
+		ctx := t.Context()
+
+		for i := 1; i <= 6; i++ {
+			labels := map[string]string{"group": "b"}
+			if i%2 == 1 {
+				labels = map[string]string{"group": "a"}
+			}
+			setState(t, ctx, "LabelPaged", fmt.Sprintf("actor-%02d", i), labels)
+		}
+
+		var (
+			seen   []string
+			cursor string
+		)
+		for {
+			res, err := s.p.ListStates(ctx, components.ListStatesReq{ActorType: "LabelPaged", Labels: map[string]string{"group": "a"}, After: cursor, Limit: 2})
+			require.NoError(t, err)
+			for _, state := range res.States {
+				seen = append(seen, state.ActorID)
+			}
+
+			if !res.HasMore || len(res.States) == 0 {
+				break
+			}
+			cursor = res.States[len(res.States)-1].ActorID
+		}
+		assert.Equal(t, []string{"actor-01", "actor-03", "actor-05"}, seen)
 	})
 }
 
