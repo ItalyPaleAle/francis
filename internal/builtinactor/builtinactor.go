@@ -100,3 +100,12 @@ func InvokeActor(ctx context.Context, svc *actor.Service, bareActorType string, 
 	client := actor.NewBuiltInActorClient[any](builtinkey.Key{}, fullType, actorID, svc)
 	return client.Invoke(ctx, fullType, actorID, method, payload)
 }
+
+// Peek performs a read-only invocation of a specific instance of a built-in actor through the privileged client, returning the response envelope
+// It is the read-side counterpart of InvokeActor: concurrent peeks of the same actor run at the same time, and only ever queue behind a write turn
+// bareActorType is the actor's bare type (without the reserved prefix), and payload is optional: pass nil when the method carries no request data
+func Peek(ctx context.Context, svc *actor.Service, bareActorType string, actorID string, method string, payload any) (actor.Envelope, error) {
+	fullType := FullActorType(bareActorType)
+	client := actor.NewBuiltInActorClient[any](builtinkey.Key{}, fullType, actorID, svc)
+	return client.Peek(ctx, fullType, actorID, method, payload)
+}

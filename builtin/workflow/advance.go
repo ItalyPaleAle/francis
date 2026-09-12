@@ -1,0 +1,956 @@
+package workflow
+
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+)
+
+// maxAdvanceIterations bounds the fixed-point loop in advance
+// Each iteration settles or opens at least one step, so a graph can never need more passes than it has steps, and the bound only guards against a bug turning into a spin
+const maxAdvanceIterations = 1024
+
+// eventKind discriminates the things that drive a Workflow turn
+type eventKind string
+
+const (
+	evStart       eventKind = "start"
+	evDone        eventKind = "done"
+	evCompensated eventKind = "compensated"
+	evRaise       eventKind = "event"
+	evCancel      eventKind = "cancel"
+	evUnwind      eventKind = "unwind"
+	evSuspend     eventKind = "suspend"
+	evResume      eventKind = "resume"
+	evTick        eventKind = "tick"
+	evDeadline    eventKind = "deadline"
+)
+
+// event is one thing to fold into the journal, built by the orchestrator from the job or alarm that triggered the turn
+type event struct {
+	kind   eventKind
+	start  *startPayload
+	report *reportPayload
+	comp   *compReportPayload
+	raise  *eventPayload
+	reason string
+	// fromParent and compAttempt carry what a parent said when it asked this instance to stop and undo itself
+	fromParent  bool
+	compAttempt int
+}
+
+// apply folds an event into the journal
+// It is pure, and it records nothing for a duplicate or for a report whose outcome the journal already has, which is what makes every report safe to redeliver (§7.3)
+// The returned value reports whether the event changed nothing, so the turn can count how often ordering invariant 2 is doing its job
+func apply(st *instanceState, def *definition, ev *event, now time.Time) (duplicate bool) {
+	// A terminated instance ignores everything, so a late report or a repeated cancel cannot revive it
+	if st.Status.IsTerminal() {
+		return true
+	}
+
+	switch ev.kind {
+	case evStart:
+		return applyStart(st, def, ev.start, now)
+	case evDone:
+		return applyReport(st, def, ev.report, now)
+	case evCompensated:
+		return applyCompReport(st, def, ev.comp, now)
+	case evRaise:
+		return applyRaisedEvent(st, def, ev.raise, now)
+	case evCancel:
+		return applyCancel(st, ev, now)
+	case evUnwind:
+		return applyUnwind(st, ev, now)
+	case evSuspend:
+		return applySuspend(st, def, ev.reason, now)
+	case evResume:
+		return applyResume(st, def, now)
+	case evTick, evDeadline:
+		// A tick records nothing by design: it exists to re-run advance and reconcile
+		// A deadline is resolved against the journal by the orchestrator, which folds the outcome as a failure rather than as its own event
+		return true
+	default:
+		return true
+	}
+}
+
+// applyStart initializes the journal of a new instance, recording every step of the definition so status and the unknown-version path are answerable from the journal alone
+func applyStart(st *instanceState, def *definition, p *startPayload, now time.Time) bool {
+	// A repeated start finds the instance already here, so the second call's input is discarded rather than overwriting the first's
+	if st.Status != "" {
+		return true
+	}
+
+	st.Workflow = def.name
+	st.Version = p.Version
+	st.Status = StatusRunning
+	st.Input = p.Input
+	st.TraceParent = p.TraceParent
+	st.Parent = p.Parent
+	if st.Parent != nil && p.Attempt > 0 {
+		st.Parent.Attempt = p.Attempt
+	}
+	st.CreatedAt = p.CreatedAt
+	if st.CreatedAt.IsZero() {
+		st.CreatedAt = now
+	}
+	st.StartedAt = now
+
+	st.Steps = make([]stepRecord, len(def.steps))
+	for i, d := range def.steps {
+		st.Steps[i] = stepRecord{
+			Name:   d.name,
+			Kind:   d.kind,
+			Status: StepPending,
+		}
+	}
+
+	return false
+}
+
+// applyReport folds a worker's (or a child's) outcome for one task into the journal
+func applyReport(st *instanceState, def *definition, p *reportPayload, now time.Time) bool {
+	sr := st.step(p.Step)
+	if sr == nil {
+		return true
+	}
+	d := def.byName[p.Step]
+	if d == nil {
+		return true
+	}
+	tr := sr.task(p.Index)
+	if tr == nil {
+		return true
+	}
+
+	// The journal's outcome is what decides whether a report counts, never whether this delivery has been seen before
+	if tr.Done {
+		return true
+	}
+
+	// A late report from an earlier attempt is accepted when it succeeded, since the work really was done, and ignored when it failed, since a newer attempt is already in flight
+	if p.Attempt < tr.Attempts && p.Error != "" {
+		return true
+	}
+
+	// Success: record the output and close the task
+	if p.Error == "" {
+		tr.Output = p.Output
+		tr.Done = true
+		tr.CompletedAt = now
+		tr.LastError = ""
+		tr.RetryAt = time.Time{}
+		if sr.Remaining > 0 {
+			sr.Remaining--
+		}
+		return false
+	}
+
+	// A child that terminated failed or cancelled fails the parent's task, and restarting it would only find the instance that already terminated
+	if p.ChildStatus != "" && p.ChildStatus != StatusCompleted {
+		p.Retryable = false
+	}
+
+	// Failure: the step's policy decides whether another attempt follows
+	tr.LastError = p.Error
+	maxAttempts := effectiveMaxAttempts(d)
+	if !p.Retryable || tr.Attempts >= maxAttempts {
+		tr.Error = p.Error
+		tr.Done = true
+		tr.CompletedAt = now
+		if sr.Remaining > 0 {
+			sr.Remaining--
+		}
+		return false
+	}
+
+	// The next attempt's number is recorded before the job that runs it exists, so a lost dispatch is recoverable and a report can never arrive for an attempt the journal does not know about
+	tr.Attempts++
+	tr.RetryAt = now.Add(backoff(d.retryInitial, d.retryMax, defaultRetryInitial, defaultRetryMax, tr.Attempts-1))
+	return false
+}
+
+// applyCompReport folds an undo worker's outcome for one task's compensation into the journal
+func applyCompReport(st *instanceState, def *definition, p *compReportPayload, now time.Time) bool {
+	sr := st.step(p.Step)
+	if sr == nil {
+		return true
+	}
+	d := def.byName[p.Step]
+	if d == nil {
+		return true
+	}
+	tr := sr.task(p.Index)
+	if tr == nil || tr.Comp == nil {
+		return true
+	}
+
+	if tr.Comp.Done {
+		return true
+	}
+	if p.Attempt < tr.Comp.Attempts && p.Error != "" {
+		return true
+	}
+
+	// Success: the effect is undone
+	if p.Error == "" {
+		tr.Comp.Done = true
+		tr.Comp.LastError = ""
+		tr.Comp.RetryAt = time.Time{}
+		tr.Compensated = true
+		return false
+	}
+
+	// Failure: compensations get their own, more generous attempt policy, because a failed rollback leaves the system inconsistent
+	tr.Comp.LastError = p.Error
+	maxAttempts := effectiveCompMaxAttempts(d)
+	if !p.Retryable || tr.Comp.Attempts >= maxAttempts {
+		tr.Comp.Error = p.Error
+		tr.Comp.Done = true
+		return false
+	}
+
+	tr.Comp.Attempts++
+	tr.Comp.RetryAt = now.Add(backoff(d.compInitial, d.compMax, defaultCompInitial, defaultCompMax, tr.Comp.Attempts-1))
+	return false
+}
+
+// applyRaisedEvent records an external event against the WaitForEvent step listening for it
+// An event is accepted while suspended, and the step completes on resume
+func applyRaisedEvent(st *instanceState, def *definition, p *eventPayload, now time.Time) bool {
+	for i := range st.Steps {
+		sr := &st.Steps[i]
+		if sr.Kind != KindWait {
+			continue
+		}
+
+		d := def.byName[sr.Name]
+		if d == nil || d.effectiveEventName() != p.Name {
+			continue
+		}
+
+		// Only the open wait accepts its event, so an event raised before the step is reached, or after it completed, records nothing
+		if sr.Status != StepRunning {
+			return true
+		}
+
+		sr.Event = p.Payload
+		if sr.Event == nil {
+			sr.Event = json.RawMessage("null")
+		}
+		sr.Remaining = 0
+		sr.CompletedAt = now
+		return false
+	}
+
+	return true
+}
+
+// applyCancel asks a running or suspended instance to stop and unwind
+func applyCancel(st *instanceState, ev *event, now time.Time) bool {
+	// Cancel takes precedence over a suspension, so it resumes the instance straight into the unwind
+	if st.Status == StatusCompensating {
+		return true
+	}
+
+	reason := ev.reason
+	if reason == "" {
+		reason = "cancelled"
+	}
+	st.Suspended = nil
+	recordUnwoundBy(st, ev)
+	beginUnwind(st, reason, StatusCancelled, now)
+	return false
+}
+
+// applyUnwind moves a completed child back into compensating at its parent's request, which is the one verb only a parent may send
+// A completed child is kept rather than purged for as long as its parent is running for precisely this reason
+func applyUnwind(st *instanceState, ev *event, now time.Time) bool {
+	if st.Status == StatusCompensating {
+		return true
+	}
+
+	reason := ev.reason
+	if reason == "" {
+		reason = "unwound by parent"
+	}
+	st.Suspended = nil
+	st.Reported = false
+	recordUnwoundBy(st, ev)
+	beginUnwind(st, reason, StatusCancelled, now)
+	return false
+}
+
+// recordUnwoundBy notes that a parent asked this instance to undo itself, and with which compensation attempt, so its termination reports a compensation rather than a result
+func recordUnwoundBy(st *instanceState, ev *event) {
+	if !ev.fromParent || st.Parent == nil {
+		return
+	}
+	st.Parent.UnwoundBy = ev.compAttempt
+	if st.Parent.UnwoundBy <= 0 {
+		st.Parent.UnwoundBy = 1
+	}
+}
+
+// applySuspend pauses an instance, recording what is left of each deadline so resuming does not eat the remainder
+func applySuspend(st *instanceState, def *definition, reason string, now time.Time) bool {
+	if st.Status == StatusSuspended {
+		return true
+	}
+
+	rec := &suspendRecord{
+		At:               now,
+		Reason:           reason,
+		ResumeTo:         st.Status,
+		RemainingTimeout: until(instanceDeadline(st, def), now),
+	}
+
+	// The current step's own deadline is paused alongside the instance's, so a long suspension does not consume a short step timeout either
+	sr, d := currentRunningStep(st, def)
+	if sr != nil && d != nil {
+		stepDue := stepDeadline(sr, d)
+		if !stepDue.IsZero() {
+			rec.RemainingStepTimeout = until(stepDue, now)
+		}
+	}
+
+	st.Suspended = rec
+	st.Status = StatusSuspended
+	return false
+}
+
+// applyResume continues a suspended instance, putting the deadlines back where the suspension found them
+// The remainders are restored by shifting the recorded start times forward, so every deadline recomputes from the journal exactly as it did before
+func applyResume(st *instanceState, def *definition, now time.Time) bool {
+	if st.Status != StatusSuspended || st.Suspended == nil {
+		return true
+	}
+
+	rec := st.Suspended
+	st.Status = rec.ResumeTo
+	if st.Status == "" {
+		st.Status = StatusRunning
+	}
+
+	st.StartedAt = now.Add(rec.RemainingTimeout - def.timeout)
+
+	sr, d := currentRunningStep(st, def)
+	if sr != nil && d != nil && rec.RemainingStepTimeout > 0 {
+		budget := stepBudget(d)
+		if budget > 0 {
+			sr.StartedAt = now.Add(rec.RemainingStepTimeout - budget)
+		}
+	}
+
+	st.Suspended = nil
+	return false
+}
+
+// beginUnwind opens the compensation phase, recording the cause every compensation receives and the status the unwind terminates into
+func beginUnwind(st *instanceState, cause string, terminal Status, now time.Time) {
+	st.Cause = cause
+	st.TerminalStatus = terminal
+	st.Status = StatusCompensating
+
+	// Steps that were never reached are recorded as skipped rather than left pending, so the journal says plainly that they will not run
+	for i := range st.Steps {
+		if st.Steps[i].Status == StepPending {
+			st.Steps[i].Status = StepSkipped
+			st.Steps[i].CompletedAt = now
+		}
+	}
+}
+
+// advance derives the next journal from the current one, as a pure function of the journal and the definition
+// It performs no I/O, runs no user code, and cannot block, which is what keeps the orchestration boundary structural rather than aspirational (§4.3)
+// Cursor is one of its outputs, never one of its inputs
+func advance(st *instanceState, def *definition, instanceID string, now time.Time) {
+	if st.Status.IsTerminal() || st.Status == "" {
+		return
+	}
+
+	// A suspended instance still records the truth about work that was already in flight, but opens nothing new and never changes its own status
+	// Its deadlines are paused, which is what the empty DeadlineAt says: reconcile drops the alarm and resume puts the remainders back
+	if st.Status == StatusSuspended {
+		settleSteps(st, def, now)
+		st.DeadlineAt = time.Time{}
+		st.Cursor = deriveCursor(st)
+		return
+	}
+
+	// Settling a step opens the next one, which may settle immediately (a skipped step, an empty fan-out), so this runs to a fixed point
+	for range maxAdvanceIterations {
+		changed := settleSteps(st, def, now)
+
+		if st.Status == StatusCompensating {
+			changed = unwindNextFrame(st, def, now) || changed
+		} else {
+			changed = openNextStep(st, def, instanceID, now) || changed
+		}
+
+		if !changed {
+			break
+		}
+		if st.Status.IsTerminal() {
+			break
+		}
+	}
+
+	st.DeadlineAt = nextDeadline(st, def)
+	st.Cursor = deriveCursor(st)
+}
+
+// nextDeadline is the earliest of the instance timeout and the current step's own timeout, which for a wait step is how long it waits for its event
+// One alarm stands for every deadline the instance has, and the journal records which time it should carry
+func nextDeadline(st *instanceState, def *definition) time.Time {
+	if st.Status.IsTerminal() {
+		return time.Time{}
+	}
+
+	due := instanceDeadline(st, def)
+
+	sr, d := currentRunningStep(st, def)
+	if sr != nil && d != nil {
+		stepDue := stepDeadline(sr, d)
+		if !stepDue.IsZero() && (due.IsZero() || stepDue.Before(due)) {
+			due = stepDue
+		}
+	}
+	return due
+}
+
+// settleSteps closes every running step whose tasks have all reported, or that a fail-fast policy has already decided
+func settleSteps(st *instanceState, def *definition, now time.Time) bool {
+	var changed bool
+	for i := range st.Steps {
+		sr := &st.Steps[i]
+		if sr.Status != StepRunning {
+			continue
+		}
+
+		d := def.byName[sr.Name]
+		if d == nil {
+			continue
+		}
+
+		// A wait step is settled by its event rather than by a task reporting
+		if sr.Kind == KindWait {
+			if sr.Event != nil {
+				completeStep(st, sr, d, now)
+				changed = true
+			}
+			continue
+		}
+
+		// Fail-fast decides the step the moment one task has failed for good, without waiting for the stragglers whose results are still recorded
+		failedNow := firstFailedTask(sr) >= 0
+		if sr.Remaining > 0 && !(failedNow && groupPolicy(d) == FailFast) {
+			continue
+		}
+
+		outcome, errMsg := stepOutcome(sr, d)
+		if outcome == StepFailed {
+			failStep(st, sr, d, errMsg, now)
+		} else {
+			completeStep(st, sr, d, now)
+		}
+		changed = true
+	}
+	return changed
+}
+
+// stepOutcome decides whether a step that has finished reporting completed or failed, applying the group policy for a group or a fan-out
+func stepOutcome(sr *stepRecord, d *stepDef) (StepStatus, string) {
+	switch d.kind {
+	case KindStep, KindChild:
+		tr := sr.task(0)
+		if tr != nil && tr.Error != "" {
+			return StepFailed, tr.Error
+		}
+		return StepCompleted, ""
+	default:
+		// A group or a fan-out only fails when its policy says a failing member should cost the step
+		if groupPolicy(d) == TolerateFailures {
+			return StepCompleted, ""
+		}
+		idx := firstFailedTask(sr)
+		if idx >= 0 {
+			return StepFailed, sr.Tasks[idx].Error
+		}
+		return StepCompleted, ""
+	}
+}
+
+// firstFailedTask returns the index into Tasks of the first task that failed for good, or -1 when none has
+func firstFailedTask(sr *stepRecord) int {
+	for i := range sr.Tasks {
+		if sr.Tasks[i].Done && sr.Tasks[i].Error != "" {
+			return i
+		}
+	}
+	return -1
+}
+
+// completeStep records a step as completed and pushes its frame onto the compensation stack when there is anything to undo
+func completeStep(st *instanceState, sr *stepRecord, d *stepDef, now time.Time) {
+	sr.Status = StepCompleted
+	sr.CompletedAt = now
+	sr.Remaining = 0
+	pushFrame(st, sr, d)
+}
+
+// failStep records a step as failed, applies WithSkipOnFailure to its named dependents, and opens the unwind unless the step declared otherwise
+func failStep(st *instanceState, sr *stepRecord, d *stepDef, errMsg string, now time.Time) {
+	sr.Status = StepFailed
+	sr.Error = errMsg
+	sr.CompletedAt = now
+	sr.Remaining = 0
+
+	// A frame is still pushed when tasks of the step succeeded, since their effects are real and a fail-fast group is exactly that case
+	pushFrame(st, sr, d)
+
+	// The named dependents are pointless without this step, and are recorded as skipped rather than run and failed
+	// Skipping is not transitive: a skipped step is not a failed one, so its own list is not applied
+	for _, dep := range d.skipOnFailure {
+		depRec := st.step(dep)
+		if depRec != nil && depRec.Status == StepPending {
+			depRec.Status = StepSkipped
+			depRec.CompletedAt = now
+		}
+	}
+
+	// Only the default case unwinds: WithOptional and WithSkipOnFailure both say the workflow continues, and they differ only in what they cost
+	if d.optional || len(d.skipOnFailure) > 0 {
+		return
+	}
+
+	cause := fmt.Sprintf("step %q failed: %s", sr.Name, errMsg)
+	beginUnwind(st, cause, StatusFailed, now)
+}
+
+// pushFrame adds a settled step to the compensation stack when it is compensable and holds at least one task whose effect has to be undone
+func pushFrame(st *instanceState, sr *stepRecord, d *stepDef) {
+	if !d.isCompensable() {
+		return
+	}
+	if len(compensableTasks(sr, d)) == 0 {
+		return
+	}
+
+	// Frames are pushed in completion order and popped in reverse, which is the invariant a saga depends on
+	st.Stack = append(st.Stack, sr.Name)
+}
+
+// compensableTasks returns the indexes into Tasks of the tasks of a settled step whose effects have to be undone
+// A task that succeeded is always one; a task that failed is one only when the step opted in with WithCompensateOnFailure, since the saga convention is that a step which did not complete did not take effect
+func compensableTasks(sr *stepRecord, d *stepDef) []int {
+	var out []int
+	for i := range sr.Tasks {
+		tr := &sr.Tasks[i]
+		if !tr.Done {
+			continue
+		}
+
+		if tr.Error == "" {
+			// A group's member is only compensable when that member declares a compensation of its own
+			if memberCompensable(d, tr.Index) {
+				out = append(out, i)
+			}
+			continue
+		}
+
+		if d.compensateOnFailure && memberCompensable(d, tr.Index) {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// memberCompensable reports whether the task at an index of a step has anything to undo, resolving a group's task back to the member that ran it
+func memberCompensable(d *stepDef, index int) bool {
+	if d.kind == KindParallel {
+		if index < 0 || index >= len(d.members) {
+			return false
+		}
+		return d.members[index].isCompensable()
+	}
+	return d.isCompensable()
+}
+
+// openNextStep opens the first step that has not been reached yet, or terminates the instance when every step has settled
+func openNextStep(st *instanceState, def *definition, instanceID string, now time.Time) bool {
+	for i := range st.Steps {
+		sr := &st.Steps[i]
+		switch sr.Status {
+		case StepPending:
+			return openStep(st, def, sr, instanceID, now)
+		case StepRunning, StepCompensating:
+			// The step in flight has to settle before anything after it opens
+			return false
+		default:
+			continue
+		}
+	}
+
+	terminate(st, def, now)
+	return true
+}
+
+// openStep materializes a step's tasks and marks it running, or records it as skipped when its condition says it should not run
+func openStep(st *instanceState, def *definition, sr *stepRecord, instanceID string, now time.Time) bool {
+	d := def.byName[sr.Name]
+	if d == nil {
+		// The definition no longer has this step, which only happens to a journal whose version this host cannot serve, so it is left alone for a host that can
+		return false
+	}
+
+	// A condition is a recorded output rather than a predicate evaluated here, so an absent output simply means the step runs
+	if d.hasSkipIf && conditionMatches(st, def, d) {
+		sr.Status = StepSkipped
+		sr.CompletedAt = now
+		sr.Remaining = 0
+		return true
+	}
+
+	sr.StartedAt = now
+	sr.Status = StepRunning
+
+	switch d.kind {
+	case KindStep, KindChild:
+		sr.Tasks = []taskRecord{newTask(0, nil)}
+		if d.kind == KindChild {
+			sr.Tasks[0].ChildID = workerActorID(instanceID, sr.Name, 0)
+		}
+		sr.Remaining = 1
+	case KindParallel:
+		sr.Tasks = make([]taskRecord, len(d.members))
+		for i, m := range d.members {
+			sr.Tasks[i] = newTask(i, nil)
+			if m.kind == KindChild {
+				sr.Tasks[i].ChildID = workerActorID(instanceID, sr.Name, i)
+			}
+		}
+		sr.Remaining = len(sr.Tasks)
+	case KindForEach:
+		items, err := fanOutItems(st, def, d)
+		if err != nil {
+			// The list is the fan-out's own input, so a list that cannot be read is the step failing rather than the instance crashing
+			sr.Tasks = nil
+			sr.Remaining = 0
+			failStep(st, sr, d, err.Error(), now)
+			return true
+		}
+
+		sr.Tasks = make([]taskRecord, len(items))
+		for i, item := range items {
+			sr.Tasks[i] = newTask(i, item)
+			if d.child != nil {
+				sr.Tasks[i].ChildID = workerActorID(instanceID, sr.Name, i)
+			}
+		}
+		sr.Remaining = len(sr.Tasks)
+	case KindWait:
+		// A wait step has no task at all: it is completed by RaiseEvent, or failed by its own timeout
+		sr.Tasks = nil
+		sr.Remaining = 0
+	}
+
+	return true
+}
+
+// newTask builds the record of a task that has not run yet, with its first attempt already numbered so it is journaled before it is dispatched
+func newTask(index int, item json.RawMessage) taskRecord {
+	return taskRecord{
+		Index:    index,
+		Item:     item,
+		Attempts: 1,
+	}
+}
+
+// conditionMatches reports whether the step named by WithSkipIf recorded the output the condition skips on
+func conditionMatches(st *instanceState, def *definition, d *stepDef) bool {
+	sr := st.step(d.skipIfStep)
+	if sr == nil || sr.Status != StepCompleted {
+		return false
+	}
+
+	out := stepOutput(sr, def.byName[sr.Name])
+	if len(out) == 0 {
+		return false
+	}
+
+	var v bool
+	err := json.Unmarshal(out, &v)
+	if err != nil {
+		return false
+	}
+	return v == d.skipIfValue
+}
+
+// fanOutItems reads the elements a fan-out iterates from the output of the step named by WithItemsFrom
+// The size is decided once, when the upstream step reports, and is then journaled, so a retried turn re-reads the recorded items rather than re-deriving them
+func fanOutItems(st *instanceState, def *definition, d *stepDef) ([]json.RawMessage, error) {
+	sr := st.step(d.itemsFrom)
+	if sr == nil {
+		return nil, fmt.Errorf("fan-out %q reads its items from step %q, which the journal does not have", d.name, d.itemsFrom)
+	}
+	if sr.Status == StepSkipped {
+		// A fan-out over a skipped step has nothing to iterate, which is an empty fan-out rather than an error
+		return nil, nil
+	}
+
+	var items []json.RawMessage
+	err := json.Unmarshal(stepOutput(sr, def.byName[sr.Name]), &items)
+	if err != nil {
+		return nil, fmt.Errorf("fan-out %q requires step %q to output a JSON array: %w", d.name, d.itemsFrom, err)
+	}
+	return items, nil
+}
+
+// unwindNextFrame drives the compensation stack one frame at a time, in reverse order, and terminates the instance once it is empty
+// A frame is fully compensated before the next one starts, which is what makes the reverse order mean anything
+func unwindNextFrame(st *instanceState, def *definition, now time.Time) bool {
+	if len(st.Stack) == 0 {
+		terminate(st, def, now)
+		return true
+	}
+
+	name := st.Stack[len(st.Stack)-1]
+	sr := st.step(name)
+	d := def.byName[name]
+	if sr == nil || d == nil {
+		// A frame naming a step the journal or the definition no longer has cannot be unwound, so it is dropped rather than blocking the rest
+		st.Stack = st.Stack[:len(st.Stack)-1]
+		return true
+	}
+
+	// Opening the frame gives every task that has to be undone its first compensation attempt, numbered before it is dispatched
+	if sr.Status != StepCompensating {
+		sr.Status = StepCompensating
+		for _, i := range compensableTasks(sr, d) {
+			sr.Tasks[i].Comp = &compRecord{Attempts: 1}
+		}
+		return true
+	}
+
+	// Within a frame the compensations run concurrently, since the tasks had no order between them going forward
+	var failed bool
+	for i := range sr.Tasks {
+		c := sr.Tasks[i].Comp
+		if c == nil {
+			continue
+		}
+		if !c.Done {
+			return false
+		}
+		if c.Error != "" {
+			failed = true
+		}
+	}
+
+	if failed {
+		sr.Status = StepCompensationFailed
+		if def.compensationFailurePolicy == AbortUnwinding {
+			// The journal names exactly which frames were not unwound, because the stack is left as it stands
+			st.Compensation = CompensationFailed
+			terminate(st, def, now)
+			return true
+		}
+		st.Compensation = CompensationPartial
+	} else {
+		sr.Status = StepCompensated
+	}
+
+	st.Stack = st.Stack[:len(st.Stack)-1]
+	return true
+}
+
+// terminate closes the instance, deciding its terminal status and its output
+func terminate(st *instanceState, def *definition, now time.Time) {
+	if st.Status.IsTerminal() {
+		return
+	}
+
+	if st.Status == StatusCompensating {
+		st.Status = st.TerminalStatus
+		if st.Status == "" {
+			st.Status = StatusFailed
+		}
+		// A partial or failed outcome was already recorded by the frame that produced it, so only the clean cases are decided here
+		if st.Compensation == "" {
+			if len(st.Stack) == 0 && anyCompensated(st) {
+				st.Compensation = CompensationCompleted
+			} else {
+				st.Compensation = CompensationNone
+			}
+		}
+		st.CompletedAt = now
+		return
+	}
+
+	// A run that reached the end without unwinding is failed only when a step failed under WithSkipOnFailure, which continues but still costs the run
+	st.Status = StatusCompleted
+	for i := range st.Steps {
+		if st.Steps[i].Status != StepFailed {
+			continue
+		}
+
+		d := def.byName[st.Steps[i].Name]
+		if d != nil && d.optional {
+			continue
+		}
+		st.Status = StatusFailed
+		if st.Cause == "" {
+			st.Cause = fmt.Sprintf("step %q failed: %s", st.Steps[i].Name, st.Steps[i].Error)
+		}
+	}
+
+	st.Compensation = CompensationNone
+	st.Output = instanceOutput(st, def)
+	st.CompletedAt = now
+}
+
+// anyCompensated reports whether the unwind actually undid anything, which is what separates a clean rollback from an instance that had nothing on its stack
+func anyCompensated(st *instanceState) bool {
+	for i := range st.Steps {
+		switch st.Steps[i].Status {
+		case StepCompensated, StepCompensationFailed:
+			return true
+		}
+	}
+	return false
+}
+
+// instanceOutput returns the output a completed instance reports, which is the output of the step named by WithOutput or of the last step that produced one
+func instanceOutput(st *instanceState, def *definition) json.RawMessage {
+	if def.outputStep != "" {
+		sr := st.step(def.outputStep)
+		if sr == nil {
+			return nil
+		}
+		return stepOutput(sr, def.byName[sr.Name])
+	}
+
+	for i := len(st.Steps) - 1; i >= 0; i-- {
+		sr := &st.Steps[i]
+		if sr.Status != StepCompleted {
+			continue
+		}
+		out := stepOutput(sr, def.byName[sr.Name])
+		if out != nil {
+			return out
+		}
+	}
+	return nil
+}
+
+// deriveCursor names the step the instance is on, purely so status reads and log lines do not have to walk the step list
+// Nothing reads it, so if it ever disagreed with the records the records would win
+func deriveCursor(st *instanceState) string {
+	for i := range st.Steps {
+		switch st.Steps[i].Status {
+		case StepRunning, StepCompensating:
+			return st.Steps[i].Name
+		}
+	}
+	return ""
+}
+
+// currentRunningStep returns the step currently in flight and its definition, or nil when nothing is
+func currentRunningStep(st *instanceState, def *definition) (*stepRecord, *stepDef) {
+	for i := range st.Steps {
+		sr := &st.Steps[i]
+		if sr.Status != StepRunning && sr.Status != StepCompensating {
+			continue
+		}
+		return sr, def.byName[sr.Name]
+	}
+	return nil, nil
+}
+
+// effectiveMaxAttempts returns how many attempts a forward task of a step gets
+func effectiveMaxAttempts(d *stepDef) int {
+	if d.maxAttempts > 0 {
+		return d.maxAttempts
+	}
+	return defaultMaxAttempts
+}
+
+// effectiveCompMaxAttempts returns how many attempts a step's compensation gets
+func effectiveCompMaxAttempts(d *stepDef) int {
+	if d.compMaxAttempt > 0 {
+		return d.compMaxAttempt
+	}
+	return defaultCompMaxAttempts
+}
+
+// groupPolicy returns the failure policy of a group or a fan-out, which defaults to failing on the first failure
+func groupPolicy(d *stepDef) FailurePolicy {
+	if d.failurePolicy != "" {
+		return d.failurePolicy
+	}
+	return FailFast
+}
+
+// backoff returns the delay before an attempt, doubling from the initial delay and stopping at the cap
+func backoff(initial time.Duration, max time.Duration, defInitial time.Duration, defMax time.Duration, retries int) time.Duration {
+	if initial <= 0 {
+		initial = defInitial
+	}
+	if max <= 0 {
+		max = defMax
+	}
+
+	d := initial
+	for range retries - 1 {
+		d *= 2
+		if d >= max {
+			return max
+		}
+	}
+	if d > max {
+		return max
+	}
+	return d
+}
+
+// until returns how much of a deadline is left, never going below zero so a deadline already past resumes as due immediately
+func until(deadline time.Time, now time.Time) time.Duration {
+	if deadline.IsZero() {
+		return 0
+	}
+	d := deadline.Sub(now)
+	if d < 0 {
+		return 0
+	}
+	return d
+}
+
+// instanceDeadline returns when the instance timeout elapses
+func instanceDeadline(st *instanceState, def *definition) time.Time {
+	start := st.StartedAt
+	if start.IsZero() {
+		start = st.CreatedAt
+	}
+	if start.IsZero() {
+		return time.Time{}
+	}
+	return start.Add(def.timeout)
+}
+
+// stepBudget returns how long a step is allowed to take, which for a wait step is how long it waits for its event
+func stepBudget(d *stepDef) time.Duration {
+	if d.kind == KindWait {
+		return d.eventTimeout
+	}
+	return d.stepTimeout
+}
+
+// stepDeadline returns when a running step's own timeout elapses, or the zero time when it declared none
+func stepDeadline(sr *stepRecord, d *stepDef) time.Time {
+	budget := stepBudget(d)
+	if budget <= 0 || sr.StartedAt.IsZero() {
+		return time.Time{}
+	}
+	return sr.StartedAt.Add(budget)
+}
