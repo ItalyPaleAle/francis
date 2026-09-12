@@ -3,6 +3,7 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -58,9 +59,9 @@ func apply(st *instanceState, def *definition, ev *event, now time.Time) (duplic
 	case evRaise:
 		return applyRaisedEvent(st, def, ev.raise, now)
 	case evCancel:
-		return applyCancel(st, ev, now)
+		return applyCancel(st, def, ev, now)
 	case evUnwind:
-		return applyUnwind(st, ev, now)
+		return applyUnwind(st, def, ev, now)
 	case evSuspend:
 		return applySuspend(st, def, ev.reason, now)
 	case evResume:
@@ -124,8 +125,18 @@ func applyReport(st *instanceState, def *definition, p *reportPayload, now time.
 	}
 
 	// The journal's outcome is what decides whether a report counts, never whether this delivery has been seen before
+	// The one exception is a task an unwind abandoned: it was never interrupted, so a success it reports late is real, and recording it is what gets the effect compensated rather than stranded
 	if tr.Done {
-		return true
+		if !tr.Abandoned || p.Error != "" {
+			return true
+		}
+
+		tr.Abandoned = false
+		tr.Error = ""
+		tr.LastError = ""
+		tr.Output = p.Output
+		tr.CompletedAt = now
+		return false
 	}
 
 	// A late report from an earlier attempt is accepted when it succeeded, since the work really was done, and ignored when it failed, since a newer attempt is already in flight
@@ -247,7 +258,7 @@ func applyRaisedEvent(st *instanceState, def *definition, p *eventPayload, now t
 }
 
 // applyCancel asks a running or suspended instance to stop and unwind
-func applyCancel(st *instanceState, ev *event, now time.Time) bool {
+func applyCancel(st *instanceState, def *definition, ev *event, now time.Time) bool {
 	// Cancel takes precedence over a suspension, so it resumes the instance straight into the unwind
 	if st.Status == StatusCompensating {
 		return true
@@ -259,13 +270,13 @@ func applyCancel(st *instanceState, ev *event, now time.Time) bool {
 	}
 	st.Suspended = nil
 	recordUnwoundBy(st, ev)
-	beginUnwind(st, reason, StatusCancelled, now)
+	beginUnwind(st, def, reason, StatusCancelled, now)
 	return false
 }
 
 // applyUnwind moves a completed child back into compensating at its parent's request, which is the one verb only a parent may send
 // A completed child is kept rather than purged for as long as its parent is running for precisely this reason
-func applyUnwind(st *instanceState, ev *event, now time.Time) bool {
+func applyUnwind(st *instanceState, def *definition, ev *event, now time.Time) bool {
 	if st.Status == StatusCompensating {
 		return true
 	}
@@ -277,7 +288,7 @@ func applyUnwind(st *instanceState, ev *event, now time.Time) bool {
 	st.Suspended = nil
 	st.Reported = false
 	recordUnwoundBy(st, ev)
-	beginUnwind(st, reason, StatusCancelled, now)
+	beginUnwind(st, def, reason, StatusCancelled, now)
 	return false
 }
 
@@ -347,18 +358,72 @@ func applyResume(st *instanceState, def *definition, now time.Time) bool {
 }
 
 // beginUnwind opens the compensation phase, recording the cause every compensation receives and the status the unwind terminates into
-func beginUnwind(st *instanceState, cause string, terminal Status, now time.Time) {
+func beginUnwind(st *instanceState, def *definition, cause string, terminal Status, now time.Time) {
 	st.Cause = cause
 	st.TerminalStatus = terminal
 	st.Status = StatusCompensating
 
-	// Steps that were never reached are recorded as skipped rather than left pending, so the journal says plainly that they will not run
 	for i := range st.Steps {
-		if st.Steps[i].Status == StepPending {
-			st.Steps[i].Status = StepSkipped
-			st.Steps[i].CompletedAt = now
+		sr := &st.Steps[i]
+		switch sr.Status {
+		case StepPending:
+			// A step that was never reached is recorded as skipped rather than left pending, so the journal says plainly that it will not run
+			sr.Status = StepSkipped
+			sr.CompletedAt = now
+		case StepRunning:
+			// A step in flight is closed out so the unwind can proceed, rather than waiting on attempts nobody is going to re-drive
+			abandonRunningStep(st, sr, def.byName[sr.Name], now)
 		}
 	}
+}
+
+// abandonOutstandingTasks closes out the tasks of a step that have not reported, marking them abandoned rather than failed
+// The distinction matters: nothing interrupts an attempt that is already executing, so a success one of them reports late is real work that still has to be compensated
+func abandonOutstandingTasks(sr *stepRecord, reason string, now time.Time) {
+	for i := range sr.Tasks {
+		tr := &sr.Tasks[i]
+		if tr.Done {
+			continue
+		}
+
+		tr.Abandoned = true
+		tr.Done = true
+		tr.Error = reason
+		tr.LastError = reason
+		tr.CompletedAt = now
+		if sr.Remaining > 0 {
+			sr.Remaining--
+		}
+	}
+}
+
+// abandonRunningStep closes out the step that was in flight when the unwind opened
+// The tasks that had not reported are abandoned rather than failed, because an attempt already executing is never interrupted and a success it reports late still has to be compensated
+func abandonRunningStep(st *instanceState, sr *stepRecord, d *stepDef, now time.Time) {
+	if d == nil {
+		return
+	}
+
+	// A wait step has no task at all, and nobody is going to raise its event now
+	if d.kind == KindWait {
+		sr.Status = StepSkipped
+		sr.CompletedAt = now
+		sr.Remaining = 0
+		return
+	}
+
+	abandonOutstandingTasks(sr, "abandoned: "+st.Cause, now)
+
+	// The step settles on the records as they now stand, so whatever completed before the unwind opened still enters the compensation stack
+	outcome, errMsg := stepOutcome(sr, d)
+	if outcome == StepFailed {
+		sr.Status = StepFailed
+		sr.Error = errMsg
+	} else {
+		sr.Status = StepCompleted
+	}
+	sr.CompletedAt = now
+	pushFrame(st, sr, d)
 }
 
 // advance derives the next journal from the current one, as a pure function of the journal and the definition
@@ -383,6 +448,7 @@ func advance(st *instanceState, def *definition, instanceID string, now time.Tim
 		changed := settleSteps(st, def, now)
 
 		if st.Status == StatusCompensating {
+			changed = refreshFrames(st, def) || changed
 			changed = unwindNextFrame(st, def, now) || changed
 		} else {
 			changed = openNextStep(st, def, instanceID, now) || changed
@@ -448,9 +514,14 @@ func settleSteps(st *instanceState, def *definition, now time.Time) bool {
 			continue
 		}
 
+		// Fail-fast settles the step while tasks are still outstanding, and those are abandoned rather than failed: an attempt already executing is never interrupted, so a success it reports late still has to be compensated
+		if sr.Remaining > 0 {
+			abandonOutstandingTasks(sr, "abandoned: step "+sr.Name+" failed", now)
+		}
+
 		outcome, errMsg := stepOutcome(sr, d)
 		if outcome == StepFailed {
-			failStep(st, sr, d, errMsg, now)
+			failStep(st, def, sr, d, errMsg, now)
 		} else {
 			completeStep(st, sr, d, now)
 		}
@@ -500,7 +571,7 @@ func completeStep(st *instanceState, sr *stepRecord, d *stepDef, now time.Time) 
 }
 
 // failStep records a step as failed, applies WithSkipOnFailure to its named dependents, and opens the unwind unless the step declared otherwise
-func failStep(st *instanceState, sr *stepRecord, d *stepDef, errMsg string, now time.Time) {
+func failStep(st *instanceState, def *definition, sr *stepRecord, d *stepDef, errMsg string, now time.Time) {
 	sr.Status = StepFailed
 	sr.Error = errMsg
 	sr.CompletedAt = now
@@ -525,7 +596,7 @@ func failStep(st *instanceState, sr *stepRecord, d *stepDef, errMsg string, now 
 	}
 
 	cause := fmt.Sprintf("step %q failed: %s", sr.Name, errMsg)
-	beginUnwind(st, cause, StatusFailed, now)
+	beginUnwind(st, def, cause, StatusFailed, now)
 }
 
 // pushFrame adds a settled step to the compensation stack when it is compensable and holds at least one task whose effect has to be undone
@@ -534,6 +605,11 @@ func pushFrame(st *instanceState, sr *stepRecord, d *stepDef) {
 		return
 	}
 	if len(compensableTasks(sr, d)) == 0 {
+		return
+	}
+
+	// A step already on the stack, or already unwound, is not pushed again
+	if slices.Contains(st.Stack, sr.Name) || sr.Status == StepCompensating || sr.Status == StepCompensated || sr.Status == StepCompensationFailed {
 		return
 	}
 
@@ -637,7 +713,7 @@ func openStep(st *instanceState, def *definition, sr *stepRecord, instanceID str
 			// The list is the fan-out's own input, so a list that cannot be read is the step failing rather than the instance crashing
 			sr.Tasks = nil
 			sr.Remaining = 0
-			failStep(st, sr, d, err.Error(), now)
+			failStep(st, def, sr, d, err.Error(), now)
 			return true
 		}
 
@@ -707,6 +783,30 @@ func fanOutItems(st *instanceState, def *definition, d *stepDef) ([]json.RawMess
 	return items, nil
 }
 
+// refreshFrames adds a frame for a step that gained something to compensate after the unwind had already opened
+// That is the straggler case: an attempt the unwind abandoned was never interrupted, so a success it reports late is real work, and it goes on top of the stack because it completed last
+func refreshFrames(st *instanceState, def *definition) bool {
+	var changed bool
+	for i := range st.Steps {
+		sr := &st.Steps[i]
+		if sr.Status != StepCompleted && sr.Status != StepFailed {
+			continue
+		}
+
+		d := def.byName[sr.Name]
+		if d == nil {
+			continue
+		}
+
+		before := len(st.Stack)
+		pushFrame(st, sr, d)
+		if len(st.Stack) != before {
+			changed = true
+		}
+	}
+	return changed
+}
+
 // unwindNextFrame drives the compensation stack one frame at a time, in reverse order, and terminates the instance once it is empty
 // A frame is fully compensated before the next one starts, which is what makes the reverse order mean anything
 func unwindNextFrame(st *instanceState, def *definition, now time.Time) bool {
@@ -750,17 +850,20 @@ func unwindNextFrame(st *instanceState, def *definition, now time.Time) bool {
 
 	if failed {
 		sr.Status = StepCompensationFailed
+		st.Stack = st.Stack[:len(st.Stack)-1]
+
 		if def.compensationFailurePolicy == AbortUnwinding {
-			// The journal names exactly which frames were not unwound, because the stack is left as it stands
+			// Stopping here leaves the frames below untouched, and the stack is what names them for the operator
 			st.Compensation = CompensationFailed
 			terminate(st, def, now)
 			return true
 		}
+
 		st.Compensation = CompensationPartial
-	} else {
-		sr.Status = StepCompensated
+		return true
 	}
 
+	sr.Status = StepCompensated
 	st.Stack = st.Stack[:len(st.Stack)-1]
 	return true
 }

@@ -638,7 +638,9 @@ func (o *orchestrator) childDefinitionFor(stepName string, index int) *Workflow 
 func (o *orchestrator) cancelOutstanding(ctx context.Context, sr *stepRecord, d *stepDef) error {
 	for i := range sr.Tasks {
 		tr := &sr.Tasks[i]
-		if tr.Done {
+
+		// A task an unwind abandoned is done as far as the journal is concerned, but its job may still be waiting to run, and there is no reason to let it
+		if tr.Done && !tr.Abandoned {
 			continue
 		}
 
@@ -735,7 +737,7 @@ func (o *orchestrator) applyElapsedDeadlines(st *instanceState, now time.Time) {
 	instanceDue := instanceDeadline(st, o.def)
 	if !instanceDue.IsZero() && !now.Before(instanceDue) {
 		if st.Status != StatusCompensating {
-			beginUnwind(st, "instance timeout elapsed", StatusFailed, now)
+			beginUnwind(st, o.def, "instance timeout elapsed", StatusFailed, now)
 		}
 		return
 	}
@@ -752,7 +754,7 @@ func (o *orchestrator) applyElapsedDeadlines(st *instanceState, now time.Time) {
 
 	// A wait step that never got its event is the one case where the step's timeout ends the run rather than failing a task
 	if d.kind == KindWait {
-		beginUnwind(st, fmt.Sprintf("event %q timed out", d.effectiveEventName()), StatusFailed, now)
+		beginUnwind(st, o.def, fmt.Sprintf("event %q timed out", d.effectiveEventName()), StatusFailed, now)
 		return
 	}
 

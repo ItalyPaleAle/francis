@@ -137,6 +137,8 @@ type taskRecord struct {
 	// Error is set once the task has failed for good
 	Error string `msgpack:"error,omitempty"`
 	Done  bool   `msgpack:"done"`
+	// Abandoned marks a task an unwind closed out before it reported, which keeps a late success countable: the work really happened, so it is recorded and compensated like any other
+	Abandoned bool `msgpack:"abandoned,omitempty"`
 	// Compensation tracks the undo of this task once its frame is being unwound
 	Comp        *compRecord `msgpack:"comp,omitempty"`
 	Compensated bool        `msgpack:"compensated,omitempty"`
