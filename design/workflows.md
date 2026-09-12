@@ -1,21 +1,24 @@
 # Design: generic workflows as a built-in actor
 
-- **Status**: draft, for discussion
+- **Status**: draft, revision 2 — incorporates the resolutions of every finding in §21
 - **Package**: `builtin/workflow` (new)
-- **Reserved actor types**: `francis.builtin.workflow.<name>`, `francis.builtin.workflow.<name>.worker`
+- **Reserved actor types**: `francis.builtin.workflow.<name>` (orchestrator), `francis.builtin.workflow.<name>.worker[.<cap>]` (forward tasks), `francis.builtin.workflow.<name>.undo[.<cap>]` (compensations), `francis.builtin.workflow.<name>.registry` (singleton), plus a `cronjob` for auto-purge when enabled
+- **Framework changes required**: two small additions to Francis, listed in §17
 - **Prior art in the wild**: Pixel's `imageoptim` service, which hand-rolls this pattern on top of Francis actors, jobs, and alarms. Its [`pkg/actors/README.md`](https://github.com/ItalyPaleAle/pixel/blob/devel/v1/services/imageoptim/pkg/actors/README.md) documents the shape this design generalizes.
 
 ## 1. Summary
 
 Francis already has every primitive a durable workflow engine needs: single-activation actors with turn-based concurrency, durable per-actor state, durable jobs with retries and dead-lettering, named replaceable alarms, and placement that spreads actors across a cluster. What it does not have is the *pattern* that assembles them, so every application that wants "run these steps, in this order, some of them in parallel, and undo them if something fails" writes the same orchestrator by hand.
 
-This document generalizes the pattern that `imageoptim` proved out into a **built-in actor** that runs arbitrary workflows: sequences of steps, parallel groups, dynamic fan-out, and **compensations** that roll back what already succeeded.
+This document generalizes the pattern that `imageoptim` proved out into a **built-in actor** that runs arbitrary workflows: sequences of steps, parallel groups, dynamic fan-out, child workflows, waits on external events, suspend and resume, and **compensations** that roll back what already succeeded.
 
 Two commitments shape everything below.
 
 The first is that there is **no SDK abstracting the underlying actors** the way Dapr Workflow does. No code-as-workflow, no replay, no determinism requirement, no hidden control flow. A workflow is a **declared graph of named steps** plus plain Go handler functions, and the engine is a state machine over a durable journal.
 
 The second is the **orchestration boundary** (§4): the `Workflow` actor orchestrates and performs nothing. Every unit of work, without exception, runs on a `WorkflowWorker`. This is the single most important rule in the design, and making it structural — rather than a convention each application has to keep — is most of the value of shipping this as a built-in.
+
+This revision also makes a third commitment that the first draft left implicit: **the engine owns its own failure handling**. Retry attempts, dead-letter recovery, and the deadline are all recorded in the journal and driven by the same reconcile loop, rather than delegated to per-actor-type settings the engine can't observe. Two review passes (§21) found that the first draft leaned on framework behavior that isn't there; this one doesn't.
 
 ## 2. Motivation
 
@@ -46,13 +49,13 @@ ImageWorkflow/<imageID>                         ← orchestrator: state and disp
 
 The properties that make it work are all general, and none of them are about images:
 
-1. **The orchestrator performs no step.** It reads and writes its own state, arms its alarm, and dispatches jobs. Every read and write of the object store, every libvips encode, and the callback happen on a worker. The manifest write and the webhook were originally done inline on the orchestrator's terminal turn, and moving them out is the change this design takes as its starting point.
+1. **The orchestrator performs no step.** It reads and writes its own state, arms its alarm, and dispatches jobs. Every read and write of the object store, every libvips encode, and the callback happen on a worker.
 2. **Executable steps are durable jobs; the deadline is an alarm.** A job is dispatched per unit of work, is retried, and is dead-lettered rather than dropped. The deadline is an alarm because it must be replaceable and cancellable by name, and it is re-armed on entry to each step so it covers whichever one is in flight.
 3. **There is no phase field.** What the workflow does next is derived from its state — remaining thumbnails, then the manifest, then the webhook — which is what keeps every report safe to redeliver.
 4. **Every step is idempotent**, because jobs and alarms are delivered at least once: a repeated `start` re-schedules only what has not reported, a repeated result is recorded once, a re-run thumbnail overwrites the same object, and a re-written manifest writes identical bytes.
 5. **A duplicate report still drives the next step**, even though it records nothing. A turn that persisted its result and then failed to dispatch is retried from the duplicate branch, and without this the workflow would sit waiting for a step nobody scheduled.
 6. **One actor per unit of work** is what buys parallelism: Francis places workers across hosts and bounds them with `WithConcurrencyLimit`.
-7. **Failure has two paths**: a retryable error returns and is retried by the job engine; a permanent one reports a failed result immediately, and the dead-letter hook (`ActorJobFailed`) covers the case where retries are exhausted. The deadline remains the backstop, because that hook is best-effort.
+7. **Failure has two paths**: a retryable error returns and is retried; a permanent one reports a failed result immediately, and the dead-letter hook (`ActorJobFailed`) covers the case where retries are exhausted. The deadline remains the backstop, because that hook is best-effort.
 8. **What a step's failure costs the workflow varies by step.** A failed thumbnail is recorded and the workflow still terminates; an unstored manifest fails the workflow and skips the callback; an unacknowledged callback is logged and the workflow still completes.
 
 ### 2.2 Why generalize it
@@ -70,10 +73,14 @@ Two things `imageoptim` does **not** need, and which a general engine must have:
 
 - Sequential steps, static parallel groups, and dynamic fan-out over a runtime-sized list.
 - Per-step **compensation callbacks**, run in reverse order when the workflow fails or is cancelled.
+- **Child workflows** with their own journal, whose result alone enters the parent's.
+- **Suspend and resume** of a running instance, with its deadlines paused.
 - Durable and resumable across restarts, host loss, and rebalancing, with at-least-once execution.
 - Steps run **anywhere in the cluster**, with per-host concurrency bounds and optional capability requirements.
 - **A `Workflow` actor that cannot perform work**, because the engine gives user code nowhere to run on it (§4).
-- Observable: status query, listing, metrics, traces, and a journal an operator can read.
+- **Self-healing**: a lost report, a dead-lettered job, or a deleted alarm is recovered by the engine, not by an operator.
+- Observable and operable: status query, listing filtered by status, explicit and scheduled purge, metrics, traces, and a journal an operator can read.
+- Safe rolling deployments: a definition registry that refuses drift, and instances that drain onto the hosts that can serve them.
 - Registered and driven exactly like the other built-in actors (`taskpool`, `cronjob`, `signal`, `ratelimit`).
 
 ### Non-goals
@@ -87,7 +94,7 @@ Two things `imageoptim` does **not** need, and which a general engine must have:
 
 > **The `Workflow` actor orchestrates. It never performs a step.**
 >
-> It reads and writes its own state, arms and drops one alarm, and dispatches jobs. Anything that can fail, or that takes longer than an instant, belongs on a `WorkflowWorker`.
+> It reads and writes its own state, arms and drops its timers, and dispatches jobs. Anything that can fail, or that takes longer than an instant, belongs on a `WorkflowWorker`.
 
 This is stated first because it is the rule every other decision in this document defers to, and because it is the rule that is easiest to erode one small exception at a time. "It's only one `PUT`." "The callback usually answers in 50ms." Each is individually defensible and collectively fatal.
 
@@ -96,13 +103,13 @@ This is stated first because it is the rule every other decision in this documen
 A `Workflow` actor holds its turn lock for the duration of a turn. While a turn runs, that instance cannot:
 
 - accept a result from any other worker, so a wide fan-out serializes behind the slow turn;
-- accept a cancellation, so `Cancel` does not take effect until the blocking call returns;
+- accept a cancellation or a suspend, so neither takes effect until the blocking call returns;
 - handle its own deadline alarm, so the mechanism that guarantees termination is itself blocked by the thing it exists to bound;
 - serve a status `Peek`, because `Peek` excludes an in-flight write turn.
 
 A single blocking call on the orchestrator therefore degrades every property the engine is supposed to provide, and it does so exactly when things are going worst — a store that has become slow, a callback endpoint that has started hanging.
 
-It also breaks the failure model. A step that runs on a worker gets its own retries, its own backoff, its own dead-letter record, and its own deadline, and a failure is *data* the journal records. The same work inlined on the orchestrator gets the orchestrator's retry policy, and its failure re-runs the whole turn — including the parts that already succeeded.
+It also breaks the failure model. A step that runs on a worker gets its own attempts, its own backoff, and its own deadline, and a failure is *data* the journal records. The same work inlined on the orchestrator gets the orchestrator's retry policy, and its failure re-runs the whole turn — including the parts that already succeeded.
 
 Francis' other built-ins reach the same conclusion from the same starting point: `cronjob` splits a scheduler from a runner precisely so that a long-running job never blocks the scheduler's lifecycle invocations.
 
@@ -115,8 +122,8 @@ Francis' other built-ins reach the same conclusion from the same starting point:
 | `advance`: decide what comes next, as a pure function of the journal | Any CPU-bound work: encoding, rendering, compression |
 | Build a job payload from the journal, in memory | Anything with a timeout of its own |
 | `GetState` / `SetState` / `DeleteState` | Anything whose failure should be retried independently |
-| `SetAlarm` / `DeleteAlarm` | Anything that should appear as its own dead-letter record |
-| `Dispatch` / `CancelJob` | |
+| `SetAlarm` / `DeleteAlarm` | Anything that should appear as its own attempt in the journal |
+| `Dispatch` / `CancelJob` / `RetryJob` / `DeleteJob` / `ListJobs` | |
 | `Halt`, log, emit a metric | |
 
 The operations in the left column are not free — `SetState` and `Dispatch` are database writes and can fail. The distinction is that they are the framework's own bounded, fast, retried operations, and the whole turn is retried as a unit if one of them fails. The rule is about **external and user work**, which is neither bounded nor the framework's to retry.
@@ -124,7 +131,7 @@ The operations in the left column are not free — `SetState` and `Dispatch` are
 Two consequences are worth stating explicitly, because they are the cases that look like exceptions:
 
 - **Deriving a payload is orchestration; writing it is a step.** `imageoptim` builds its manifest on the orchestrator, from persisted state, and hands the finished bytes to a worker to store. That is correct on both counts: building is a pure in-memory function of the journal, and doing it there is what makes a retried write store *identical* bytes rather than re-deriving them against a journal that has since moved on.
-- **The orchestrator never calls `Invoke`.** A synchronous invocation couples this instance's turn lock to another actor's availability and queue depth. Talking to another actor is a step, dispatched as a job, and it reports back like any other.
+- **The orchestrator never calls `Invoke` on behalf of user logic.** A synchronous invocation couples this instance's turn lock to another actor's availability and queue depth. Talking to another actor is a step, dispatched as a job, and it reports back like any other. The engine makes exactly one exception for itself: the once-per-host, cached definition-registry check in §15.2, which is framework-owned, bounded to a few milliseconds, and happens at most once per version for the life of the process.
 
 ### 4.3 How the engine enforces it
 
@@ -133,10 +140,10 @@ A hand-rolled workflow keeps this rule by discipline. A built-in keeps it by con
 1. **The definition exposes no hook that runs on the `Workflow` actor.** `WithRun` and `WithCompensate` are the only places user code appears, and both are invoked exclusively by `WorkflowWorker`. There is no `WithBeforeStep`, no orchestrator-side predicate, no expander callback. If a future option seems to want one, that is a signal the feature is a step.
 2. **`advance` is a pure function** of `(journal, definition)`. It performs no I/O, takes no `context.Context`, and returns the next journal. It is unit-testable from a serialized journal alone, and it cannot block.
 3. **Fan-out sizes come from a step's output** (§9.2), not from a callback the orchestrator runs. This costs one durable round-trip and is the single largest concession the rule extracts — and it is worth it.
-4. **Conditions are step outputs** (§17), not predicates evaluated on the orchestrator, for the same reason.
-5. **Payload and journal size caps** (§11.2) are checked on the worker, before a report is dispatched, so the orchestrator never spends a turn serializing something unbounded.
+4. **Conditions are step outputs** (§20), not predicates evaluated on the orchestrator, for the same reason.
+5. **Payload and journal size caps** (§13.2) are checked on the worker, before a report is dispatched, so the orchestrator never spends a turn serializing something unbounded.
 
-The engine can also assert the boundary in tests: a `Workflow` actor constructed against a `Service` whose transport panics on anything but state, alarm, and job operations will fail any turn that reaches past the boundary.
+The engine also asserts the boundary in tests: a `Workflow` actor constructed against a `Service` whose transport panics on anything but state, alarm, and job operations fails any turn that reaches past the boundary.
 
 ## 5. Relationship to Dapr Workflow
 
@@ -152,9 +159,12 @@ This design keeps the parts of Dapr's model that are unambiguously good and drop
 | Determinism required | yes, strictly | no |
 | History used for | replaying the orchestrator function | driving a state machine, and audit |
 | Activity dispatch | queue + work items | Francis durable job per task |
+| Activity retries | policy on the activity call | policy on the step, attempts recorded in the journal |
 | Orchestration state | event-sourced history | one journal document per instance |
 | Compensation | hand-written `defer`/`try` inside the orchestrator | declared per step, engine-driven |
 | Dynamic fan-out | `for` loop over `CallActivity` | `ForEach` step over a list from an upstream step |
+| Child workflows | `CallChildWorkflow` | `Child` step; the child has its own journal |
+| Suspend / resume | yes | yes, with deadlines paused |
 | Conditionals, loops | arbitrary Go | conditions only; loops out of scope |
 
 Notably, Dapr's orchestrator is also forbidden from doing real work — that is what the determinism rules amount to — but it enforces this with a contract the developer must learn and can violate at runtime. Here the same guarantee comes from there being no place to put the violation.
@@ -165,38 +175,50 @@ The cost of dropping replay is expressiveness: a graph cannot say "retry the who
 
 ### 6.1 Vocabulary
 
-- **Definition** — a named, versioned graph of steps, registered on a host at startup, together with the Go functions that implement them. Registered identically on every host that should run the workflow's steps.
+- **Definition** — a named, versioned graph of steps, registered on a host at startup, together with the Go functions that implement them. Registered identically on every host that should run the workflow's steps, and checked against the **registry** (§15) so that it is.
 - **Instance** — one execution of a definition, identified by an **instance ID**. One `Workflow` actor instance per workflow instance.
-- **Step** — a named node in the definition. A step is one of the kinds below.
-- **Task** — one execution unit of a step, performed by one `WorkflowWorker` actor and driven by one durable job. A plain step has one task; a parallel group has one per member; a fan-out has one per item.
+- **Step** — a named node in the definition. A step is one of the kinds below. Step names are unique within a definition.
+- **Task** — one execution unit of a step, performed by one `WorkflowWorker` actor and driven by one durable job. A plain step has one task; a parallel group has one per member; a fan-out has one per item; a child step's task is a whole child instance.
+- **Attempt** — one run of a task's handler. Attempts are counted in the journal, and the step's retry policy decides how many are allowed.
 - **Journal** — the `Workflow` actor's durable state: the instance's status, its input, and one record per step and task. It is the single source of truth.
 - **Compensation** — a per-step callback that undoes the effect of a task that completed successfully.
+- **Registry** — a cluster-wide singleton per workflow name that records the fingerprint of each version's definition, so two hosts can't serve different graphs under the same version.
 
 ### 6.2 Step kinds
 
 | Kind | Constructor | Tasks | Notes |
 |---|---|---|---|
 | Plain | `workflow.Step(name, opts...)` | 1 | The common case |
-| Parallel group | `workflow.Parallel(name, steps...)` | one per member | Members are plain steps; they run concurrently |
-| Fan-out | `workflow.ForEach(name, opts...)` | one per item, sized at runtime | Items come from an upstream step's output |
+| Parallel group | `workflow.Parallel(name, steps...)` | one per member | Members are plain or child steps; they run concurrently |
+| Fan-out | `workflow.ForEach(name, opts...)` | one per item, sized at runtime | Items come from an upstream step's output; each task is a plain handler or a child instance |
+| Child workflow | `workflow.Child(name, opts...)` | 1 (a child instance) | Runs another registered definition; only its result enters this journal (§12) |
 | Wait for event | `workflow.WaitForEvent(name, opts...)` | 0 | Parks the instance until `RaiseEvent` or a deadline |
 
-Steps are addressed **by name**, never by position, which is what makes the journal survive a definition change (§14).
+Steps are addressed **by name**, never by position, which is what makes the journal survive a definition change (§15). `New` rejects a definition with two steps of the same name, and — because a `WaitForEvent` step's event name defaults to its step name and may be set with `WithEventName` — two steps listening for the same event name. Both rules exist so that a report or an event is never ambiguous about which record it belongs to.
 
 ### 6.3 Data flow between steps
 
 Each task receives, in its job payload:
 
-- the **workflow input**, as given to `Start`;
+- the **workflow input**, as given to `Start`, capped by `WithMaxInputSize` (default 64 KiB);
 - the **output of the immediately preceding step**;
 - the outputs of any steps named with `WithInputFrom("a", "b")`;
 - for a fan-out task, its **item**.
 
 The engine never ships the whole journal to a worker. This keeps the payload bounded and makes the data dependencies of a step explicit and auditable from the definition alone.
 
-A task returns `(any, error)`. The output is JSON-encoded into the journal, subject to `WithMaxOutputSize` (default 64 KiB per task, mirroring `signal`'s payload cap). A fan-out step's output, seen by later steps, is the array of its tasks' outputs, ordered by item index.
+A task returns `(any, error)`. The output is JSON-encoded into the journal, subject to `WithMaxOutputSize` (default 16 KiB per task; §13.2 explains the number). What later steps see as a step's output depends on its kind:
 
-Outputs are for **control flow and small results**, not for payloads. The guidance is the same as for actor state: keep large blobs in an object store and put a reference in the output.
+| Kind | Output seen by later steps |
+|---|---|
+| Plain | the handler's return value |
+| Parallel group | an object keyed by member name, each member's output as its value |
+| Fan-out | an array of the tasks' outputs, ordered by item index; failed items carry `{"error": "…"}` under `TolerateFailures` |
+| Child workflow | the child instance's output (§12.3) |
+| Wait for event | the event's payload |
+| Skipped (§8.9) | absent; `DecodeOutput` returns `ErrStepSkipped` |
+
+Outputs are for **control flow and small results**, not for payloads. The guidance is the same as for actor state: keep large blobs in an object store and put a reference in the output. §13.2 gives the arithmetic that makes this more than advice.
 
 ## 7. Public API
 
@@ -208,16 +230,23 @@ import "github.com/italypaleale/francis/builtin/workflow"
 wf, err := workflow.New("order-fulfillment",
     workflow.WithVersion(3),
     workflow.WithTimeout(30*time.Minute),
-    workflow.WithRetention(24*time.Hour),
+    workflow.WithRetention(workflow.RetentionPolicy{
+        Completed: 24 * time.Hour,
+        Failed:    7 * 24 * time.Hour,
+        Cancelled: 7 * 24 * time.Hour,
+    }),
+    // Sweep terminated instances past their retention every night, cluster-wide on one host
+    workflow.WithAutoPurge("0 3 * * *"),
     workflow.WithConcurrency(4),
     workflow.WithLogger(log),
 
     workflow.WithSteps(
-        // A plain step, with the compensation that undoes it
+        // A plain step, with the compensation that undoes it and its own retry policy
         workflow.Step("charge-card",
             workflow.WithRun(chargeCard),
             workflow.WithCompensate(refundCard),
             workflow.WithMaxAttempts(5),
+            workflow.WithRetryBackoff(2*time.Second, time.Minute),
             workflow.WithStepTimeout(30*time.Second),
         ),
 
@@ -237,14 +266,13 @@ wf, err := workflow.New("order-fulfillment",
             workflow.Step("sms", workflow.WithRun(sendSMS)),
         ),
 
-        // One task per element of the "plan-shipments" output, run concurrently
+        // One child workflow per element of the "plan-shipments" output, run concurrently
+        // Each shipment is a workflow of its own, with its own journal and its own compensations
         workflow.ForEach("ship",
             workflow.WithItemsFrom("plan-shipments"),
-            workflow.WithRun(bookCourier),
-            workflow.WithCompensate(cancelCourier),
+            workflow.WithChild(shipmentWorkflow),
             workflow.WithMaxParallel(8),
             workflow.WithFailurePolicy(workflow.CollectFailures),
-            workflow.WithRequiredCapability("eu-region"),
         ),
 
         // Best-effort: a failure here is recorded and the workflow still completes
@@ -259,21 +287,24 @@ if err != nil {
 }
 
 // Register before the host starts, on every host that should run this workflow's steps
+// The child definition is registered the same way, on the same hosts
 err = host.RegisterBuiltInActor(wf)
 ```
 
-`New` follows the conventions of the other built-ins exactly: a unique name validated with `ref.ValidateComponents`, functional options, a single returned value registered with `RegisterBuiltInActor`, and a `Service` method that binds it to an `actor.Service`.
+`New` follows the conventions of the other built-ins exactly: a unique name validated with `ref.ValidateComponents`, functional options, a single returned value registered with `RegisterBuiltInActor`, and a `Service` method that binds it to an `actor.Service`. It also validates the graph: unique step and event names, `WithInputFrom` and `WithSkipOnFailure` referring to steps that exist and precede or follow as required, and a child definition that is itself valid.
+
+`WithVersion` is the definition's version and is stamped on every instance it starts. Bump it for any change to the graph (§15.3).
 
 ### 7.2 Handler contract
 
 ```go
-// RunFunc performs one task of a step and returns the output recorded in the journal
+// RunFunc performs one attempt of a task and returns the output recorded in the journal
 // It runs on a WorkflowWorker, never on the Workflow actor
-// Returning an error retries the task; returning actor.ErrJobPermanentFailure fails it immediately; returning actor.ErrJobRejected declines it so another host runs it
+// Returning an error records a failed attempt, retried per the step's policy; returning actor.ErrJobPermanentFailure fails the task without further attempts; returning actor.ErrJobRejected declines it so another host runs it, without counting an attempt
 type RunFunc func(ctx context.Context, t Task) (output any, err error)
 
 // CompensateFunc undoes the effect of one task that had completed successfully
-// It also runs on a WorkflowWorker
+// It runs on the compensation worker type, and is retried per the step's compensation policy
 type CompensateFunc func(ctx context.Context, c Compensation) error
 
 type Task interface {
@@ -283,7 +314,7 @@ type Task interface {
     Step() string
     // Index is the position within a parallel group or fan-out, and -1 for a plain step
     Index() int
-    // Attempt is 1 on the first execution and increases with each retry
+    // Attempt is 1 on the first execution and increases with each retry, as recorded in the journal
     Attempt() int
 
     // DecodeInput reads the workflow input, as given to Start
@@ -291,6 +322,7 @@ type Task interface {
     // DecodeItem reads this task's fan-out item, and is a no-op for a step that is not a fan-out
     DecodeItem(into any) error
     // DecodeOutput reads the output of an upstream step, which must be the preceding step or one named with WithInputFrom
+    // It returns ErrStepSkipped when that step was skipped
     DecodeOutput(step string, into any) error
 }
 
@@ -303,7 +335,9 @@ type Compensation interface {
 }
 ```
 
-A handler is a plain function. It may call the clock, do I/O, use randomness, and start goroutines — precisely because it never runs on the `Workflow` actor. The only contract is **idempotency**, because at-least-once delivery means it can run twice.
+A handler is a plain function. It may call the clock, do I/O, use randomness, and start goroutines — precisely because it never runs on the `Workflow` actor. The only contract is **idempotency**, because at-least-once delivery means it can run twice: once for a retried attempt, and once if the host died between finishing and reporting.
+
+The retry contract is worth being precise about, because the first draft got it wrong. A returned error does **not** make Francis retry the job. The worker catches it, reports it to the orchestrator as a failed attempt, and halts. The orchestrator records the attempt in the journal and, if the step's `WithMaxAttempts` allows another, schedules the next one after the step's backoff. Attempts are therefore per step, per compensation, visible in `GetStatus`, and independent of any actor-type setting (§8.8).
 
 ### 7.3 Driving workflows
 
@@ -312,51 +346,66 @@ svc := wf.Service(host.Service())
 
 // Start an instance
 // Without WithInstanceID, the engine mints a UUIDv7, which sorts by creation time
-id, err := svc.Start(ctx, OrderInput{OrderID: "A-91", Total: 4999})
+id, created, err := svc.Start(ctx, OrderInput{OrderID: "A-91", Total: 4999})
 
-// Use a natural key to make starting idempotent: a second Start with the same ID is a no-op
-id, err = svc.Start(ctx, input, workflow.WithInstanceID("order-A-91"))
+// Use a natural key to make starting idempotent: a second Start with the same ID finds the first
+// created is false, and the input of the second call is discarded, so a caller that must know can check it
+id, created, err = svc.Start(ctx, input, workflow.WithInstanceID("order-A-91"))
 
 // Read the current status without taking the Workflow actor's exclusive turn
 status, err := svc.GetStatus(ctx, id)
 
-// List instances, paginated, built on Service.ListStates
+// List instances, filtered server-side by status, paginated in creation order
 page, err := svc.List(ctx, &workflow.ListOptions{Status: workflow.StatusRunning, Limit: 50})
 
 // Deliver an external event to a WaitForEvent step
 err = svc.RaiseEvent(ctx, id, "approval", ApprovalPayload{By: "ops"})
 
+// Pause a running instance without losing its place, then continue it
+err = svc.Suspend(ctx, id, "downstream maintenance")
+err = svc.Resume(ctx, id)
+
 // Ask a running instance to stop and unwind
 err = svc.Cancel(ctx, id, "customer cancelled the order")
 
-// Drop the journal of a terminated instance before its retention elapses
+// Drop everything a terminated instance left behind: its journal, its dead-letters, its children
 err = svc.Purge(ctx, id)
+
+// Sweep every terminated instance past its retention, which is what the auto-purge cron job runs
+n, err := svc.PurgeTerminated(ctx)
+
+// Operator view of the registry: which versions exist, their fingerprints, and any conflicts
+defs, err := svc.Definitions(ctx)
 ```
 
-`Start` returns as soon as the start job is durable, which is the same guarantee `imageoptim`'s handler gives its callers: from that point on the work survives a restart of the process.
+`Start` returns as soon as the start job is durable, which is the same guarantee `imageoptim`'s handler gives its callers: from that point on the work survives a restart of the process. `Start` is idempotent only for suppressing a duplicate dispatch of the *same* request: an instance ID that has already terminated is not restarted (the repeated `start` is dropped, as `imageoptim`'s own handler drops it), so re-driving a failed run means minting a fresh instance ID.
+
+Authorization — who may `Start`, `Cancel`, `Suspend`, `RaiseEvent`, or `Purge` a given instance — is the calling application's responsibility, as it is for every other actor invocation in Francis. The engine offers no hook for it, deliberately.
 
 ## 8. Execution model
 
-### 8.1 The two actors
+### 8.1 The actors
 
-Two reserved actor types per registered workflow:
+Per registered workflow, the engine registers these reserved types:
 
 | Actor | Actor type | Instances | Responsibility |
 |---|---|---|---|
-| `Workflow` | `francis.builtin.workflow.<name>` | one per instance, actor ID is the instance ID | **Orchestrator.** Owns the journal. Decides what happens next, records what came back, and terminates. State, alarm, and dispatch — nothing else (§4). |
-| `WorkflowWorker` | `francis.builtin.workflow.<name>.worker` | one per task | **Worker.** Performs exactly one task and reports the outcome back. Every user handler and every external call happens here. |
+| `Workflow` | `francis.builtin.workflow.<name>` | one per instance, actor ID is the instance ID | **Orchestrator.** Owns the journal. Decides what happens next, records what came back, and terminates. State, timers, and dispatch — nothing else (§4). |
+| `WorkflowWorker` | `francis.builtin.workflow.<name>.worker`, plus `.worker.<cap>` per capability | one per task | **Worker.** Performs one attempt of one task and reports the outcome back. Every user `RunFunc` and every external call happens here. |
+| Compensation worker | `francis.builtin.workflow.<name>.undo`, plus `.undo.<cap>` per capability | one per compensated task | The same shape as the worker, for `CompensateFunc`. A separate type so compensations have their own per-host capacity budget and can't be starved by forward work. |
+| Registry | `francis.builtin.workflow.<name>.registry` | the cluster-wide singleton | Records each version's definition fingerprint; answers the once-per-host consistency check (§15). |
 
-A `WorkflowWorker` is stateless: the task arrives in its job payload and the result leaves in another job, so it halts itself as soon as it has reported rather than lingering to its idle timeout. This matters for a wide fan-out, which would otherwise hold one activation per task.
+A worker is stateless: the task arrives in its job payload and the result leaves in another job, so it halts itself as soon as it has reported rather than lingering to its idle timeout. This matters for a wide fan-out, which would otherwise hold one activation per task. A worker does keep one thing for the life of its activation: the result of the attempt it just ran, so that if reporting fails and Francis retries the report, the handler is not run again (§8.8).
 
-Splitting them is what buys parallelism — Francis places workers independently across the cluster — and it is what keeps the orchestration boundary structural rather than aspirational.
+Splitting orchestrator from worker is what buys parallelism — Francis places workers independently across the cluster — and it is what keeps the orchestration boundary structural rather than aspirational.
 
 ### 8.2 The `Workflow` turn
 
-Every turn — whether triggered by the start job, a task result, an event, a cancellation, or the deadline alarm — runs the same four phases:
+Every turn — whether triggered by the start job, a task report, an event, a cancel, a suspend or resume, the watchdog, or the deadline alarm — runs the same four phases:
 
 ```go
 func (w *Workflow) turn(ctx context.Context, ev event) error {
-    // The journal is the source of truth, and a terminated instance ignores everything
+    // The journal is the source of truth, and a terminated instance ignores everything but purge
     st, err := w.client.GetState(ctx)
     if err != nil {
         return err
@@ -366,26 +415,28 @@ func (w *Workflow) turn(ctx context.Context, ev event) error {
     }
 
     // Fold the event into the journal
-    // A duplicate, or a result for a task the journal does not know about, records nothing here
+    // A duplicate, or a report for a task the journal already has an outcome for, records nothing here
+    // That includes this very turn being retried after its SetState succeeded and its dispatch failed
     apply(&st, ev)
 
     // Advance the cursor as far as the journal allows, which is a pure function of the journal and the definition
-    // This is where a completed step opens the next one, a failed step opens the unwind, and a fully unwound instance terminates
+    // This is where a completed step opens the next one, a failed attempt schedules the next, a failed step opens the unwind, and a fully unwound instance terminates
     advance(&st, w.def)
 
     // The journal is durable before anything is scheduled, so a lost dispatch is always recoverable and an orphan result never is
+    // The status label is written in the same operation, so the listing index can never disagree with the journal
     err = w.client.SetState(ctx, st, w.stateOpts(st))
     if err != nil {
         return err
     }
 
     // Everything the journal says should be running is dispatched, idempotently
-    // This runs on every turn, including the ones that recorded nothing
+    // This runs on every turn, including the ones that recorded nothing, and is a no-op while the instance is suspended
     return w.reconcile(ctx, st)
 }
 ```
 
-`advance` is pure and total: given the journal and the definition, it produces the next journal. It never performs I/O and never runs user code, so it is trivially unit-testable, and a bug in it can be reproduced from a serialized journal alone.
+`advance` is pure and total: given the journal and the definition, it produces the next journal. It never performs I/O and never runs user code, so it is trivially unit-testable, and a bug in it can be reproduced from a serialized journal alone. `Cursor` (§13.1) is one of its outputs, never one of its inputs.
 
 `reconcile` derives the set of tasks that should be in flight from the journal and dispatches each one with a stable idempotency key. It is the *only* thing that schedules work, and it is safe to run at any time.
 
@@ -397,46 +448,54 @@ Everything durable in this design rests on three rules.
 
 **1. Persist before dispatching.** The journal records a task as *scheduled* before the job that runs it exists. If the process dies between the two, the triggering job is retried (jobs complete only after the handler returns), the turn re-runs, and `reconcile` dispatches it. The inverse order would allow a task to report back to a journal that does not know it exists, and that result would be dropped.
 
-**2. A turn that records nothing still schedules.** `advance` and `reconcile` run on every turn, including one whose event was a duplicate. This is not an optimization to skip — it is load-bearing. Consider a turn that persists a result and then fails to dispatch the next step: the job is retried, the report arrives again, and it is now a *duplicate* that records nothing. If the duplicate branch returned early, the instance would wait forever for a step nobody scheduled. `imageoptim` hit exactly this and fixed it by re-driving from the duplicate branch; here it falls out of the structure, because there is no early return to add.
+**2. A turn that records nothing still schedules.** `advance` and `reconcile` run on every turn, including one whose event was a duplicate. This is not an optimization to skip — it is load-bearing. Consider a turn that persists a result and then fails to dispatch the next step: the job is retried, the report arrives again, and it is now a *duplicate* that records nothing. If the duplicate branch returned early, the instance would wait forever for a step nobody scheduled. The same rule covers the turn's *own* retry: when Francis redelivers the same job occurrence after `SetState` succeeded and `reconcile` failed, `apply` sees an event the journal already reflects. It stays correct only because the guard is "is this outcome already recorded", never "have I seen this delivery before". Phase 1 carries a fault-injection test for exactly this sequence (§19).
 
-**3. The journal decides what happened; the idempotency key only prevents duplicate in-flight work.** Francis maps an idempotency key to the job's name and deduplicates against *live* rows, so a key is reusable once its job completes. That is exactly right here: the key stops `reconcile` from queueing a second copy of a task that is already pending or running, and the journal's `Done` flag stops a duplicate *result* from being counted twice.
+**3. The journal decides what happened; the idempotency key only prevents duplicate in-flight work.** Francis maps an idempotency key to the job's name and deduplicates against *live* rows only, so a key is reusable once its job completes **or dead-letters** — dead-lettering moves the row out of the live table. That is exactly right for the first case: the key stops `reconcile` from queueing a second copy of a task that is already pending or running, and the journal's outcome stops a duplicate *report* from being counted twice. The second case is why `reconcile` must never redispatch a task without first asking whether its previous job dead-lettered (§8.8): a freed key would otherwise let a task that could not report be run again on every turn.
 
 ### 8.4 Message flow
 
+<!-- label: Sequence · one instance, a retried attempt, a fan-out, a failure and its compensation -->
 ```mermaid
 sequenceDiagram
     participant C as Caller
     participant W as Workflow<br/>(one per instance)
     participant K as WorkflowWorker<br/>(one per task)
+    participant U as undo worker<br/>(one per compensation)
 
     C->>W: job "start" (input)
-    Note over W: journal: running, step 1 scheduled,<br/>deadline armed
-    W->>K: job "run" (task 1)
+    Note over W: journal: running, step 1 scheduled,<br/>deadline armed, watchdog job set
+    W->>K: job "run" (task 1, attempt 1)
+    K-->>W: job "done" (attempt 1 failed, retryable)
+    Note over W: attempts=1, next at +2s
+    W->>K: job "run" (task 1, attempt 2, due +2s)
     K-->>W: job "done" (output)
-    Note over W: journal: step 1 completed,<br/>fan-out step 2 materialized
+    Note over W: step 1 completed,<br/>fan-out step 2 materialized
     W->>K: job "run" (task 2.0)
     W->>K: job "run" (task 2.1)
     K-->>W: job "done" (2.0)
-    K-->>W: job "done" (2.1, error)
+    K-->>W: job "done" (2.1, permanent failure)
     Note over W: policy = fail fast →<br/>status: compensating
-    W->>K: job "compensate" (task 1)
-    K-->>W: job "compensated" (task 1)
-    Note over W: journal: failed / compensated,<br/>deadline dropped, actor halts
+    W->>U: job "compensate" (task 1)
+    U-->>W: job "compensated" (task 1)
+    Note over W: journal: failed / compensated,<br/>timers dropped, actor halts
 ```
 
 ### 8.5 Job methods
 
 | Method | Target | Dispatched by | Idempotency key |
 |---|---|---|---|
-| `start` | `Workflow` | `Service.Start` | `start` |
-| `done` | `Workflow` | `WorkflowWorker` | `done\|<step>\|<index>` |
-| `compensated` | `Workflow` | `WorkflowWorker` | `comp\|<step>\|<index>` |
+| `start` | `Workflow` | `Service.Start`, or a parent instance | `start` |
+| `done` | `Workflow` | worker, or a child instance | `done\|<step>\|<index>\|<attempt>` |
+| `compensated` | `Workflow` | undo worker, or a child instance | `comp\|<step>\|<index>\|<attempt>` |
 | `event` | `Workflow` | `Service.RaiseEvent` | `event\|<name>` |
-| `cancel` | `Workflow` | `Service.Cancel` | `cancel` |
-| `run` | `WorkflowWorker` | `Workflow` | `run` |
-| `compensate` | `WorkflowWorker` | `Workflow` | `compensate` |
+| `cancel` | `Workflow` | `Service.Cancel`, or a parent instance | `cancel` |
+| `unwind` | `Workflow` (a completed child) | a parent instance | `unwind` |
+| `suspend` / `resume` | `Workflow` | `Service.Suspend` / `Service.Resume` | `suspend` / `resume` |
+| `tick` | `Workflow` | itself, as a repeating job | `watchdog` |
+| `run` | `WorkflowWorker` | `Workflow` | `run\|<attempt>` |
+| `compensate` | undo worker | `Workflow` | `compensate\|<attempt>` |
 
-The worker's keys are constant because each task has its own actor, so the key only has to be unique within it. `imageoptim` uses one report method per step (`thumbnail-done`, `manifest-done`, `webhook-done`); generalizing collapses them into `done` keyed by step and index.
+Report keys carry the attempt number so that a late report from attempt 1 can never be mistaken for attempt 2's. `imageoptim` uses one report method per step (`thumbnail-done`, `manifest-done`, `webhook-done`); generalizing collapses them into `done` keyed by step, index, and attempt.
 
 ### 8.6 Worker actor IDs
 
@@ -446,50 +505,63 @@ A worker's ID must be **deterministic**, so that a re-run of `reconcile` address
 <instanceID>|<step>|<index>
 ```
 
-`|` is the delimiter, so step names are rejected at definition time if they contain it, and instance IDs are rejected at `Start` if they do. (Francis itself only reserves `/`.) `imageoptim` reaches the same place with `<workflowID>-<index>` plus named suffixes like `-manifest`, and has to argue that a numeric suffix cannot collide with a named one; keying on the step name removes the argument.
+`|` is the delimiter, so step names are rejected at definition time if they contain it, and instance IDs are rejected at `Start` if they do. (Francis itself only reserves `/`.) A child instance's ID uses the same form, so a child is always locatable from its parent's journal, and the parent's is a prefix of the child's.
 
 A hash of the three components would avoid constraining names at the cost of unreadable actor IDs in logs and traces; readability wins, since these IDs are what an operator greps for.
 
-### 8.7 Alarms: exactly one per instance
+### 8.7 Timers: one deadline alarm and one watchdog job
 
-The `Workflow` actor keeps **one** alarm, named `deadline`, recomputed on every turn to the earliest of:
+The `Workflow` actor keeps two durable timers, chosen for different reasons.
 
-- the instance timeout from `WithTimeout`,
-- the current step's timeout from `WithStepTimeout`,
-- a `WaitForEvent` step's `WithEventTimeout`,
-- the next watchdog tick, if `WithWatchdog` is set.
+**The `deadline` alarm** is recomputed on every turn to the earliest of the instance timeout, the current step's `WithStepTimeout`, and a `WaitForEvent` step's `WithEventTimeout`. It is an alarm because alarms are **replaceable by name**: `SetAlarm` upserts, so recomputing is one write. The journal records the last-armed `DeadlineAt`, and the turn skips the `SetAlarm` when the newly computed time is unchanged — which is the common case, and which keeps a wide fan-out's reports from each costing a second write on the same row. Re-arming the alarm from inside its own handler is safe because Francis completes alarms by lease, not by name: a replaced alarm is treated as already handled.
 
-Alarms are named and replaceable, so recomputing is a single `SetAlarm`, and the alarm is deleted when the instance terminates. This generalizes `imageoptim`'s rule that the deadline is re-armed on entry to each step so it covers whichever one is in flight, and keeps the alarm table proportional to the number of *running instances* rather than running steps.
+**The `watchdog` job** is a repeating job the instance dispatches to itself at `Start` (`WithJobInterval`, keyed `watchdog`, TTL the instance timeout) and cancels at termination. It is a job because a repeating job **survives a failed occurrence** — one that dead-letters is recorded while the recurrence continues — whereas an alarm whose handler fails `MaxAttempts` times is deleted, repeating or not. The watchdog is on by default at a ten-minute interval (`WithWatchdog(0)` disables it; ten thousand running instances cost seventeen ticks a second), and a tick does what no ordinary turn can afford to do on every report:
 
-When it fires, the `Workflow` actor determines from the journal which deadline actually elapsed and applies it: fail the outstanding tasks of a timed-out step, fail the instance on an instance timeout, or simply re-run `advance` + `reconcile` for a watchdog tick. What a timeout *costs* depends on the step it hit, which the per-step policies in §8.9 decide — the same conclusion `imageoptim` reached, where a timeout on the thumbnails carries on to the manifest but a timeout on the manifest fails the workflow.
+1. re-run `advance` + `reconcile`, which recovers a lost dispatch;
+2. re-arm the `deadline` alarm unconditionally, which restores one that was deleted;
+3. scan the workers of every scheduled-not-done task for a dead-lettered job, and the instance's own dead-letters for a lost report (§8.8);
+4. re-assert the status label, in case a `SetState` retry raced a purge.
 
-`WithWatchdog(d)` is **off by default**. The dispatch path is already recoverable through job retries, and a repeating alarm per running instance is a real cost at scale (10,000 running instances on a one-minute watchdog is ~167 alarm executions per second). Enabling it is the right call for long-running workflows where a stall would otherwise go unnoticed until the instance timeout.
+When the deadline fires, the actor determines from the journal which deadline actually elapsed and applies it: fail the outstanding attempts of a timed-out step, or fail the instance on an instance timeout. What a timeout *costs* depends on the step it hit, which the per-step policies in §8.9 decide.
 
-### 8.8 Failure of a task
+The `Workflow` type itself is registered with `MaxAttempts` of 20 and an initial retry delay of 5 s, far above the framework defaults. Its turns are idempotent, so retrying is always safe, and a generous policy is what keeps a ten-second database blip from dead-lettering a report or deleting a deadline in the first place. The watchdog is the backstop for the cases that still get through.
 
-A task has three ways to end, mirroring what `imageoptim`'s worker does:
+### 8.8 Attempts, failures, and dead-letters
 
-1. **Success** — it dispatches `done` with its output and halts.
-2. **Retryable failure** — it returns the error, the job engine retries it with backoff up to `WithMaxAttempts`.
-3. **Permanent failure** — it returns `actor.ErrJobPermanentFailure` (or exhausts its retries) and the job is dead-lettered. The worker's `JobFailed` hook then dispatches `done` carrying the error, so the `Workflow` actor learns immediately instead of waiting for a deadline.
+The engine owns retries. Francis' own retry mechanism is a property of the actor type, not of the job, so it can't express "five attempts for this step, twenty for its compensation"; and a Francis retry is invisible to the journal. So the worker never lets a handler error reach Francis:
 
-The distinction between (2) and (3) belongs to the handler and is worth stating in the docs: a store that is briefly unavailable recovers, so it should return the error and be retried; a request the encoder rejects, or an identifier that does not parse, fails the same way every time and should report immediately rather than burning the job's retries.
+1. **Success** — the worker dispatches `done` with the output, and halts.
+2. **Retryable failure** — the handler returned an ordinary error. The worker dispatches `done` carrying the error and `retryable: true`, and halts. The orchestrator records the attempt, and if `Attempts < WithMaxAttempts` (default 3) sets `RetryAt` from the step's `WithRetryBackoff` (default 2 s, doubling, capped at 1 min); `reconcile` dispatches the next attempt with `WithJobDueTime(RetryAt)` and a new attempt number in its key. Otherwise the task is failed.
+3. **Permanent failure** — the handler returned `actor.ErrJobPermanentFailure`. The worker reports it with `retryable: false`, and the task is failed without further attempts.
+4. **Rejection** — the handler returned `actor.ErrJobRejected`. The worker returns it to Francis, which re-routes the occurrence to another host without counting an attempt (the same escape hatch `taskpool` exposes through `WithAccept`).
 
-The `JobFailed` hook is best-effort, so the `deadline` alarm remains the backstop, exactly as it is in `imageoptim`.
+The distinction between (2) and (3) belongs to the handler: a store that is briefly unavailable recovers, so return the error; a request the encoder rejects, or an identifier that does not parse, fails the same way every time, so return `ErrJobPermanentFailure`.
 
-A handler can also return `actor.ErrJobRejected` to decline a task on this host without counting an attempt, which re-routes it. This is the same escape hatch `taskpool` exposes through `WithAccept`, and it is how a host says "not me" for reasons a static capability cannot express.
+Each attempt costs a round trip through the orchestrator — one report turn and one dispatch — where a Francis-level retry would have re-run the handler in place. That is the price of attempts being durable, per-step, observable in `GetStatus`, and independent of the actor type's configuration, and it is a price only failing tasks pay.
+
+A worker's `Job` handler returns an error to Francis in exactly one situation: the report dispatch itself failed. Francis retries the job in place; the worker still holds the result of the attempt in memory for the life of the activation, so the retried job re-sends the report rather than re-running the handler. The worker types are registered with a `MaxAttempts` of 5 to cover this case only.
+
+**Dead-letters.** A worker's job dead-letters only when it could not report — five failed report dispatches, or a host that died mid-attempt more than five times. Dead-lettering frees the job's idempotency key, so `reconcile` never redispatches a scheduled-not-done task blindly. Two mechanisms cover this:
+
+- The worker's `JobFailed` hook dispatches `done` with the dead-letter's error and `retryable: true`, so in the common case the orchestrator learns within a turn. The hook is best-effort, so it is the fast path, not the guarantee.
+- The watchdog scans. For every scheduled-not-done task it lists the worker's jobs; a dead-lettered `run` or `compensate` is folded into the journal as one failed attempt of transport kind, and then either `RetryJob`'d (which atomically re-dispatches and removes the record) if attempts remain, or `DeleteJob`'d (§17) after the task is failed. It also lists the instance's own jobs, and `RetryJob`s any dead-lettered report or event it finds — the orchestrator's `JobFailed` hook additionally emits a metric and arms the deadline to fire at once, so the scan doesn't wait for the next tick.
+
+The invariant that falls out: **no dead-letter record outlives the journal entry that accounts for it.** By the time an instance terminates, every dead-letter it produced has been retried or deleted, which is what lets `Purge` (§14.3) be a state delete plus a bounded sweep rather than a search.
 
 ### 8.9 What a step's failure costs the workflow
 
-Not every step is equally important, and `imageoptim` demonstrates all three cases in one workflow: a failed thumbnail is recorded and the run continues, an unstored manifest fails the run and skips the callback, and an unacknowledged callback is logged while the run still completes. A plain step therefore declares what its own failure means:
+Not every step is equally important, and `imageoptim` demonstrates three cases in one workflow: a failed thumbnail is recorded and the run continues, an unstored manifest ends the run as failed and skips the callback, and an unacknowledged callback is logged while the run still completes. A plain step declares what its own failure means with two independent options:
 
-| Option | On failure |
-|---|---|
-| default | The step fails, and the workflow unwinds |
-| `WithOptional()` | The failure is recorded in the journal and the workflow carries on to the next step |
-| `WithSkipOnFailure("a", "b")` | The step fails the workflow, and the named downstream steps are recorded as `skipped` rather than run |
+| Declared | After the step fails | Named dependents | Terminal status |
+|---|---|---|---|
+| (default) | the workflow unwinds (§10) | — | `failed` |
+| `WithSkipOnFailure("a", "b")` | the workflow **continues** | recorded as `skipped`, never run | `failed` |
+| `WithOptional()` | the workflow continues | — | `completed` |
+| both | the workflow continues | recorded as `skipped` | `completed` |
 
-`WithOptional` is the webhook case: the work the caller asked for was done, and only a notification was lost. It is deliberately a per-step declaration rather than a global policy, because it is a statement about that step's meaning.
+`WithOptional` decides the terminal status; `WithSkipOnFailure` decides which downstream steps are pointless without this one. Neither triggers an unwind — an unwind is only for the default case, where the failure means the work so far must be undone. Skipping is not transitive (a skipped step is not a failed one, so its own `WithSkipOnFailure` list is not applied), a skipped step never enters the compensation stack, and its output is absent (§6.3).
+
+`WithOptional` is the webhook case: the work the caller asked for was done, and only a notification was lost. `WithSkipOnFailure` is the manifest case: without the manifest there is nothing to call back about, and the run is a failure, but the thumbnails are in the store and there is nothing to undo.
 
 Group and fan-out steps have a richer set of policies, in §9.3.
 
@@ -501,46 +573,46 @@ Group and fan-out steps have a richer set of policies, in §9.3.
 
 ### 9.2 Dynamic fan-out
 
-`workflow.ForEach(name, workflow.WithItemsFrom("plan"), ...)` materializes one task per element of the named step's output, which must decode to a JSON array. The size is decided at runtime, when the upstream step reports, and is then **journaled**: a retried turn re-reads the recorded items rather than re-deriving them.
+`workflow.ForEach(name, workflow.WithItemsFrom("plan"), ...)` materializes one task per element of the named step's output, which must decode to a JSON array. The size is decided at runtime, when the upstream step reports, and is then **journaled**: a retried turn re-reads the recorded items rather than re-deriving them. Each task runs the step's `WithRun` handler, or — with `WithChild` — starts one child instance per item (§12).
 
-Deriving the list is a normal step that runs on a worker. That is a direct consequence of §4: an expander callback invoked on the `Workflow` actor's turn would be simpler to write, but it would put an arbitrary user function on the instance's control plane — the exact thing the boundary exists to prevent. The cost is one extra durable round-trip, and the benefit is that the expansion is itself retried, dead-lettered, traced, bounded by a deadline, and recorded like any other step.
+Deriving the list is a normal step that runs on a worker. That is a direct consequence of §4: an expander callback invoked on the `Workflow` actor's turn would be simpler to write, but it would put an arbitrary user function on the instance's control plane — the exact thing the boundary exists to prevent. The cost is one extra durable round-trip, and the benefit is that the expansion is itself retried, traced, bounded by a deadline, and recorded like any other step.
 
-`WithMaxParallel(n)` bounds how many of a fan-out's tasks are in flight **per instance**: `reconcile` dispatches at most `n` at a time and releases the next as results arrive. It is orthogonal to the per-host bound in §9.4, which limits how much work a host accepts across all instances.
+`WithMaxParallel(n)` bounds how many of a fan-out's tasks are in flight **per instance**. The mechanism is a sliding window over the tasks in index order: on every `reconcile`, the first `n` tasks that are not yet done are dispatched, idempotently — a redispatch of a task that is already pending or running coalesces on its key, so no explicit in-flight flag is needed and none is kept. As results arrive, the window slides. The bound is orthogonal to the per-host bound in §9.4, which limits how much work a host accepts across all instances.
 
 ### 9.3 Failure policies for groups and fan-outs
 
 | Policy | Behavior |
 |---|---|
-| `workflow.FailFast` (default) | The first failure fails the step. Pending tasks of the group are cancelled with `CancelJob`; tasks already running are allowed to finish and their results are recorded (and compensated, if they succeeded). |
+| `workflow.FailFast` (default) | The first failure fails the step. Tasks already dispatched are cancelled with `CancelJob`; tasks not yet admitted by the window are never dispatched; tasks already running are allowed to finish, and their results are recorded (and compensated, if they succeeded). |
 | `workflow.CollectFailures` | Every task runs to completion, then the step fails if any of them failed. Use when the tasks are independent and partial progress is worth having before unwinding. |
 | `workflow.TolerateFailures` | Every task runs to completion and the step succeeds regardless. Failures are visible in the step's output, and it is the next step's business what to do about them. |
 
 `TolerateFailures` is exactly `imageoptim`'s thumbnail semantics: a thumbnail that cannot be encoded is recorded as failed in the manifest and does not stop the run, and the manifest step downstream reads the outcomes and reports them.
 
-Note that `CancelJob` removes a pending job but does not interrupt an occurrence that is already executing; a task that wants to stop early must observe its context.
+`CancelJob` removes a pending job; it does not interrupt an occurrence that is already executing, and Francis does not cancel the handler's context. A task that wants to stop early must observe its context for host shutdown and otherwise finish; the engine treats its late report as a recorded result.
 
 ### 9.4 Placement, capacity, and capabilities
 
-Worker actor types are registered with the same mechanics `taskpool` uses:
+Worker and undo types are registered with the same mechanics `taskpool` uses:
 
-- `WithConcurrency(n)` puts every worker type of the workflow into one **capacity group** with a strict, in-process per-host budget, and mirrors it as the cluster-wide `ConcurrencyLimit` placement hint so hosts are rarely handed more than they can run.
-- `WithRequiredCapability(cap)` on a step routes its tasks to a per-capability worker type (`francis.builtin.workflow.<name>.worker.<cap>`) that only hosts advertising the capability register. A step with no requirement runs anywhere.
+- `WithConcurrency(n)` puts every worker type of the workflow into one **capacity group** with a strict, in-process per-host budget, and mirrors it as the cluster-wide `ConcurrencyLimit` placement hint so hosts are rarely handed more than they can run. The undo types form a second group, `WithCompensateConcurrency(n)` (default: the same number), so a slow unwind can't starve forward work or vice versa.
+- `WithRequiredCapability(cap)` on a step routes its tasks to `…worker.<cap>`, which only hosts advertising the capability register (`WithCapability(cap)` at `New`). A step with no requirement runs anywhere. A step's compensation is routed to `…undo.<cap>` with the *same* capability, since the undo almost always needs the placement the forward task had — the same GPU, the same region.
 
 This makes "the OCR step only runs on hosts with a GPU" a one-line property of the definition, and it means throughput scales by adding hosts with no change to the definition.
 
-One caveat is worth carrying over from `imageoptim`, which notes it explicitly: because every step of a workflow shares one worker type, it shares one per-host budget, and a slow step occupies a slot an expensive one could have used — a callback waiting on a remote server holds a slot sized for an image encode. Capability queues are the existing escape hatch (route the cheap steps to their own capability), but a `WithCapacityGroup(name)` per step would express it directly. Left open in §17.
+Two operational notes. Every step of a workflow shares one worker type and therefore one per-host budget, so a slow step occupies a slot an expensive one could have used — a callback waiting on a remote server holds a slot sized for an image encode; route cheap steps to their own capability if that matters (§20 keeps a per-step capacity group open). And `WithMaxParallel` knows nothing about cluster capacity: when in-flight tasks exceed the cluster's total budget, each surplus occurrence is released and re-fetched an alarm poll interval later, so an over-subscribed fan-out degrades to poll-interval pacing rather than failing. `taskpool` has the same property.
 
 ## 10. Compensation
 
 ### 10.1 Model
 
-Compensation is a **stack**. Every task that completes successfully and whose step declares `WithCompensate` is pushed onto the journal's compensation stack in completion order. When the instance has to unwind, the stack is popped in reverse.
+Compensation is a **stack**. Every task that completes successfully and whose step declares `WithCompensate` — or whose step is a child workflow — is pushed onto the journal's compensation stack in completion order. When the instance has to unwind, the stack is popped in reverse.
 
 ```text
 forward:      charge-card ──► reserve-stock ──► ship[0] ship[1] ship[2] ──► ✗ confirm
-                                                (parallel)
+                                                (parallel children)
 
-unwind:       refund-card ◄── release-stock ◄── cancel-courier ×3
+unwind:       refund-card ◄── release-stock ◄── unwind ship[0..2]
                                                 (parallel, in one frame)
 ```
 
@@ -550,22 +622,23 @@ Ordering rules:
 - **Within a frame, compensations run concurrently.** The tasks of a parallel group or fan-out had no order between them going forward, so imposing one on the way back would only make unwinding slower.
 - **A frame is fully compensated before the next one starts.** This is what makes the reverse order meaningful, and it is why compensation is driven by the same `advance` + `reconcile` loop rather than by dispatching everything at once.
 
-Every compensation is a task on a `WorkflowWorker`, like every other unit of work. The unwind is scheduled by the `Workflow` actor and performed nowhere near it.
+Every compensation is a task on an undo worker, like every other unit of work. The unwind is scheduled by the `Workflow` actor and performed nowhere near it.
 
 ### 10.2 What triggers an unwind
 
-- A step fails terminally, under a policy that makes that a step failure (§8.9, §9.3).
-- `Service.Cancel` is called on a running instance.
+- A step fails terminally under the default policy (§8.9), or a group fails under `FailFast` or `CollectFailures` (§9.3).
+- `Service.Cancel` is called on a running or suspended instance.
 - The instance timeout elapses.
 - A `WaitForEvent` step's own timeout elapses without the event.
+- A parent instance unwinds a child step (§12.4).
 
 In every case the journal records the **cause**, which is handed to each compensation as `Cause()`. A compensation frequently needs it: "release the stock because the payment failed" and "release the stock because the customer cancelled" may write different audit records.
 
 ### 10.3 Executing a compensation
 
-A compensation is a durable job (`compensate`) to the **same worker actor ID** the forward task used, carrying the same input and item plus the output that task produced. That output is usually what identifies the effect to undo — a charge ID, a reservation token, an object key — which is why `DecodeResult` exists.
+A compensation is a durable job (`compensate`) to the undo worker with the **same actor ID** the forward task used, on the undo type matching the forward task's capability, carrying the same input and item plus the output that task produced. That output is usually what identifies the effect to undo — a charge ID, a reservation token, an object key — which is why `DecodeResult` exists.
 
-Compensations get their own retry policy, `WithCompensateMaxAttempts`, defaulting higher than the forward policy: a failed rollback leaves the system inconsistent, so it is worth trying harder.
+Compensations get their own attempt policy, `WithCompensateMaxAttempts` (default 10) and `WithCompensateBackoff`, recorded in the journal exactly like forward attempts (§8.8). The default is higher than the forward policy because a failed rollback leaves the system inconsistent, so it is worth trying harder — and because the engine owns attempts, the higher number costs nothing at the actor-type level.
 
 Compensations are **at-least-once**, like everything else, so `refundCard` must tolerate being called twice for the same charge. In practice this means keying the undo on the forward operation's identifier, which the handler already has.
 
@@ -598,6 +671,7 @@ type Status string
 const (
     StatusPending      Status = "pending"      // the start job is durable but has not run
     StatusRunning      Status = "running"
+    StatusSuspended    Status = "suspended"    // paused by Suspend; ResumeTo records what it was
     StatusCompensating Status = "compensating"
     StatusCompleted    Status = "completed"    // terminal
     StatusFailed       Status = "failed"       // terminal
@@ -614,26 +688,89 @@ const (
 )
 ```
 
-Per-step status is `pending`, `running`, `completed`, `failed`, `skipped`, `compensating`, `compensated`, or `compensation-failed`.
+`CompensationOutcome` is empty until the instance reaches a terminal status; while `Status` is `compensating` the per-step view says how far the unwind has got. Per-step status is `pending`, `running`, `completed`, `failed`, `skipped`, `compensating`, `compensated`, or `compensation-failed`.
 
+<!-- label: Instance status · state diagram -->
 ```mermaid
 stateDiagram-v2
     [*] --> pending: Start dispatches the start job
     pending --> running: the start job runs
-    running --> completed: every step completed
+    running --> suspended: Suspend
+    suspended --> running: Resume
+    running --> completed: every step completed, or continued past optional failures
+    running --> failed: continued past a WithSkipOnFailure failure
     running --> compensating: a step failed, Cancel, or a deadline elapsed
+    suspended --> compensating: Cancel
+    compensating --> suspended: Suspend
+    suspended --> compensating: Resume
     compensating --> failed: unwound after a failure
     compensating --> cancelled: unwound after a Cancel
-    completed --> [*]: retention elapses
-    failed --> [*]: retention elapses
-    cancelled --> [*]: retention elapses
+    completed --> compensating: unwind, from a parent
+    completed --> [*]: purged
+    failed --> [*]: purged
+    cancelled --> [*]: purged
 ```
 
 An instance with nothing on its compensation stack passes through `compensating` in a single turn, so the path is uniform whether or not anything has to be undone.
 
-## 11. Journal
+## 11. Suspend and resume
 
-### 11.1 Shape
+`Service.Suspend(ctx, id, reason)` pauses an instance without losing its place; `Service.Resume(ctx, id)` continues it. Both are durable jobs to the `Workflow` actor with constant keys, so a repeated call coalesces with a pending one and a call on an instance that is already in the requested state records nothing.
+
+While suspended:
+
+- **Nothing new is started.** `reconcile` dispatches nothing — no next step, no next attempt, no compensation frame. This is the whole of the mechanism: `apply` and `advance` run as usual, so the journal keeps recording the truth, and only the scheduling half of the turn is gated.
+- **In-flight work finishes.** A task that was already dispatched runs to completion and its report is recorded. Suspension is a promise not to start things, not an interruption, for the same reason `CancelJob` isn't one (§9.3).
+- **Deadlines are paused.** On suspend the `deadline` alarm is deleted and the journal records how much of the instance timeout, the current step's timeout, and any event timeout remained. On resume they are re-armed from those remainders, so a two-day suspension does not eat a thirty-minute timeout. The watchdog keeps ticking and keeps scanning for dead-letters, but dispatches nothing.
+- **Events are accepted.** A `RaiseEvent` for the open `WaitForEvent` step is recorded; the step completes on resume.
+- **Cancel takes precedence.** `Cancel` on a suspended instance resumes it straight into `compensating`; suspending during an unwind pauses the unwind at the current frame.
+- **Children are not affected.** A suspended parent's running children keep running and their results wait in the parent's journal for the resume. Suspend a child explicitly if that isn't wanted; the parent's journal has every child's instance ID.
+
+`GetStatus` reports `suspended`, the reason, when, and what the status was before (`ResumeTo`). The listing index (§14.2) sees the status change like any other.
+
+## 12. Child workflows
+
+### 12.1 Model
+
+A child workflow is a step whose task is a whole instance of another registered definition:
+
+```go
+workflow.Child("ship", workflow.WithDefinition(shipmentWorkflow))
+
+// One child per item
+workflow.ForEach("ship", workflow.WithItemsFrom("plan-shipments"), workflow.WithChild(shipmentWorkflow))
+```
+
+The child has **its own journal**, its own compensation stack, its own timers, and its own attempts. The parent's journal records, per child task, only the child's instance ID and — when it terminates — its output or its failure and compensation outcome. Nothing else crosses: a parent of a hundred children with a thousand steps each is a journal of a hundred small records.
+
+The child definition is registered on the hosts like any other (`RegisterBuiltInActor(shipmentWorkflow)`), and `New` on the parent validates that the child definition it was handed is well-formed. The child's own version is stamped on each child instance independently of the parent's.
+
+### 12.2 Starting a child
+
+`reconcile` starts a child by dispatching `start` to `francis.builtin.workflow.<childName>` with instance ID `<parentID>|<step>|<index>` — deterministic, so a retried turn finds the same child rather than starting a second — and with the task's input (§6.3) as the child's workflow input. The child's journal records its `Parent` (instance ID, workflow, step, index, and depth), and its status label carries `parent=<parentID>` so `List` can find all children of an instance. `WithMaxDepth` (default 8) rejects a `start` whose parent chain is deeper, which is the only way a definition that references itself is stopped.
+
+### 12.3 Reporting back
+
+When a child reaches a terminal status it dispatches `done` to its parent — the same report a worker sends, keyed by the parent's step and index — carrying its output, or its cause and compensation outcome. A child's output is the output of its last step, or of the step named by `WithOutput("step")` on the child's definition.
+
+A child that terminates `failed` or `cancelled` fails the parent's task; the parent's step policy (§8.9, §9.3) decides what that means for the parent. A child's terminal `compensation: partial` is surfaced in the parent's journal even when the parent continues.
+
+### 12.4 Unwinding a child
+
+Compensating a child step means asking the child to undo itself:
+
+- A child that is still running receives `cancel`, unwinds its own stack, and reports `compensated` when it terminates.
+- A child that already `completed` receives `unwind`, a verb only a parent may send. It moves the child back to `compensating`, unwinds its stack in reverse exactly as a failure would, and reports `compensated` with its own compensation outcome. A completed child is kept, not purged, for as long as its parent is running for precisely this reason.
+
+A parent's `Cancel` cancels its running children through the same path, and a parent's step timeout cancels the child it was waiting for. A parent's `Suspend` does not propagate (§11).
+
+### 12.5 Lifetime
+
+A child's retention follows its parent's: `Purge` of a parent purges its children first, recursively, then its own dead-letters, then its journal — in that order, so an interrupted purge is safe to repeat. The auto-purge sweep (§14.3) skips instances that have a parent, so a child is never purged from under a parent that might still unwind it.
+
+## 13. Journal
+
+### 13.1 Shape
 
 One state document per instance, as a single actor state value:
 
@@ -644,10 +781,14 @@ type instanceState struct {
     Status       Status              `json:"status"`
     Compensation CompensationOutcome `json:"compensation,omitempty"`
     Input        json.RawMessage     `json:"input,omitempty"`
-    Cursor       string              `json:"cursor,omitempty"` // name of the step being executed or unwound
-    Steps        []stepRecord        `json:"steps"`            // in definition order, only steps that were reached
-    Stack        []string            `json:"stack,omitempty"`  // compensation frames, oldest first
-    Cause        string              `json:"cause,omitempty"`  // what triggered the unwind
+    Output       json.RawMessage     `json:"output,omitempty"`   // set at completion, from the last step or WithOutput
+    Cursor       string              `json:"cursor"`             // derived by advance for display, never read by it
+    Steps        []stepRecord        `json:"steps"`              // every step of the definition, recorded at Start
+    Stack        []string            `json:"stack,omitempty"`    // compensation frames (step names), oldest first
+    Cause        string              `json:"cause,omitempty"`    // what triggered the unwind
+    DeadlineAt   time.Time           `json:"deadlineAt,omitzero"` // the last-armed deadline, so an unchanged one is not re-written
+    Suspended    *suspendRecord      `json:"suspended,omitempty"`
+    Parent       *parentRef          `json:"parent,omitempty"`
     CreatedAt    time.Time           `json:"createdAt"`
     StartedAt    time.Time           `json:"startedAt"`
     CompletedAt  time.Time           `json:"completedAt,omitzero"`
@@ -656,47 +797,74 @@ type instanceState struct {
 type stepRecord struct {
     Name        string       `json:"name"`
     Kind        Kind         `json:"kind"`
-    Status      StepStatus   `json:"status"`
-    Tasks       []taskRecord `json:"tasks"`
-    Remaining   int          `json:"remaining"` // tasks that have not reported, so completion is O(1)
-    StartedAt   time.Time    `json:"startedAt"`
+    Status      StepStatus   `json:"status"`     // pending until reached
+    Tasks       []taskRecord `json:"tasks,omitempty"`
+    Remaining   int          `json:"remaining"`  // tasks that have not reported, so completion is O(1)
+    StartedAt   time.Time    `json:"startedAt,omitzero"`
     CompletedAt time.Time    `json:"completedAt,omitzero"`
 }
 
 type taskRecord struct {
     Index       int             `json:"index"`
-    Item        json.RawMessage `json:"item,omitempty"` // fan-out item
+    Item        json.RawMessage `json:"item,omitempty"`    // fan-out item
+    ChildID     string          `json:"childId,omitempty"` // child instance, for a child task
+    Attempts    int             `json:"attempts"`
+    RetryAt     time.Time       `json:"retryAt,omitzero"`  // next attempt is not due before this
+    LastError   string          `json:"lastError,omitempty"`
     Output      json.RawMessage `json:"output,omitempty"`
-    Error       string          `json:"error,omitempty"`
+    Error       string          `json:"error,omitempty"`   // set once the task has failed for good
     Done        bool            `json:"done"`
     Compensated bool            `json:"compensated,omitempty"`
     CompletedAt time.Time       `json:"completedAt,omitzero"`
+}
+
+type suspendRecord struct {
+    At                  time.Time     `json:"at"`
+    Reason              string        `json:"reason,omitempty"`
+    ResumeTo            Status        `json:"resumeTo"`
+    RemainingTimeout    time.Duration `json:"remainingTimeout"`
+    RemainingStepTimeout time.Duration `json:"remainingStepTimeout,omitempty"`
+}
+
+type parentRef struct {
+    InstanceID string `json:"instanceId"`
+    Workflow   string `json:"workflow"`
+    Step       string `json:"step"`
+    Index      int    `json:"index"`
+    Depth      int    `json:"depth"`
 }
 ```
 
 `Remaining` is carried explicitly rather than recomputed, which is what `imageoptim` does and what keeps the "have all tasks reported" check from scanning a large fan-out on every result.
 
-There is deliberately **no phase field**. The cursor is a name for where the instance is, but what it does next is derived by `advance` from the step and task records, which is what makes every report safe to redeliver. A phase field is a second source of truth and would eventually disagree with the first.
+`Steps` records **every** step of the definition at `Start`, with the ones not yet reached as `pending`. That costs a few hundred bytes and makes `GetStatus`, the unknown-version path (§15.4), and operator tooling answerable from the journal alone, without the definition on hand.
 
-### 11.2 Size
+There is deliberately **no phase field**. `Cursor` is the name of the current step, written by `advance` as a by-product of deriving the real answer from `Steps`; it is never an input to `advance` or `reconcile`, and exists only so that `GetStatus` and log lines don't have to walk the step list. If it ever disagrees with the records, the records win, because nothing reads it.
 
-Francis state is read and written as one value per actor, so the journal has to stay small. Three bounds:
+### 13.2 Size and write amplification
 
-- `WithMaxOutputSize` (default 64 KiB) per task output, enforced **on the worker** before it reports, so the `Workflow` actor never spends a turn serializing something unbounded. Exceeding it fails the task permanently with a clear error rather than corrupting the instance.
-- `WithMaxJournalSize` (default 1 MiB) on the encoded journal, checked before `SetState`. Exceeding it fails the instance, which is a much better outcome than an instance that can no longer persist and therefore can no longer progress.
-- A documented guidance limit of a few hundred tasks per instance. Beyond that, the right shape is a parent workflow that starts child instances.
+Francis state is read and written as one value per actor, so the journal has to stay small — and every report rewrites the whole document, so it has to stay small *in proportion to how often it is rewritten*. An N-task fan-out writes O(N²) bytes: a journal that grows to 1 MiB over 500 reports has written about 250 MiB through the state store by the time it is done. That, not the cap, is the reason for the guidance below.
 
-Every write of the journal rewrites the whole document. That is acceptable for the sizes above, and it is what buys the design its most important property: **a step transition is a single atomic state write**, so there is no partially-applied journal to reason about.
+- `WithMaxOutputSize` (default 16 KiB) caps a single task's output, enforced **on the worker** before it reports, so the orchestrator never spends a turn serializing something unbounded. Exceeding it fails the attempt permanently with a clear error.
+- `WithMaxInputSize` (default 64 KiB) caps the workflow input, enforced at `Start`, because the input is shipped in every task's payload.
+- `WithMaxJournalSize` (default 1 MiB) caps the encoded journal, checked before `SetState`. Exceeding it fails the instance, which is a much better outcome than an instance that can no longer persist and therefore can no longer progress.
 
-### 11.3 Retention
+These compose as one constraint, not three: `tasks × typical output size` should stay well under the journal cap, and comfortably under 256 KiB for anything that reports quickly. A 300-task fan-out gets under 1 KiB per task in practice; the 16 KiB cap is a ceiling against a misbehaving task, not a per-task budget. For wide fan-outs, the pattern is a handle: write the result to the object store and return its key. For fan-outs wider than a few hundred, the pattern is a child workflow per batch (§12), which moves the width into journals that are rewritten independently.
 
-`WithRetention(d)` sets a TTL on the state of a terminated instance, exactly as `imageoptim` does with `completedWorkflowRetention`. Zero retains it indefinitely. `Service.Purge` deletes it early.
+Every write of the journal rewrites the whole document. That is what buys the design its most important property: **a step transition is a single atomic state write**, so there is no partially-applied journal to reason about.
 
-Once the state has expired, `GetStatus` reports "not found", and a late report for that instance is dropped. This is a deliberate trade-off — the journal is an operational record, not an audit log. An application that needs a permanent record should write one from a terminal step, which is precisely what `imageoptim`'s manifest is.
+### 13.3 Retention
 
-## 12. Status, listing, and observability
+`WithRetention` takes a policy with one duration per terminal status — `Completed`, `Failed`, `Cancelled` — because a failed run is usually worth keeping longer than a successful one. Retention is enforced in two layers:
 
-### 12.1 Status
+- **The purge sweep** (§14.3) is the primary mechanism. It removes the journal, the instance's dead-letters, and its children, and it runs when the operator says so.
+- **A state TTL** is the backstop: on termination, the journal is written with a TTL of twice the policy duration, so an instance whose sweep never runs still expires. It is twice the duration so that the sweep always finds the journal it needs to clean up the rest.
+
+Once the state is gone, `GetStatus` reports "not found", and a late report for that instance is dropped. The journal is an operational record, not an audit log. An application that needs a permanent record should write one from a terminal step, which is precisely what `imageoptim`'s manifest is.
+
+## 14. Status, listing, and purging
+
+### 14.1 Status
 
 `GetStatus` is a `Peek`, so status reads run concurrently with each other and never queue behind another status read — only behind a write turn, which §4 keeps short. The pattern `imageoptim` uses is generalized: read through the provider, and if the state does not exist yet, look for a live `start` job on the actor, which distinguishes "pending" from "no such instance".
 
@@ -708,70 +876,129 @@ type InstanceStatus struct {
     Status       Status
     Compensation CompensationOutcome
     CurrentStep  string
-    Steps        []StepStatusView // name, status, task counts, timings, error
+    Steps        []StepStatusView // every step: status, task counts, attempts, timings, error, child IDs
     Cause        string
+    Suspended    *SuspendView     // when suspended: since when, why, and what it was
+    Parent       *ParentView      // when a child: whose
     CreatedAt, StartedAt, CompletedAt time.Time
 }
 ```
 
 A caller never sees `completed` before every step has reported, including the optional ones — `imageoptim`'s rule that a client must not be told the run finished before the manifest is stored and the callback has been acknowledged or given up on.
 
-### 12.2 Listing
+### 14.2 Listing
 
-`Service.List` is built on `Service.ListStates` over the `Workflow` actor type, which already returns actors with stored state, paginated by actor ID, without activating them. Because the default instance ID is a UUIDv7, the listing is in creation order. Filtering by status requires `IncludeData`, and is therefore a client-side filter over a page — good enough for an operator console, and explicitly not a query engine.
+`Service.List` is built on `Service.ListStates` with the **state labels** that §17 adds to Francis. The orchestrator writes four labels with every journal write — `status`, `version`, `parent`, and `terminatedAt` (day granularity) — in the same operation as the state, so the index can never disagree with the journal, and `ListStates` filters on them server-side:
 
-### 12.3 Metrics
+```go
+page, err := svc.List(ctx, &workflow.ListOptions{
+    Status:  workflow.StatusRunning, // or any status; empty means all
+    Version: 3,                      // optional
+    Parent:  parentID,               // optional: the children of one instance
+    Limit:   50,
+    After:   page.AfterID(),         // pagination cursor, an instance ID
+})
+```
 
-Per workflow name: instances started, instances terminated by status, instance duration, step duration by step name and outcome, task attempts, tasks dead-lettered, compensations run and failed, and the current number of running instances.
+Because the default instance ID is a UUIDv7, a listing is in creation order. A label filter is an equality on an indexed column, so "every running instance" is a range scan, not a walk of every retained journal.
 
-Worth adding, because §4 makes it meaningful: a histogram of `Workflow` **turn duration**. It should sit in single-digit milliseconds, and a regression in it is the signal that something has been inlined onto the orchestrator that should be a step.
+### 14.3 Purging
 
-### 12.4 Tracing
+Three levels, from explicit to automatic:
+
+- **`Purge(ctx, id)`** removes one terminated instance: its children first (recursively), then its dead-letters (a bounded set, by §8.8's invariant), then its journal. It refuses a running or suspended instance with `ErrInstanceActive`, and it is idempotent, so an interrupted purge is repeated. `Purge` of an instance with a running parent is refused too; the parent's purge reaches it.
+- **`PurgeTerminated(ctx)`** lists terminated instances with `terminatedAt` older than their status's retention and purges each, skipping any with a parent. It returns how many it removed, and it pages, so a backlog of a million terminated instances is a long call rather than a large one.
+- **`WithAutoPurge(cron)`** registers a `cronjob` built-in, `workflow.<name>.purge`, whose job calls `PurgeTerminated`. The cron job is a cluster-wide singleton, so the sweep runs on one host per schedule however many hosts registered the workflow, and `RegisterBuiltInActor(wf)` registers it alongside the workflow's own types.
+
+### 14.4 Metrics
+
+Per workflow name: instances started, instances terminated by status, instance duration, step duration by step name and outcome, attempts per task, attempts that were transport failures, dead-letters recovered by the watchdog, compensations run and failed, instances suspended, children started, instances purged, and the current number of running instances.
+
+Two are worth singling out because §4 and §8.3 make them meaningful. A histogram of `Workflow` **turn duration** should sit in single-digit milliseconds, and a regression is the signal that something has been inlined onto the orchestrator that should be a step. And a counter of **turns that re-applied an already-recorded event** — cheap to keep, since Francis stamps every job occurrence with a request ID the turn can log — is the direct measure of how often invariant 2 is doing its job.
+
+### 14.5 Tracing
 
 A workflow instance is a long-lived, multi-host activity, so it cannot be one span. The proposal is:
 
-- one span per `Workflow` turn, and one per task execution, tagged with instance ID, workflow, version, step, and index;
-- the trace context of the `Start` call is recorded in the journal, and each task's span **links** to it, rather than being a child of a span that ended long ago.
+- one span per `Workflow` turn, and one per attempt, tagged with instance ID, workflow, version, step, index, and attempt;
+- the trace context of the `Start` call is recorded in the journal, and each attempt's span **links** to it, rather than being a child of a span that ended long ago; a child instance's spans link to the parent's.
 
-Whether Francis already propagates trace context across the durable job boundary needs to be confirmed: `internal/tracing` and the peer/runtime clients propagate context across *transport* hops, but a job is persisted and executed later, so the context has to be carried in the job payload for this to work. If it is not carried today, this design needs it, and it is generally useful beyond workflows.
+Whether Francis already propagates trace context across the durable job boundary needs to be confirmed (§20): `internal/tracing` and the peer/runtime clients propagate context across *transport* hops, but a job is persisted and executed later, so the context has to be carried in the job payload for this to work.
 
-## 13. Definition versioning and rolling deployments
+## 15. The definition registry, versioning, and rolling deployments
 
-A definition lives in Go code on the hosts. A running instance's journal refers to steps by name, in the order the definition had when it started. A deployment that changes the definition while instances are running is therefore the hardest operational problem in this design, and the one Dapr's replay model handles worst.
+A definition lives in Go code on the hosts. A running instance's journal refers to steps by name, in the order the definition had when it started. A deployment that changes the definition while instances are running is therefore the hardest operational problem in this design, and the one Dapr's replay model handles worst. Three mechanisms address it.
 
-The proposal:
+### 15.1 The registry
 
-1. **`WithVersion(n)` is recorded in the journal** when the instance starts.
-2. **A host that does not have the instance's version declines to advance it.** The `Workflow` actor's job handler returns `actor.ErrJobRejected`, which re-routes the occurrence to another host **without counting an attempt and without dead-lettering it**. During a rolling deployment, instances of the old version drain onto the hosts still running the old code, and new instances start on the new one. This falls straight out of a mechanism Francis already has.
-3. **If no host claims a version**, the job keeps re-routing with backoff. The instance's `deadline` alarm eventually terminates it, and the status names the missing version. A `WithUnknownVersionPolicy(Park|Fail)` option lets an operator choose between failing such an instance and leaving it parked until the old code is redeployed.
-4. **Compatible changes do not need a new version.** Adding a step after the cursor, or changing a handler's implementation, is safe. Renaming, reordering, or removing a step that instances may have reached is not, and should get a new version.
+`francis.builtin.workflow.<name>.registry` is a cluster-wide singleton — the same shape as `cronjob`'s scheduler — whose state maps each version of the definition to the **fingerprint** of its graph: a hash over the ordered step names, kinds, and the options that change behavior (`WithInputFrom`, `WithSkipOnFailure`, `WithOptional`, failure policies, the child definition's name and version). Handler *bodies* are not fingerprinted; §15.3 says why that matters.
 
-The engine can also compute a **fingerprint** of the step names, kinds, and order, and refuse to register two different definitions under the same name and version. That turns "someone edited the graph and forgot to bump the version" from a corrupted instance into a startup error.
+The registry answers one question, `register(version, fingerprint)`: if the version is unknown, record it and answer `ok`; if it is known with the same fingerprint, `ok`; otherwise `conflict`, with the recorded fingerprint and when it was first seen. It never overwrites, so the first deployment of a version defines it. `Service.Definitions` lists what it holds, and `Service.ForgetVersion(ctx, v)` is the operator's reset for a version that was registered wrongly and has no instances left.
 
-## 14. Alternatives considered
+### 15.2 The consistency check
+
+A host cannot learn the answer from `Bootstrap`: Francis drives that hook for singletons and only logs its error. So the check is made where the engine can act on it — **lazily, once per host per version, cached for the life of the process**. The first time this host's `Workflow`, worker, or undo actor handles a job for version `v`, it calls `register(v, fingerprint)` on the registry through the privileged client and caches the answer.
+
+- `ok`: the host serves the version.
+- `conflict`: the host **declines every job of that version** with `actor.ErrJobRejected`, so the work re-routes to hosts whose code matches, emits `workflow_definition_conflict` with the version and both fingerprints, and logs at error level (rate-limited). It does not stop the host; other workflows and other versions are unaffected.
+
+This is the one place the orchestrator makes a synchronous call to another actor from a turn (§4.2): a single cached `Invoke`, bounded to milliseconds, at most once per version for the life of the process.
+
+The failure mode is loud by design. If someone changes the graph and forgets to bump the version, the *first* host to deploy registers the new fingerprint under the old number and every host still running the old code starts conflicting — or, if old hosts were first, every new host conflicts and the deploy drains no work at all. Either way the metric fires within one turn, nothing corrupts, and the fix is a version bump (or `ForgetVersion`, if the new graph was the intended one and no old instances remain).
+
+### 15.3 What needs a new version
+
+- **Any change to the graph** — a step added, removed, renamed, reordered, or with a changed policy — changes the fingerprint and needs a new version, or the registry refuses it.
+- **A change to a handler's body alone** does not change the fingerprint and needs no new version. That is the direct consequence of dropping replay (§5), and its converse should be understood: an instance that has not reached a step yet runs whatever code is deployed for it, so two instances of the "same" version can observe different behavior for the same step depending on when each reaches it relative to a deploy. Treat a materially different handler the way you would any other live code swap — feature-flag it, or bump the version anyway so old instances drain on old code.
+
+### 15.4 Rolling deployments
+
+1. **`WithVersion(n)` is stamped on the journal** when the instance starts.
+2. **A host without the instance's version declines to advance it.** The `Workflow` actor's job handler returns `actor.ErrJobRejected`, which halts the actor to clear its placement and re-routes the occurrence to another host — **without counting an attempt and without dead-lettering it**. Old instances drain onto the hosts still running the old code; new instances start on the new one. The same rule applies on the worker and undo types, so a task is never run by a handler set from another version.
+3. **The drain is correct but not fast.** A re-route costs a jittered one to two alarm poll intervals. With `k` old-version hosts among `N`, each turn of an old instance expects about `N/k` re-routes before it lands; at a 30 s poll interval, a 20-turn instance on a four-host cluster with one old host takes on the order of an hour to drain. Keep old-version hosts up until `List(Version: old)` is empty, and expect it to take a while.
+4. **The deadline alarm has its own branch.** The alarm is delivered to the same actor on the same hosts, so a version-mismatched host cannot simply reject it forever or run `advance` against a definition it doesn't have. When the alarm fires on a mismatched host, the handler works from the journal alone — the full step list is there (§13.1) — and applies `WithUnknownVersionPolicy`: `Park` (default) re-arms the alarm and waits for a matching host; `Fail` terminates the instance as `failed` with cause `unknown version` when the instance timeout has elapsed, without compensation, since no host can run the compensations either. The registry tells the operator which versions are registered, and `List(Version: v)` which instances are parked on one.
+
+## 16. Alternatives considered
 
 **Code-as-workflow with replay (the Dapr/DTF model).** Rejected per §5: the expressiveness is real, but so are the determinism rules, the versioning trap, and the SDK surface required to hide the machinery. The stated goal here is the opposite — that nothing is hidden.
 
-**Let the `Workflow` actor perform "small" steps.** Tempting whenever a step is one fast call, and the shape `imageoptim` started from. Rejected per §4: the turn lock makes every blocking call a denial of the instance's own control plane, the work loses its independent retries and dead-letter record, and no boundary drawn at "small" survives contact with a slow day.
+**Let the `Workflow` actor perform "small" steps.** Tempting whenever a step is one fast call, and the shape `imageoptim` started from. Rejected per §4: the turn lock makes every blocking call a denial of the instance's own control plane, the work loses its independent attempts, and no boundary drawn at "small" survives contact with a slow day.
 
-**Build the worker on `taskpool`.** Attractive, since `taskpool` already gives strict per-host concurrency, capability queues, and re-routing. Rejected because a task pool is explicitly fire-and-forget and has no result path, and because a workflow needs the dead-letter hook to report a terminal failure back to its `Workflow` actor. The workflow registers its own worker types with the *same* mechanics (`CapacityGroup`, `CapacityGroupLimit`, per-capability types), which is the part worth reusing; the parts that differ are the parts that matter.
+**Let Francis retry handler errors.** The first draft did, and it is cheaper per attempt — a Francis retry re-runs the handler in place, with the lease held. Rejected because the retry count is a property of the actor type, so a step and its compensation could not have different policies while sharing a type; because Francis retries are invisible to the journal; and because a job that exhausts them dead-letters, which frees its idempotency key and turns the reconcile loop into a re-run loop. Engine-owned attempts cost a report per attempt and buy per-step policy, observability, and a dead-letter that means "could not report" rather than "failed".
+
+**Build the worker on `taskpool`.** Attractive, since `taskpool` already gives strict per-host concurrency, capability queues, and re-routing. Rejected because a task pool is explicitly fire-and-forget and has no result path. The workflow registers its own worker types with the *same* mechanics (`CapacityGroup`, `CapacityGroupLimit`, per-capability types), which is the part worth reusing.
 
 **One actor per step instead of one per task.** Would halve the number of activations for parallel steps. Rejected because a fan-out's tasks would then be serialized by that actor's turn lock, which defeats the purpose.
 
-**An event-sourced journal (append-only records) instead of one document.** Better for large instances and gives a natural audit log. Rejected for v1 because Francis state is a single value per actor, so an append-only log would need side actors or a second storage concept, and because a single document makes a step transition one atomic write. Worth revisiting if the size bounds in §11.2 turn out to be too tight.
+**An event-sourced journal (append-only records) instead of one document.** Better for large instances and gives a natural audit log. Rejected for now because Francis state is a single value per actor, so an append-only log would need side actors or a second storage concept, and because a single document makes a step transition one atomic write. Child workflows (§12) are the pressure valve: a wide fan-out becomes independent journals. If §13.2's arithmetic turns out to bind in practice, this is the next thing to build.
 
-**A phase field on the journal.** Simpler `advance`. Rejected because it is a second source of truth that can disagree with the records, and because deriving the phase is what makes duplicate reports safe (§8.3, invariant 2).
+**A phase field on the journal.** Simpler `advance`. Rejected because it is a second source of truth that can disagree with the records, and because deriving the phase is what makes duplicate reports safe (§8.3, invariant 2). `Cursor` survives only as a derived value nothing reads.
+
+**A secondary index actor for listing by status.** Would need no framework change: shard instances across a few index actors, each holding sets of IDs by status, updated on every status transition. Rejected in favor of state labels (§17) because the index would be a second write on a second actor, updated *after* the journal write and therefore able to lag or dangle, and because "filter a listing by a small label" is useful to every actor application, not only this one.
+
+**An alarm for the watchdog.** One timer instead of two. Rejected because a failing alarm handler deletes the alarm, repeating or not, and the watchdog's job is to survive exactly the conditions that make handlers fail. A repeating job keeps its recurrence through a dead-lettered occurrence, at the cost of being first-write-wins rather than replaceable — which the watchdog, unlike the deadline, never needs.
 
 **Compensations as ordinary steps in a declared "on failure" branch.** More uniform, and it makes the rollback path visible in the graph. Rejected because the unwind set is determined at runtime by how far the instance got, so the branch would have to be conditional on each forward step's status — which is the compensation stack, written less directly.
 
-## 15. Mapping `imageoptim` onto this design
+## 17. Framework changes required
 
-The design is only worth building if it subsumes the case that motivated it. `imageoptim`'s workflow — now a sequence with a fan-out in the middle and an optional step at the end — becomes:
+Two additions to Francis, both small and both useful beyond workflows. Everything else in this design is expressible with the API as it stands.
+
+1. **`Service.DeleteJob(ctx, jobID)` for dead-lettered jobs.** The provider interface already has `DeleteDeadJob`; the public `Service` exposes `GetJob`, `ListJobs`, `CancelJob`, and `RetryJob` but no delete, so today a dead-letter record can only leave the store by being retried. The engine needs it to keep §8.8's invariant — no dead-letter outlives the journal entry that accounts for it — and `Purge` needs it to be complete. Any application that dead-letters jobs it decides not to retry needs it too.
+2. **State labels, with a filtered listing.** `SetStateOpts` gains `Labels map[string]string` (a handful of short string pairs, written in the same transaction as the state, expiring with it), and `ListStatesOpts` gains `Labels map[string]string`, matched by equality and indexed on `(actor_type, key, value, actor_id)`, so a filtered listing pages in actor-ID order exactly as an unfiltered one does. Three providers — SQLite, Postgres, standalone — and one table each. This is what makes "list the running instances" a range scan instead of a client-side filter over every retained journal.
+
+## 18. Mapping `imageoptim` onto this design
+
+The design is only worth building if it subsumes the case that motivated it. `imageoptim`'s workflow — a sequence with a fan-out in the middle and an optional step at the end — becomes:
 
 ```go
 wf, err := workflow.New("thumbnails",
     workflow.WithTimeout(cfg.Actors.WorkflowTimeout),
-    workflow.WithRetention(cfg.Actors.CompletedWorkflowRetention),
+    workflow.WithRetention(workflow.RetentionPolicy{
+        Completed: cfg.Actors.CompletedWorkflowRetention,
+        Failed:    cfg.Actors.CompletedWorkflowRetention,
+    }),
+    workflow.WithAutoPurge("@hourly"),
     workflow.WithConcurrency(cfg.Images.MaxConcurrentEncodes),
     workflow.WithSteps(
         // Normalizes the request and produces the list of thumbnails to generate
@@ -786,7 +1013,7 @@ wf, err := workflow.New("thumbnails",
         ),
 
         // Writes manifest.json from the fan-out's outputs
-        // Without it there is nothing to call back about, so its failure skips the callback
+        // Without it there is nothing to call back about, so the run continues as failed and the callback is skipped
         workflow.Step("manifest",
             workflow.WithRun(writeManifest),
             workflow.WithSkipOnFailure("webhook"),
@@ -795,119 +1022,82 @@ wf, err := workflow.New("thumbnails",
         // The thumbnails and the manifest are stored either way, so a lost notification does not fail the run
         workflow.Step("webhook",
             workflow.WithRun(deliverWebhook),
+            workflow.WithMaxAttempts(10),
             workflow.WithOptional(),
         ),
     ),
 )
 
-// The image ID is the instance ID, so a retried upload starts nothing new
-id, err := svc.Start(ctx, req, workflow.WithInstanceID(imageID))
+// The image ID is the instance ID, so a retried upload finds the instance the first one started
+id, _, err := svc.Start(ctx, req, workflow.WithInstanceID(imageID))
 ```
 
 Every declaration above corresponds to a paragraph of prose in `imageoptim`'s README today, which is the clearest evidence the generalization is the right one.
 
 What the service keeps: the encoder, the object store, the HTTP client, the request parsing, the metrics that are about images. What it deletes: `imageworkflow.go` entirely and the orchestration half of `imageworkflowworker.go` — the fan-out, the result accounting, the `Remaining` counter, the deadline alarm and its per-step re-arming, the idempotency keys, the dead-letter hook, the duplicate-report redrive in three places, the `Peek` status plumbing, and the `advance` switch. Roughly 600 lines of subtle, well-tested code becomes a declaration and four handler functions.
 
-Two behaviors change, both for the better: the status endpoint reports per-step progress rather than a thumbnail count, and a failed workflow can be re-driven by starting a new instance with the same input rather than by re-uploading.
+Three behaviors change, all for the better: the status endpoint reports per-step progress and attempts rather than a thumbnail count; a failed workflow can be re-driven by starting a new instance with the same input rather than by re-uploading; and the webhook's retries become a declared, observable policy instead of the actor type's.
 
 It also gains something it does not currently have: if the thumbnails were written somewhere a partial result mattered, `WithCompensate(deleteThumbnail)` would be one line.
 
-## 16. Phasing
+## 19. Phasing
 
-**Phase 1 — the engine.** `Workflow` and `WorkflowWorker` actors, journal, the `advance`/`reconcile` loop, sequential steps, static parallel groups, the `deadline` alarm, `Start`/`GetStatus`/`Cancel`, per-step failure semantics, retention, metrics. Enough to replace `imageoptim` except for the fan-out.
+**Phase 0 — framework.** `Service.DeleteJob` and state labels with a filtered listing (§17), with provider tests in the shared suite. Small, and everything after depends on them.
 
-**Phase 2 — fan-out and compensation.** `ForEach` with `WithItemsFrom` and `WithMaxParallel`, the three group failure policies, the compensation stack and its policies. This is the point at which `imageoptim` can be ported and the design validated against a real service.
+**Phase 1 — the engine.** `Workflow`, worker, and undo actors; the registry and the consistency check; the journal with the full step list; the `advance`/`reconcile` loop; engine-owned attempts; the deadline alarm and the watchdog job with both dead-letter scans; sequential steps and static parallel groups; per-step failure semantics; `Start`/`GetStatus`/`List`/`Cancel`/`Purge`; retention with the TTL backstop; metrics. Enough to replace `imageoptim` except for the fan-out.
 
-**Phase 3 — waiting and routing.** `WaitForEvent` and `RaiseEvent`, per-step capabilities, conditional skipping, `WithWatchdog`, `List`, `Purge`.
+**Phase 2 — fan-out and compensation.** `ForEach` with `WithItemsFrom` and `WithMaxParallel`, the three group failure policies, the compensation stack and its policies. This is the point at which `imageoptim` is ported and the design validated against a real service.
 
-**Phase 4 — versioning and composition.** `WithVersion`, the `ErrJobRejected` drain, the definition fingerprint, and child workflows.
+**Phase 3 — waiting, pausing, and sweeping.** `WaitForEvent` and `RaiseEvent`, `Suspend` and `Resume` with paused deadlines, per-step capabilities, `PurgeTerminated` and `WithAutoPurge`.
 
-Documentation follows the existing built-in actor pages (`docs/content/builtin-actors/`), and the engine gets the same functional-test treatment as `taskpool` and `signal`, plus table-driven unit tests over `advance` since it is a pure function of a serialized journal. A dedicated test asserts the boundary of §4: a `Workflow` turn driven against a transport that rejects anything but state, alarm, and job operations.
+**Phase 4 — composition and deployment.** Child workflows with `unwind`, `WithMaxDepth`, the version drain and its unknown-version branch, `Definitions` and `ForgetVersion`.
 
-## 17. Open questions
+Documentation follows the existing built-in actor pages (`docs/content/builtin-actors/`), and the engine gets the same functional-test treatment as `taskpool` and `signal`, plus table-driven unit tests over `advance` since it is a pure function of a serialized journal. Three tests are named here because they guard the invariants the reviews found fragile: a `Workflow` turn driven against a transport that rejects anything but state, alarm, and job operations (§4); a fault injected between `SetState` and `reconcile` with the retried turn asserted to converge without double-counting (§8.3); and a worker whose report is made to dead-letter, with the instance asserted to recover through the watchdog scan and to leave no dead-letter record behind (§8.8).
 
-1. **Trace context across durable jobs.** Does a job carry the trace context of its dispatcher today? If not, this needs adding, and it affects more than workflows (§12.4).
+## 20. Open questions
+
+1. **Trace context across durable jobs.** Does a job carry the trace context of its dispatcher today? If not, this needs adding, and it affects more than workflows (§14.5).
 2. **Fan-out over a field of the input.** Today the list must be a step's whole output, so fanning out over one field of the workflow input costs a `plan` step. A field selector would remove it, at the cost of introducing an expression of some kind — and the alternative, a callback on the orchestrator, is ruled out by §4. Is the round-trip worth avoiding?
-3. **Per-step capacity groups.** Every step shares one worker type and therefore one per-host budget, so a slow network step occupies a slot sized for an expensive CPU step (§9.4). Capability queues already work as a workaround. Is `WithCapacityGroup(name)` per step worth the extra registered types?
-4. **Child workflows.** A step that starts another workflow and waits for it. The mechanics are clear (the child dispatches `done` to its parent; compensating the step means cancelling the child instance), but it interacts with versioning and with the journal size bound. Phase 4 or later?
-5. **Suspend and resume.** Dapr has it, and it is genuinely useful for operations ("stop making progress while we fix the downstream"). It is cheap to add — a status that makes `reconcile` a no-op — but it interacts with deadlines: does a suspended instance's timeout keep running?
-6. **Retry policy granularity.** Step-level `WithMaxAttempts` maps onto the actor type's registration options, which are per *actor type*, not per step. Supporting genuinely per-step retry policies means either one worker type per step (a lot of types) or implementing backoff in the engine on top of a single-attempt job. Which cost is right?
-7. **`CancelJob` on an active occurrence.** It removes the job row, but does it interrupt an executing occurrence's context? The fail-fast policy's behavior depends on the answer.
-8. **Should the `Workflow` actor use `LockModeShared`?** `signal` does, to keep parked waiters from blocking the completion that releases them. Turns here are short by construction (§4) and there are no parked callers, so exclusive turns look right — but a very wide fan-out reporting simultaneously would serialize on it.
+3. **Per-step capacity groups.** Every step shares one worker type and therefore one per-host budget (§9.4). Capability queues already work as a workaround. Is `WithCapacityGroup(name)` per step worth the extra registered types?
 
-**Resolved by §4**, and recorded here because it was open in the previous draft: conditional steps do **not** get a `WithCondition(fn)` predicate evaluated on the `Workflow` actor. A condition is a step that returns a boolean and a `WithSkipIf("check", false)` on the following step — one more durable round-trip, and consistent with the rest of the design.
+Two questions from the first draft are closed here rather than carried. `CancelJob` on an active occurrence removes the row and does not interrupt the handler, so §9.3 records the late report as a result. And the `Workflow` actor keeps exclusive turns: `LockModeShared` exists for `signal`'s parked waiters, and this actor has none; a wide fan-in serializes at one turn per state write, which §13.2's guidance already bounds.
 
-## 18. Review findings
+Conditional steps do **not** get a `WithCondition(fn)` predicate evaluated on the `Workflow` actor. A condition is a step that returns a boolean and a `WithSkipIf("check", false)` on the following step — one more durable round-trip, and consistent with the rest of the design.
 
-A pass through the design that cross-checks its claims against Francis's actual primitives — the `actor` package, `RegisterActorOptions`, the built-in actor contract, and the docs for jobs and alarms — rather than testing the prose in isolation. Grouped by how much they matter; each entry names the section it bears on.
+## 21. Review record
 
-### 18.1 Needs resolving before Phase 1/2
+Two review passes were made against the first draft: one against the public `actor` API and the docs, one against the execution engine in `host/local/alarms.go` and the job providers. Every finding was resolved in this revision; this table records what was found and where the resolution lives, so the reasoning isn't lost.
 
-These are places where the design states something as settled that the platform doesn't currently support, or where a real correctness gap survives the design's own guards.
-
-**Cross-host definition-fingerprint checking is described as if it were a cluster-wide guarantee, but as written it can only be local (§13).** `workflow.New` and `RegisterBuiltInActor` run once per host at startup, with no mention of the fingerprint being persisted or compared anywhere shared. That catches the least dangerous case — one process registering the same version twice with different code, e.g. a bug in a redeploy script — while missing the one the section exists to prevent: two hosts in the same cluster running genuinely different code under the same declared `(name, version)`, which is exactly what a half-rolled-out deploy plus a reused version number produces. Francis already has a pattern for this kind of cluster-wide, once-per-value coordination — a bootstrapped singleton actor, the same mechanism `cronjob`'s scheduler and this design's own placement model lean on — so the fingerprint should be written to and checked against that singleton's state at registration time, and a host whose local fingerprint disagrees with the cluster's recorded one for that version should refuse to register the workflow, not just skip a local duplicate-registration check.
-
-**Per-method retry policy is a stated capability, not just an open question (§8.8, §10.3; cf. §17 Q6).** §10.3 says compensations "get their own retry policy, `WithCompensateMaxAttempts`, defaulting higher than the forward policy." But Francis's retry count is a property of the registered *actor type*, not of a job method — `RegisterActorOptions.MaxAttempts`, and confirmed for jobs specifically in the Jobs documentation ("a failing Job is retried per the actor type's `MaxAttempts`"). Since both `run` and `compensate` are dispatched to the same `WorkflowWorker` actor type (§8.1, §8.5), Francis has no way today to give them different attempt counts. This is sharper than Q6's "which cost is right" framing: §10.3 asserts the feature works as designed, and the platform can't deliver it as written. The cheap fix is also a clean one: register compensations on their own actor type (`…worker.compensate`, alongside the per-capability types in §9.4), which gets them an independent `MaxAttempts`/`InitialRetryDelay` for free and, incidentally, their own capacity-group budget instead of competing with forward work for the same per-host slots.
-
-**`RaiseEvent`'s idempotency guard has a real gap when a `WaitForEvent` step name is reused (§6.2, §8.5, §8.3 invariant 3).** Its protection against a stale, late-arriving duplicate relies entirely on the dispatch-level idempotency key `event|<name>`, which — by the engine's own rule — becomes reusable the moment the first job carrying that key completes. Every other report in the design additionally carries a *journal-level* guard (a task's `Done` flag, checked before `apply` mutates anything), so a duplicate delivered after the key has been recycled is still caught. `RaiseEvent` has no equivalent: nothing in the journal records that an event named `approval` has already been consumed once the step that consumed it has moved on. That's harmless as long as no definition reuses a `WaitForEvent` name, since a late duplicate aimed at a step that already resolved is just dropped the same way a stale task result is. It stops being harmless the moment two `WaitForEvent` steps in one definition share a name — a workflow that waits for "approval" twice, once early and once late, is a realistic shape — because a delayed duplicate of the first raise, arriving after the first wait resolved and the second is now open, is indistinguishable at the journal level from a genuine second raise. Recommend scoping the guard (and ideally the idempotency key itself) to the step occurrence — its position in the journal, or a nonce recorded when the `WaitForEvent` step opens — rather than to the bare event name, or documenting that reusing a `WaitForEvent` name within one definition is unsupported.
-
-**`Cursor` risks being exactly the second source of truth the design rejects one paragraph earlier (§11.1).** The section states as a principle that there is deliberately no phase field, because a second source of truth "would eventually disagree with the first," and then defines `Cursor string // name of the step being executed or unwound` on the same struct. If `Cursor` is ever read by anything other than a human looking at `GetStatus` output — in particular, if `advance` or `reconcile` ever branch on it rather than recomputing the current step from `Steps` — it is exactly the phase field the paragraph above it argues against, and can drift from the step records under the same crash-between-writes failure mode. The fix is one sentence, not a redesign: state explicitly that `Cursor` is written by `advance` as a byproduct of deriving the real answer from `Steps`, is never itself an input to `advance`, and exists only to make `GetStatus` and logs cheap to read without walking the whole step list.
-
-### 18.2 Worth tightening before Phase 2/3
-
-**The three size bounds don't compose the way they read (§11.2).** `WithMaxOutputSize` defaults to 64 KiB *per task*, `WithMaxJournalSize` bounds the *whole* encoded journal to 1 MiB, and the guidance limit is "a few hundred tasks per instance" — but a few hundred tasks anywhere near the per-task output ceiling is tens of megabytes, an order of magnitude over the journal cap, long before task count alone becomes the binding constraint. The two defaults are really one constraint (`tasks × typical output size ≲ 1 MiB`), and the doc should say so directly: either state the effective per-task budget as a function of expected fan-out width, or note explicitly that 64 KiB is a ceiling against a misbehaving task, not a per-task allowance to plan a wide fan-out around.
-
-**Recomputing the `deadline` alarm on every turn has a cost the design doesn't price in (§8.7, §12.3).** It's elegant, but not free: every task report becomes a `SetState` *and* a `SetAlarm`, both writes to the same `(actor, name)` row, on top of whatever `reconcile` dispatches. For a wide, fast-reporting fan-out this doubles the write volume a turn depends on and puts every one of those writes in contention with each other — directly against the single-digit-millisecond turn-duration target §12.3 proposes measuring. Worth an explicit escape hatch: keep the last-armed due time in the journal and skip `SetAlarm` when the newly computed one is unchanged, which is the common case.
-
-**`FailFast`'s wording doesn't quite fit a `MaxParallel`-bounded fan-out (§9.2, §9.3).** "Pending tasks of the group are cancelled with `CancelJob`" is accurate for a plain `Parallel` group, where every member is dispatched up front, but most of a wide, throttled `ForEach`'s tasks are never dispatched at all while they wait for a slot — there is no job to cancel for them, they simply have to stop being admitted once the step is marked failed. Worth a sentence distinguishing "cancel the ones in flight" from "stop admitting new ones," since a reader of §9.3 alone could reasonably try to `CancelJob` tasks that were never dispatched.
-
-**A turn's own retry-after-partial-failure is the same mechanism as duplicate-report handling, but the doc doesn't say so (§8.2, §8.3, §16).** Invariant 2 covers a *duplicate delivery* of an event that already has an effect recorded. The same code path also has to handle Francis retrying the *same job occurrence* after a turn's `SetState` succeeded and its subsequent `reconcile` dispatch failed — on that retry, `apply` sees the identical event applied to a journal that already reflects it, and stays correct only because the guard is "is this already recorded," never "have I seen this specific delivery before." The design gets this right by construction, but doesn't say so, and it's worth a named test in the Phase 1 plan: kill or error the process between `SetState` and `reconcile` and confirm the retried turn converges without double-counting anything.
-
-**`WithMaxParallel`'s actual mechanism isn't explained (§9.2, §11.1).** `taskRecord` has no in-flight or dispatched flag to bound against — only `Done`. The mechanism that must be intended — a sliding window that idempotently redispatches the first `n` not-yet-`Done` tasks in index order on every `reconcile` — works fine, since redispatching an already-running task's identical job just coalesces on its idempotency key, but nothing in the doc says this, and a reader is left to reconstruct it or wonder whether a missing flag is a bug.
-
-### 18.3 Minor clarity notes
-
-- **`Start`'s idempotency is not a restart lever (§7.3, §15).** It only suppresses a duplicate dispatch of the *same* call; reusing an instance ID after that instance has already terminated is silently ignored, per the same rule `imageoptim`'s own `start` handler uses. §15's "re-drive by starting a new instance with the same input" is correct but easy to misread as "the same ID" — worth one explicit sentence that re-driving means minting a fresh instance ID.
-- **`CompensationOutcome` while still `compensating` (§10.6).** None of the four values describe "still unwinding"; presumably it's empty until the instance reaches a terminal status. Worth saying so, rather than leaving a status-page implementer to guess.
-- **Authorization is unstated (new).** Nothing says who may call `Start`, `Cancel`, `RaiseEvent`, or `Purge` on a given instance. Consistent with the rest of Francis, where that's entirely the calling application's concern, but worth one sentence saying so, if only so a reader doesn't go looking for an authz hook that was never meant to exist.
-- **Mid-flight handler drift under a "compatible" change is the accepted, but unnamed, converse of §13 point 4.** "Changing a handler's implementation is safe" is true and is the direct consequence of dropping replay (§5) — but two instances of the "same" version can observe different behavior for the same step depending on exactly when each reaches it relative to a deploy, since nothing versions the handler body itself. Worth naming as something operators plan for the same way they would any other live-code-swap risk (feature-flag a materially different handler rather than relying on the fingerprint to catch it, since by definition a same-shape change won't).
-
-### 18.4 Second pass: verified against the host implementation
-
-The first pass checked the design against the public `actor` API and the docs. This pass reads the execution engine itself — `host/local/alarms.go`, the SQLite and Postgres job providers, and `components/actor-provider.go` — and finds that several of the design's guarantees rest on behavior the doc doesn't describe, and in three places on behavior the engine doesn't have. File and line references are to the `main` branch at the time of writing.
-
-#### Correctness
-
-**Dead-lettering frees the idempotency key, so `reconcile` re-runs dead-lettered tasks (§8.3 invariant 3, §8.8).** Dispatch dedups with `INSERT … ON CONFLICT (actor_type, actor_id, alarm_name) DO NOTHING` over the live `alarms` table only (`components/sqlite/sqlite-jobs.go:59-67`, same shape in Postgres), and `DeadLetterAlarm` *moves* the failed row out of that table into `dead_jobs` (`components/actor-provider.go:78-81`). So the moment a task dead-letters, its `run` key is free again — and the next turn's `reconcile`, triggered by any sibling's report or a watchdog tick, sees the task as scheduled-not-done and dispatches a brand-new `run`. The task runs another full `MaxAttempts` cycle, leaves another dead-letter record, and repeats until the journal learns of the failure. The only thing that tells the journal is the `JobFailed` hook, which is best-effort by design (`host/local/alarms.go:511-540`). Invariant 3 is right that the key "stops `reconcile` from queueing a second copy of a task that is already pending or running"; it's silent on dead-lettered, which is the case that matters. Fix: before redispatching a scheduled-not-done task, `reconcile` checks for an existing dead-letter record on that worker (`ListJobs`/`GetJob` are available through the privileged client) and folds it into the journal as the failure. That also demotes the hook from load-bearing to an accelerator, which is the only role a best-effort hook should have.
-
-**The orchestrator's own jobs dead-letter on the same terms, and a dead-lettered `done` is a lost result (§8.2, §12.1).** `executeJob` applies `ActorsConfig[type].MaxAttempts` to every job regardless of which actor it targets (`host/local/alarms.go:470-477`); the defaults are 3 attempts with a 2 s initial delay and a `1.5^n` backoff, so the whole retry window is about ten seconds. A database blip of that length while a `done` report is being applied dead-letters the report permanently — and the worker has already halted and will never re-send. The instance then either re-runs the task through the previous finding (if the journal never recorded it) or, worse, waits for the deadline and fails a step whose work actually succeeded. The design never discusses the `Workflow` type's retry policy. It should: register the type with a much higher `MaxAttempts` and longer backoff than the default (its turns are idempotent, so retrying is always safe); have the watchdog scan the instance's own dead-letters (`ListJobs` on itself, which §12.1 already does for `start`) and `RetryJob` any dead-lettered `done`/`compensated`/`event`; and implement `JobFailed` on the orchestrator to at least emit a metric.
-
-**The deadline alarm is deleted after `MaxAttempts` failed executions, so "guarantees termination" is only as strong as the orchestrator's retry policy (§8.7).** A fatal alarm execution deletes the alarm, repeating or not (`host/local/alarms.go:367-375`); by contrast a repeating *job* keeps its recurrence when one occurrence dead-letters (`alarms.go:491-498`). A stalled instance whose deadline handler fails three times — the same ten-second blip — loses its only backstop and never terminates. Two ways out: the higher `MaxAttempts` from the previous finding, or implement the watchdog as a repeating job to self (`WithJobInterval` plus `WithJobTTL` set to the instance timeout), which survives a failed occurrence. The trade is real and the doc should pick: an alarm is replaceable by name (`SetAlarm` upserts) but fragile; a job is durable across a failed occurrence but first-write-wins (`DO NOTHING`), so "recompute on every turn" would need `CancelJob` + `Dispatch` instead of one upsert. For the record, what makes the *current* design safe is worth stating too: re-arming `deadline` from inside its own handler works because completion is keyed by lease, not name — `completeAlarm` re-reads the leased alarm and treats a replaced one as already handled (`alarms.go:593-607`).
-
-**`WithSkipOnFailure` is ambiguous about compensation (§8.9, §15).** The table says the step "fails the workflow, and the named downstream steps are recorded as skipped rather than run" — but the default row defines "fails the workflow" as "the workflow unwinds," and once an instance unwinds no downstream step runs anyway, which makes naming the ones to skip meaningless. The semantics the manifest→webhook case in §15 actually needs are: record the failure, skip the named dependents, keep running everything else, and terminate as `failed` **without** unwinding — a variant of `WithOptional`, not of the default. The option also needs to say whether skipping is transitive (a skipped step that itself declares `WithSkipOnFailure`; presumably not, since skipped ≠ failed) and that a skipped step never enters the compensation stack. Restate the table with three explicit outcomes: unwind, continue-as-`completed`, continue-as-`failed`.
-
-**Compensation routing doesn't say which actor type it targets, and capabilities make that matter (§9.4, §10.3).** `compensate` goes to "the same worker actor ID the forward task used," but a step with `WithRequiredCapability("gpu")` ran on `…worker.gpu`, and its compensation almost always needs the same placement — the undo touches the same GPU-local or region-local resource. The doc should state that compensation targets the same *type* as the forward task. That also prices the first pass's suggested separate compensation type honestly: it becomes one type per capability, `{run, compensate} × {base, cap₁, cap₂…}`.
-
-#### Robustness and operations
-
-**Dead-letter records leak, and `Purge` can't reach them (§11.3, and a Francis gap).** The provider has `DeleteDeadJob` (`components/actor-provider.go:98-100`), but `actor.Service` exposes only `GetJob`, `ListJobs`, `CancelJob`, and `RetryJob` — there is no public delete. Every failed task, and per the first correctness finding every *re-run* of one, leaves a `dead_jobs` row keyed by a worker ID that nothing ever cleans up; `Purge` deletes the journal and orphans them. Francis needs a `Service.DeleteJob` for dead-lettered jobs (the provider side already exists), and both `Purge` and terminal-retention expiry should delete the instance's dead-letters. This is a framework change, not just a workflow one, and it belongs in Phase 1.
-
-**Write amplification is quadratic in fan-out width (§11.2, §14).** Every `done` report rewrites the whole journal, and the journal grows with the number of reported tasks, so an N-task fan-out writes O(N²) bytes: 500 tasks with 2 KiB outputs is a 1 MiB journal rewritten 500 times, roughly 500 MiB through the state store for one instance. This is the actual reason behind the "few hundred tasks" guidance and the first pass's size-cap finding, and it should be stated as such. It is also the strongest argument for the event-sourced journal §14 rejects, specifically for wide fan-outs: append one record per report and compact at step boundaries.
-
-**The `ErrJobRejected` version drain works but is slow, and its deadline path has a hole (§13).** A rejected occurrence halts the actor to clear its placement and is pushed out by a jittered 1–2× alarm poll interval (`host/local/alarms.go:546-563`). With `k` old-version hosts among `N`, each turn of an old instance expects about `N/k` re-routes at 30–60 s each (imageoptim polls at 30 s): a 20-turn instance on a four-host cluster with one old host spends on the order of an hour draining. The doc should set that expectation. Separately, §13 point 3 leans on the deadline alarm to terminate an instance no host can serve — but the alarm is delivered to the same actor on the same version-mismatched hosts. If the handler applies the version check, the deadline is rejected forever too; if it doesn't, it runs `advance` against a definition it doesn't have. The alarm handler needs an explicit unknown-version branch that fails the instance from the journal alone.
-
-**`GetStatus` should be answerable from the journal alone, so the journal should record the full step list at start (§11.1, §12.1).** The journal records "only steps that were reached"; the pending ones would have to come from the definition on whichever host serves the `Peek` — wrong on a version-mismatched host, and impossible in the unknown-version branch above. Recording `{name, kind}` for every step at `Start` costs a few hundred bytes and makes status, the unknown-version path, and operator tooling independent of what code is deployed.
-
-**Over-subscribed fan-outs degrade to poll-interval pacing (§9.2, §9.4).** `WithMaxParallel` is per instance and knows nothing about cluster capacity. When in-flight tasks exceed the cluster's total `WithConcurrency` budget, each surplus occurrence is released and re-fetched a poll interval later, on the same path as the version drain. `taskpool` documents this property; §9.4 should too, since it changes how to size `WithMaxParallel`.
-
-#### Spec gaps and API notes
-
-- **`Start` with a conflicting input is silently first-write-wins (§7.3).** Two callers starting the same instance ID with different inputs both succeed; the second's input is discarded without signal. `Start` should return whether it created or found the instance, or an `ErrAlreadyExists`.
-- **Group outputs are unspecified (§6.3).** A fan-out's output is defined (array by index); a `Parallel` group's is not (presumably an object keyed by member name), nor is a `WaitForEvent`'s (presumably the event payload). Both are what the next step's `DecodeOutput` decodes.
-- **Francis already stamps a per-occurrence request ID (§8.3).** `executeJob` sets `actor.WithRequestID(ctx, jobID + dueTime)` "so the actor can detect duplicate deliveries of the same occurrence" (`alarms.go:454-455`). It can't replace the journal guard — distinct dispatches get distinct IDs — but it is a free way to make the first pass's turn-retry case observable: a metric for turns that re-applied an already-recorded event.
-
-### 18.5 Corrections to the first pass
-
-- The suggested `…worker.compensate` type collides with a user capability literally named `compensate`, since capability types are `…worker.<cap>`. Use a segment outside the capability namespace — `…worker` for runs and `…undo` for compensations — and, per the routing finding above, one of each per capability.
-- "A key is reusable once its job completes" (§8.3 invariant 3) is confirmed, and is *also* true once a job dead-letters — which is exactly what causes the re-run finding. The invariant should read "completes or dead-letters."
-- The alarm-recompute cost finding stands, but the design is safer here than the first pass implied: the recompute is safe even from inside the deadline handler, because completion is lease-keyed.
+| Finding | Resolution | Where |
+|---|---|---|
+| The definition fingerprint was checked locally, so it could not catch two hosts serving different graphs under one version | A registry singleton records each version's fingerprint; hosts check it once, cached, and decline conflicting versions with `ErrJobRejected` | §15.1, §15.2 |
+| `WithCompensateMaxAttempts` was stated as if Francis could give a job method its own retry count; `MaxAttempts` is per actor type | The engine owns attempts: workers report failures as data, the journal counts them, and policies are per step and per compensation | §8.8, §10.3, §16 |
+| `RaiseEvent` had no journal-level guard, so a late duplicate could be misapplied when two `WaitForEvent` steps shared a name | Event names must be unique within a definition; the step record marks the event consumed | §6.2 |
+| `Cursor` sat next to the "no phase field" principle without saying it was derived | Documented as a by-product of `advance` that nothing reads | §13.1 |
+| The three size bounds did not compose; a few hundred tasks at the per-task cap was tens of megabytes | Stated as one product constraint, with O(N²) write amplification named as the reason; per-task cap lowered to 16 KiB; input cap added | §13.2 |
+| The deadline alarm was rewritten on every turn, doubling writes on one row under a wide fan-out | `DeadlineAt` is journaled and an unchanged deadline is not re-armed | §8.7 |
+| `FailFast` said pending tasks are cancelled with `CancelJob`, which does not fit tasks a `MaxParallel` window never dispatched | Reworded: dispatched tasks are cancelled, un-admitted tasks are never dispatched | §9.3 |
+| A turn's own retry after a partial failure was the same mechanism as duplicate handling, but unstated | Stated under invariant 2, with a named fault-injection test | §8.3, §19 |
+| `WithMaxParallel`'s mechanism was not explained and `taskRecord` had no in-flight flag | The sliding window over not-yet-done tasks, safe by idempotent redispatch, is described | §9.2 |
+| `Start`'s idempotency could be misread as a restart lever | Stated: a terminated instance is not restarted; re-drive with a new ID | §7.3 |
+| `CompensationOutcome` while still `compensating` was undefined | Empty until terminal | §10.6 |
+| Authorization was unstated | Stated as the caller's responsibility, by design | §7.3 |
+| Handler-body drift under a same-version deploy was an unnamed consequence | Named, with the operational advice | §15.3 |
+| Dead-lettering frees the idempotency key, so `reconcile` re-ran dead-lettered tasks on every turn | Handler errors never dead-letter; the watchdog scans workers for dead-letters and folds them in as attempts via `RetryJob`/`DeleteJob` | §8.3, §8.8 |
+| The orchestrator's own reports dead-lettered under the default 3-attempt policy, losing results from halted workers | `Workflow` type registered with 20 attempts; watchdog scans its own dead-letters and `RetryJob`s them; `JobFailed` arms the deadline at once | §8.7, §8.8 |
+| A deadline alarm whose handler failed `MaxAttempts` times was deleted, repeating or not | The watchdog is a repeating job, which survives a failed occurrence, and re-arms the deadline on every tick | §8.7, §16 |
+| `WithSkipOnFailure` said "fails the workflow", which under the default row means unwinding, making the skip list meaningless | Restated as continue-as-`failed` without unwinding; four-row table; skipping not transitive | §8.9 |
+| Compensation did not say which actor type it targets; a GPU step's undo needs the GPU | Undo types per capability, routed to match the forward task | §8.1, §9.4, §10.3 |
+| Dead-letter records leaked; `Service` had no delete, and `Purge` orphaned them | `Service.DeleteJob` added to Francis; the engine keeps no dead-letter past its journal entry; `Purge` sweeps the rest | §8.8, §14.3, §17 |
+| Write amplification is O(N²) in fan-out width | Named as the reason for the guidance; child-per-batch as the pattern for wide fan-outs | §13.2, §12 |
+| The version drain was slow, and its deadline could neither be rejected forever nor run without the definition | Drain latency stated with the formula; the alarm handler has a journal-only unknown-version branch with a `Park`/`Fail` policy | §15.4 |
+| The journal recorded only reached steps, so status needed the definition | Every step is recorded at `Start` | §13.1 |
+| Over-subscribed fan-outs degrade to poll-interval pacing, unstated | Stated | §9.4 |
+| `Start` with a conflicting input was silently first-write-wins | `Start` returns `created` | §7.3 |
+| `Parallel` and `WaitForEvent` outputs were unspecified | Table of outputs by kind | §6.3 |
+| The per-occurrence request ID Francis stamps was unused | Used for the re-applied-event metric | §14.4 |
+| `…worker.compensate` as a type name collided with a capability named `compensate` | The undo types are `…undo[.<cap>]` | §8.1 |
+| Listing could not filter by status | State labels in Francis; `List` filters server-side by status, version, and parent | §14.2, §17 |
+| No way to purge terminated instances except waiting for the TTL | `Purge`, `PurgeTerminated`, and `WithAutoPurge` on a `cronjob`; TTL kept as a backstop | §13.3, §14.3 |
+| No child workflows | `Child` step and `WithChild` fan-out, with own journal, `unwind` for completed children, depth limit | §12 |
+| No suspend/resume | `Suspend`/`Resume`, with `reconcile` gated and deadlines paused | §11 |
