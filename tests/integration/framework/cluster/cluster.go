@@ -6,7 +6,9 @@
 package cluster
 
 import (
+	"log/slog"
 	"net"
+	"os"
 	"strconv"
 	"testing"
 	"time"
@@ -164,6 +166,7 @@ func (c *Cluster) buildLocal(t *testing.T, opts Options) {
 			Actors:        opts.Actors,
 			BuiltInActors: opts.BuiltInActors,
 			Extra:         hostExtra,
+			Logger:        DebugLogger(),
 		})
 		c.hosts[i] = h
 		c.procs = append(c.procs, h)
@@ -237,6 +240,7 @@ func (c *Cluster) buildRemote(t *testing.T, opts Options) {
 			Backend:      c.backend,
 			BootstrapJWT: opts.BootstrapJWT,
 			Extra:        runtimeExtra,
+			Logger:       DebugLogger(),
 		})
 		c.runtimes[i] = rt
 		c.procs = append(c.procs, rt)
@@ -284,10 +288,20 @@ func (c *Cluster) buildRemote(t *testing.T, opts Options) {
 			Actors:           opts.Actors,
 			BuiltInActors:    opts.BuiltInActors,
 			Extra:            hostExtra,
+			Logger:           DebugLogger(),
 		})
 		c.hosts[i] = h
 		c.procs = append(c.procs, h)
 	}
+}
+
+// DebugLogger returns a debug logger when FRANCIS_TEST_DEBUG is set, and nil otherwise so the process keeps its discarding default
+// A scenario that stalls says nothing useful without the hosts' and runtimes' own logs, and this is how a run is asked for them
+func DebugLogger() *slog.Logger {
+	if os.Getenv("FRANCIS_TEST_DEBUG") == "" {
+		return nil
+	}
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
 // Processes returns the processes that make up the cluster, in start order
