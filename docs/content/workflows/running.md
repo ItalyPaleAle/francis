@@ -49,11 +49,21 @@ type InstanceStatus struct {
 	CurrentStep  string
 	Steps        []StepStatusView // every step: status, task counts, attempts, timings, error, child IDs
 	Cause        string
+	Output       json.RawMessage  // what the run produced, once it has completed
 	Suspended    *SuspendView     // when suspended: since when, why, and what it was
 	Parent       *ParentView      // when a child: whose
 	CreatedAt, StartedAt, CompletedAt time.Time
 }
 ```
+
+**The output** is what the instance produced: the output of the step named with `WithOutput`, or of the last step otherwise. It is set once the instance completes and stays readable for as long as the journal is retained, so a caller can ask what a run returned long after it ended — which is the same value a parent reads back from a child. Decode it with `DecodeOutput`:
+
+```go
+var result CheckoutResult
+err = status.DecodeOutput(&result)
+```
+
+It is empty for any instance that has not completed, and `DecodeOutput` leaves the destination untouched in that case.
 
 An instance whose start job is durable but has not run yet reports `pending`, which is how it is told apart from one that does not exist. A caller never sees `completed` before every step has reported, including the optional ones.
 

@@ -387,6 +387,10 @@ type InstanceStatus struct {
 	Steps []StepStatusView
 	// Cause is what triggered an unwind, or why the instance failed
 	Cause string
+	// Output is what the instance produced, taken from the step named with WithOutput or the last step otherwise
+	// It is set once the instance completes, and stays readable for as long as the journal is retained, so a caller can ask what a run returned long after it ended
+	// Decode it with DecodeOutput
+	Output json.RawMessage
 	// Suspended is set while the instance is paused
 	Suspended *SuspendView
 	// Parent is set when the instance is a child of another
@@ -394,6 +398,20 @@ type InstanceStatus struct {
 	CreatedAt   time.Time
 	StartedAt   time.Time
 	CompletedAt time.Time
+}
+
+// DecodeOutput reads the instance's output into a value of the caller's own type.
+// It is a no-op for an instance that has no output yet, which is every instance that has not completed.
+func (s InstanceStatus) DecodeOutput(into any) error {
+	if len(s.Output) == 0 {
+		return nil
+	}
+
+	err := json.Unmarshal(s.Output, into)
+	if err != nil {
+		return fmt.Errorf("failed to decode the workflow output: %w", err)
+	}
+	return nil
 }
 
 // StepStatusView is one step of an instance, as a caller sees it
@@ -443,6 +461,7 @@ func statusView(instanceID string, st *instanceState, def *definition) InstanceS
 		Compensation: st.Compensation,
 		CurrentStep:  st.Cursor,
 		Cause:        st.Cause,
+		Output:       st.Output,
 		CreatedAt:    st.CreatedAt,
 		StartedAt:    st.StartedAt,
 		CompletedAt:  st.CompletedAt,

@@ -156,6 +156,11 @@ func TestSequentialWorkflow(t *testing.T) {
 	assert.Equal(t, workflow.StepCompleted, stepView(t, status, "first").Status)
 	assert.Equal(t, workflow.StepCompleted, stepView(t, status, "second").Status)
 
+	// With no step named, the instance's output is the last step's, and a caller reads it back from the status for as long as the journal is retained
+	var out map[string]int
+	require.NoError(t, status.DecodeOutput(&out))
+	assert.Equal(t, map[string]int{"plusOne": 41}, out)
+
 	mu.Lock()
 	defer mu.Unlock()
 	assert.Equal(t, []string{"first", "second"}, order)
@@ -661,4 +666,14 @@ func TestChildWorkflow(t *testing.T) {
 	assert.Equal(t, workflow.StatusCompleted, childStatus.Status)
 	require.NotNil(t, childStatus.Parent)
 	assert.Equal(t, id, childStatus.Parent.InstanceID)
+
+	// WithOutput names which step the instance's output comes from, and the status reports it rather than the last step's
+	var creds map[string]string
+	require.NoError(t, childStatus.DecodeOutput(&creds))
+	assert.Equal(t, map[string]string{"user": "tenant"}, creds)
+
+	// The parent's own output is its last step's, which read the child's
+	var verified string
+	require.NoError(t, status.DecodeOutput(&verified))
+	assert.Equal(t, "tenant", verified)
 }
