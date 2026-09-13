@@ -2,13 +2,11 @@ package workflow
 
 import (
 	"encoding/json"
-	"fmt"
-	"time"
 )
 
 // buildRunPayload assembles what one task needs to run, from the journal, in memory
 // Building a payload is orchestration; performing the work it describes is a step, and the engine never ships the whole journal to a worker, so a step's data dependencies stay explicit and auditable from the definition alone (§5.3)
-func (o *orchestrator) buildRunPayload(st *instanceState, sr *stepRecord, d *stepDef, member *stepDef, tr *taskRecord, now time.Time) (runPayload, error) {
+func (o *orchestrator) buildRunPayload(st *instanceState, sr *stepRecord, d *stepDef, member *stepDef, tr *taskRecord) runPayload {
 	outputs, skipped := o.upstreamOutputs(st, sr, d)
 
 	p := runPayload{
@@ -33,8 +31,7 @@ func (o *orchestrator) buildRunPayload(st *instanceState, sr *stepRecord, d *ste
 		p.Handler = member.name
 	}
 
-	_ = now
-	return p, nil
+	return p
 }
 
 // upstreamOutputs collects the outputs a step's tasks may read: the output of the immediately preceding step, and those of the steps named with WithInputFrom
@@ -80,9 +77,9 @@ func (o *orchestrator) precedingStepName(name string) string {
 
 // childInput returns what a child instance receives as its workflow input
 // A child of a fan-out gets its item, which is what makes "one child per element" read the way it looks; any other child gets the output of the preceding step, falling back to the parent's own input when there is none
-func (o *orchestrator) childInput(st *instanceState, sr *stepRecord, d *stepDef, tr *taskRecord) (json.RawMessage, error) {
+func (o *orchestrator) childInput(st *instanceState, sr *stepRecord, d *stepDef, tr *taskRecord) json.RawMessage {
 	if d.kind == KindForEach {
-		return tr.Item, nil
+		return tr.Item
 	}
 
 	prev := o.precedingStepName(sr.Name)
@@ -91,12 +88,12 @@ func (o *orchestrator) childInput(st *instanceState, sr *stepRecord, d *stepDef,
 		if other != nil && other.Status != StepSkipped {
 			out := stepOutput(other, o.def.byName[prev])
 			if len(out) > 0 {
-				return out, nil
+				return out
 			}
 		}
 	}
 
-	return st.Input, nil
+	return st.Input
 }
 
 // isPositional reports whether a step's tasks have siblings to be positioned among, which is what makes an index meaningful to a handler
@@ -107,9 +104,4 @@ func isPositional(d *stepDef) bool {
 	default:
 		return false
 	}
-}
-
-// isoInterval renders a duration as the ISO8601 form the job scheduler takes
-func isoInterval(d time.Duration) string {
-	return fmt.Sprintf("PT%dS", int(d.Round(time.Second).Seconds()))
 }

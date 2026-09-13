@@ -16,14 +16,26 @@ import (
 
 // registryState is what the definition registry holds: the fingerprint first recorded for each version of the graph
 type registryState struct {
-	// Versions maps a version number to the fingerprint that defined it, and is never overwritten, so the first deployment of a version defines it
-	Versions map[int]registryEntry `msgpack:"versions,omitempty"`
+	// Versions holds one entry per recorded version, and an entry is never overwritten, so the first deployment of a version defines it
+	// It is a slice rather than a map keyed by version because a map with integer keys cannot survive the generic decode a cross-host response goes through
+	Versions []registryEntry `msgpack:"versions,omitempty"`
 }
 
 // registryEntry is one version's recorded definition
 type registryEntry struct {
+	Version     int       `msgpack:"version"`
 	Fingerprint string    `msgpack:"fingerprint"`
 	FirstSeenAt time.Time `msgpack:"firstSeenAt"`
+}
+
+// find returns the entry recorded for a version, or nil when the version is unknown
+func (st *registryState) find(version int) *registryEntry {
+	for i := range st.Versions {
+		if st.Versions[i].Version == version {
+			return &st.Versions[i]
+		}
+	}
+	return nil
 }
 
 // registerRequest asks the registry whether this host's graph is the one recorded for a version
@@ -58,7 +70,7 @@ type DefinitionInfo struct {
 
 // definitionsResponse carries what the registry holds back to the caller
 type definitionsResponse struct {
-	Entries map[int]registryEntry `msgpack:"entries,omitempty"`
+	Entries []registryEntry `msgpack:"entries,omitempty"`
 }
 
 // registryActor is the cluster-wide singleton that records each version's definition fingerprint, so two hosts cannot serve different graphs under the same version
@@ -101,8 +113,8 @@ func (r *registryActor) register(ctx context.Context, data actor.Envelope) (any,
 		return nil, fmt.Errorf("failed to read the registry state: %w", err)
 	}
 
-	existing, ok := st.Versions[req.Version]
-	if ok {
+	existing := st.find(req.Version)
+	if existing != nil {
 		return registerResponse{
 			OK:          existing.Fingerprint == req.Fingerprint,
 			Fingerprint: existing.Fingerprint,
@@ -110,14 +122,12 @@ func (r *registryActor) register(ctx context.Context, data actor.Envelope) (any,
 		}, nil
 	}
 
-	if st.Versions == nil {
-		st.Versions = map[int]registryEntry{}
-	}
 	entry := registryEntry{
+		Version:     req.Version,
 		Fingerprint: req.Fingerprint,
 		FirstSeenAt: time.Now(),
 	}
-	st.Versions[req.Version] = entry
+	st.Versions = append(st.Versions, entry)
 
 	err = r.client.SetState(ctx, st, nil)
 	if err != nil {
@@ -149,12 +159,17 @@ func (r *registryActor) forget(ctx context.Context, data actor.Envelope) error {
 		return fmt.Errorf("failed to read the registry state: %w", err)
 	}
 
-	_, ok := st.Versions[req.Version]
-	if !ok {
+	kept := make([]registryEntry, 0, len(st.Versions))
+	for _, entry := range st.Versions {
+		if entry.Version != req.Version {
+			kept = append(kept, entry)
+		}
+	}
+	if len(kept) == len(st.Versions) {
 		return nil
 	}
 
-	delete(st.Versions, req.Version)
+	st.Versions = kept
 	err = r.client.SetState(ctx, st, nil)
 	if err != nil {
 		return fmt.Errorf("failed to forget the definition: %w", err)

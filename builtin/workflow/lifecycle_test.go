@@ -485,3 +485,54 @@ func TestPurgeRefusesAChildOfARunningParent(t *testing.T) {
 	_, err = childSvc.GetStatus(t.Context(), childID)
 	require.ErrorIs(t, err, workflow.ErrInstanceNotFound)
 }
+
+// TestMaxDepthRefusesADeeperChain verifies a definition that references itself is stopped by the depth limit, and that the refusal reaches the parent as a failure rather than stalling it
+func TestMaxDepthRefusesADeeperChain(t *testing.T) {
+	var runs atomic.Int32
+
+	// The leaf is what a deeper chain would reach, and it must never run
+	leaf, err := workflow.New("depth-leaf",
+		workflow.WithMaxDepth(1),
+		workflow.WithSteps(
+			workflow.Step("work", workflow.WithRun(func(ctx context.Context, tk workflow.Task) (any, error) {
+				runs.Add(1)
+				return "leaf", nil
+			})),
+		),
+	)
+	require.NoError(t, err)
+
+	middle, err := workflow.New("depth-middle",
+		workflow.WithMaxDepth(1),
+		workflow.WithSteps(
+			workflow.Child("leaf", workflow.WithDefinition(leaf)),
+		),
+	)
+	require.NoError(t, err)
+
+	root, err := workflow.New("depth-root",
+		workflow.WithMaxDepth(1),
+		workflow.WithSteps(
+			workflow.Child("middle", workflow.WithDefinition(middle)),
+		),
+	)
+	require.NoError(t, err)
+
+	host := startHost(t, leaf, middle, root)
+	rootSvc := root.Service(host.Service())
+	middleSvc := middle.Service(host.Service())
+
+	id, _, err := rootSvc.Start(t.Context(), nil, workflow.WithInstanceID("deep-1"))
+	require.NoError(t, err)
+
+	// The middle instance is at depth 1 and allowed, but the leaf it would start is at depth 2 and refused
+	status := awaitStatus(t, rootSvc, id, workflow.StatusFailed)
+	assert.Equal(t, workflow.StepFailed, stepView(t, status, "middle").Status)
+
+	middleID := stepView(t, status, "middle").ChildIDs[0]
+	middleStatus, err := middleSvc.GetStatus(t.Context(), middleID)
+	require.NoError(t, err)
+	assert.Equal(t, workflow.StatusFailed, middleStatus.Status)
+
+	assert.Zero(t, runs.Load(), "the leaf beyond the depth limit must never run")
+}

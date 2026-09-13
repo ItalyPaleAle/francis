@@ -107,6 +107,19 @@ func applyStart(st *instanceState, def *definition, p *startPayload, now time.Ti
 		}
 	}
 
+	// A start whose parent chain is deeper than the definition allows is refused here, which is the only thing that stops a definition referencing itself
+	// Refusing it as a terminated instance rather than as an error is what gets the failure reported back to the parent, whose step policy then decides what it costs
+	if st.Parent != nil && st.Parent.Depth > def.maxDepth {
+		st.Status = StatusFailed
+		st.Compensation = CompensationNone
+		st.Cause = fmt.Sprintf("%s: depth %d exceeds the limit of %d", ErrMaxDepthExceeded.Error(), st.Parent.Depth, def.maxDepth)
+		st.CompletedAt = now
+		for i := range st.Steps {
+			st.Steps[i].Status = StepSkipped
+			st.Steps[i].CompletedAt = now
+		}
+	}
+
 	return false
 }
 

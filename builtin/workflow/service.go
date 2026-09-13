@@ -347,12 +347,12 @@ func (s *WorkflowService) Definitions(ctx context.Context) ([]DefinitionInfo, er
 	}
 
 	out := make([]DefinitionInfo, 0, len(resp.Entries))
-	for version, entry := range resp.Entries {
+	for _, entry := range resp.Entries {
 		out = append(out, DefinitionInfo{
-			Version:     version,
+			Version:     entry.Version,
 			Fingerprint: entry.Fingerprint,
 			FirstSeenAt: entry.FirstSeenAt,
-			Conflicts:   version == s.wf.def.version && entry.Fingerprint != s.wf.def.fingerprint,
+			Conflicts:   entry.Version == s.wf.def.version && entry.Fingerprint != s.wf.def.fingerprint,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })

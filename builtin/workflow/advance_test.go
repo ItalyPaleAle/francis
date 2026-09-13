@@ -781,3 +781,105 @@ func TestJournalSizeCapFailsTheInstance(t *testing.T) {
 	assert.Equal(t, StepSkipped, st.Steps[0].Status)
 	assert.False(t, errors.Is(nil, ErrJournalTooLarge))
 }
+
+func TestStatusIsTerminal(t *testing.T) {
+	terminal := []Status{StatusCompleted, StatusFailed, StatusCancelled}
+	for _, s := range terminal {
+		assert.True(t, s.IsTerminal(), "%q is an end state", s)
+	}
+
+	// Everything else can still be driven forward, which is what the guard on every turn asks
+	for _, s := range []Status{StatusPending, StatusRunning, StatusSuspended, StatusCompensating, Status("")} {
+		assert.False(t, s.IsTerminal(), "%q is not an end state", s)
+	}
+}
+
+func TestStepKindsAreRecordedInTheJournal(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "kinds", WithSteps(
+		Step("plain", WithRun(noopRun)),
+		Parallel("group", Step("m", WithRun(noopRun))),
+		ForEach("fan", WithItemsFrom("plain"), WithRun(noopRun)),
+		Child("kid", WithDefinition(mustWorkflow(t, "the-kid"))),
+		WaitForEvent("wait"),
+	))
+
+	st := startJournal(t, def, now)
+
+	// A caller reads the kind off the status view, so the journal has to carry it for every step from the start
+	kinds := map[string]Kind{}
+	for i := range st.Steps {
+		kinds[st.Steps[i].Name] = st.Steps[i].Kind
+	}
+	assert.Equal(t, map[string]Kind{
+		"plain": KindStep,
+		"group": KindParallel,
+		"fan":   KindForEach,
+		"kid":   KindChild,
+		"wait":  KindWait,
+	}, kinds)
+}
+
+func TestAdvanceSuspendPausesAnUnwindAtTheCurrentFrame(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "pausable-unwind", WithSteps(
+		Step("a", WithRun(noopRun), WithCompensate(noopCompensate)),
+		Step("b", WithRun(noopRun), WithCompensate(noopCompensate)),
+		Step("c", WithRun(noopRun), WithMaxAttempts(1)),
+	))
+
+	st := startJournal(t, def, now)
+	reportSuccess(t, st, def, "a", 0, "one", now)
+	advance(st, def, "inst-1", now)
+	reportSuccess(t, st, def, "b", 0, "two", now)
+	advance(st, def, "inst-1", now)
+	reportFailure(t, st, def, "c", 0, "boom", false, now)
+	advance(st, def, "inst-1", now)
+	require.Equal(t, StatusCompensating, st.Status)
+	require.Equal(t, StepCompensating, stepStatus(t, st, "b"))
+
+	// Suspending during an unwind pauses it at the current frame, and remembers to go back to compensating
+	apply(st, def, &event{kind: evSuspend, reason: "maintenance"}, now)
+	advance(st, def, "inst-1", now)
+	require.NotNil(t, st.Suspended)
+	assert.Equal(t, StatusCompensating, st.Suspended.ResumeTo)
+
+	// The frame in flight still records its outcome, but the next frame is not opened
+	apply(st, def, &event{kind: evCompensated, comp: &compReportPayload{Step: "b", Index: 0, Attempt: 1}}, now)
+	advance(st, def, "inst-1", now)
+	assert.Equal(t, StatusSuspended, st.Status)
+	assert.Equal(t, StepCompleted, stepStatus(t, st, "a"), "the next frame stays closed while paused")
+
+	apply(st, def, &event{kind: evResume}, now)
+	advance(st, def, "inst-1", now)
+	assert.Equal(t, StepCompensating, stepStatus(t, st, "a"), "resuming continues the unwind where it stopped")
+}
+
+func TestAdvanceAcceptsAnEventWhileSuspended(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "event-while-paused", WithSteps(
+		WaitForEvent("approval", WithEventTimeout(time.Hour)),
+		Step("after", WithRun(noopRun)),
+	))
+
+	st := startJournal(t, def, now)
+	require.Equal(t, StepRunning, stepStatus(t, st, "approval"))
+
+	apply(st, def, &event{kind: evSuspend, reason: "maintenance"}, now)
+	advance(st, def, "inst-1", now)
+	require.Equal(t, StatusSuspended, st.Status)
+
+	// The event is recorded while paused, so nothing is lost by suspending an instance that was waiting on one
+	dup := apply(st, def, &event{kind: evRaise, raise: &eventPayload{Name: "approval", Payload: json.RawMessage(`{"by":"ops"}`)}}, now)
+	assert.False(t, dup)
+	advance(st, def, "inst-1", now)
+
+	// But the step after it is not opened until the instance is resumed
+	assert.Equal(t, StatusSuspended, st.Status)
+	assert.Equal(t, StepPending, stepStatus(t, st, "after"))
+
+	apply(st, def, &event{kind: evResume}, now)
+	advance(st, def, "inst-1", now)
+	assert.Equal(t, StepRunning, stepStatus(t, st, "after"))
+	assert.JSONEq(t, `{"by":"ops"}`, string(stepOutput(st.step("approval"), def.byName["approval"])))
+}

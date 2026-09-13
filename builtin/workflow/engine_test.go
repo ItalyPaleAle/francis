@@ -707,3 +707,151 @@ func TestTheDeadlineFailsTheStepItHit(t *testing.T) {
 	assert.Equal(t, StepRunning, st.step("after").Status)
 	assert.Equal(t, StatusRunning, st.Status)
 }
+
+// TestWirePayloadsSurviveAGenericDecode guards a whole class of bug: every value the engine sends between actors is
+// msgpack-encoded, and a response that crosses hosts is decoded into an interface before being decoded into its type
+//
+// A map with non-string keys does not survive that round-trip — it decodes to nothing and silently re-encodes as empty —
+// so every wire shape is checked here rather than only where a cluster happens to be multi-host
+func TestWirePayloadsSurviveAGenericDecode(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+
+	tests := []struct {
+		name  string
+		value any
+		into  func() any
+	}{
+		{
+			name: "start",
+			value: startPayload{
+				Input:       json.RawMessage(`{"a":1}`),
+				Version:     3,
+				Parent:      &parentRef{InstanceID: "p", Workflow: "w", Step: "s", Index: 2, Depth: 1, Attempt: 1},
+				TraceParent: "00-abc-def-01",
+				CreatedAt:   now,
+				Attempt:     1,
+			},
+			into: func() any { return &startPayload{} },
+		},
+		{
+			name: "run",
+			value: runPayload{
+				InstanceID: "i", Workflow: "w", Version: 1, Step: "s", Index: 0, Positional: true, Attempt: 2,
+				Handler:          "member",
+				Input:            json.RawMessage(`{"a":1}`),
+				Item:             json.RawMessage(`2`),
+				Outputs:          map[string]json.RawMessage{"prev": json.RawMessage(`"out"`)},
+				Skipped:          []string{"gone"},
+				Result:           json.RawMessage(`"res"`),
+				Cause:            "because",
+				OrchestratorType: "workflow.w", MaxOutputSize: 1024, TraceParent: "tp",
+			},
+			into: func() any { return &runPayload{} },
+		},
+		{
+			name: "report",
+			value: reportPayload{
+				Step: "s", Index: 1, Attempt: 2,
+				Output: json.RawMessage(`"o"`), Error: "e", Retryable: true, Transport: true,
+				ChildStatus: StatusFailed, ChildCompensation: CompensationPartial, TraceParent: "tp",
+			},
+			into: func() any { return &reportPayload{} },
+		},
+		{
+			name:  "compensation report",
+			value: compReportPayload{Step: "s", Index: 1, Attempt: 3, Error: "e", Retryable: true, Transport: true, TraceParent: "tp"},
+			into:  func() any { return &compReportPayload{} },
+		},
+		{
+			name:  "event",
+			value: eventPayload{Name: "approval", Payload: json.RawMessage(`{"by":"ops"}`)},
+			into:  func() any { return &eventPayload{} },
+		},
+		{
+			name:  "reason",
+			value: reasonPayload{Reason: "cancelled", FromParent: true, CompAttempt: 2},
+			into:  func() any { return &reasonPayload{} },
+		},
+		{
+			name:  "registry register",
+			value: registerRequest{Version: 4, Fingerprint: "abc"},
+			into:  func() any { return &registerRequest{} },
+		},
+		{
+			name:  "registry response",
+			value: registerResponse{OK: true, Fingerprint: "abc", FirstSeenAt: now},
+			into:  func() any { return &registerResponse{} },
+		},
+		{
+			name:  "registry state",
+			value: registryState{Versions: []registryEntry{{Version: 4, Fingerprint: "abc", FirstSeenAt: now}}},
+			into:  func() any { return &registryState{} },
+		},
+		{
+			name:  "definitions response",
+			value: definitionsResponse{Entries: []registryEntry{{Version: 4, Fingerprint: "abc", FirstSeenAt: now}}},
+			into:  func() any { return &definitionsResponse{} },
+		},
+		{
+			name:  "forget request",
+			value: forgetRequest{Version: 4},
+			into:  func() any { return &forgetRequest{} },
+		},
+		{
+			name:  "purge result",
+			value: purgeResult{Found: true, Active: true},
+			into:  func() any { return &purgeResult{} },
+		},
+		{
+			name: "status result",
+			value: statusResult{Found: true, Status: InstanceStatus{
+				InstanceID: "i", Workflow: "w", Version: 2, Status: StatusRunning, CurrentStep: "s",
+				Steps:       []StepStatusView{{Name: "s", Kind: KindStep, Status: StepRunning, Tasks: 1, Attempts: 1, ChildIDs: []string{"c"}}},
+				Suspended:   &SuspendView{At: now, Reason: "why", ResumeTo: StatusRunning},
+				Parent:      &ParentView{InstanceID: "p", Workflow: "w", Step: "s", Index: 1, Depth: 1},
+				CreatedAt:   now,
+				StartedAt:   now,
+				CompletedAt: now,
+			}},
+			into: func() any { return &statusResult{} },
+		},
+		{
+			name: "journal",
+			value: instanceState{
+				Workflow: "w", Version: 1, Status: StatusRunning,
+				Input:  json.RawMessage(`{"a":1}`),
+				Cursor: "s",
+				Steps: []stepRecord{{
+					Name: "s", Kind: KindForEach, Status: StepRunning, Remaining: 1,
+					Tasks: []taskRecord{{Index: 0, Item: json.RawMessage(`1`), Attempts: 2, Comp: &compRecord{Attempts: 1}}},
+				}},
+				Stack:     []string{"s"},
+				CreatedAt: now, StartedAt: now,
+			},
+			into: func() any { return &instanceState{} },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			enc, err := msgpack.Marshal(tt.value)
+			require.NoError(t, err)
+
+			// This is what a cross-host response goes through: decoded into an interface, then re-encoded for the caller's type
+			var generic any
+			err = msgpack.Unmarshal(enc, &generic)
+			require.NoError(t, err, "the value must decode into an interface, which is what crossing a host boundary does")
+
+			reEncoded, err := msgpack.Marshal(generic)
+			require.NoError(t, err)
+
+			direct := tt.into()
+			require.NoError(t, msgpack.Unmarshal(enc, direct))
+
+			viaGeneric := tt.into()
+			require.NoError(t, msgpack.Unmarshal(reEncoded, viaGeneric))
+
+			assert.Equal(t, direct, viaGeneric, "the value must survive the round-trip a cross-host response goes through")
+		})
+	}
+}

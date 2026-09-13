@@ -229,3 +229,8 @@ func (o *orchestrator) ensureWatchdog(ctx context.Context, st *instanceState) er
 	o.watchdogArmed = true
 	return nil
 }
+
+// isoInterval renders a duration as the ISO8601 form the job scheduler takes
+func isoInterval(d time.Duration) string {
+	return fmt.Sprintf("PT%dS", int(d.Round(time.Second).Seconds()))
+}
