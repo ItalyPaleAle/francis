@@ -484,8 +484,9 @@ func (h *Host) executeJob(parentCtx context.Context, lease *ref.AlarmLease, act 
 // For a repeating job the recurrence is rescheduled in the same provider transaction, so a single failed occurrence does not stop the recurrence
 func (h *Host) deadLetterJob(ctx context.Context, lease *ref.AlarmLease, props ref.AlarmProperties, method string, data []byte, jobErr error, log *slog.Logger) {
 	req := components.DeadLetterAlarmReq{
-		Reason:   jobErr.Error(),
-		Attempts: lease.Attempts(),
+		Reason:    jobErr.Error(),
+		Attempts:  lease.Attempts(),
+		Retention: h.jobRetention(lease.ActorRef().ActorType),
 	}
 
 	// Keep a repeating job's recurrence alive by rescheduling its next occurrence as part of the dead-letter move
@@ -614,12 +615,31 @@ func (h *Host) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, l
 		log.Error("Failed to compute next execution time for alarm; alarm will be kept", slog.Any("error", err))
 		return false, nil
 	}
+	// A job whose actor type asked for retention leaves a record behind rather than vanishing, which is what makes a successful run observable
+	retention := time.Duration(0)
+	if alarm.Kind == components.AlarmKindJob {
+		retention = h.jobRetention(lease.ActorRef().ActorType)
+	}
+
 	if next.IsZero() {
+		ctx, cancel = context.WithTimeout(parentCtx, h.providerRequestTimeout)
+		defer cancel()
+
+		if retention > 0 {
+			log.Debug("Recording completed job")
+			err = h.actorProvider.CompleteJob(ctx, lease, components.CompleteJobReq{
+				Attempts:  lease.Attempts() + 1,
+				Retention: retention,
+			})
+			if err != nil && !errors.Is(err, components.ErrNoAlarm) {
+				return false, fmt.Errorf("error recording completed job in provider: %w", err)
+			}
+			return false, nil
+		}
+
 		log.Debug("Removing completed alarm")
 
 		// Alarm doesn't repeat, delete it as it's completed
-		ctx, cancel = context.WithTimeout(parentCtx, h.providerRequestTimeout)
-		defer cancel()
 		err = h.actorProvider.DeleteLeasedAlarm(ctx, lease)
 		if err != nil && !errors.Is(err, components.ErrNoAlarm) {
 			// If we get ErrNoAlarm, the alarm was modified/deleted, or the lease was canceled for other reasons
@@ -628,6 +648,24 @@ func (h *Host) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, l
 		}
 
 		// We're done!
+		return false, nil
+	}
+
+	// A repeating job that is retained records this occurrence and re-creates the recurrence in one transaction, rather than updating the row in place
+	// That costs the lease it might otherwise have kept for a near occurrence, which the next poll picks up instead
+	if retention > 0 {
+		log.Debug("Recording completed job occurrence and rescheduling", slog.Any("due", next))
+		ctx, cancel = context.WithTimeout(parentCtx, h.providerRequestTimeout)
+		defer cancel()
+		err = h.actorProvider.CompleteJob(ctx, lease, components.CompleteJobReq{
+			Attempts:    lease.Attempts() + 1,
+			Retention:   retention,
+			Reschedule:  true,
+			NextDueTime: next,
+		})
+		if err != nil && !errors.Is(err, components.ErrNoAlarm) {
+			return false, fmt.Errorf("error recording completed job in provider: %w", err)
+		}
 		return false, nil
 	}
 
@@ -665,6 +703,11 @@ func (h *Host) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, l
 
 	// The next occurrence is too far out to keep the lease, so a later fetch will pick it up
 	return false, nil
+}
+
+// jobRetention is how long this host's registration of an actor type asks for a job's record to be kept once it ends, and is zero when it asked for none
+func (h *Host) jobRetention(actorType string) time.Duration {
+	return h.core.ActorsConfig[actorType].JobRetention
 }
 
 func (h *Host) runLeaseRenewal(parentCtx context.Context) (err error) {
