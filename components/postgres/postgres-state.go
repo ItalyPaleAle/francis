@@ -114,7 +114,9 @@ func (p *PostgresProvider) ListStates(ctx context.Context, req components.ListSt
 	// This avoids a second query just to compute HasMore
 	limit := req.EffectiveLimit()
 
-	args := []any{req.ActorType, req.After}
+	// The size is known up front: the two fixed arguments, two per label clause, and the limit
+	args := make([]any, 0, 3+2*len(req.Labels))
+	args = append(args, req.ActorType, req.After)
 
 	// Each requested label becomes an EXISTS clause served by the labels lookup index, which keeps a filtered listing a range scan rather than a walk of every stored state
 	var labelClauses strings.Builder

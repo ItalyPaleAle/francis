@@ -3,7 +3,6 @@ package workflow
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"testing"
 	"time"
 
@@ -779,7 +778,6 @@ func TestJournalSizeCapFailsTheInstance(t *testing.T) {
 	assert.Equal(t, CompensationNone, st.Compensation)
 	assert.Contains(t, st.Cause, ErrJournalTooLarge.Error())
 	assert.Equal(t, StepSkipped, st.Steps[0].Status)
-	assert.False(t, errors.Is(nil, ErrJournalTooLarge))
 }
 
 func TestStatusIsTerminal(t *testing.T) {

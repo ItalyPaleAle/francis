@@ -1,5 +1,3 @@
-// This file holds the operations a caller drives against one instance — purging it and reading its status — and the report a child sends its parent when it terminates
-// They are kept apart from the turn itself because none of them advances the journal: each answers a question or tears an instance down
 package workflow
 
 import (

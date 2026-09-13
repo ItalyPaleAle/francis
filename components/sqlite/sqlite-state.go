@@ -110,7 +110,9 @@ func (s *SQLiteProvider) ListStates(ctx context.Context, req components.ListStat
 	// This avoids a second query just to compute HasMore
 	limit := req.EffectiveLimit()
 
-	args := []any{req.ActorType, req.After, s.clock.Now().UnixMilli()}
+	// The size is known up front: the three fixed arguments, two per label clause, and the limit
+	args := make([]any, 0, 4+2*len(req.Labels))
+	args = append(args, req.ActorType, req.After, s.clock.Now().UnixMilli())
 
 	// Each requested label becomes an EXISTS clause served by the labels lookup index, which keeps a filtered listing a range scan rather than a walk of every stored state
 	var labelClauses strings.Builder

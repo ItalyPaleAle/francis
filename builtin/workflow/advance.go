@@ -532,7 +532,7 @@ func settleSteps(st *instanceState, def *definition, now time.Time) bool {
 
 		// Fail-fast decides the step the moment one task has failed for good, without waiting for the stragglers whose results are still recorded
 		failedNow := firstFailedTask(sr) >= 0
-		if sr.Remaining > 0 && !(failedNow && groupPolicy(d) == FailFast) {
+		if sr.Remaining > 0 && (!failedNow || groupPolicy(d) != FailFast) {
 			continue
 		}
 

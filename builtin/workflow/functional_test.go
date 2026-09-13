@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -81,10 +82,8 @@ func awaitStatus(t *testing.T, svc *workflow.WorkflowService, id string, want ..
 		status, err := svc.GetStatus(t.Context(), id)
 		if err == nil {
 			last = status
-			for _, w := range want {
-				if status.Status == w {
-					return status
-				}
+			if slices.Contains(want, status.Status) {
+				return status
 			}
 		}
 		time.Sleep(50 * time.Millisecond)

@@ -380,7 +380,9 @@ func newTestOrchestrator(t *testing.T, wf *Workflow, host *fakeHost, instanceID 
 	t.Helper()
 
 	svc := actor.NewService(host)
-	return newOrchestrator(wf, instanceID, svc).(*orchestrator)
+	o, ok := newOrchestrator(wf, instanceID, svc).(*orchestrator)
+	require.True(t, ok, "the workflow factory should build an orchestrator")
+	return o
 }
 
 // readJournal decodes the journal the fake host holds for an instance

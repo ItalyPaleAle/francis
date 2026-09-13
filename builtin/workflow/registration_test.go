@@ -54,7 +54,7 @@ func TestRegistrationsCoverEveryReservedType(t *testing.T) {
 	assert.False(t, orchestrator.Singleton)
 	assert.Equal(t, orchestratorMaxAttempts, orchestrator.RegisterOptions.MaxAttempts)
 	assert.Equal(t, orchestratorRetryDelay, orchestrator.RegisterOptions.InitialRetryDelay)
-	assert.Equal(t, wf.ActorType(), "workflow.orders")
+	assert.Equal(t, "workflow.orders", wf.ActorType())
 
 	// Every worker queue shares one strict per-host budget, and the undo queues form a second one so an unwind cannot starve forward work
 	workerGroup := got["francis.builtin.workflow.orders.worker"].RegisterOptions

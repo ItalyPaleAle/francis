@@ -731,7 +731,6 @@ func (o *orchestrator) armDeadline(ctx context.Context, st *instanceState) error
 
 // dropDeadline removes the deadline alarm, which is what pausing an instance's deadlines amounts to
 func (o *orchestrator) dropDeadline(ctx context.Context) error {
-
 	err := o.client.DeleteAlarm(ctx, alarmDeadline)
 	if err != nil && !errors.Is(err, actor.ErrAlarmNotFound) {
 		return fmt.Errorf("failed to drop the deadline: %w", err)
