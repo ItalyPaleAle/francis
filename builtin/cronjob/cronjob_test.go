@@ -26,7 +26,7 @@ func TestNew(t *testing.T) {
 		assert.Equal(t, cronJobActorTypePrefix+"nightly", b.ActorType())
 		assert.NotNil(t, b.Factory())
 		assert.Equal(t, cronJobIdleTimeout, b.RegisterOptions().IdleTimeout)
-		// A week of occurrence records is what makes a schedule auditable: ListJobs answers whether last night's run happened, not only whether one failed
+		// A week of occurrence records makes a schedule auditable: ListJobs answers whether last night's run happened, not only whether one failed
 		assert.Equal(t, 7*24*time.Hour, b.RegisterOptions().JobRetention)
 	})
 

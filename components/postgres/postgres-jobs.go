@@ -151,7 +151,7 @@ func (p *PostgresProvider) endJob(ctx context.Context, lease *ref.AlarmLease, re
 	}
 
 	// Only a dead job keeps its input, since that is what a replay needs and a completed one is never replayed
-	// This is what keeps a wide fan-out's retained records cheap, where the payload is much larger than the metadata around it
+	// A wide fan-out's retained records stay small this way, since the payload dwarfs the metadata around it
 	//
 	// A dead-lettered job records the error that ended it, while a completed one has none
 	var reason *string
@@ -410,7 +410,7 @@ func (p *PostgresProvider) ListJobs(ctx context.Context, actorType string, actor
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
-	// Live jobs (alarm rows) and terminal ones are disjoint by construction, so UNION ALL avoids an extra round-trip without any risk of duplicates
+	// Live jobs (alarm rows) and terminal ones can never overlap, so UNION ALL avoids an extra round-trip without any risk of duplicates
 	// Each branch projects into a common shape: the live branch derives the status and supplies zero attempts, no error and no end time, while the terminal branch reports what it recorded
 	// #nosec G202 -- the only concatenated values are static table prefixes, not user input
 	rows, err := p.db.Query(queryCtx, `

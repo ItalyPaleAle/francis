@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	// The state labels written with every journal write, which is what makes a filtered listing a range scan rather than a walk of every retained journal
+	// These labels are written with every journal write, so a filtered listing is a range scan rather than a walk of every retained journal
 	labelStatus  = "status"
 	labelVersion = "version"
 	labelParent  = "parent"
@@ -419,7 +419,7 @@ type StepStatusView struct {
 	Name   string
 	Kind   Kind
 	Status StepStatus
-	// Tasks counts the execution units the step materialized
+	// Tasks counts how many tasks the step created
 	Tasks int
 	// Completed and Failed count the tasks that reported each outcome
 	Completed int

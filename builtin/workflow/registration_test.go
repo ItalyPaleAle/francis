@@ -49,7 +49,7 @@ func TestRegistrationsCoverEveryReservedType(t *testing.T) {
 	}
 	assert.Len(t, got, len(want), "a workflow should register exactly these types")
 
-	// The orchestrator is reached at the instance ID, and its generous retry policy is what keeps a database blip from dead-lettering a report
+	// The orchestrator is reached at the instance ID, and its generous retry policy stops a database blip from dead-lettering a report
 	orchestrator := got["francis.builtin.workflow.orders"]
 	assert.False(t, orchestrator.Singleton)
 	assert.Equal(t, orchestratorMaxAttempts, orchestrator.RegisterOptions.MaxAttempts)

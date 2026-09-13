@@ -5,7 +5,7 @@
 //
 // The central rule is the orchestration boundary: the Workflow actor orchestrates and performs nothing
 // It reads and writes its own journal, arms and drops its timers, and dispatches jobs; every unit of work, without exception, runs on a worker actor, which is where WithRun and WithCompensate are invoked
-// That is enforced by construction rather than by convention: the definition exposes no hook that runs on the Workflow actor, advance is a pure function of the journal and the definition, and a fan-out's size and a step's condition are both outputs of steps rather than callbacks the orchestrator runs
+// That is enforced by the code rather than by convention: the definition exposes no hook that runs on the Workflow actor, advance is a pure function of the journal and the definition, and a fan-out's size and a step's condition are both outputs of steps rather than callbacks the orchestrator runs
 //
 // The engine owns its own failure handling: attempts, dead-letter recovery, and the deadline are recorded in the journal and driven by the same reconcile loop, rather than delegated to per-actor-type settings the engine cannot observe
 // Execution is at-least-once, like everything else in Francis, so handlers must be idempotent
@@ -48,7 +48,7 @@ const (
 	// idDelimiter joins the components of a worker's actor ID, which is why step names and instance IDs may not contain it
 	idDelimiter = "|"
 
-	// orchestratorMaxAttempts and orchestratorRetryDelay are far above the framework defaults, because a Workflow turn is idempotent and a generous policy is what keeps a database blip from dead-lettering a report or deleting a deadline
+	// orchestratorMaxAttempts and orchestratorRetryDelay are far above the framework defaults, because a Workflow turn is idempotent and a generous policy stops a database blip from dead-lettering a report or deleting a deadline
 	orchestratorMaxAttempts = 20
 	orchestratorRetryDelay  = 5 * time.Second
 	// workerMaxAttempts covers the one case a worker returns an error to Francis: the report dispatch itself failed
@@ -73,7 +73,7 @@ type Workflow struct {
 
 	// checksMu guards checks
 	checksMu sync.Mutex
-	// checks caches this host's registry answer per version, for the life of the process, which is what keeps the consistency check to at most one Invoke per version
+	// checks caches this host's registry answer per version, for the life of the process, so the consistency check costs at most one Invoke per version
 	checks map[int]*versionCheck
 
 	// boundService is the actor.Service the host handed to this workflow's factories, which is what the auto-purge cron job's handler runs against
@@ -468,7 +468,7 @@ func (w *Workflow) buildRegistrations(o *options) error {
 	regs := make([]builtinactor.BuiltInActorRegistration, 0, 2*(len(o.capabilities)+1)+2)
 
 	// The orchestrator holds the journal and is reached at the instance ID
-	// Its retry policy is generous because its turns are idempotent, and retrying is what keeps a database blip from dead-lettering a report
+	// Its retry policy is generous because its turns are idempotent, and retrying stops a database blip from dead-lettering a report
 	regs = append(regs, builtinactor.BuiltInActorRegistration{
 		ActorType: w.baseType,
 		Factory: func(actorID string, svc *actor.Service) actor.Actor {

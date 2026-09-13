@@ -371,7 +371,7 @@ func TestInvalidSignalID(t *testing.T) {
 	require.ErrorContains(t, err, "invalid signal ID")
 }
 
-// TestWaitIsAggregatedPerProcess verifies every local caller waiting on the same signal shares a single invocation, which is what keeps a signal with many local waiters down to one stream and one in-flight slot on the owning host
+// TestWaitIsAggregatedPerProcess verifies every local caller waiting on the same signal shares a single invocation, so a signal with many local waiters costs one stream and one in-flight slot on the owning host
 func TestWaitIsAggregatedPerProcess(t *testing.T) {
 	const waiters = 25
 

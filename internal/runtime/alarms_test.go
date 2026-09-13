@@ -474,7 +474,7 @@ func TestRunAlarmFetcherKeepsProcessorAfterShutdown(t *testing.T) {
 	// After shutdown the field must stay set to the closed processor rather than being nilled, so an in-flight execution that outlives the grace-period drain and reaches the re-enqueue path cannot nil-deref it
 	require.NotNil(t, rt.alarmProcessor)
 
-	// The closed processor rejects new work gracefully instead of panicking, which is what makes the late re-enqueue safe
+	// The closed processor rejects new work gracefully instead of panicking, so the late re-enqueue is safe
 	require.ErrorIs(t, rt.alarmProcessor.Enqueue(), eventqueue.ErrProcessorStopped)
 }
 

@@ -39,7 +39,7 @@ The parent's journal records, per child task, only the child's instance ID and â
 
 The child's input is what the task would have received:
 
-- a child of a **fan-out** gets its **item**, which is what makes "one child per element" read the way it looks;
+- a child of a **fan-out** gets its **item**, so "one child per element" reads the way it looks;
 - any other child gets the **preceding step's output**, falling back to the parent's own input when there is none.
 
 ```go

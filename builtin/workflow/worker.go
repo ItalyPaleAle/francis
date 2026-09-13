@@ -20,7 +20,7 @@ import (
 )
 
 // worker performs one attempt of one task and reports the outcome back to the orchestrator
-// Every user RunFunc and CompensateFunc runs here, and every external call with it, which is what keeps the Workflow actor free to accept the next report, the cancel, and its own deadline
+// Every user RunFunc and CompensateFunc runs here, and every external call with it, so the Workflow actor stays free to accept the next report, the cancel, and its own deadline
 //
 // A worker is stateless apart from one thing: it keeps the result of the attempt it just ran for the life of its activation, so a retried report does not run the handler again
 type worker struct {
@@ -185,7 +185,7 @@ func (w *worker) invokeHandler(ctx context.Context, method string, p *runPayload
 }
 
 // runForward runs a step's handler and encodes what it returned, enforcing the output cap here rather than on the orchestrator
-// Checking the size on the worker is what keeps the orchestrator from ever spending a turn serializing something unbounded
+// Checking the size on the worker means the orchestrator never spends a turn serializing something unbounded
 func (w *worker) runForward(ctx context.Context, d *stepDef, task *taskEnvelope) (json.RawMessage, error) {
 	if d.run == nil {
 		return nil, fmt.Errorf("%w: step %q has no handler on this host", actor.ErrJobPermanentFailure, d.name)

@@ -21,7 +21,7 @@ import (
 // orchestrator is the Workflow actor: one instance per workflow instance, holding the journal and deciding what happens next
 //
 // It orchestrates and performs nothing (§4): it reads and writes its own state, arms and drops its timers, and dispatches jobs
-// No user code runs here at all, because the definition exposes no hook that does, which is what makes the orchestration boundary structural rather than a convention each application has to keep
+// No user code runs here at all, because the definition exposes no hook that does, so the orchestration boundary is enforced by the code rather than left to each application to keep
 type orchestrator struct {
 	wf         *Workflow
 	def        *definition
@@ -252,7 +252,7 @@ func (o *orchestrator) turn(ctx context.Context, ev *event) (err error) {
 	o.recordTransitions(ctx, &st, ev, before)
 
 	// Phase 4b: everything the journal says should be running is dispatched, idempotently
-	// This runs on every turn, including the ones that recorded nothing, which is what keeps a turn that persisted a result and then failed to dispatch from stalling the instance forever
+	// This runs on every turn, including the ones that recorded nothing, so a turn that persisted a result and then failed to dispatch cannot stall the instance forever
 	return o.reconcile(ctx, &st, now)
 }
 
@@ -658,7 +658,7 @@ func (o *orchestrator) finish(ctx context.Context) error {
 }
 
 // armDeadline writes the instance's single deadline alarm, and only when it differs from what this activation already armed
-// Alarms are replaceable by name, so recomputing is one write, and skipping the unchanged case is what keeps a wide fan-out's reports from each costing a second write on the same row
+// Alarms are replaceable by name, so recomputing is one write, and skipping the unchanged case stops a wide fan-out's reports from each costing a second write on the same row
 // Re-arming from inside the alarm's own handler is safe because Francis completes alarms by lease rather than by name, so a replaced alarm is treated as already handled
 func (o *orchestrator) armDeadline(ctx context.Context, st *instanceState) error {
 	due := st.DeadlineAt

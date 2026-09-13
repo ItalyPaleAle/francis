@@ -240,7 +240,7 @@ func (p *Provider) endJob(ctx context.Context, lease *ref.AlarmLease, req endJob
 		}
 
 		// Only a dead job keeps its input, since that is what a replay needs and a completed one is never replayed
-		// This is what keeps a wide fan-out's retained records cheap, where the payload is much larger than the metadata around it
+		// A wide fan-out's retained records stay small this way, since the payload dwarfs the metadata around it
 		var data []byte
 		if req.status == components.JobStatusDeadLettered {
 			data = a.Data

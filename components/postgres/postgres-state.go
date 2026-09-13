@@ -91,12 +91,12 @@ func (p *PostgresProvider) ListStates(ctx context.Context, req components.ListSt
 	// This avoids a second query just to compute HasMore
 	limit := req.EffectiveLimit()
 
-	// The whole filter is one containment test, so the arguments are known up front: the two fixed ones, the labels object when there is one, and the limit
+	// The label filter adds at most one argument, so the count is known up front: the two fixed ones, the labels object when there is one, and the limit
 	args := make([]any, 0, 4)
 	args = append(args, req.ActorType, req.After)
 
-	// Containment against the row's own label object is served by the GIN index, which keeps a filtered listing an index lookup rather than a walk of every stored state
-	// One test covers every requested label at once, since a JSON object contains another only when it holds all of its pairs
+	// Matching against the row's own label object is served by the GIN index, so a filtered listing is an index lookup rather than a walk of every stored state
+	// One comparison covers every label asked for, because @> is true only when the row's labels hold all of them
 	labelsJSON, err := req.LabelsJSON()
 	if err != nil {
 		return components.ListStatesRes{}, err

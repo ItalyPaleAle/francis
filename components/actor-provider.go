@@ -380,7 +380,7 @@ type ListStatesReq struct {
 	Limit int
 }
 
-// LabelsJSON encodes the requested label filter as a JSON object, for providers that match it with a containment operator.
+// LabelsJSON encodes the requested label filter as a JSON object, for providers that match it against a JSON column.
 // It returns nil when the request filters on no labels.
 func (r ListStatesReq) LabelsJSON() ([]byte, error) {
 	return EncodeLabels(r.Labels)

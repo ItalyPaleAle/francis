@@ -73,7 +73,7 @@ const (
 )
 
 // instanceState is the journal: the Workflow actor's durable state and the single source of truth for an instance
-// Every transition rewrites the whole document in one state write, which is what makes a step transition atomic (§12.2)
+// Every transition rewrites the whole document in one state write, so a step transition is atomic (§12.2)
 type instanceState struct {
 	Workflow     string              `msgpack:"workflow"`
 	Version      int                 `msgpack:"version"`
@@ -177,7 +177,7 @@ type parentRef struct {
 	// Attempt is the parent task's attempt number, which this instance's report is keyed by
 	Attempt int `msgpack:"attempt,omitempty"`
 	// UnwoundBy is the parent's compensation attempt number when the parent asked this instance to undo itself, and zero otherwise
-	// It is what makes a child cancelled by its parent report a compensation, while one cancelled by a caller reports an ordinary failed result
+	// It is why a child cancelled by its parent reports a compensation, while one cancelled by a caller reports an ordinary failed result
 	UnwoundBy int `msgpack:"unwoundBy,omitempty"`
 }
 
@@ -192,7 +192,7 @@ func (st *instanceState) step(name string) *stepRecord {
 	return nil
 }
 
-// task returns the record of one task of a step, or nil when the index is outside what the journal materialized
+// task returns the record of one task of a step, or nil when the index is outside what the journal recorded
 func (sr *stepRecord) task(index int) *taskRecord {
 	for i := range sr.Tasks {
 		if sr.Tasks[i].Index == index {

@@ -19,7 +19,7 @@ Per registered workflow, the engine registers these reserved types:
 
 A worker is stateless: the task arrives in its job payload and the result leaves in another job, so it **halts itself as soon as it has reported** rather than lingering to its idle timeout. That matters for a wide fan-out, which would otherwise hold one activation per task. It does keep one thing for the life of its activation — the result of the attempt it just ran — so that if reporting fails and Francis retries the report, the handler is not run again.
 
-Splitting orchestrator from worker is what buys parallelism, since Francis places workers independently across the cluster. It is also what keeps the orchestration boundary structural rather than aspirational.
+Splitting orchestrator from worker is what buys parallelism, since Francis places workers independently across the cluster. It also puts the orchestration boundary in the code rather than leaving it to convention.
 
 ## The orchestration boundary
 
@@ -42,7 +42,7 @@ The operations on the left are not free — a state write and a dispatch are dat
 
 Two cases look like exceptions and are not:
 
-- **Deriving a payload is orchestration; writing it is a step.** The thumbnail example builds its manifest on the orchestrator, from persisted state, and hands the finished bytes to a worker to store. Building is a pure in-memory function of the journal, and doing it there is what makes a retried write store *identical* bytes rather than re-deriving them against a journal that has since moved on.
+- **Deriving a payload is orchestration; writing it is a step.** The thumbnail example builds its manifest on the orchestrator, from persisted state, and hands the finished bytes to a worker to store. Building is a pure in-memory function of the journal, and doing it there means a retried write stores *identical* bytes rather than re-deriving them against a journal that has since moved on.
 - **The orchestrator never calls another actor on behalf of user logic.** A synchronous invocation couples this instance's turn lock to another actor's availability and queue depth. Talking to another actor is a step. The engine makes exactly one exception for itself: the once-per-host, cached definition-registry check, which is framework-owned, bounded to a few milliseconds, and happens at most once per version for the life of the process.
 
 **How it is enforced.** The definition exposes no hook that runs on the `Workflow` actor: `WithRun` and `WithCompensate` are the only places user code appears, and both are invoked exclusively by a worker. There is no before-step hook, no orchestrator-side predicate, no expander callback — which is why a fan-out's size and a step's condition are both outputs of steps. The function that decides what happens next is pure: no I/O, no `context.Context`, no user code, and it cannot block. Size caps are checked on the worker before a report is dispatched, so the orchestrator never spends a turn serializing something unbounded. The engine's own tests drive a turn against a transport that panics on anything but state, alarm, and job operations.
@@ -66,7 +66,7 @@ Everything durable here rests on three rules.
 
 **2. A turn that records nothing still schedules.** Advance and reconcile run on every turn, including one whose event was a duplicate. This is not an optimization to skip — it is load-bearing. Consider a turn that persists a result and then fails to dispatch the next step: the job is retried, the report arrives again, and it is now a *duplicate* that records nothing. If the duplicate branch returned early, the instance would wait forever for a step nobody scheduled. The same rule covers the turn's own retry. It stays correct only because the guard is "is this outcome already recorded", never "have I seen this delivery before".
 
-**3. The journal decides what happened; the idempotency key only prevents duplicate in-flight work.** Francis deduplicates an idempotency key against *live* rows only, so a key is reusable once its job completes **or dead-letters**. That is exactly right for the first case: the key stops reconcile from queueing a second copy of a task that is already pending or running, and the journal's outcome stops a duplicate *report* from being counted twice. The second case is what makes recovery work: a dead-lettered job frees its key, and the transport failure its worker reports bumps the attempt, so the replacement is dispatched under a key of its own rather than colliding with the one that died. Retaining a completed job does not change this — dedup looks only at the live jobs, never at the records they leave behind.
+**3. The journal decides what happened; the idempotency key only prevents duplicate in-flight work.** Francis deduplicates an idempotency key against *live* rows only, so a key is reusable once its job completes **or dead-letters**. That is exactly right for the first case: the key stops reconcile from queueing a second copy of a task that is already pending or running, and the journal's outcome stops a duplicate *report* from being counted twice. The second case is why recovery works: a dead-lettered job frees its key, and the transport failure its worker reports bumps the attempt, so the replacement is dispatched under a key of its own rather than colliding with the one that died. Retaining a completed job does not change this — dedup looks only at the live jobs, never at the records they leave behind.
 
 ## The journal
 
@@ -74,7 +74,7 @@ One state document per instance, as a single actor state value. It records the i
 
 **Every step of the definition is recorded at `Start`**, with the ones not yet reached marked pending. That costs a few hundred bytes and makes status, the unknown-version path, and operator tooling answerable from the journal alone, without the definition on hand.
 
-There is deliberately **no phase field**. What the instance does next is derived from the step records. A cursor naming the current step is written as a by-product, purely so status reads and log lines do not have to walk the list — nothing reads it, so if it ever disagreed with the records, the records would win. Deriving the phase rather than storing it is what makes duplicate reports safe.
+There is deliberately **no phase field**. What the instance does next is derived from the step records. A cursor naming the current step is written as a by-product, purely so status reads and log lines do not have to walk the list — nothing reads it, so if it ever disagreed with the records, the records would win. Deriving the phase rather than storing it is why duplicate reports are safe.
 
 ### Size and write amplification
 
@@ -151,7 +151,7 @@ A worker's actor ID is deterministic — `<instanceID>|<step>|<index>` — so a 
 
 `List` is built on **state labels**: the orchestrator writes `status`, `version`, and `parent` with every journal write. They live in the state row itself, as a JSON object in a column of its own, so they are written, replaced, and removed in the same statement as the journal and cannot disagree with it or outlive it.
 
-On Postgres the column carries a `jsonb_path_ops` GIN index and a filter is one containment test, which the planner uses when the filter is selective enough to beat walking the page in actor-ID order.
+On Postgres the column carries a `jsonb_path_ops` GIN index, which the planner uses when the filter is selective enough to beat walking the page in actor-ID order.
 
 SQLite has no index that covers arbitrary JSON keys, but it does index expressions. Name the keys you filter on and each gets an index of its own, which turns the filter into an index lookup:
 

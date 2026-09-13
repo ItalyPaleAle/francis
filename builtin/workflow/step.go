@@ -295,7 +295,7 @@ func WithDefinition(wf *Workflow) StepOption {
 }
 
 // WithMaxParallel bounds how many of a fan-out's tasks are in flight for one instance, as a sliding window over the tasks in index order
-// It is orthogonal to the per-host bound set with WithConcurrency, which limits how much work a host accepts across all instances
+// It is separate from the per-host bound set with WithConcurrency, which limits how much work a host accepts across all instances
 func WithMaxParallel(n int) StepOption {
 	return func(d *stepDef) {
 		d.maxParallel = n

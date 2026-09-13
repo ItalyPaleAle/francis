@@ -8,7 +8,7 @@ Two steps run more than one task at a time: a **parallel group**, whose members 
 
 ## Static parallel groups
 
-`workflow.Parallel(name, steps...)` materializes one task per member. The group completes when every member has reported.
+`workflow.Parallel(name, steps...)` creates one task per member. The group completes when every member has reported.
 
 ```go
 workflow.Parallel("notify",
@@ -29,7 +29,7 @@ A member may be a plain step or a [child step](/workflows/child-workflows). It m
 
 ## Dynamic fan-out
 
-`workflow.ForEach` materializes one task per element of an upstream step's output, which must decode to a JSON array:
+`workflow.ForEach` creates one task per element of an upstream step's output, which must decode to a JSON array:
 
 ```go
 workflow.Step("plan", workflow.WithRun(planThumbnails)),
@@ -65,7 +65,7 @@ The list is always a step's **whole** output. There is no selector for fanning o
 
 `WithMaxParallel(n)` bounds how many of a fan-out's tasks are in flight **per instance**. It is a sliding window over the tasks in index order: the first `n` that are not yet done are dispatched, and as results arrive the window slides.
 
-This is orthogonal to `WithConcurrency`, which limits how much work a host accepts across **all** instances. A fan-out of 500 with `WithMaxParallel(8)`, on four hosts each running `WithConcurrency(4)`, has at most 8 in flight for that instance and at most 16 running across the cluster.
+This is separate from `WithConcurrency`, which limits how much work a host accepts across **all** instances. A fan-out of 500 with `WithMaxParallel(8)`, on four hosts each running `WithConcurrency(4)`, has at most 8 in flight for that instance and at most 16 running across the cluster.
 
 `WithMaxParallel` knows nothing about cluster capacity. When the in-flight tasks exceed the cluster's total budget, each surplus occurrence is released and re-fetched an alarm poll interval later, so an over-subscribed fan-out degrades to poll-interval pacing rather than failing.
 

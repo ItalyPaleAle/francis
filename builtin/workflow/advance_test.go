@@ -132,7 +132,7 @@ func TestAdvanceRecordsEveryStepAtStart(t *testing.T) {
 
 	st := startJournal(t, def, now)
 
-	// The full step list is what makes status and the unknown-version path answerable from the journal alone
+	// The full step list is why status and the unknown-version path can be answered from the journal alone
 	require.Len(t, st.Steps, 3)
 	assert.Equal(t, []string{"a", "group", "ev"}, []string{st.Steps[0].Name, st.Steps[1].Name, st.Steps[2].Name})
 	assert.Equal(t, KindParallel, st.Steps[1].Kind)
@@ -208,7 +208,7 @@ func TestAdvanceIgnoresADuplicateReport(t *testing.T) {
 	assert.True(t, dup)
 	assert.JSONEq(t, `"first"`, string(st.step("a").task(0).Output))
 
-	// A duplicate still leaves the journal saying the next step should be running, which is what keeps the instance from stalling
+	// A duplicate still leaves the journal saying the next step should be running, so the instance does not stall
 	advance(st, def, "inst-1", now)
 	assert.Equal(t, StepRunning, stepStatus(t, st, "b"))
 }
@@ -592,7 +592,7 @@ func TestAdvanceIsIdempotent(t *testing.T) {
 	st := startJournal(t, def, now)
 	reportSuccess(t, st, def, "a", 0, "one", now)
 
-	// Running advance any number of times over the same journal converges on the same answer, which is what makes recovery not a special code path
+	// Running advance any number of times over the same journal converges on the same answer, so recovery needs no special code path
 	advance(st, def, "inst-1", now)
 	first, err := json.Marshal(st)
 	require.NoError(t, err)

@@ -13,7 +13,7 @@ import (
 )
 
 // purge removes everything a terminated instance left behind: its children first, then its dead-letters, then its journal
-// The order is what makes an interrupted purge safe to repeat
+// That order is why an interrupted purge is safe to repeat
 func (o *orchestrator) purge(ctx context.Context) (any, error) {
 	st, err := o.client.GetState(ctx)
 	if err != nil {

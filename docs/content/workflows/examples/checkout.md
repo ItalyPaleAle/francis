@@ -126,7 +126,7 @@ func releaseInventory(ctx context.Context, c workflow.Compensation) error {
 		return errors.Join(actor.ErrJobPermanentFailure, err)
 	}
 
-	// Releasing a reservation that is already released is a no-op, which is what makes this safe to run twice
+	// Releasing a reservation that is already released is a no-op, so this is safe to run twice
 	return inventory.Release(ctx, res.Token)
 }
 ```

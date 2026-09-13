@@ -626,7 +626,7 @@ func (rt *Runtime) initialRetryDelay(actorType string) time.Duration {
 }
 
 // completeAlarm reschedules a repeating alarm or deletes a one-shot alarm after a successful execution
-// A job whose actor type asked for retention leaves a record behind instead of vanishing, which is what makes a successful run observable
+// A job whose actor type asked for retention leaves a record behind instead of vanishing, so a successful run is visible afterwards
 // It returns true when the lease was kept for its next occurrence and must be re-enqueued by the caller once the active flag is cleared
 func (rt *Runtime) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, jobInfo jobExecInfo, log *slog.Logger) (bool, error) {
 	// Re-read the alarm to confirm the lease is still valid and to observe any edits the actor made

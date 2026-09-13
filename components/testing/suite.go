@@ -5243,7 +5243,7 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 
 	// An alarm with no lease is one whose actor deactivated, which is what an actor halting itself from its own handler does
 	// Finalizing the occurrence that execution just ran has to survive that, or it is left behind to be leased and delivered again
-	// The alarm ID is what makes this safe to accept: replacing an alarm by name mints a new one, so a lease can never name a row it did not execute
+	// This is safe to accept because of the alarm ID: replacing an alarm by name mints a new one, so a lease can never name a row it did not execute
 	t.Run("deletes an alarm whose lease its own actor released", func(t *testing.T) {
 		ctx := t.Context()
 

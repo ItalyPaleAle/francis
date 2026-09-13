@@ -129,7 +129,7 @@ func (s *builtinWorkflow) Setup(t *testing.T) []framework.Option {
 			// Held open on request, which is what lets a test suspend or cancel while work is in flight
 			workflow.Step("gate", workflow.WithRun(s.gate), workflow.WithCompensate(s.undoGate)),
 
-			// Retried per its own policy, which is what makes the attempt count observable
+			// Retried per its own policy, so the attempt count is observable
 			workflow.Step("flaky",
 				workflow.WithRun(s.flaky),
 				workflow.WithCompensate(s.undoFlaky),
@@ -264,7 +264,7 @@ func (s *builtinWorkflow) fanOutItem(ctx context.Context, t workflow.Task) (any,
 		return nil, errors.Join(actor.ErrJobPermanentFailure, err)
 	}
 
-	// Holding the slot briefly is what makes concurrent tasks overlap long enough to observe
+	// Holding the slot briefly makes concurrent tasks overlap long enough to observe
 	select {
 	case <-time.After(300 * time.Millisecond):
 	case <-ctx.Done():
@@ -430,7 +430,7 @@ func (s *builtinWorkflow) Run(t *testing.T) {
 		_, _, err := svc.Start(ctx, runInput{Items: 1, Gated: true}, workflow.WithInstanceID(id))
 		require.NoError(t, err)
 
-		// Suspending while the gate step is in flight is what makes the pause deterministic
+		// Suspending while the gate step is in flight makes the pause deterministic
 		select {
 		case <-gate:
 		case <-time.After(eventuallyTimeout):
@@ -515,7 +515,7 @@ func (s *builtinWorkflow) Run(t *testing.T) {
 			require.ErrorIs(t, err, workflow.ErrInstanceNotFound, "instance %s should be gone", id)
 		}
 
-		// Sweeping again finds nothing left, which is what makes it safe to run on a schedule
+		// Sweeping again finds nothing left, so it is safe to run on a schedule
 		removed, err = sweepSvc.PurgeTerminated(ctx)
 		require.NoError(t, err)
 		assert.Zero(t, removed)

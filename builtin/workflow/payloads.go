@@ -126,14 +126,14 @@ type eventPayload struct {
 // reasonPayload carries the free-form reason of a cancel, an unwind, or a suspend
 type reasonPayload struct {
 	Reason string `msgpack:"reason,omitempty"`
-	// FromParent marks a cancel or an unwind a parent sent, which is what makes the child report its termination as a compensation rather than as a result
+	// FromParent marks a cancel or an unwind a parent sent, so the child reports its termination as a compensation rather than as a result
 	FromParent bool `msgpack:"fromParent,omitempty"`
 	// CompAttempt is the parent's compensation attempt number, which the child echoes back so its report lands on the record being unwound
 	CompAttempt int `msgpack:"compAttempt,omitempty"`
 }
 
 // stepOutput returns what later steps see as a step's output, which depends on its kind (§5.3)
-// A skipped step has no output at all, which is what makes DecodeOutput able to report ErrStepSkipped
+// A skipped step has no output at all, so DecodeOutput can report ErrStepSkipped
 func stepOutput(sr *stepRecord, d *stepDef) json.RawMessage {
 	if sr == nil || sr.Status == StepSkipped || sr.Status == StepPending {
 		return nil

@@ -248,7 +248,7 @@ func (s *SQLiteProvider) endJob(ctx context.Context, lease *ref.AlarmLease, req 
 		}
 
 		// Only a dead job keeps its input, since that is what a replay needs and a completed one is never replayed
-		// This is what keeps a wide fan-out's retained records cheap, where the payload is much larger than the metadata around it
+		// A wide fan-out's retained records stay small this way, since the payload dwarfs the metadata around it
 		// The payload is dropped from the record rather than from the row it came out of, because a recurrence still needs it for its next occurrence
 		recordData := data
 		if req.status != components.JobStatusDeadLettered {
@@ -392,7 +392,7 @@ func (s *SQLiteProvider) ListJobs(ctx context.Context, actorType string, actorID
 
 	now := s.clock.Now().UnixMilli()
 
-	// Live jobs (alarm rows) and terminal ones are disjoint by construction, so UNION ALL avoids an extra round-trip without any risk of duplicates
+	// Live jobs (alarm rows) and terminal ones can never overlap, so UNION ALL avoids an extra round-trip without any risk of duplicates
 	// Each branch projects into a common shape: the live branch derives the status and supplies zero attempts, no error and no end time, while the terminal branch reports what it recorded
 	// #nosec G202 -- the only concatenated values are static table prefixes, not user input
 	rows, err := s.db.QueryContext(queryCtx, `

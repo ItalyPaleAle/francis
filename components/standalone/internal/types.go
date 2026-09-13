@@ -237,7 +237,7 @@ type StateEntry struct {
 }
 
 // MatchesLabels returns true when the entry carries every one of the requested labels with the given value
-// An empty request matches every entry, which is what makes an unfiltered listing the same code path as a filtered one
+// An empty request matches every entry, so an unfiltered listing takes the same code path as a filtered one
 func (s *StateEntry) MatchesLabels(want map[string]string) bool {
 	for k, v := range want {
 		got, ok := s.Labels[k]

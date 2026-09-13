@@ -376,7 +376,7 @@ func (s *list) Run(t *testing.T) {
 		assert.Equal(t, []string{"list-02", "list-03", "list-04"}, ids)
 	})
 
-	// Labels are written in the same operation as the state and filter a listing by equality, which is what keeps an index from disagreeing with what it describes
+	// Labels are written in the same operation as the state and filter a listing by equality, so an index can never disagree with what it describes
 	t.Run("filters a listing by label", func(t *testing.T) {
 		for i, status := range []string{"running", "done", "running"} {
 			err := svc.SetState(ctx, shared.ProbeActorType, fmt.Sprintf("label-%02d", i), shared.ProbeState{N: int64(i)},

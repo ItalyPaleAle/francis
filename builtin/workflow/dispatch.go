@@ -76,7 +76,7 @@ func (o *orchestrator) precedingStepName(name string) string {
 }
 
 // childInput returns what a child instance receives as its workflow input
-// A child of a fan-out gets its item, which is what makes "one child per element" read the way it looks; any other child gets the output of the preceding step, falling back to the parent's own input when there is none
+// A child of a fan-out gets its item, so "one child per element" reads the way it looks; any other child gets the output of the preceding step, falling back to the parent's own input when there is none
 func (o *orchestrator) childInput(st *instanceState, sr *stepRecord, d *stepDef, tr *taskRecord) json.RawMessage {
 	if d.kind == KindForEach {
 		return tr.Item
@@ -96,7 +96,7 @@ func (o *orchestrator) childInput(st *instanceState, sr *stepRecord, d *stepDef,
 	return st.Input
 }
 
-// isPositional reports whether a step's tasks have siblings to be positioned among, which is what makes an index meaningful to a handler
+// isPositional reports whether a step's tasks have siblings to be positioned among, so an index means something to a handler
 func isPositional(d *stepDef) bool {
 	switch d.kind {
 	case KindParallel, KindForEach:

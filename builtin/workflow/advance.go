@@ -40,7 +40,7 @@ type event struct {
 }
 
 // apply folds an event into the journal
-// It is pure, and it records nothing for a duplicate or for a report whose outcome the journal already has, which is what makes every report safe to redeliver (§7.3)
+// It is pure, and it records nothing for a duplicate or for a report whose outcome the journal already has, so every report is safe to redeliver (§7.3)
 // The returned value reports whether the event changed nothing, so the turn can count how often ordering invariant 2 is doing its job
 func apply(st *instanceState, def *definition, ev *event, now time.Time) (duplicate bool) {
 	// A terminated instance ignores everything, so a late report or a repeated cancel cannot revive it
@@ -447,7 +447,7 @@ func abandonRunningStep(st *instanceState, sr *stepRecord, d *stepDef, now time.
 }
 
 // advance derives the next journal from the current one, as a pure function of the journal and the definition
-// It performs no I/O, runs no user code, and cannot block, which is what keeps the orchestration boundary structural rather than aspirational (§4.3)
+// It performs no I/O, runs no user code, and cannot block, so the orchestration boundary is enforced by the code rather than by convention (§4.3)
 // Cursor is one of its outputs, never one of its inputs
 func advance(st *instanceState, def *definition, instanceID string, now time.Time) {
 	if st.Status.IsTerminal() || st.Status == "" {
@@ -692,7 +692,7 @@ func openNextStep(st *instanceState, def *definition, instanceID string, now tim
 	return true
 }
 
-// openStep materializes a step's tasks and marks it running, or records it as skipped when its condition says it should not run
+// openStep creates a step's tasks and marks it running, or records it as skipped when its condition says it should not run
 func openStep(st *instanceState, def *definition, sr *stepRecord, instanceID string, now time.Time) bool {
 	d := def.byName[sr.Name]
 	if d == nil {
@@ -828,7 +828,7 @@ func refreshFrames(st *instanceState, def *definition) bool {
 }
 
 // unwindNextFrame drives the compensation stack one frame at a time, in reverse order, and terminates the instance once it is empty
-// A frame is fully compensated before the next one starts, which is what makes the reverse order mean anything
+// A frame is fully compensated before the next one starts, which is the point of unwinding in reverse
 func unwindNextFrame(st *instanceState, def *definition, now time.Time) bool {
 	if len(st.Stack) == 0 {
 		terminate(st, def, now)

@@ -62,7 +62,7 @@ const (
 	// cronJobIdleTimeout keeps the singleton from lingering between occurrences
 	cronJobIdleTimeout = time.Minute
 
-	// cronJobRetention keeps a week of occurrence records, which is what makes a schedule auditable: ListJobs answers whether last night's run happened, not only whether one failed
+	// cronJobRetention keeps a week of occurrence records, so a schedule is auditable: ListJobs answers whether last night's run happened, not only whether one failed
 	// A week covers a missed daily or weekly run being noticed, and bounds the records a busy schedule leaves behind
 	cronJobRetention = 7 * 24 * time.Hour
 )
@@ -350,7 +350,7 @@ func (a *cronJobScheduler) registerChain(ctx context.Context, state cronJobState
 		return err
 	}
 
-	// A live chain registered for the configured schedule is left alone, which is what makes bootstrapping from every host a no-op after the first
+	// A live chain registered for the configured schedule is left alone, so bootstrapping from every host is a no-op after the first
 	if len(live) > 0 && state.JobID == "" && state.ChainID != "" && state.ChainInterval == a.interval && state.ChainCron == a.cron {
 		if a.log != nil {
 			a.log.Info("Cron job already registered")
@@ -772,7 +772,7 @@ func planRun(ctx context.Context, runner actor.Client[struct{}], nominal time.Ti
 	return due, nil
 }
 
-// jitterDueTime offsets t by a random amount in the range +/- jitter, which is what keeps cron jobs sharing a schedule from all firing at the same instant
+// jitterDueTime offsets t by a random amount in the range +/- jitter, so cron jobs sharing a schedule do not all fire at the same instant
 func jitterDueTime(t time.Time, jitter time.Duration) time.Time {
 	if jitter <= 0 {
 		return t

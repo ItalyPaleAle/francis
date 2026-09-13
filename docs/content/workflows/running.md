@@ -91,7 +91,7 @@ page, err := svc.List(ctx, &workflow.ListOptions{
 })
 ```
 
-Listing is built on **state labels** the orchestrator writes in the same statement as the journal, so the index can never disagree with it. A filter is matched by containment against an indexed column, which makes "every running instance" an index lookup rather than a walk of every retained journal.
+Listing is built on **state labels** the orchestrator writes in the same statement as the journal, so the index can never disagree with it. A filter is matched against an indexed column, so "every running instance" is an index lookup rather than a walk of every retained journal.
 
 Because the default instance ID is a UUIDv7, a listing is in creation order. Page until `AfterID()` returns empty:
 

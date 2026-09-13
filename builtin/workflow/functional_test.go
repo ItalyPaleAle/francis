@@ -480,7 +480,7 @@ func TestSuspendAndResume(t *testing.T) {
 	wf, err := workflow.New("suspendable",
 		workflow.WithSteps(
 			workflow.Step("first", workflow.WithRun(func(ctx context.Context, tk workflow.Task) (any, error) {
-				// Holding the first step open is what makes the suspension land while work is genuinely in flight
+				// Holding the first step open makes the suspension land while work is genuinely in flight
 				once.Do(func() { close(started) })
 				select {
 				case <-release:

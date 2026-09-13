@@ -19,7 +19,7 @@ thumbnails, err := workflow.New("thumbnails",
 	workflow.WithTimeout(10*time.Minute),
 	workflow.WithRetention(workflow.RetentionPolicy{Completed: 24 * time.Hour, Failed: 72 * time.Hour}),
 	workflow.WithAutoPurge("@hourly"),
-	// Encoding is what makes a worker expensive, so this is the number of encoders per host
+	// Encoding is the expensive part of a worker, so this is the number of encoders per host
 	workflow.WithConcurrency(runtime.NumCPU()),
 	workflow.WithSteps(
 		// Normalizes the request into one item per thumbnail to produce

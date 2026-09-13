@@ -332,7 +332,7 @@ func (s *jobs) Run(t *testing.T) {
 		assert.Equal(t, "process", info.Method)
 		assert.False(t, info.EndedAt.IsZero(), "a terminal job records when it ended")
 
-		// It is listed alongside the actor's live jobs, which is what makes a successful run observable
+		// It is listed alongside the actor's live jobs, so a successful run is visible afterwards
 		list, err := svc.ListJobs(ctx, retainedProbeActorType, actorID)
 		require.NoError(t, err)
 		require.Len(t, list, 1)

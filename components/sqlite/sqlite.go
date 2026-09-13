@@ -173,7 +173,7 @@ type SQLiteProviderOptions struct {
 	// StateLabelIndexes names the state-label keys to build an index for
 	// SQLite has no index that covers arbitrary JSON keys, but it does index expressions, so one index per declared key turns a listing filtered on that key into an index lookup instead of a scan of every row of the actor type
 	// Declare the keys an application actually filters on: a key left out is still stored and still filterable, just matched per row
-	// Each key must be a plain identifier (letters, digits and underscores), which is what keeps the index name readable and its JSON path free of escaping
+	// Each key must be a plain identifier (letters, digits and underscores), so the index name stays readable and its JSON path needs no escaping
 	StateLabelIndexes []string
 
 	// QueryLog controls optional SQL statement logging when this constructor opens the database connection

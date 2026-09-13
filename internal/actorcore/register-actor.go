@@ -55,7 +55,7 @@ type RegisterActorOptions struct {
 	// Defaults to 2s
 	InitialRetryDelay time.Duration
 	// JobRetention is how long a job dispatched to this actor type keeps a record after it ends
-	// When set, a job that completes leaves a record that ListJobs and GetJob report until the retention elapses, which is what makes a successful run observable rather than invisible
+	// When set, a job that completes leaves a record that ListJobs and GetJob report until the retention elapses, so a successful run leaves a trace rather than vanishing
 	// It also bounds a dead-lettered job's record, which is otherwise kept until something removes it
 	// Defaults to 0, which keeps no record of a completed job
 	JobRetention time.Duration

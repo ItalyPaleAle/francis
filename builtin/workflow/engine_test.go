@@ -22,7 +22,7 @@ import (
 // fakeHost is an in-memory actor.Host that records what a turn does, so the engine's own behavior can be driven and inspected without a cluster
 //
 // It is deliberately not a working actor runtime: nothing is delivered, and a dispatched job is simply recorded
-// That is what makes it useful for the invariants, because a test can decide exactly which operation fails and when
+// That is why it is useful for the invariants: a test can decide exactly which operation fails and when
 type fakeHost struct {
 	mu sync.Mutex
 
@@ -150,7 +150,7 @@ func (f *fakeHost) Dispatch(ctx context.Context, actorType string, actorID strin
 		return "", errors.New("injected dispatch failure")
 	}
 
-	// Francis deduplicates an idempotency key against live rows only, which is what makes a re-dispatch of a pending task a no-op
+	// Francis deduplicates an idempotency key against live rows only, so re-dispatching a pending task is a no-op
 	if props.IdempotencyKey != "" {
 		k := key(actorType, actorID, props.IdempotencyKey)
 		existing, ok := f.liveKeys[k]

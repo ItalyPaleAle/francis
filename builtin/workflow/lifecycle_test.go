@@ -47,7 +47,7 @@ func TestPurgeTerminatedSweepsPastRetention(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, page.Instances)
 
-	// Sweeping again finds nothing left, which is what makes it safe to run on a schedule
+	// Sweeping again finds nothing left, so it is safe to run on a schedule
 	removed, err = svc.PurgeTerminated(t.Context())
 	require.NoError(t, err)
 	assert.Zero(t, removed)
@@ -331,7 +331,7 @@ func TestFanOutOfChildren(t *testing.T) {
 	assert.Equal(t, 3, ship.Completed)
 	assert.Len(t, ship.ChildIDs, 3)
 
-	// Every child is locatable from the parent's journal, which is what makes listing them possible
+	// Every child is locatable from the parent's journal, so they can be listed
 	page, err := svc.List(t.Context(), &workflow.ListOptions{Limit: 50})
 	require.NoError(t, err)
 	assert.Len(t, page.Instances, 1, "the parent's own listing does not include its children, which have their own workflow name")
@@ -435,7 +435,7 @@ func TestPurgeRefusesAChildOfARunningParent(t *testing.T) {
 	parent, err := workflow.New("purge-parent",
 		workflow.WithSteps(
 			workflow.Child("sub", workflow.WithDefinition(child)),
-			// Holding the parent open is what keeps it running while the child has already terminated
+			// Holding the parent open keeps it running while the child has already terminated
 			workflow.Step("hold", workflow.WithRun(func(ctx context.Context, tk workflow.Task) (any, error) {
 				select {
 				case <-release:

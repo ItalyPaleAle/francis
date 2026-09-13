@@ -615,7 +615,7 @@ func (h *Host) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, l
 		log.Error("Failed to compute next execution time for alarm; alarm will be kept", slog.Any("error", err))
 		return false, nil
 	}
-	// A job whose actor type asked for retention leaves a record behind rather than vanishing, which is what makes a successful run observable
+	// A job whose actor type asked for retention leaves a record behind rather than vanishing, so a successful run is visible afterwards
 	retention := time.Duration(0)
 	if alarm.Kind == components.AlarmKindJob {
 		retention = h.jobRetention(lease.ActorRef().ActorType)

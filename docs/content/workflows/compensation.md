@@ -29,7 +29,7 @@ Three ordering rules:
 
 - **Frames unwind in reverse order.** A step that ran after another is compensated before it. That is the invariant a saga depends on: the customer is refunded before the stock is released, because the stock was held first.
 - **Within a frame, compensations run concurrently.** The tasks of a parallel group or fan-out had no order between them going forward, so imposing one on the way back would only make unwinding slower.
-- **A frame is fully compensated before the next one starts.** That is what makes the reverse order mean anything.
+- **A frame is fully compensated before the next one starts.** That is the point of unwinding in reverse.
 
 Every compensation is a task on an undo worker, like every other unit of work. The unwind is scheduled by the `Workflow` actor and performed nowhere near it.
 

@@ -83,8 +83,6 @@ func (f *fakeHost) ListJobs(context.Context, string, string) ([]JobInfo, error) 
 	return nil, nil
 }
 
-
-
 func (f *fakeHost) RetryJob(context.Context, string) (string, error) {
 	return "", nil
 }
