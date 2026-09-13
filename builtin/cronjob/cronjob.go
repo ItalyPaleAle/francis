@@ -61,6 +61,10 @@ const (
 
 	// cronJobIdleTimeout keeps the singleton from lingering between occurrences
 	cronJobIdleTimeout = time.Minute
+
+	// cronJobRetention keeps a week of occurrence records, which is what makes a schedule auditable: ListJobs answers whether last night's run happened, not only whether one failed
+	// A week covers a missed daily or weekly run being noticed, and bounds the records a busy schedule leaves behind
+	cronJobRetention = 7 * 24 * time.Hour
 )
 
 // New builds a cron job built-in actor identified by name
@@ -164,7 +168,8 @@ func New(name string, opts ...Option) (*CronJob, error) {
 			}
 		},
 		regOpts: actorcore.RegisterActorOptions{
-			IdleTimeout: cronJobIdleTimeout,
+			IdleTimeout:  cronJobIdleTimeout,
+			JobRetention: cronJobRetention,
 		},
 	}, nil
 }

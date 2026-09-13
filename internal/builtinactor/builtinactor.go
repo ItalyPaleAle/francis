@@ -6,6 +6,7 @@ package builtinactor
 
 import (
 	"context"
+	"time"
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/actorcore"
@@ -57,20 +58,39 @@ type MultiBuiltInActor interface {
 	Registrations() []BuiltInActorRegistration
 }
 
+// DefaultJobRetention is how long a built-in actor's jobs keep a record once they end, unless the built-in asks for a different window
+// Built-ins run work on a caller's behalf without the caller holding a handle to it, so the record of a run that succeeded is the only way to see that it happened at all
+// An application actor still defaults to keeping none, since only its author knows whether a job's history is worth storing
+const DefaultJobRetention = 24 * time.Hour
+
 // RegistrationsFor returns the actor-type registrations a host must create for a built-in actor
 // It returns every type from a MultiBuiltInActor, or the single type of a plain BuiltInActor, so hosts have one code path for both
+// A registration that names no job retention is given the built-in default, so every built-in is observable without each having to remember to ask
 func RegistrationsFor(b BuiltInActor) []BuiltInActorRegistration {
 	multi, ok := b.(MultiBuiltInActor)
 	if ok {
-		return multi.Registrations()
+		regs := multi.Registrations()
+		for i := range regs {
+			applyJobRetentionDefault(&regs[i].RegisterOptions)
+		}
+		return regs
 	}
 
-	return []BuiltInActorRegistration{{
+	reg := BuiltInActorRegistration{
 		ActorType:       b.ActorType(),
 		Factory:         b.Factory(),
 		RegisterOptions: b.RegisterOptions(),
 		Singleton:       b.Singleton(),
-	}}
+	}
+	applyJobRetentionDefault(&reg.RegisterOptions)
+	return []BuiltInActorRegistration{reg}
+}
+
+// applyJobRetentionDefault fills in the built-in job retention for a registration that named none
+func applyJobRetentionDefault(opts *actorcore.RegisterActorOptions) {
+	if opts.JobRetention == 0 {
+		opts.JobRetention = DefaultJobRetention
+	}
 }
 
 // FullActorType returns the reserved actor type a built-in actor is registered under, by prefixing its bare type
