@@ -15,7 +15,6 @@ import (
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/backup"
-	"github.com/italypaleale/francis/internal/ref"
 )
 
 // Backup writes a snapshot of all persistent data to w
@@ -64,8 +63,7 @@ func (p *PostgresProvider) Backup(ctx context.Context, w io.Writer) error {
 func (p *PostgresProvider) Restore(ctx context.Context, r io.Reader) error {
 	// Column lists for the restore COPY, matching the order produced by the value functions below
 	var (
-		backupStateColumns   = []string{"actor_type", "actor_id", "actor_state_data", "actor_state_expiration_time"}
-		backupLabelColumns   = []string{"actor_type", "actor_id", "label_key", "label_value"}
+		backupStateColumns   = []string{"actor_type", "actor_id", "actor_state_data", "actor_state_expiration_time", "actor_state_labels"}
 		backupAlarmColumns   = []string{"alarm_id", "actor_type", "actor_id", "alarm_name", "alarm_due_time", "alarm_interval", "alarm_cron", "alarm_ttl_time", "alarm_data", "alarm_lease_id", "alarm_lease_expiration_time", "alarm_kind", "job_method"}
 		backupDeadJobColumns = []string{"job_id", "actor_type", "actor_id", "job_method", "job_data", "attempts", "last_error", "failed_at", "original_due", "job_interval", "job_cron"}
 	)
@@ -94,23 +92,10 @@ func (p *PostgresProvider) Restore(ctx context.Context, r io.Reader) error {
 		defer stop()
 		pull := &recordPull{next: next}
 
-		// The state COPY streams past each record once, so the labels are collected as it goes and loaded right after, when the rows they reference exist
-		var labelRows [][]any
-		collectLabels := func(rec backup.Record) ([]any, error) {
-			for k, v := range rec.State.Labels {
-				labelRows = append(labelRows, []any{rec.State.ActorType, rec.State.ActorID, k, v})
-			}
-			return stateToCopyValues(rec)
-		}
-
 		// Bulk-load each section with COPY, which is efficient and safe because the tables are empty after the wipe
-		_, err = tx.CopyFrom(ctx, pgx.Identifier{p.tablePrefix + "actor_state"}, backupStateColumns, &copySection{pull: pull, wantType: backup.RecordTypeState, toValues: collectLabels})
+		_, err = tx.CopyFrom(ctx, pgx.Identifier{p.tablePrefix + "actor_state"}, backupStateColumns, &copySection{pull: pull, wantType: backup.RecordTypeState, toValues: stateToCopyValues})
 		if err != nil {
 			return fmt.Errorf("failed to restore actor state: %w", err)
-		}
-		_, err = tx.CopyFrom(ctx, pgx.Identifier{p.tablePrefix + "actor_state_labels"}, backupLabelColumns, pgx.CopyFromRows(labelRows))
-		if err != nil {
-			return fmt.Errorf("failed to restore actor state labels: %w", err)
 		}
 		_, err = tx.CopyFrom(ctx, pgx.Identifier{p.tablePrefix + "alarms"}, backupAlarmColumns, &copySection{pull: pull, wantType: backup.RecordTypeAlarm, toValues: alarmToCopyValues})
 		if err != nil {
@@ -197,8 +182,7 @@ func (p *PostgresProvider) ensureNoHostsConnected(ctx context.Context, tx pgx.Tx
 
 // wipePersistentData deletes all actor state, alarms, and dead jobs
 func (p *PostgresProvider) wipePersistentData(ctx context.Context, tx pgx.Tx) error {
-	// actor_state_labels goes first because its rows reference actor_state, and the cascade is not relied on here
-	for _, table := range []string{"actor_state_labels", "actor_state", "alarms", "dead_jobs"} {
+	for _, table := range []string{"actor_state", "alarms", "dead_jobs"} {
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.Exec(ctx, "DELETE FROM "+p.tablePrefix+table)
 		if err != nil {
@@ -209,15 +193,9 @@ func (p *PostgresProvider) wipePersistentData(ctx context.Context, tx pgx.Tx) er
 }
 
 func (p *PostgresProvider) backupState(ctx context.Context, tx pgx.Tx, bw *backup.Writer) error {
-	// The labels are read up front and keyed by actor, so each state row is written with its own set without a query per row
-	labels, err := p.backupStateLabels(ctx, tx)
-	if err != nil {
-		return err
-	}
-
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	rows, err := tx.Query(ctx,
-		`SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time
+		`SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time, actor_state_labels
 		FROM `+p.tablePrefix+`actor_state
 		WHERE actor_state_expiration_time IS NULL OR actor_state_expiration_time > (now() AT TIME ZONE 'utc')`,
 	)
@@ -228,10 +206,11 @@ func (p *PostgresProvider) backupState(ctx context.Context, tx pgx.Tx, bw *backu
 
 	for rows.Next() {
 		var (
-			rec backup.StateRecord
-			exp *time.Time
+			rec    backup.StateRecord
+			exp    *time.Time
+			labels []byte
 		)
-		err = rows.Scan(&rec.ActorType, &rec.ActorID, &rec.Data, &exp)
+		err = rows.Scan(&rec.ActorType, &rec.ActorID, &rec.Data, &exp, &labels)
 		if err != nil {
 			return fmt.Errorf("failed to scan actor state row: %w", err)
 		}
@@ -239,7 +218,12 @@ func (p *PostgresProvider) backupState(ctx context.Context, tx pgx.Tx, bw *backu
 		if exp != nil {
 			rec.Expiration = new(exp.UTC())
 		}
-		rec.Labels = labels[ref.NewActorRef(rec.ActorType, rec.ActorID)]
+
+		// The backup format carries labels as a map, so it stays portable across providers that store them differently
+		rec.Labels, err = components.DecodeLabels(labels)
+		if err != nil {
+			return err
+		}
 
 		err = bw.WriteState(&rec)
 		if err != nil {
@@ -253,40 +237,6 @@ func (p *PostgresProvider) backupState(ctx context.Context, tx pgx.Tx, bw *backu
 	}
 
 	return nil
-}
-
-// backupStateLabels reads every actor-state label into a map keyed by actor, so the state backup can attach each set without querying per row
-func (p *PostgresProvider) backupStateLabels(ctx context.Context, tx pgx.Tx) (map[ref.ActorRef]map[string]string, error) {
-	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	rows, err := tx.Query(ctx,
-		`SELECT actor_type, actor_id, label_key, label_value FROM `+p.tablePrefix+`actor_state_labels`,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query actor state labels: %w", err)
-	}
-	defer rows.Close()
-
-	res := map[ref.ActorRef]map[string]string{}
-	for rows.Next() {
-		var actorType, actorID, key, value string
-		err = rows.Scan(&actorType, &actorID, &key, &value)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan actor state label row: %w", err)
-		}
-
-		aRef := ref.NewActorRef(actorType, actorID)
-		if res[aRef] == nil {
-			res[aRef] = map[string]string{}
-		}
-		res[aRef][key] = value
-	}
-
-	err = rows.Err()
-	if err != nil {
-		return nil, err
-	}
-
-	return res, nil
 }
 
 func (p *PostgresProvider) backupAlarms(ctx context.Context, tx pgx.Tx, bw *backup.Writer) error {
@@ -399,7 +349,17 @@ func stateToCopyValues(rec backup.Record) ([]any, error) {
 		exp = r.Expiration.UTC()
 	}
 
-	return []any{r.ActorType, r.ActorID, data, exp}, nil
+	labelsJSON, err := components.EncodeLabels(r.Labels)
+	if err != nil {
+		return nil, err
+	}
+
+	var labels any
+	if labelsJSON != nil {
+		labels = string(labelsJSON)
+	}
+
+	return []any{r.ActorType, r.ActorID, data, exp, labels}, nil
 }
 
 // alarmToCopyValues maps an alarm record to a COPY row matching backupAlarmColumns, with the lease columns set to NULL

@@ -1,18 +1,4 @@
--- Holds the labels attached to an actor's state, so a listing can filter on them by equality without reading every stored state
--- Labels are written in the same transaction as the state they belong to, and the cascade removes them with it
-CREATE TABLE %sactor_state_labels (
-    -- Actor type
-    actor_type text NOT NULL,
-    -- Actor ID
-    actor_id text NOT NULL,
-    -- Label name
-    label_key text NOT NULL,
-    -- Label value
-    label_value text NOT NULL,
-
-    PRIMARY KEY (actor_type, actor_id, label_key),
-    FOREIGN KEY (actor_type, actor_id) REFERENCES %sactor_state (actor_type, actor_id) ON DELETE CASCADE
-) WITHOUT ROWID, STRICT;
-
--- The lookup index orders by actor_id last, so a filtered listing pages in actor-ID order exactly as an unfiltered one does
-CREATE INDEX %sactor_state_labels_lookup_idx ON %sactor_state_labels (actor_type, label_key, label_value, actor_id);
+-- Labels attached to an actor's state, stored as a JSON object in the row they describe
+-- Keeping them in the state row is what makes them written, replaced, and removed with it in a single statement, with no second table to keep consistent and nothing left behind when the row expires
+-- SQLite has no general-purpose index for arbitrary JSON keys, so a filtered listing evaluates the labels per row, within the actor_type range the primary key already narrows it to
+ALTER TABLE %sactor_state ADD COLUMN actor_state_labels text;

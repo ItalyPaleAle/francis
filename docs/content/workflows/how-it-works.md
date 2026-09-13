@@ -145,8 +145,10 @@ A worker's actor ID is deterministic — `<instanceID>|<step>|<index>` — so a 
 
 ## Listing
 
-`List` is built on **state labels**: the orchestrator writes `status`, `version`, and `parent` with every journal write, in the same operation as the state, so the index can never disagree with the journal. The labels are matched by equality on an indexed column, which makes a filtered listing a range scan rather than a walk of every retained journal.
+`List` is built on **state labels**: the orchestrator writes `status`, `version`, and `parent` with every journal write. They live in the state row itself, as a JSON object in a column of its own, so they are written, replaced, and removed in the same statement as the journal and cannot disagree with it or outlive it.
+
+On Postgres the column carries a `jsonb_path_ops` GIN index and a filter is one containment test, which the planner uses when the filter is selective enough to beat walking the page in actor-ID order. SQLite has no index for arbitrary JSON keys, so a filter there is evaluated per row, within the actor-type range the primary key already narrows the scan to.
 
 Labels are equality-only, so a range question — "terminated more than a week ago" — cannot be asked of them. The retention sweep therefore filters by status server-side and checks each instance's completion time on the decoded journal.
 
-A secondary index actor would have needed no framework change, but it would have been a second write on a second actor, updated *after* the journal write and therefore able to lag or dangle. Labels are also useful to every actor application, not only this one.
+A secondary index actor would have needed no framework change, but it would have been a second write on a second actor, updated *after* the journal write and therefore able to lag or dangle. A side table of label rows has the same shape of problem in miniature — two writes to keep consistent, and rows to clean up when the state they describe expires. A column of the row it describes has neither. Labels are also useful to every actor application, not only this one.

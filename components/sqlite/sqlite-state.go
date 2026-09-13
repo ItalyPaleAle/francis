@@ -42,55 +42,31 @@ func (s *SQLiteProvider) SetState(ctx context.Context, ref ref.ActorRef, data []
 		exp = new(s.clock.Now().Add(opts.TTL).UnixMilli())
 	}
 
+	// The labels live in the state row, so writing them is part of the same statement and the set passed in replaces whatever the actor had
+	labelsJSON, err := opts.LabelsJSON()
+	if err != nil {
+		return err
+	}
+
+	// The column is declared text in a STRICT table, so the encoded object is bound as a string rather than as a blob
+	var labels *string
+	if labelsJSON != nil {
+		labels = new(string(labelsJSON))
+	}
+
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	// The state and its labels are written in one transaction, so a listing filtered on a label can never see one without the other
-	tx, err := s.db.BeginTx(queryCtx, nil)
-	if err != nil {
-		return fmt.Errorf("error starting transaction: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	// An upsert rather than a REPLACE, because REPLACE deletes the row first and the labels would cascade away with it
+	// Performs a upsert
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	_, err = tx.ExecContext(queryCtx,
-		`INSERT INTO `+s.tablePrefix+`actor_state
-			(actor_type, actor_id, actor_state_data, actor_state_expiration_time)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT (actor_type, actor_id) DO UPDATE SET
-			actor_state_data = excluded.actor_state_data,
-			actor_state_expiration_time = excluded.actor_state_expiration_time`,
-		ref.ActorType, ref.ActorID, data, exp,
+	_, err = s.db.ExecContext(queryCtx,
+		`REPLACE INTO `+s.tablePrefix+`actor_state
+			(actor_type, actor_id, actor_state_data, actor_state_expiration_time, actor_state_labels)
+		VALUES (?, ?, ?, ?, ?)`,
+		ref.ActorType, ref.ActorID, data, exp, labels,
 	)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)
-	}
-
-	// The labels passed in replace whatever the actor had, so the previous set goes first and an empty map simply leaves none behind
-	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	_, err = tx.ExecContext(queryCtx,
-		`DELETE FROM `+s.tablePrefix+`actor_state_labels WHERE actor_type = ? AND actor_id = ?`,
-		ref.ActorType, ref.ActorID,
-	)
-	if err != nil {
-		return fmt.Errorf("error executing query: %w", err)
-	}
-
-	for k, v := range opts.Labels {
-		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-		_, err = tx.ExecContext(queryCtx,
-			`INSERT INTO `+s.tablePrefix+`actor_state_labels (actor_type, actor_id, label_key, label_value) VALUES (?, ?, ?, ?)`,
-			ref.ActorType, ref.ActorID, k, v,
-		)
-		if err != nil {
-			return fmt.Errorf("error executing query: %w", err)
-		}
-	}
-
-	err = tx.Commit()
-	if err != nil {
-		return fmt.Errorf("error committing transaction: %w", err)
 	}
 
 	return nil
@@ -114,18 +90,20 @@ func (s *SQLiteProvider) ListStates(ctx context.Context, req components.ListStat
 	args := make([]any, 0, 4+2*len(req.Labels))
 	args = append(args, req.ActorType, req.After, s.clock.Now().UnixMilli())
 
-	// Each requested label becomes an EXISTS clause served by the labels lookup index, which keeps a filtered listing a range scan rather than a walk of every stored state
+	// Each requested label becomes an EXISTS over the row's own label object
+	// SQLite has no index for arbitrary JSON keys, so this is evaluated per row, within the actor_type range the primary key already narrows the scan to
+	// json_each is used rather than a json_extract path so a label key needs no escaping to be matched
 	var labelClauses strings.Builder
+	if len(req.Labels) > 0 {
+		// json_each requires well-formed JSON, so a row with no labels at all is excluded before it is reached
+		labelClauses.WriteString(`
+			AND actor_state_labels IS NOT NULL`)
+	}
 	for k, v := range req.Labels {
-		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		labelClauses.WriteString(`
 			AND EXISTS (
-				SELECT 1 FROM ` + s.tablePrefix + `actor_state_labels l
-				WHERE
-					l.actor_type = ` + s.tablePrefix + `actor_state.actor_type
-					AND l.actor_id = ` + s.tablePrefix + `actor_state.actor_id
-					AND l.label_key = ?
-					AND l.label_value = ?
+				SELECT 1 FROM json_each(actor_state_labels) l
+				WHERE l.key = ? AND l.value = ?
 			)`)
 		args = append(args, k, v)
 	}
@@ -190,7 +168,7 @@ func (s *SQLiteProvider) DeleteState(ctx context.Context, ref ref.ActorRef) erro
 
 	// We exclude expired state from the deletion because we want to be able to get an appropriate count of affected rows, and return ErrNoState if nothing was deleted
 	// Expired state entries are garbage collected periodically anyways
-	// The labels are removed by the foreign key's cascade, so they never outlive the state they describe
+	// The labels are a column of the row, so they go with it and can never outlive the state they describe
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := s.db.ExecContext(queryCtx,
 		`DELETE FROM `+s.tablePrefix+`actor_state

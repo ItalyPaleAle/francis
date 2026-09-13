@@ -11,7 +11,6 @@ import (
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/backup"
-	"github.com/italypaleale/francis/internal/ref"
 )
 
 // Backup writes a snapshot of all persistent data to w
@@ -155,8 +154,7 @@ func (s *SQLiteProvider) ensureNoHostsConnected(ctx context.Context, conn *sql.C
 
 // wipePersistentData deletes all actor state, alarms, and dead jobs
 func (s *SQLiteProvider) wipePersistentData(ctx context.Context, conn *sql.Conn) error {
-	// actor_state_labels goes first because its rows reference actor_state, and the cascade is not relied on here
-	for _, table := range []string{"actor_state_labels", "actor_state", "alarms", "dead_jobs"} {
+	for _, table := range []string{"actor_state", "alarms", "dead_jobs"} {
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := conn.ExecContext(ctx, "DELETE FROM "+s.tablePrefix+table)
 		if err != nil {
@@ -169,15 +167,9 @@ func (s *SQLiteProvider) wipePersistentData(ctx context.Context, conn *sql.Conn)
 func (s *SQLiteProvider) backupState(ctx context.Context, tx *sql.Tx, bw *backup.Writer) error {
 	nowMs := s.clock.Now().UnixMilli()
 
-	// The labels are read up front and keyed by actor, so each state row is written with its own set without a query per row
-	labels, err := s.backupStateLabels(ctx, tx)
-	if err != nil {
-		return err
-	}
-
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	rows, err := tx.QueryContext(ctx,
-		`SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time
+		`SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time, actor_state_labels
 		FROM `+s.tablePrefix+`actor_state
 		WHERE actor_state_expiration_time IS NULL OR actor_state_expiration_time > ?`,
 		nowMs,
@@ -189,10 +181,11 @@ func (s *SQLiteProvider) backupState(ctx context.Context, tx *sql.Tx, bw *backup
 
 	for rows.Next() {
 		var (
-			rec   backup.StateRecord
-			expMs sql.NullInt64
+			rec    backup.StateRecord
+			expMs  sql.NullInt64
+			labels []byte
 		)
-		err = rows.Scan(&rec.ActorType, &rec.ActorID, &rec.Data, &expMs)
+		err = rows.Scan(&rec.ActorType, &rec.ActorID, &rec.Data, &expMs, &labels)
 		if err != nil {
 			return fmt.Errorf("failed to scan actor state row: %w", err)
 		}
@@ -200,7 +193,12 @@ func (s *SQLiteProvider) backupState(ctx context.Context, tx *sql.Tx, bw *backup
 		if expMs.Valid {
 			rec.Expiration = new(time.UnixMilli(expMs.Int64).UTC())
 		}
-		rec.Labels = labels[ref.NewActorRef(rec.ActorType, rec.ActorID)]
+
+		// The backup format carries labels as a map, so it stays portable across providers that store them differently
+		rec.Labels, err = components.DecodeLabels(labels)
+		if err != nil {
+			return err
+		}
 
 		err = bw.WriteState(&rec)
 		if err != nil {
@@ -214,40 +212,6 @@ func (s *SQLiteProvider) backupState(ctx context.Context, tx *sql.Tx, bw *backup
 	}
 
 	return nil
-}
-
-// backupStateLabels reads every actor-state label into a map keyed by actor, so the state backup can attach each set without querying per row
-func (s *SQLiteProvider) backupStateLabels(ctx context.Context, tx *sql.Tx) (map[ref.ActorRef]map[string]string, error) {
-	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	rows, err := tx.QueryContext(ctx,
-		`SELECT actor_type, actor_id, label_key, label_value FROM `+s.tablePrefix+`actor_state_labels`,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query actor state labels: %w", err)
-	}
-	defer rows.Close()
-
-	res := map[ref.ActorRef]map[string]string{}
-	for rows.Next() {
-		var actorType, actorID, key, value string
-		err = rows.Scan(&actorType, &actorID, &key, &value)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan actor state label row: %w", err)
-		}
-
-		aRef := ref.NewActorRef(actorType, actorID)
-		if res[aRef] == nil {
-			res[aRef] = map[string]string{}
-		}
-		res[aRef][key] = value
-	}
-
-	err = rows.Err()
-	if err != nil {
-		return nil, err
-	}
-
-	return res, nil
 }
 
 func (s *SQLiteProvider) backupAlarms(ctx context.Context, tx *sql.Tx, bw *backup.Writer) error {
@@ -368,25 +332,24 @@ func (s *SQLiteProvider) restoreState(ctx context.Context, conn *sql.Conn, r *ba
 		data = []byte{}
 	}
 
+	labelsJSON, err := components.EncodeLabels(r.Labels)
+	if err != nil {
+		return err
+	}
+
+	// The column is declared text in a STRICT table, so the encoded object is bound as a string rather than as a blob
+	var labels any
+	if labelsJSON != nil {
+		labels = string(labelsJSON)
+	}
+
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	_, err := conn.ExecContext(ctx,
-		`INSERT INTO `+s.tablePrefix+`actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time) VALUES (?, ?, ?, ?)`,
-		r.ActorType, r.ActorID, data, exp,
+	_, err = conn.ExecContext(ctx,
+		`INSERT INTO `+s.tablePrefix+`actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time, actor_state_labels) VALUES (?, ?, ?, ?, ?)`,
+		r.ActorType, r.ActorID, data, exp, labels,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to restore actor state: %w", err)
-	}
-
-	// The labels are restored after the state they reference, so the foreign key holds
-	for k, v := range r.Labels {
-		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-		_, err = conn.ExecContext(ctx,
-			`INSERT INTO `+s.tablePrefix+`actor_state_labels (actor_type, actor_id, label_key, label_value) VALUES (?, ?, ?, ?)`,
-			r.ActorType, r.ActorID, k, v,
-		)
-		if err != nil {
-			return fmt.Errorf("failed to restore actor state label: %w", err)
-		}
 	}
 
 	return nil

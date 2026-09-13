@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -45,56 +44,35 @@ func (p *PostgresProvider) SetState(ctx context.Context, ref ref.ActorRef, data 
 		exp = &opts.TTL
 	}
 
+	// The labels live in the state row, so writing them is part of the same statement and the set passed in replaces whatever the actor had
+	labelsJSON, err := opts.LabelsJSON()
+	if err != nil {
+		return err
+	}
+
+	var labels *string
+	if labelsJSON != nil {
+		labels = new(string(labelsJSON))
+	}
+
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
-	// The state and its labels are written in one transaction, so a listing filtered on a label can never see one without the other
-	tx, err := p.db.Begin(queryCtx)
-	if err != nil {
-		return fmt.Errorf("error starting transaction: %w", err)
-	}
-	defer tx.Rollback(queryCtx) //nolint:errcheck
-
 	// Performs a upsert
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	_, err = tx.Exec(queryCtx,
+	_, err = p.db.Exec(queryCtx,
 		// If exp is nil, now() + NULL will be NULL
 		`INSERT INTO `+p.tablePrefix+`actor_state
-			(actor_type, actor_id, actor_state_data, actor_state_expiration_time)
-		VALUES ($1, $2, $3, (now() AT TIME ZONE 'utc') + $4)
+			(actor_type, actor_id, actor_state_data, actor_state_expiration_time, actor_state_labels)
+		VALUES ($1, $2, $3, (now() AT TIME ZONE 'utc') + $4, $5::jsonb)
 		ON CONFLICT (actor_type, actor_id) DO UPDATE SET
 			actor_state_data = EXCLUDED.actor_state_data,
-			actor_state_expiration_time = EXCLUDED.actor_state_expiration_time`,
-		ref.ActorType, ref.ActorID, data, exp,
+			actor_state_expiration_time = EXCLUDED.actor_state_expiration_time,
+			actor_state_labels = EXCLUDED.actor_state_labels`,
+		ref.ActorType, ref.ActorID, data, exp, labels,
 	)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)
-	}
-
-	// The labels passed in replace whatever the actor had, so the previous set goes first and an empty map simply leaves none behind
-	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	_, err = tx.Exec(queryCtx,
-		`DELETE FROM `+p.tablePrefix+`actor_state_labels WHERE actor_type = $1 AND actor_id = $2`,
-		ref.ActorType, ref.ActorID,
-	)
-	if err != nil {
-		return fmt.Errorf("error executing query: %w", err)
-	}
-
-	for k, v := range opts.Labels {
-		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-		_, err = tx.Exec(queryCtx,
-			`INSERT INTO `+p.tablePrefix+`actor_state_labels (actor_type, actor_id, label_key, label_value) VALUES ($1, $2, $3, $4)`,
-			ref.ActorType, ref.ActorID, k, v,
-		)
-		if err != nil {
-			return fmt.Errorf("error executing query: %w", err)
-		}
-	}
-
-	err = tx.Commit(queryCtx)
-	if err != nil {
-		return fmt.Errorf("error committing transaction: %w", err)
 	}
 
 	return nil
@@ -114,26 +92,23 @@ func (p *PostgresProvider) ListStates(ctx context.Context, req components.ListSt
 	// This avoids a second query just to compute HasMore
 	limit := req.EffectiveLimit()
 
-	// The size is known up front: the two fixed arguments, two per label clause, and the limit
-	args := make([]any, 0, 3+2*len(req.Labels))
+	// The whole filter is one containment test, so the arguments are known up front: the two fixed ones, the labels object when there is one, and the limit
+	args := make([]any, 0, 4)
 	args = append(args, req.ActorType, req.After)
 
-	// Each requested label becomes an EXISTS clause served by the labels lookup index, which keeps a filtered listing a range scan rather than a walk of every stored state
-	var labelClauses strings.Builder
-	for k, v := range req.Labels {
-		keyArg := strconv.Itoa(len(args) + 1)
-		valueArg := strconv.Itoa(len(args) + 2)
-		// #nosec G202 -- the only concatenated values are the static table prefix and generated placeholder numbers, not user input
-		labelClauses.WriteString(`
-			AND EXISTS (
-				SELECT 1 FROM ` + p.tablePrefix + `actor_state_labels l
-				WHERE
-					l.actor_type = ` + p.tablePrefix + `actor_state.actor_type
-					AND l.actor_id = ` + p.tablePrefix + `actor_state.actor_id
-					AND l.label_key = $` + keyArg + `
-					AND l.label_value = $` + valueArg + `
-			)`)
-		args = append(args, k, v)
+	// Containment against the row's own label object is served by the GIN index, which keeps a filtered listing an index lookup rather than a walk of every stored state
+	// One test covers every requested label at once, since a JSON object contains another only when it holds all of its pairs
+	labelsJSON, err := req.LabelsJSON()
+	if err != nil {
+		return components.ListStatesRes{}, err
+	}
+
+	var labelClause string
+	if labelsJSON != nil {
+		// #nosec G202 -- the only concatenated value is a generated placeholder number, not user input
+		labelClause = `
+			AND actor_state_labels @> $` + strconv.Itoa(len(args)+1) + `::jsonb`
+		args = append(args, string(labelsJSON))
 	}
 	limitArg := strconv.Itoa(len(args) + 1)
 	args = append(args, limit+1)
@@ -148,7 +123,7 @@ func (p *PostgresProvider) ListStates(ctx context.Context, req components.ListSt
 			actor_type = $1
 			AND actor_id > $2
 			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > (now() AT TIME ZONE 'utc'))`+
-			labelClauses.String()+`
+			labelClause+`
 		ORDER BY actor_id
 		LIMIT $`+limitArg,
 		args...,
@@ -197,7 +172,7 @@ func (p *PostgresProvider) DeleteState(ctx context.Context, ref ref.ActorRef) er
 
 	// We exclude expired state from the deletion because we want to be able to get an appropriate count of affected rows, and return ErrNoState if nothing was deleted
 	// Expired state entries are garbage collected periodically anyways
-	// The labels are removed by the foreign key's cascade, so they never outlive the state they describe
+	// The labels are a column of the row, so they go with it and can never outlive the state they describe
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := p.db.Exec(queryCtx,
 		`DELETE FROM `+p.tablePrefix+`actor_state

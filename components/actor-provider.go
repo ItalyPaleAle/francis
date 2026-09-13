@@ -2,6 +2,8 @@ package components
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"time"
 	"uuid"
@@ -341,9 +343,15 @@ type UpdateLeasedAlarmReq struct {
 // SetStateOpts contains options for SetState
 type SetStateOpts struct {
 	TTL time.Duration
-	// Labels is an optional set of short string pairs stored alongside the state, in the same transaction and with the same expiration, which ListStates filters on by equality
+	// Labels is an optional set of short string pairs stored in the state row itself, so they carry its expiration and are replaced with it, which ListStates filters on by equality
 	// A nil or empty map removes every label previously stored for the actor
 	Labels map[string]string
+}
+
+// LabelsJSON encodes the labels as the JSON object a provider stores in the state row's label column.
+// It returns nil when there are no labels, so the column is left empty rather than holding an empty object.
+func (o SetStateOpts) LabelsJSON() ([]byte, error) {
+	return EncodeLabels(o.Labels)
 }
 
 // ListStatesReq is the request object for the ListStates method.
@@ -361,6 +369,12 @@ type ListStatesReq struct {
 	Limit int
 }
 
+// LabelsJSON encodes the requested label filter as a JSON object, for providers that match it with a containment operator.
+// It returns nil when the request filters on no labels.
+func (r ListStatesReq) LabelsJSON() ([]byte, error) {
+	return EncodeLabels(r.Labels)
+}
+
 // EffectiveLimit returns the number of states the provider should return for this request, applying the default when the caller didn't set a limit and the cap when it asked for too many.
 func (r ListStatesReq) EffectiveLimit() int {
 	switch {
@@ -371,6 +385,33 @@ func (r ListStatesReq) EffectiveLimit() int {
 	default:
 		return r.Limit
 	}
+}
+
+// EncodeLabels marshals a label set into the JSON object providers store it as, returning nil for an empty set.
+func EncodeLabels(labels map[string]string) ([]byte, error) {
+	if len(labels) == 0 {
+		return nil, nil
+	}
+
+	res, err := json.Marshal(labels)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode state labels: %w", err)
+	}
+	return res, nil
+}
+
+// DecodeLabels reads a label set back from the JSON object a provider stored it as, treating an absent value as no labels.
+func DecodeLabels(data []byte) (map[string]string, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+
+	var res map[string]string
+	err := json.Unmarshal(data, &res)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode state labels: %w", err)
+	}
+	return res, nil
 }
 
 // ListStatesRes is the response object for the ListStates method.
