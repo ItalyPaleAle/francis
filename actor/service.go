@@ -281,7 +281,7 @@ func (s *Service) dispatch(ctx context.Context, actorType string, actorID string
 	return s.host.Dispatch(ctx, actorType, actorID, method, input, properties)
 }
 
-// GetJob returns the information for a job by its ID, spanning both live and dead-lettered jobs.
+// GetJob returns the information for a job by its ID, spanning both live and terminal jobs.
 // Returns ErrJobNotFound if the job cannot be found.
 func (s *Service) GetJob(ctx context.Context, jobID string) (JobInfo, error) {
 	if !s.ready() {
@@ -291,7 +291,7 @@ func (s *Service) GetJob(ctx context.Context, jobID string) (JobInfo, error) {
 	return s.host.GetJob(ctx, jobID)
 }
 
-// ListJobs returns all live and dead-lettered jobs for an actor.
+// ListJobs returns all of an actor's jobs: the live ones, and any terminal record still retained.
 func (s *Service) ListJobs(ctx context.Context, actorType string, actorID string) ([]JobInfo, error) {
 	if ref.IsBuiltInActorType(actorType) {
 		return nil, ErrActorTypeReserved
@@ -309,23 +309,23 @@ func (s *Service) listJobs(ctx context.Context, actorType string, actorID string
 	return s.host.ListJobs(ctx, actorType, actorID)
 }
 
-// CancelJob cancels a live (pending or active) job for an actor.
-// Returns ErrJobNotFound if the job cannot be found among live jobs.
-func (s *Service) CancelJob(ctx context.Context, actorType string, actorID string, jobID string) error {
+// DeleteJob removes one of an actor's jobs, whatever state it is in: a job still scheduled is cancelled before it runs, and one that has ended has its record removed.
+// Returns ErrJobNotFound if the actor has no job with that ID.
+func (s *Service) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string) error {
 	if ref.IsBuiltInActorType(actorType) {
 		return ErrActorTypeReserved
 	}
 
-	return s.cancelJob(ctx, actorType, actorID, jobID)
+	return s.deleteJob(ctx, actorType, actorID, jobID)
 }
 
-// cancelJob is the unguarded CancelJob used by the in-actor client, which is allowed to target built-in actors
-func (s *Service) cancelJob(ctx context.Context, actorType string, actorID string, jobID string) error {
+// deleteJob is the unguarded DeleteJob used by the in-actor client, which is allowed to target built-in actors
+func (s *Service) deleteJob(ctx context.Context, actorType string, actorID string, jobID string) error {
 	if !s.ready() {
 		return ErrServiceNotInitialized
 	}
 
-	return s.host.CancelJob(ctx, actorType, actorID, jobID)
+	return s.host.DeleteJob(ctx, actorType, actorID, jobID)
 }
 
 // RetryJob re-dispatches a dead-lettered job, scheduled to run as soon as possible.
@@ -337,17 +337,6 @@ func (s *Service) RetryJob(ctx context.Context, jobID string) (newJobID string, 
 	}
 
 	return s.host.RetryJob(ctx, jobID)
-}
-
-// DeleteJob removes a dead-lettered job's record without re-dispatching it.
-// Use it to discard a dead-lettered job whose work has been accounted for another way, so its record doesn't outlive what it refers to; RetryJob is what re-dispatches one instead.
-// Returns ErrJobNotFound if the dead job cannot be found.
-func (s *Service) DeleteJob(ctx context.Context, jobID string) error {
-	if !s.ready() {
-		return ErrServiceNotInitialized
-	}
-
-	return s.host.DeleteJob(ctx, jobID)
 }
 
 // HaltAll halts all actors currently active on the host.

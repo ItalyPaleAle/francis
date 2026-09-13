@@ -47,6 +47,9 @@ type ActorHostType struct {
 	DeactivationTimeoutMs int64 `msgpack:"deact,omitempty"`
 	// MaxAttempts is the maximum number of attempts when invoking the actor or executing alarms
 	MaxAttempts int `msgpack:"maxAttempts,omitempty"`
+	// JobRetentionMs is how long a job of this actor type keeps a record after it ends, in milliseconds
+	// Zero means a completed job leaves no record and a dead-lettered one is kept until something removes it
+	JobRetentionMs int64 `msgpack:"jobRetention,omitempty"`
 	// InitialRetryDelayMs is the initial retry delay after a failed attempt, in milliseconds
 	InitialRetryDelayMs int64 `msgpack:"retryDelay,omitempty"`
 }
@@ -222,7 +225,7 @@ type JobInfo struct {
 	ActorType string `msgpack:"type"`
 	ActorID   string `msgpack:"id"`
 	Method    string `msgpack:"method"`
-	// Status is the job lifecycle stage: 0 pending, 1 active, 2 dead-lettered
+	// Status is the job lifecycle stage: 0 pending, 1 active, 2 completed, 3 dead-lettered
 	Status          int    `msgpack:"status"`
 	DueTimeUnixMs   int64  `msgpack:"due,omitempty"`
 	Interval        string `msgpack:"interval,omitempty"`
@@ -230,6 +233,8 @@ type JobInfo struct {
 	Attempts        int    `msgpack:"attempts,omitempty"`
 	LastError       string `msgpack:"lastError,omitempty"`
 	CreatedAtUnixMs int64  `msgpack:"createdAt,omitempty"`
+	// EndedAtUnixMs is when the job reached its terminal status, and is absent for a live job
+	EndedAtUnixMs int64 `msgpack:"endedAt,omitempty"`
 }
 
 // DispatchJobRequest creates a job, with the alarm name resolved by the host (idempotency key or a random name)
@@ -267,13 +272,6 @@ type ListJobsResponse struct {
 	Jobs []JobInfo `msgpack:"jobs,omitempty"`
 }
 
-// CancelJobRequest cancels a live job for an actor
-type CancelJobRequest struct {
-	ActorType string `msgpack:"type"`
-	ActorID   string `msgpack:"id"`
-	JobID     string `msgpack:"jobId"`
-}
-
 // RetryJobRequest re-dispatches a dead-lettered job
 type RetryJobRequest struct {
 	JobID string `msgpack:"jobId"`
@@ -284,9 +282,11 @@ type RetryJobResponse struct {
 	JobID string `msgpack:"jobId"`
 }
 
-// DeleteJobRequest removes a dead-lettered job's record
+// DeleteJobRequest removes one of an actor's jobs, whatever state it is in
 type DeleteJobRequest struct {
-	JobID string `msgpack:"jobId"`
+	ActorType string `msgpack:"type"`
+	ActorID   string `msgpack:"id"`
+	JobID     string `msgpack:"jobId"`
 }
 
 // GetStateRequest retrieves the persistent state of an actor

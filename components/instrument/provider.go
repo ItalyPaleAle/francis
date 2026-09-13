@@ -158,11 +158,11 @@ func classifyOperation(method string, err error) operationDisposition {
 		if errors.Is(err, components.ErrNoActor) {
 			return operationExpected
 		}
-	case "GetAlarm", "DeleteAlarm", "DeadLetterAlarm", "ReleaseAlarmLease", "GetLeasedAlarm", "UpdateLeasedAlarm", "DeleteLeasedAlarm":
+	case "GetAlarm", "DeleteAlarm", "DeadLetterAlarm", "CompleteJob", "ReleaseAlarmLease", "GetLeasedAlarm", "UpdateLeasedAlarm", "DeleteLeasedAlarm":
 		if errors.Is(err, components.ErrNoAlarm) {
 			return operationExpected
 		}
-	case "GetJob", "CancelJob", "GetDeadJob", "DeleteDeadJob", "RetryDeadJob":
+	case "GetJob", "DeleteJob", "GetTerminalJob", "RetryDeadJob":
 		if errors.Is(err, components.ErrNoJob) {
 			return operationExpected
 		}
@@ -302,6 +302,15 @@ func (w *providerWrapper) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmL
 	return err
 }
 
+// CompleteJob implements components.ActorProvider
+func (w *providerWrapper) CompleteJob(ctx context.Context, lease *ref.AlarmLease, req components.CompleteJobReq) (err error) {
+	spanCtx, span, start := w.beginOp(ctx, "CompleteJob")
+	err = w.base.CompleteJob(spanCtx, lease, req)
+	w.finishOp(spanCtx, span, "CompleteJob", start, err)
+
+	return err
+}
+
 // GetJob implements components.ActorProvider
 func (w *providerWrapper) GetJob(ctx context.Context, jobID string) (res components.JobInfo, err error) {
 	spanCtx, span, start := w.beginOp(ctx, "GetJob")
@@ -320,31 +329,22 @@ func (w *providerWrapper) ListJobs(ctx context.Context, actorType string, actorI
 	return res, err
 }
 
-// CancelJob implements components.ActorProvider
-func (w *providerWrapper) CancelJob(ctx context.Context, actorType string, actorID string, jobID string) (err error) {
-	spanCtx, span, start := w.beginOp(ctx, "CancelJob")
-	err = w.base.CancelJob(spanCtx, actorType, actorID, jobID)
-	w.finishOp(spanCtx, span, "CancelJob", start, err)
+// DeleteJob implements components.ActorProvider
+func (w *providerWrapper) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string) (err error) {
+	spanCtx, span, start := w.beginOp(ctx, "DeleteJob")
+	err = w.base.DeleteJob(spanCtx, actorType, actorID, jobID)
+	w.finishOp(spanCtx, span, "DeleteJob", start, err)
 
 	return err
 }
 
-// GetDeadJob implements components.ActorProvider
-func (w *providerWrapper) GetDeadJob(ctx context.Context, jobID string) (res components.GetDeadJobRes, err error) {
-	spanCtx, span, start := w.beginOp(ctx, "GetDeadJob")
-	res, err = w.base.GetDeadJob(spanCtx, jobID)
-	w.finishOp(spanCtx, span, "GetDeadJob", start, err)
+// GetTerminalJob implements components.ActorProvider
+func (w *providerWrapper) GetTerminalJob(ctx context.Context, jobID string) (res components.GetTerminalJobRes, err error) {
+	spanCtx, span, start := w.beginOp(ctx, "GetTerminalJob")
+	res, err = w.base.GetTerminalJob(spanCtx, jobID)
+	w.finishOp(spanCtx, span, "GetTerminalJob", start, err)
 
 	return res, err
-}
-
-// DeleteDeadJob implements components.ActorProvider
-func (w *providerWrapper) DeleteDeadJob(ctx context.Context, jobID string) (err error) {
-	spanCtx, span, start := w.beginOp(ctx, "DeleteDeadJob")
-	err = w.base.DeleteDeadJob(spanCtx, jobID)
-	w.finishOp(spanCtx, span, "DeleteDeadJob", start, err)
-
-	return err
 }
 
 // RetryDeadJob implements components.ActorProvider

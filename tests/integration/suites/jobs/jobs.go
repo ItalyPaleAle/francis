@@ -5,7 +5,7 @@
 // - immediate, delayed, interval, and cron jobs
 // - idempotency-key dedup
 // - dead-lettering on exhausted retries and on permanent failure with the JobFailed hook
-// - GetJob/ListJobs/CancelJob/RetryJob
+// - GetJob/ListJobs/DeleteJob/RetryJob
 // - a repeating job whose one failing occurrence dead-letters while the recurrence continues
 package jobs
 
@@ -138,7 +138,7 @@ func (s *jobs) Run(t *testing.T) {
 		}, eventuallyTimeout, eventuallyTick, "an interval job should run multiple times")
 
 		// Stop further executions so the count cannot grow into later subtests
-		err = svc.CancelJob(ctx, shared.ProbeActorType, actorID, jobID)
+		err = svc.DeleteJob(ctx, shared.ProbeActorType, actorID, jobID)
 		require.NoError(t, err)
 	})
 
@@ -155,7 +155,7 @@ func (s *jobs) Run(t *testing.T) {
 		assert.NotEqual(t, actor.JobStatusDeadLettered, info.Status)
 
 		// Clean up so it does not fire during the run
-		err = svc.CancelJob(ctx, shared.ProbeActorType, actorID, jobID)
+		err = svc.DeleteJob(ctx, shared.ProbeActorType, actorID, jobID)
 		require.NoError(t, err)
 	})
 
@@ -225,11 +225,11 @@ func (s *jobs) Run(t *testing.T) {
 		actorID := "cancel-1-" + string(s.kind) + "-" + string(s.variant)
 		jobID, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobDelay(time.Hour))
 		require.NoError(t, err)
-		err = svc.CancelJob(ctx, shared.ProbeActorType, actorID, jobID)
+		err = svc.DeleteJob(ctx, shared.ProbeActorType, actorID, jobID)
 		require.NoError(t, err)
 
 		// Cancelling a job that no longer exists reports the public not-found error
-		err = svc.CancelJob(ctx, shared.ProbeActorType, actorID, jobID)
+		err = svc.DeleteJob(ctx, shared.ProbeActorType, actorID, jobID)
 		require.ErrorIs(t, err, actor.ErrJobNotFound)
 
 		got := settleJob(t, actorID, 0)
@@ -289,7 +289,7 @@ func (s *jobs) Run(t *testing.T) {
 				continue
 			}
 			live++
-			err = svc.CancelJob(ctx, shared.ProbeActorType, actorID, j.JobID)
+			err = svc.DeleteJob(ctx, shared.ProbeActorType, actorID, j.JobID)
 			require.NoError(t, err)
 		}
 		assert.GreaterOrEqual(t, dead, 1, "the failed occurrence should be in the dead-letter store")

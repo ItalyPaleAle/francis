@@ -201,8 +201,6 @@ func (rt *Runtime) route(ctx context.Context, c *hostConn, req *protocol.Envelop
 		return rt.handleGetJob(ctx, c, req)
 	case protocol.KindListJobs:
 		return rt.handleListJobs(ctx, c, req)
-	case protocol.KindCancelJob:
-		return rt.handleCancelJob(ctx, c, req)
 	case protocol.KindRetryJob:
 		return rt.handleRetryJob(ctx, c, req)
 	case protocol.KindDeleteJob:
@@ -753,33 +751,6 @@ func (rt *Runtime) handleListJobs(parentCtx context.Context, _ *hostConn, req *p
 	})
 }
 
-// handleCancelJob cancels a live job for an actor
-func (rt *Runtime) handleCancelJob(parentCtx context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
-	var payload protocol.CancelJobRequest
-	err := req.DecodePayload(&payload)
-	if err != nil {
-		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode cancel job request"))
-	}
-
-	err = ref.ValidateComponents(payload.ActorType, payload.ActorID)
-	if err != nil {
-		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
-	}
-
-	// Cancellation only removes a live job: a dead-lettered job is reported as not found
-	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
-	defer cancel()
-	err = rt.provider.CancelJob(ctx, payload.ActorType, payload.ActorID, payload.JobID)
-	if errors.Is(err, components.ErrNoJob) {
-		return req.ErrorReply(protocol.NewError(protocol.ErrCodeJobNotFound, "job does not exist"))
-	} else if err != nil {
-		rt.log.ErrorContext(ctx, "Failed to cancel job", slog.Any("error", err))
-		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to cancel job"))
-	}
-
-	return req.Reply(protocol.KindCancelJobResponse, nil)
-}
-
 // handleRetryJob re-dispatches a dead-lettered job and removes its dead-letter record
 func (rt *Runtime) handleRetryJob(parentCtx context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
 	var payload protocol.RetryJobRequest
@@ -802,7 +773,7 @@ func (rt *Runtime) handleRetryJob(parentCtx context.Context, _ *hostConn, req *p
 	return rt.reply(req, protocol.KindRetryJobResponse, protocol.RetryJobResponse{JobID: newID})
 }
 
-// handleDeleteJob removes a dead-lettered job's record without re-dispatching it
+// handleDeleteJob removes one of an actor's jobs, whatever state it is in
 func (rt *Runtime) handleDeleteJob(parentCtx context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
 	var payload protocol.DeleteJobRequest
 	err := req.DecodePayload(&payload)
@@ -810,9 +781,15 @@ func (rt *Runtime) handleDeleteJob(parentCtx context.Context, _ *hostConn, req *
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode delete job request"))
 	}
 
+	err = ref.ValidateComponents(payload.ActorType, payload.ActorID)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
+	}
+
+	// One verb removes a job whether it is still scheduled or has already ended, so the caller does not have to know which
 	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
 	defer cancel()
-	err = rt.provider.DeleteDeadJob(ctx, payload.JobID)
+	err = rt.provider.DeleteJob(ctx, payload.ActorType, payload.ActorID, payload.JobID)
 	if errors.Is(err, components.ErrNoJob) {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeJobNotFound, "job does not exist"))
 	} else if err != nil {

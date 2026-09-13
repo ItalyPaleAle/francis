@@ -333,7 +333,7 @@ func (a *cronJobScheduler) registerChain(ctx context.Context, state cronJobState
 			a.log.Info("Jitter was added; replacing the recurring job with a run chain", slog.String("oldJobID", state.JobID))
 		}
 
-		err = a.runner.CancelJob(ctx, state.JobID)
+		err = a.runner.DeleteJob(ctx, state.JobID)
 		if err != nil && !errors.Is(err, actor.ErrJobNotFound) {
 			// A job that is already gone is fine: we still want to register the chain
 			return fmt.Errorf("failed to cancel outdated cron job: %w", err)
@@ -493,7 +493,7 @@ func (a *cronJobScheduler) reconcileSchedule(ctx context.Context, jobID string) 
 		a.log.Info("Cron job schedule changed; replacing recurring job", slog.String("oldJobID", jobID))
 	}
 
-	err = a.runner.CancelJob(ctx, jobID)
+	err = a.runner.DeleteJob(ctx, jobID)
 	if err != nil && !errors.Is(err, actor.ErrJobNotFound) {
 		// A job that is already gone is fine: we still want to register the new schedule
 		return fmt.Errorf("failed to cancel outdated cron job: %w", err)
@@ -594,7 +594,7 @@ func (a *cronJobScheduler) unregister(ctx context.Context) error {
 	}
 
 	if state.JobID != "" {
-		err = a.runner.CancelJob(ctx, state.JobID)
+		err = a.runner.DeleteJob(ctx, state.JobID)
 		if err != nil && !errors.Is(err, actor.ErrJobNotFound) {
 			// A job that is already gone is fine: the end state (no recurring job) is what we want
 			return fmt.Errorf("failed to cancel recurring cron job: %w", err)
@@ -659,7 +659,7 @@ func (a *cronJobScheduler) cancelScheduledRuns(ctx context.Context, live []actor
 			earliest = job.DueTime
 		}
 
-		err = a.runner.CancelJob(ctx, job.JobID)
+		err = a.runner.DeleteJob(ctx, job.JobID)
 		if err != nil && !errors.Is(err, actor.ErrJobNotFound) {
 			// A job that is already gone is fine: the end state (that occurrence not running) is what we want
 			return time.Time{}, fmt.Errorf("failed to cancel scheduled cron job run: %w", err)

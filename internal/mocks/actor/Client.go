@@ -40,63 +40,6 @@ func (_m *MockClient[T]) EXPECT() *MockClient_Expecter[T] {
 	return &MockClient_Expecter[T]{mock: &_m.Mock}
 }
 
-// CancelJob provides a mock function for the type MockClient
-func (_mock *MockClient[T]) CancelJob(ctx context.Context, jobID string) error {
-	ret := _mock.Called(ctx, jobID)
-
-	if len(ret) == 0 {
-		panic("no return value specified for CancelJob")
-	}
-
-	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string) error); ok {
-		r0 = returnFunc(ctx, jobID)
-	} else {
-		r0 = ret.Error(0)
-	}
-	return r0
-}
-
-// MockClient_CancelJob_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CancelJob'
-type MockClient_CancelJob_Call[T any] struct {
-	*mock.Call
-}
-
-// CancelJob is a helper method to define mock.On call
-//   - ctx context.Context
-//   - jobID string
-func (_e *MockClient_Expecter[T]) CancelJob(ctx any, jobID any) *MockClient_CancelJob_Call[T] {
-	return &MockClient_CancelJob_Call[T]{Call: _e.mock.On("CancelJob", ctx, jobID)}
-}
-
-func (_c *MockClient_CancelJob_Call[T]) Run(run func(ctx context.Context, jobID string)) *MockClient_CancelJob_Call[T] {
-	_c.Call.Run(func(args mock.Arguments) {
-		var arg0 context.Context
-		if args[0] != nil {
-			arg0 = args[0].(context.Context)
-		}
-		var arg1 string
-		if args[1] != nil {
-			arg1 = args[1].(string)
-		}
-		run(
-			arg0,
-			arg1,
-		)
-	})
-	return _c
-}
-
-func (_c *MockClient_CancelJob_Call[T]) Return(err error) *MockClient_CancelJob_Call[T] {
-	_c.Call.Return(err)
-	return _c
-}
-
-func (_c *MockClient_CancelJob_Call[T]) RunAndReturn(run func(ctx context.Context, jobID string) error) *MockClient_CancelJob_Call[T] {
-	_c.Call.Return(run)
-	return _c
-}
-
 // DeleteAlarm provides a mock function for the type MockClient
 func (_mock *MockClient[T]) DeleteAlarm(ctx context.Context, alarmName string) error {
 	ret := _mock.Called(ctx, alarmName)

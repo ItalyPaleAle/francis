@@ -1002,14 +1002,6 @@ func (f *fakeClient[T]) Dispatch(_ context.Context, method string, input any, op
 	return f.dispatchID, nil
 }
 
-func (f *fakeClient[T]) CancelJob(_ context.Context, jobID string) error {
-	if f.cancelErr != nil {
-		return f.cancelErr
-	}
-	f.cancelled = append(f.cancelled, jobID)
-	return nil
-}
-
 // The remaining methods are part of the actor.Client interface but unused by the cron job scheduler
 func (f *fakeClient[T]) Invoke(context.Context, string, string, string, any, ...actor.InvokeOption) (actor.Envelope, error) {
 	return nil, nil
@@ -1039,7 +1031,11 @@ func (f *fakeClient[T]) RetryJob(context.Context, string) (string, error) {
 	return "", nil
 }
 
-func (f *fakeClient[T]) DeleteJob(context.Context, string) error {
+func (f *fakeClient[T]) DeleteJob(_ context.Context, jobID string) error {
+	if f.cancelErr != nil {
+		return f.cancelErr
+	}
+	f.cancelled = append(f.cancelled, jobID)
 	return nil
 }
 

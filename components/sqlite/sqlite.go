@@ -355,6 +355,20 @@ func (s *SQLiteProvider) initGC() (err error) {
 					}
 				}
 			},
+			"terminal_jobs": func() (string, func() []any) {
+				q := `
+				DELETE FROM ` + s.tablePrefix + `terminal_jobs
+				WHERE
+					expiration_time IS NOT NULL
+					AND expiration_time < ?
+				`
+				return q, func() []any {
+					now := s.clock.Now()
+					return []any{
+						now.UnixMilli(),
+					}
+				}
+			},
 		},
 		CleanupInterval: s.cleanupInterval,
 		DB:              sqladapter.AdaptDatabaseSQLConn(s.db),

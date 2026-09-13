@@ -50,7 +50,7 @@ func (p *PostgresProvider) Backup(ctx context.Context, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	err = p.backupDeadJobs(ctx, tx, bw)
+	err = p.backupTerminalJobs(ctx, tx, bw)
 	if err != nil {
 		return err
 	}
@@ -63,9 +63,9 @@ func (p *PostgresProvider) Backup(ctx context.Context, w io.Writer) error {
 func (p *PostgresProvider) Restore(ctx context.Context, r io.Reader) error {
 	// Column lists for the restore COPY, matching the order produced by the value functions below
 	var (
-		backupStateColumns   = []string{"actor_type", "actor_id", "actor_state_data", "actor_state_expiration_time", "actor_state_labels"}
-		backupAlarmColumns   = []string{"alarm_id", "actor_type", "actor_id", "alarm_name", "alarm_due_time", "alarm_interval", "alarm_cron", "alarm_ttl_time", "alarm_data", "alarm_lease_id", "alarm_lease_expiration_time", "alarm_kind", "job_method"}
-		backupDeadJobColumns = []string{"job_id", "actor_type", "actor_id", "job_method", "job_data", "attempts", "last_error", "failed_at", "original_due", "job_interval", "job_cron"}
+		backupStateColumns       = []string{"actor_type", "actor_id", "actor_state_data", "actor_state_expiration_time", "actor_state_labels"}
+		backupAlarmColumns       = []string{"alarm_id", "actor_type", "actor_id", "alarm_name", "alarm_due_time", "alarm_interval", "alarm_cron", "alarm_ttl_time", "alarm_data", "alarm_lease_id", "alarm_lease_expiration_time", "alarm_kind", "job_method"}
+		backupTerminalJobColumns = []string{"job_id", "actor_type", "actor_id", "job_method", "job_data", "job_status", "attempts", "last_error", "ended_at", "original_due", "job_interval", "job_cron", "expiration_time"}
 	)
 
 	return p.withLockedTx(ctx, pgx.TxOptions{}, func(tx pgx.Tx) error {
@@ -101,7 +101,7 @@ func (p *PostgresProvider) Restore(ctx context.Context, r io.Reader) error {
 		if err != nil {
 			return fmt.Errorf("failed to restore alarms: %w", err)
 		}
-		_, err = tx.CopyFrom(ctx, pgx.Identifier{p.tablePrefix + "dead_jobs"}, backupDeadJobColumns, &copySection{pull: pull, wantType: backup.RecordTypeDeadJob, toValues: deadJobToCopyValues})
+		_, err = tx.CopyFrom(ctx, pgx.Identifier{p.tablePrefix + "terminal_jobs"}, backupTerminalJobColumns, &copySection{pull: pull, wantType: backup.RecordTypeTerminalJob, toValues: terminalJobToCopyValues})
 		if err != nil {
 			return fmt.Errorf("failed to restore dead jobs: %w", err)
 		}
@@ -180,9 +180,9 @@ func (p *PostgresProvider) ensureNoHostsConnected(ctx context.Context, tx pgx.Tx
 	return nil
 }
 
-// wipePersistentData deletes all actor state, alarms, and dead jobs
+// wipePersistentData deletes all actor state, alarms, and terminal jobs
 func (p *PostgresProvider) wipePersistentData(ctx context.Context, tx pgx.Tx) error {
-	for _, table := range []string{"actor_state", "alarms", "dead_jobs"} {
+	for _, table := range []string{"actor_state", "alarms", "terminal_jobs"} {
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.Exec(ctx, "DELETE FROM "+p.tablePrefix+table)
 		if err != nil {
@@ -289,38 +289,43 @@ func (p *PostgresProvider) backupAlarms(ctx context.Context, tx pgx.Tx, bw *back
 	return nil
 }
 
-func (p *PostgresProvider) backupDeadJobs(ctx context.Context, tx pgx.Tx, bw *backup.Writer) error {
+func (p *PostgresProvider) backupTerminalJobs(ctx context.Context, tx pgx.Tx, bw *backup.Writer) error {
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	rows, err := tx.Query(ctx,
-		`SELECT job_id, actor_type, actor_id, job_method, job_data, attempts, last_error, failed_at, original_due, job_interval, job_cron
-		FROM `+p.tablePrefix+`dead_jobs`,
+		`SELECT job_id, actor_type, actor_id, job_method, job_data, job_status, attempts, last_error, ended_at, original_due, job_interval, job_cron, expiration_time
+		FROM `+p.tablePrefix+`terminal_jobs
+		WHERE expiration_time IS NULL OR expiration_time > (now() AT TIME ZONE 'utc')`,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to query dead jobs: %w", err)
+		return fmt.Errorf("failed to query terminal jobs: %w", err)
 	}
 	defer rows.Close()
 
 	for rows.Next() {
 		var (
-			rec                   backup.DeadJobRecord
-			id                    uuid.UUID
-			lastError             *string
-			failedAt, originalDue time.Time
-			interval, cron        *string
+			rec                  backup.TerminalJobRecord
+			id                   uuid.UUID
+			lastError            *string
+			endedAt, originalDue time.Time
+			interval, cron       *string
+			exp                  *time.Time
 		)
-		err = rows.Scan(&id, &rec.ActorType, &rec.ActorID, &rec.Method, &rec.Data, &rec.Attempts, &lastError, &failedAt, &originalDue, &interval, &cron)
+		err = rows.Scan(&id, &rec.ActorType, &rec.ActorID, &rec.Method, &rec.Data, &rec.Status, &rec.Attempts, &lastError, &endedAt, &originalDue, &interval, &cron, &exp)
 		if err != nil {
-			return fmt.Errorf("failed to scan dead job row: %w", err)
+			return fmt.Errorf("failed to scan terminal job row: %w", err)
 		}
 
 		rec.JobID = id.String()
 		rec.LastError = derefString(lastError)
-		rec.FailedAt = failedAt.UTC()
+		rec.EndedAt = endedAt.UTC()
 		rec.OriginalDue = originalDue.UTC()
 		rec.Interval = derefString(interval)
 		rec.Cron = derefString(cron)
+		if exp != nil {
+			rec.Expiration = new(exp.UTC())
+		}
 
-		err = bw.WriteDeadJob(&rec)
+		err = bw.WriteTerminalJob(&rec)
 		if err != nil {
 			return err
 		}
@@ -387,18 +392,23 @@ func alarmToCopyValues(rec backup.Record) ([]any, error) {
 	}, nil
 }
 
-// deadJobToCopyValues maps a dead-job record to a COPY row matching backupDeadJobColumns
-func deadJobToCopyValues(rec backup.Record) ([]any, error) {
-	r := rec.DeadJob
+// terminalJobToCopyValues maps a terminal-job record to a COPY row matching backupTerminalJobColumns
+func terminalJobToCopyValues(rec backup.Record) ([]any, error) {
+	r := rec.TerminalJob
 
 	id, err := uuid.Parse(r.JobID)
 	if err != nil {
 		return nil, fmt.Errorf("invalid job id %q: %w", r.JobID, err)
 	}
 
+	var exp any
+	if r.Expiration != nil {
+		exp = r.Expiration.UTC()
+	}
+
 	return []any{
 		pgUUID(id), r.ActorType, r.ActorID, r.Method, nullBytes(r.Data),
-		r.Attempts, nullString(r.LastError), r.FailedAt.UTC(), r.OriginalDue.UTC(), nullString(r.Interval), nullString(r.Cron),
+		r.Status, r.Attempts, nullString(r.LastError), r.EndedAt.UTC(), r.OriginalDue.UTC(), nullString(r.Interval), nullString(r.Cron), exp,
 	}, nil
 }
 

@@ -54,6 +54,11 @@ type RegisterActorOptions struct {
 	// Initial retry delay after failed invocation attempts
 	// Defaults to 2s
 	InitialRetryDelay time.Duration
+	// JobRetention is how long a job dispatched to this actor type keeps a record after it ends
+	// When set, a job that completes leaves a record that ListJobs and GetJob report until the retention elapses, which is what makes a successful run observable rather than invisible
+	// It also bounds a dead-lettered job's record, which is otherwise kept until something removes it
+	// Defaults to 0, which keeps no record of a completed job
+	JobRetention time.Duration
 	// CapacityGroup, when set, places this actor type into a named host-local capacity group
 	// Every actor type registered on this host with the same group name shares a single strict concurrency budget, enforced in-process when their jobs execute
 	// It is the exact per-host guarantee that complements the best-effort, cluster-wide ConcurrencyLimit placement hint
@@ -100,6 +105,14 @@ func WithConcurrencyLimit(n int) RegisterActorOption {
 func WithMaxAttempts(n int) RegisterActorOption {
 	return func(o *RegisterActorOptions) {
 		o.MaxAttempts = n
+	}
+}
+
+// WithJobRetention sets how long a job dispatched to this actor type keeps a record after it ends
+// A completed job leaves no record at all unless this is set
+func WithJobRetention(d time.Duration) RegisterActorOption {
+	return func(o *RegisterActorOptions) {
+		o.JobRetention = d
 	}
 }
 

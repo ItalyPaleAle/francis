@@ -213,17 +213,17 @@ func TestHostListJobs(t *testing.T) {
 	provider.AssertExpectations(t)
 }
 
-func TestHostCancelJob(t *testing.T) {
+func TestHostDeleteJob(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
 
 	t.Run("success", func(t *testing.T) {
 		host, provider := newJobsTestHost(t, clock)
 		provider.
-			On("CancelJob", mock.MatchedBy(testutil.MatchContextInterface), "T", "a1", "j1").
+			On("DeleteJob", mock.MatchedBy(testutil.MatchContextInterface), "T", "a1", "j1").
 			Return(nil).
 			Once()
 
-		err := host.CancelJob(t.Context(), "T", "a1", "j1")
+		err := host.DeleteJob(t.Context(), "T", "a1", "j1")
 		require.NoError(t, err)
 		provider.AssertExpectations(t)
 	})
@@ -231,11 +231,11 @@ func TestHostCancelJob(t *testing.T) {
 	t.Run("not found maps to ErrJobNotFound", func(t *testing.T) {
 		host, provider := newJobsTestHost(t, clock)
 		provider.
-			On("CancelJob", mock.MatchedBy(testutil.MatchContextInterface), "T", "a1", "missing").
+			On("DeleteJob", mock.MatchedBy(testutil.MatchContextInterface), "T", "a1", "missing").
 			Return(components.ErrNoJob).
 			Once()
 
-		err := host.CancelJob(t.Context(), "T", "a1", "missing")
+		err := host.DeleteJob(t.Context(), "T", "a1", "missing")
 		require.ErrorIs(t, err, actor.ErrJobNotFound)
 		provider.AssertExpectations(t)
 	})

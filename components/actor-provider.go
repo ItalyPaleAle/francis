@@ -77,33 +77,36 @@ type ActorProvider interface {
 	// When req carries an alarm name (an idempotency key), a job with the same (actor_type, actor_id, name) is kept and its existing job ID is returned, so re-dispatching with the same key is idempotent (first-write-wins)
 	DispatchJob(ctx context.Context, ref ref.AlarmRef, req SetAlarmReq) (jobID string, lease *ref.AlarmLease, err error)
 
-	// DeadLetterAlarm atomically moves a leased job from the alarms table to the dead_jobs store.
+	// DeadLetterAlarm atomically moves a leased job from the alarms table to the terminal-job store, recording it as dead-lettered.
 	// When req.Reschedule is set, the recurrence is re-created for its next occurrence in the same transaction, so a repeating job survives the dead-lettering of one occurrence.
 	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
 	DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLease, req DeadLetterAlarmReq) error
 
-	// GetJob returns the information for a job by its ID, spanning both live jobs (in the alarms table) and dead-lettered jobs.
+	// CompleteJob atomically moves a leased job from the alarms table to the terminal-job store, recording it as completed.
+	// It is the successful counterpart of DeadLetterAlarm, and is only called for a job whose actor type asked for its completed occurrences to be retained; otherwise the occurrence is simply deleted.
+	// When req.Reschedule is set, the recurrence is re-created for its next occurrence in the same transaction, so a repeating job keeps running while each occurrence leaves a record.
+	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
+	CompleteJob(ctx context.Context, lease *ref.AlarmLease, req CompleteJobReq) error
+
+	// GetJob returns the information for a job by its ID, spanning both live jobs (in the alarms table) and terminal ones (completed or dead-lettered).
 	// Returns ErrNoJob if the job cannot be found.
 	GetJob(ctx context.Context, jobID string) (JobInfo, error)
 
-	// ListJobs returns all live and dead-lettered jobs for an actor.
+	// ListJobs returns all of an actor's jobs: the live ones, and any terminal record still retained.
 	ListJobs(ctx context.Context, actorType string, actorID string) ([]JobInfo, error)
 
-	// CancelJob deletes a live job (in the alarms table) by its ID.
-	// Returns ErrNoJob if the job cannot be found among live jobs.
-	CancelJob(ctx context.Context, actorType string, actorID string, jobID string) error
+	// DeleteJob removes a job by its ID, whatever state it is in: live (scheduled or leased) or terminal (completed or dead-lettered).
+	// When actorType and actorID are both non-empty the removal is scoped to that actor, so a caller can only remove a job it owns; when both are empty any job with that ID is removed.
+	// Returns ErrNoJob if no job with that ID exists within the given scope.
+	DeleteJob(ctx context.Context, actorType string, actorID string, jobID string) error
 
-	// GetDeadJob returns a dead-lettered job by its ID, including its raw input data.
-	// Returns ErrNoJob if the dead job cannot be found.
-	GetDeadJob(ctx context.Context, jobID string) (GetDeadJobRes, error)
+	// GetTerminalJob returns a completed or dead-lettered job by its ID, including its raw input data.
+	// Returns ErrNoJob if the terminal job cannot be found.
+	GetTerminalJob(ctx context.Context, jobID string) (GetTerminalJobRes, error)
 
-	// DeleteDeadJob removes a dead-lettered job by its ID.
-	// Returns ErrNoJob if the dead job cannot be found.
-	DeleteDeadJob(ctx context.Context, jobID string) error
-
-	// RetryDeadJob atomically re-dispatches a dead-lettered job as a fresh, immediate one-shot job and removes its dead-letter record, returning the new job ID.
-	// The re-dispatch and the removal happen in a single transaction, so a crash can never leave both a replayed job and its dead-letter record behind.
-	// Returns ErrNoJob if the dead job cannot be found.
+	// RetryDeadJob atomically re-dispatches a dead-lettered job as a fresh, immediate one-shot job and removes its terminal record, returning the new job ID.
+	// The re-dispatch and the removal happen in a single transaction, so a crash can never leave both a replayed job and its record behind.
+	// Returns ErrNoJob if the job cannot be found or did not end dead-lettered, since a job that completed has nothing to retry.
 	RetryDeadJob(ctx context.Context, jobID string) (newJobID string, err error)
 
 	// FetchAndLeaseUpcomingAlarms fetches the upcoming alarms, acquiring a lease on them.
@@ -230,6 +233,9 @@ type ActorHostType struct {
 	DeactivationTimeout time.Duration
 	// Maximum number of attempts when invoking the actor or executing alarms
 	MaxAttempts int
+	// JobRetention is how long a job of this actor type keeps a record after it ends
+	// Zero means a completed job leaves no record, and a dead-lettered one is kept until something removes it
+	JobRetention time.Duration
 	// Initial retry delay after failed invocation attempts
 	InitialRetryDelay time.Duration
 }
@@ -438,12 +444,19 @@ const (
 	JobStatusPending JobStatus = "pending"
 	// JobStatusActive indicates a live job that currently holds a valid lease
 	JobStatusActive JobStatus = "active"
-	// JobStatusDeadLettered indicates a job that was recorded in the dead-letter store
+	// JobStatusCompleted indicates a job that ran successfully and whose record was retained
+	JobStatusCompleted JobStatus = "completed"
+	// JobStatusDeadLettered indicates a job that exhausted its retries or failed permanently
 	JobStatusDeadLettered JobStatus = "dead"
 )
 
-// JobInfo describes a job, spanning both live and dead-lettered jobs.
-// Attempts and LastError are only populated for dead-lettered jobs.
+// IsTerminal reports whether the status is one a job ends in, and therefore one held in the terminal-job store rather than among the live jobs.
+func (s JobStatus) IsTerminal() bool {
+	return s == JobStatusCompleted || s == JobStatusDeadLettered
+}
+
+// JobInfo describes a job, spanning both live and terminal jobs.
+// Attempts is only populated for a terminal job, and LastError only for one that dead-lettered.
 type JobInfo struct {
 	JobID     string
 	ActorType string
@@ -456,22 +469,27 @@ type JobInfo struct {
 	Attempts  int
 	LastError string
 	CreatedAt time.Time
+	// EndedAt is when the job reached its terminal status, and is zero for a live job
+	EndedAt time.Time
 }
 
-// GetDeadJobRes is the response object for the GetDeadJob method.
+// GetTerminalJobRes is the response object for the GetTerminalJob method.
 // It carries the raw input data so a dead job can be re-dispatched.
-type GetDeadJobRes struct {
+type GetTerminalJobRes struct {
 	JobID       string
 	ActorType   string
 	ActorID     string
 	Method      string
 	Data        []byte
+	Status      JobStatus
 	Attempts    int
 	LastError   string
-	FailedAt    time.Time
+	EndedAt     time.Time
 	OriginalDue time.Time
 	Interval    string
 	Cron        string
+	// Expiration is when the record is garbage collected, and is nil for one kept until something removes it
+	Expiration *time.Time
 }
 
 // DeadLetterAlarmReq is the request object for the DeadLetterAlarm method.
@@ -480,8 +498,25 @@ type DeadLetterAlarmReq struct {
 	Reason string
 	// Attempts is the number of attempts made before dead-lettering
 	Attempts int
+	// Retention is how long the record is kept before it is garbage collected
+	// Zero keeps it until something removes it, which is what a dead-lettered job gets when its actor type set no retention
+	Retention time.Duration
 	// Reschedule, when true, re-creates the alarm for its next occurrence in the same transaction
 	// This is how a repeating job's recurrence survives the dead-lettering of one occurrence
+	Reschedule bool
+	// NextDueTime is the due time of the rescheduled occurrence, used only when Reschedule is true
+	NextDueTime time.Time
+}
+
+// CompleteJobReq is the request object for the CompleteJob method.
+type CompleteJobReq struct {
+	// Attempts is the number of attempts the occurrence took to succeed
+	Attempts int
+	// Retention is how long the record is kept before it is garbage collected
+	// It is always set, since a job whose actor type asked for no retention is deleted outright rather than recorded here
+	Retention time.Duration
+	// Reschedule, when true, re-creates the alarm for its next occurrence in the same transaction
+	// This is how each occurrence of a repeating job can leave a record without stopping the recurrence
 	Reschedule bool
 	// NextDueTime is the due time of the rescheduled occurrence, used only when Reschedule is true
 	NextDueTime time.Time

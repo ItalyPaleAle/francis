@@ -28,6 +28,7 @@ func componentsActorTypesToProtocol(in []components.ActorHostType) []protocol.Ac
 			DeactivationTimeoutMs: t.DeactivationTimeout.Milliseconds(),
 			MaxAttempts:           t.MaxAttempts,
 			InitialRetryDelayMs:   t.InitialRetryDelay.Milliseconds(),
+			JobRetentionMs:        t.JobRetention.Milliseconds(),
 		}
 	}
 	return out
@@ -89,6 +90,8 @@ func protocolJobStatusToActor(s int) actor.JobStatus {
 	case 1:
 		return actor.JobStatusActive
 	case 2:
+		return actor.JobStatusCompleted
+	case 3:
 		return actor.JobStatusDeadLettered
 	default:
 		return actor.JobStatusPending
@@ -113,6 +116,9 @@ func protocolJobInfoToActor(j protocol.JobInfo) actor.JobInfo {
 	}
 	if j.CreatedAtUnixMs > 0 {
 		out.CreatedAt = time.UnixMilli(j.CreatedAtUnixMs)
+	}
+	if j.EndedAtUnixMs > 0 {
+		out.EndedAt = time.UnixMilli(j.EndedAtUnixMs)
 	}
 	return out
 }

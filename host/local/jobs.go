@@ -64,7 +64,7 @@ func (h *Host) Dispatch(ctx context.Context, actorType string, actorID string, m
 	return jobID, nil
 }
 
-// GetJob returns a job by its ID, spanning both live and dead-lettered jobs.
+// GetJob returns a job by its ID, spanning both live and terminal jobs.
 func (h *Host) GetJob(ctx context.Context, jobID string) (actor.JobInfo, error) {
 	res, err := h.actorProvider.GetJob(ctx, jobID)
 	if errors.Is(err, components.ErrNoJob) {
@@ -76,7 +76,7 @@ func (h *Host) GetJob(ctx context.Context, jobID string) (actor.JobInfo, error) 
 	return jobInfoToActor(res), nil
 }
 
-// ListJobs returns all live and dead-lettered jobs for an actor.
+// ListJobs returns all of an actor's jobs: the live ones, and any terminal record still retained.
 func (h *Host) ListJobs(ctx context.Context, actorType string, actorID string) ([]actor.JobInfo, error) {
 	err := ref.ValidateComponents(actorType, actorID)
 	if err != nil {
@@ -95,23 +95,6 @@ func (h *Host) ListJobs(ctx context.Context, actorType string, actorID string) (
 	return out, nil
 }
 
-// CancelJob cancels a live job for an actor.
-func (h *Host) CancelJob(ctx context.Context, actorType string, actorID string, jobID string) error {
-	err := ref.ValidateComponents(actorType, actorID)
-	if err != nil {
-		return err
-	}
-
-	err = h.actorProvider.CancelJob(ctx, actorType, actorID, jobID)
-	if errors.Is(err, components.ErrNoJob) {
-		return actor.ErrJobNotFound
-	} else if err != nil {
-		return fmt.Errorf("failed to cancel job: %w", err)
-	}
-
-	return nil
-}
-
 // RetryJob re-dispatches a dead-lettered job as a fresh immediate job and removes the dead-letter record.
 func (h *Host) RetryJob(ctx context.Context, jobID string) (string, error) {
 	// The provider re-dispatches and removes the dead-letter record atomically, so a crash cannot duplicate the job
@@ -125,9 +108,14 @@ func (h *Host) RetryJob(ctx context.Context, jobID string) (string, error) {
 	return newID, nil
 }
 
-// DeleteJob removes a dead-lettered job's record without re-dispatching it.
-func (h *Host) DeleteJob(ctx context.Context, jobID string) error {
-	err := h.actorProvider.DeleteDeadJob(ctx, jobID)
+// DeleteJob removes one of an actor's jobs, whatever state it is in.
+func (h *Host) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string) error {
+	err := ref.ValidateComponents(actorType, actorID)
+	if err != nil {
+		return err
+	}
+
+	err = h.actorProvider.DeleteJob(ctx, actorType, actorID, jobID)
 	if errors.Is(err, components.ErrNoJob) {
 		return actor.ErrJobNotFound
 	} else if err != nil {
@@ -181,6 +169,7 @@ func jobInfoToActor(j components.JobInfo) actor.JobInfo {
 		Attempts:  j.Attempts,
 		LastError: j.LastError,
 		CreatedAt: j.CreatedAt,
+		EndedAt:   j.EndedAt,
 	}
 }
 
@@ -189,6 +178,8 @@ func jobStatusToActor(s components.JobStatus) actor.JobStatus {
 	switch s {
 	case components.JobStatusActive:
 		return actor.JobStatusActive
+	case components.JobStatusCompleted:
+		return actor.JobStatusCompleted
 	case components.JobStatusDeadLettered:
 		return actor.JobStatusDeadLettered
 	default:

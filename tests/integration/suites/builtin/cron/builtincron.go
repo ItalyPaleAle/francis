@@ -329,8 +329,8 @@ func (s *builtinCron) assertClientRejected(t *testing.T, svc *actor.Service, hos
 	_, listErr := svc.ListJobs(ctx, s.cronType, singletonActorID)
 	require.ErrorIs(t, listErr, actor.ErrActorTypeReserved, "host %d ListJobs", host)
 
-	cancelErr := svc.CancelJob(ctx, s.cronType, singletonActorID, "job")
-	require.ErrorIs(t, cancelErr, actor.ErrActorTypeReserved, "host %d CancelJob", host)
+	deleteErr := svc.DeleteJob(ctx, s.cronType, singletonActorID, "job")
+	require.ErrorIs(t, deleteErr, actor.ErrActorTypeReserved, "host %d DeleteJob", host)
 
 	haltErr := svc.Halt(s.cronType, singletonActorID)
 	require.ErrorIs(t, haltErr, actor.ErrActorTypeReserved, "host %d Halt", host)

@@ -66,6 +66,11 @@ func TestRegistrationsCoverEveryReservedType(t *testing.T) {
 	assert.Equal(t, 2, undoGroup.CapacityGroupLimit)
 	assert.NotEqual(t, workerGroup.CapacityGroup, undoGroup.CapacityGroup, "the undo queues get their own budget")
 
+	// Every type the engine dispatches jobs to bounds the records they leave, so a dead-lettered job cannot outlive the journal that accounts for it
+	assert.Positive(t, orchestrator.RegisterOptions.JobRetention)
+	assert.Equal(t, orchestrator.RegisterOptions.JobRetention, workerGroup.JobRetention)
+	assert.Equal(t, orchestrator.RegisterOptions.JobRetention, undoGroup.JobRetention)
+
 	// The auto-purge cron job is the cluster-wide singleton that runs the sweep on one host per schedule
 	assert.True(t, got["francis.builtin.cronjob.orders.purge"].Singleton)
 

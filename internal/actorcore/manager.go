@@ -138,6 +138,7 @@ func (m *Manager) RegisterActor(actorType string, factory actor.Factory, opts Re
 		DeactivationTimeout: opts.DeactivationTimeout,
 		MaxAttempts:         opts.MaxAttempts,
 		InitialRetryDelay:   opts.InitialRetryDelay,
+		JobRetention:        opts.JobRetention,
 	}
 	m.ActorFactories[actorType] = factory
 	m.actorTypeLockMode[actorType] = opts.LockMode

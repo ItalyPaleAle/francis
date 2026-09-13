@@ -30,9 +30,8 @@ type Host interface {
 	Dispatch(ctx context.Context, actorType string, actorID string, method string, data any, properties JobProperties) (jobID string, err error)
 	GetJob(ctx context.Context, jobID string) (JobInfo, error)
 	ListJobs(ctx context.Context, actorType string, actorID string) ([]JobInfo, error)
-	CancelJob(ctx context.Context, actorType string, actorID string, jobID string) error
+	DeleteJob(ctx context.Context, actorType string, actorID string, jobID string) error
 	RetryJob(ctx context.Context, jobID string) (newJobID string, err error)
-	DeleteJob(ctx context.Context, jobID string) error
 
 	SetState(ctx context.Context, actorType string, actorID string, state any, opts *SetStateOpts) error
 	GetState(ctx context.Context, actorType string, actorID string, dest any) error

@@ -915,11 +915,6 @@ func (rc *runtimeClient) ListJobs(ctx context.Context, req protocol.ListJobsRequ
 	return out, err
 }
 
-// CancelJob cancels a live job through the runtime
-func (rc *runtimeClient) CancelJob(ctx context.Context, req protocol.CancelJobRequest) error {
-	return rc.doRequest(ctx, protocol.KindCancelJob, req, nil)
-}
-
 // RetryJob re-dispatches a dead-lettered job through the runtime
 func (rc *runtimeClient) RetryJob(ctx context.Context, req protocol.RetryJobRequest) (protocol.RetryJobResponse, error) {
 	var out protocol.RetryJobResponse

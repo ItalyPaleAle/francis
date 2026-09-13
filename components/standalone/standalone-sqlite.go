@@ -219,7 +219,7 @@ func (s *StandaloneSQLiteBacked) loadFromDB(ctx context.Context) error {
 	}
 
 	// Load dead jobs
-	err = s.loadDeadJobs(queryCtx)
+	err = s.loadTerminalJobs(queryCtx)
 	if err != nil {
 		return fmt.Errorf("failed to load dead jobs: %w", err)
 	}
@@ -381,13 +381,13 @@ func (s *StandaloneSQLiteBacked) loadAlarms(ctx context.Context) error {
 	return rows.Err()
 }
 
-func (s *StandaloneSQLiteBacked) loadDeadJobs(ctx context.Context) error {
+func (s *StandaloneSQLiteBacked) loadTerminalJobs(ctx context.Context) error {
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
 			job_id, actor_type, actor_id, job_method, job_data,
-			attempts, last_error, failed_at, original_due, job_interval, job_cron
-		FROM `+s.tablePrefix+`dead_jobs
+			job_status, attempts, last_error, ended_at, original_due, job_interval, job_cron, expiration_time
+		FROM `+s.tablePrefix+`terminal_jobs
 	`)
 	if err != nil {
 		return err
@@ -396,18 +396,19 @@ func (s *StandaloneSQLiteBacked) loadDeadJobs(ctx context.Context) error {
 
 	for rows.Next() {
 		var (
-			d          internal.DeadJob
+			d          internal.TerminalJob
 			data       []byte
 			lastError  sql.NullString
-			failedAtMs int64
+			endedAtMs  int64
 			originalMs int64
 			interval   sql.NullString
 			cron       sql.NullString
+			expMs      sql.NullInt64
 		)
 
 		err := rows.Scan(
 			&d.JobID, &d.ActorType, &d.ActorID, &d.Method, &data,
-			&d.Attempts, &lastError, &failedAtMs, &originalMs, &interval, &cron,
+			&d.Status, &d.Attempts, &lastError, &endedAtMs, &originalMs, &interval, &cron, &expMs,
 		)
 		if err != nil {
 			return err
@@ -419,7 +420,7 @@ func (s *StandaloneSQLiteBacked) loadDeadJobs(ctx context.Context) error {
 		if lastError.Valid {
 			d.LastError = lastError.String
 		}
-		d.FailedAt = time.UnixMilli(failedAtMs)
+		d.EndedAt = time.UnixMilli(endedAtMs)
 		d.OriginalDue = time.UnixMilli(originalMs)
 		if interval.Valid {
 			d.Interval = interval.String
@@ -427,8 +428,11 @@ func (s *StandaloneSQLiteBacked) loadDeadJobs(ctx context.Context) error {
 		if cron.Valid {
 			d.Cron = cron.String
 		}
+		if expMs.Valid {
+			d.Expiration = new(time.UnixMilli(expMs.Int64))
+		}
 
-		s.DeadJobs[d.JobID] = &d
+		s.TerminalJobs[d.JobID] = &d
 	}
 
 	return rows.Err()
@@ -520,7 +524,7 @@ func (s *StandaloneSQLiteBacked) PersistChanges(ctx context.Context, changes *in
 	}
 
 	// Process dead job changes
-	err = s.persistDeadJobChanges(queryCtx, tx, changes)
+	err = s.persistTerminalJobChanges(queryCtx, tx, changes)
 	if err != nil {
 		return err
 	}
@@ -683,18 +687,18 @@ func (s *StandaloneSQLiteBacked) persistAlarmChanges(ctx context.Context, tx *sq
 	return nil
 }
 
-func (s *StandaloneSQLiteBacked) persistDeadJobChanges(ctx context.Context, tx *sql.Tx, changes *internal.Changes) error {
+func (s *StandaloneSQLiteBacked) persistTerminalJobChanges(ctx context.Context, tx *sql.Tx, changes *internal.Changes) error {
 	// Deletes
-	for _, jobID := range changes.DeadJobs.Delete {
+	for _, jobID := range changes.TerminalJobs.Delete {
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-		_, err := tx.ExecContext(ctx, "DELETE FROM "+s.tablePrefix+"dead_jobs WHERE job_id = ?", jobID)
+		_, err := tx.ExecContext(ctx, "DELETE FROM "+s.tablePrefix+"terminal_jobs WHERE job_id = ?", jobID)
 		if err != nil {
-			return fmt.Errorf("failed to delete dead job %s: %w", jobID, err)
+			return fmt.Errorf("failed to delete terminal job %s: %w", jobID, err)
 		}
 	}
 
 	// Upserts
-	for _, dc := range changes.DeadJobs.Set {
+	for _, dc := range changes.TerminalJobs.Set {
 		d := dc.Value
 		var (
 			lastErrorVal         any
@@ -710,17 +714,22 @@ func (s *StandaloneSQLiteBacked) persistDeadJobChanges(ctx context.Context, tx *
 			cronVal = d.Cron
 		}
 
+		var expVal any
+		if d.Expiration != nil {
+			expVal = d.Expiration.UnixMilli()
+		}
+
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.ExecContext(ctx,
-			`REPLACE INTO `+s.tablePrefix+`dead_jobs (
+			`REPLACE INTO `+s.tablePrefix+`terminal_jobs (
 				job_id, actor_type, actor_id, job_method, job_data,
-				attempts, last_error, failed_at, original_due, job_interval, job_cron
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				job_status, attempts, last_error, ended_at, original_due, job_interval, job_cron, expiration_time
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			d.JobID, d.ActorType, d.ActorID, d.Method, d.Data,
-			d.Attempts, lastErrorVal, d.FailedAt.UnixMilli(), d.OriginalDue.UnixMilli(), intervalVal, cronVal,
+			d.Status, d.Attempts, lastErrorVal, d.EndedAt.UnixMilli(), d.OriginalDue.UnixMilli(), intervalVal, cronVal, expVal,
 		)
 		if err != nil {
-			return fmt.Errorf("failed to upsert dead job %s: %w", d.JobID, err)
+			return fmt.Errorf("failed to upsert terminal job %s: %w", d.JobID, err)
 		}
 	}
 

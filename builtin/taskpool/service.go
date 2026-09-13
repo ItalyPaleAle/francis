@@ -172,7 +172,7 @@ func (s *TaskPoolService) CancelTask(ctx context.Context, taskID string) error {
 
 	bareType := s.pool.bareTypeOf(info.ActorType)
 	client := builtinactor.NewClient[struct{}](bareType, info.ActorID, s.svc)
-	return client.CancelJob(ctx, taskID)
+	return client.DeleteJob(ctx, taskID)
 }
 
 // RetryTask re-submits a dead-lettered task, scheduled to run as soon as possible, and returns the new task ID

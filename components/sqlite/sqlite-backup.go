@@ -44,7 +44,7 @@ func (s *SQLiteProvider) Backup(ctx context.Context, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	err = s.backupDeadJobs(ctx, tx, bw)
+	err = s.backupTerminalJobs(ctx, tx, bw)
 	if err != nil {
 		return err
 	}
@@ -84,8 +84,8 @@ func (s *SQLiteProvider) Restore(ctx context.Context, r io.Reader) error {
 				err = s.restoreState(ctx, conn, rec.State)
 			case backup.RecordTypeAlarm:
 				err = s.restoreAlarm(ctx, conn, rec.Alarm)
-			case backup.RecordTypeDeadJob:
-				err = s.restoreDeadJob(ctx, conn, rec.DeadJob)
+			case backup.RecordTypeTerminalJob:
+				err = s.restoreTerminalJob(ctx, conn, rec.TerminalJob)
 			default:
 				err = fmt.Errorf("unknown backup record type %q", rec.Type)
 			}
@@ -152,9 +152,9 @@ func (s *SQLiteProvider) ensureNoHostsConnected(ctx context.Context, conn *sql.C
 	return nil
 }
 
-// wipePersistentData deletes all actor state, alarms, and dead jobs
+// wipePersistentData deletes all actor state, alarms, and terminal jobs
 func (s *SQLiteProvider) wipePersistentData(ctx context.Context, conn *sql.Conn) error {
-	for _, table := range []string{"actor_state", "alarms", "dead_jobs"} {
+	for _, table := range []string{"actor_state", "alarms", "terminal_jobs"} {
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := conn.ExecContext(ctx, "DELETE FROM "+s.tablePrefix+table)
 		if err != nil {
@@ -271,30 +271,33 @@ func (s *SQLiteProvider) backupAlarms(ctx context.Context, tx *sql.Tx, bw *backu
 	return nil
 }
 
-func (s *SQLiteProvider) backupDeadJobs(ctx context.Context, tx *sql.Tx, bw *backup.Writer) error {
+func (s *SQLiteProvider) backupTerminalJobs(ctx context.Context, tx *sql.Tx, bw *backup.Writer) error {
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	rows, err := tx.QueryContext(ctx,
-		`SELECT job_id, actor_type, actor_id, job_method, job_data, attempts, last_error, failed_at, original_due, job_interval, job_cron
-		FROM `+s.tablePrefix+`dead_jobs`,
+		`SELECT job_id, actor_type, actor_id, job_method, job_data, job_status, attempts, last_error, ended_at, original_due, job_interval, job_cron, expiration_time
+		FROM `+s.tablePrefix+`terminal_jobs
+		WHERE expiration_time IS NULL OR expiration_time > ?`,
+		s.clock.Now().UnixMilli(),
 	)
 	if err != nil {
-		return fmt.Errorf("failed to query dead jobs: %w", err)
+		return fmt.Errorf("failed to query terminal jobs: %w", err)
 	}
 	defer rows.Close()
 
 	for rows.Next() {
 		var (
-			rec                  backup.DeadJobRecord
-			lastError            sql.NullString
-			failedMs, originalMs int64
-			interval, cron       sql.NullString
+			rec                 backup.TerminalJobRecord
+			lastError           sql.NullString
+			endedMs, originalMs int64
+			interval, cron      sql.NullString
+			expMs               sql.NullInt64
 		)
-		err = rows.Scan(&rec.JobID, &rec.ActorType, &rec.ActorID, &rec.Method, &rec.Data, &rec.Attempts, &lastError, &failedMs, &originalMs, &interval, &cron)
+		err = rows.Scan(&rec.JobID, &rec.ActorType, &rec.ActorID, &rec.Method, &rec.Data, &rec.Status, &rec.Attempts, &lastError, &endedMs, &originalMs, &interval, &cron, &expMs)
 		if err != nil {
-			return fmt.Errorf("failed to scan dead job row: %w", err)
+			return fmt.Errorf("failed to scan terminal job row: %w", err)
 		}
 
-		rec.FailedAt = time.UnixMilli(failedMs).UTC()
+		rec.EndedAt = time.UnixMilli(endedMs).UTC()
 		rec.OriginalDue = time.UnixMilli(originalMs).UTC()
 		if lastError.Valid {
 			rec.LastError = lastError.String
@@ -305,8 +308,11 @@ func (s *SQLiteProvider) backupDeadJobs(ctx context.Context, tx *sql.Tx, bw *bac
 		if cron.Valid {
 			rec.Cron = cron.String
 		}
+		if expMs.Valid {
+			rec.Expiration = new(time.UnixMilli(expMs.Int64).UTC())
+		}
 
-		err = bw.WriteDeadJob(&rec)
+		err = bw.WriteTerminalJob(&rec)
 		if err != nil {
 			return err
 		}
@@ -391,8 +397,8 @@ func (s *SQLiteProvider) restoreAlarm(ctx context.Context, conn *sql.Conn, r *ba
 	return nil
 }
 
-func (s *SQLiteProvider) restoreDeadJob(ctx context.Context, conn *sql.Conn, r *backup.DeadJobRecord) error {
-	var lastErrorVal, intervalVal, cronVal any
+func (s *SQLiteProvider) restoreTerminalJob(ctx context.Context, conn *sql.Conn, r *backup.TerminalJobRecord) error {
+	var lastErrorVal, intervalVal, cronVal, expVal any
 	if r.LastError != "" {
 		lastErrorVal = r.LastError
 	}
@@ -402,18 +408,21 @@ func (s *SQLiteProvider) restoreDeadJob(ctx context.Context, conn *sql.Conn, r *
 	if r.Cron != "" {
 		cronVal = r.Cron
 	}
+	if r.Expiration != nil {
+		expVal = r.Expiration.UnixMilli()
+	}
 
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	_, err := conn.ExecContext(ctx,
-		`INSERT INTO `+s.tablePrefix+`dead_jobs (
+		`INSERT INTO `+s.tablePrefix+`terminal_jobs (
 			job_id, actor_type, actor_id, job_method, job_data,
-			attempts, last_error, failed_at, original_due, job_interval, job_cron
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			job_status, attempts, last_error, ended_at, original_due, job_interval, job_cron, expiration_time
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.JobID, r.ActorType, r.ActorID, r.Method, r.Data,
-		r.Attempts, lastErrorVal, r.FailedAt.UnixMilli(), r.OriginalDue.UnixMilli(), intervalVal, cronVal,
+		r.Status, r.Attempts, lastErrorVal, r.EndedAt.UnixMilli(), r.OriginalDue.UnixMilli(), intervalVal, cronVal, expVal,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to restore dead job: %w", err)
+		return fmt.Errorf("failed to restore terminal job: %w", err)
 	}
 
 	return nil

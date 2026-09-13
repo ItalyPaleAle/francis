@@ -109,7 +109,7 @@ A parent's `Cancel` cancels its running children through the same path, and a pa
 
 ## Lifetime
 
-A child's retention follows its parent's. `Purge` on a parent purges its children first, recursively, then its own dead-letters, then its journal — in that order, so an interrupted purge is safe to repeat.
+A child's retention follows its parent's. `Purge` on a parent purges its children first, recursively, then its own jobs, then its journal — in that order, so an interrupted purge is safe to repeat.
 
 The auto-purge sweep **skips instances that have a parent**, so a child is never purged from under a parent that might still unwind it.
 

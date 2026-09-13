@@ -271,6 +271,17 @@ func (p *PostgresProvider) initGC() (err error) {
 					return nil
 				}
 			},
+			"terminal_jobs": func() (string, func() []any) {
+				q := `
+				DELETE FROM ` + p.tablePrefix + `terminal_jobs
+				WHERE
+					expiration_time IS NOT NULL
+					AND expiration_time < (now() AT TIME ZONE 'utc')
+				`
+				return q, func() []any {
+					return nil
+				}
+			},
 		},
 		CleanupInterval: p.cleanupInterval,
 		DB:              postgresadapter.AdaptPgxConn(p.db),

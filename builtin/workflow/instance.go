@@ -55,8 +55,8 @@ func (o *orchestrator) purge(ctx context.Context) (any, error) {
 		}
 	}
 
-	// The instance's own dead-letters are a bounded set, because no dead-letter outlives the journal entry that accounts for it
-	err = o.purgeDeadLetters(ctx)
+	// The instance's own jobs are a bounded set, since each one belongs to a journal entry
+	err = o.purgeJobs(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -89,20 +89,15 @@ func (o *orchestrator) parentStillRunning(ctx context.Context, parent *parentRef
 	return parentState.Status != "" && !parentState.Status.IsTerminal(), nil
 }
 
-// purgeDeadLetters removes the dead-letter records the instance and its workers left behind
-func (o *orchestrator) purgeDeadLetters(ctx context.Context) error {
+// purgeJobs removes every job the instance still has, whether it is still scheduled or has already ended
+func (o *orchestrator) purgeJobs(ctx context.Context) error {
 	jobs, err := o.client.ListJobs(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list the instance's jobs: %w", err)
 	}
 
 	for _, j := range jobs {
-		switch j.Status {
-		case actor.JobStatusDeadLettered:
-			err = o.svc.DeleteJob(ctx, j.JobID)
-		default:
-			err = o.client.CancelJob(ctx, j.JobID)
-		}
+		err = o.client.DeleteJob(ctx, j.JobID)
 		if err != nil && !errors.Is(err, actor.ErrJobNotFound) {
 			return fmt.Errorf("failed to remove job %s: %w", j.JobID, err)
 		}

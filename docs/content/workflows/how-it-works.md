@@ -123,7 +123,9 @@ The instance's own `done` and `compensated` jobs can dead-letter the same way, a
 
 **Nothing stands behind those hooks, by design.** A dead-lettered job takes its payload with it, so a report lost that way cannot be reconstructed from the journal — only re-derived by running the task again. If the hook itself cannot be delivered, the task stays scheduled-not-done until the instance's deadline fires and fails it like any other timeout. An instance configured with no timeout at all waits indefinitely; that is the reason to configure one.
 
-Dead-letter records accumulate for the life of an instance — bounded by its attempts — and `Purge` removes them with the journal. They also carry the journal's own retention, so an instance that expires without ever being purged does not leave them behind.
+Dead-letter records accumulate for the life of an instance — bounded by its attempts — and `Purge` removes them with the journal. Every actor type the engine dispatches to is registered with a job retention of twice the journal's own, so a record it leaves behind expires on its own too: an instance that is never purged, and whose journal simply times out, cannot orphan a dead-letter that nothing can find again.
+
+The same retention means a **completed** task leaves a record as well, for as long as the journal it belongs to. `ListJobs` on a worker therefore shows what it ran, not only what it failed to run. A completed record keeps the metadata and drops the payload, so a ten-thousand-task fan-out costs metadata rather than ten thousand copies of the workflow input.
 
 ## Job methods and idempotency keys
 

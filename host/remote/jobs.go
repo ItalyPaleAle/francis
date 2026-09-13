@@ -60,7 +60,7 @@ func (h *Host) Dispatch(ctx context.Context, actorType string, actorID string, m
 	return res.JobID, nil
 }
 
-// GetJob returns a job by its ID, spanning both live and dead-lettered jobs.
+// GetJob returns a job by its ID, spanning both live and terminal jobs.
 func (h *Host) GetJob(ctx context.Context, jobID string) (actor.JobInfo, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
 	defer cancel()
@@ -74,7 +74,7 @@ func (h *Host) GetJob(ctx context.Context, jobID string) (actor.JobInfo, error) 
 	return protocolJobInfoToActor(res.JobInfo), nil
 }
 
-// ListJobs returns all live and dead-lettered jobs for an actor.
+// ListJobs returns all of an actor's jobs: the live ones, and any terminal record still retained.
 func (h *Host) ListJobs(ctx context.Context, actorType string, actorID string) ([]actor.JobInfo, error) {
 	err := ref.ValidateComponents(actorType, actorID)
 	if err != nil {
@@ -99,29 +99,6 @@ func (h *Host) ListJobs(ctx context.Context, actorType string, actorID string) (
 	return out, nil
 }
 
-// CancelJob cancels a live job for an actor.
-func (h *Host) CancelJob(ctx context.Context, actorType string, actorID string, jobID string) error {
-	err := ref.ValidateComponents(actorType, actorID)
-	if err != nil {
-		return err
-	}
-
-	reqCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
-	defer cancel()
-	err = h.runtimeClient.CancelJob(reqCtx, protocol.CancelJobRequest{
-		ActorType: actorType,
-		ActorID:   actorID,
-		JobID:     jobID,
-	})
-	if isProtocolErrorCode(err, protocol.ErrCodeJobNotFound) {
-		return actor.ErrJobNotFound
-	} else if err != nil {
-		return fmt.Errorf("failed to cancel job: %w", err)
-	}
-
-	return nil
-}
-
 // RetryJob re-dispatches a dead-lettered job and returns the new job ID.
 func (h *Host) RetryJob(ctx context.Context, jobID string) (string, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
@@ -136,11 +113,20 @@ func (h *Host) RetryJob(ctx context.Context, jobID string) (string, error) {
 	return res.JobID, nil
 }
 
-// DeleteJob removes a dead-lettered job's record without re-dispatching it.
-func (h *Host) DeleteJob(ctx context.Context, jobID string) error {
+// DeleteJob removes one of an actor's jobs, whatever state it is in.
+func (h *Host) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string) error {
+	err := ref.ValidateComponents(actorType, actorID)
+	if err != nil {
+		return err
+	}
+
 	reqCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
 	defer cancel()
-	err := h.runtimeClient.DeleteJob(reqCtx, protocol.DeleteJobRequest{JobID: jobID})
+	err = h.runtimeClient.DeleteJob(reqCtx, protocol.DeleteJobRequest{
+		ActorType: actorType,
+		ActorID:   actorID,
+		JobID:     jobID,
+	})
 	if isProtocolErrorCode(err, protocol.ErrCodeJobNotFound) {
 		return actor.ErrJobNotFound
 	} else if err != nil {

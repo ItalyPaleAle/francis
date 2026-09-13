@@ -5802,20 +5802,127 @@ func (s Suite) TestJobs(t *testing.T) {
 		assert.ElementsMatch(t, []string{id1, id2}, ids)
 	})
 
-	t.Run("cancel removes a live job", func(t *testing.T) {
+	t.Run("delete removes a live job", func(t *testing.T) {
 		ctx := t.Context()
 		require.NoError(t, s.p.Seed(ctx, jobSeed()))
 
 		jobID := dispatch(t, ctx, "cancel-actor", "c1", "process", ref.AlarmProperties{DueTime: s.p.Now().Add(time.Hour)}, nil)
 
-		err := s.p.CancelJob(ctx, "JOB", "cancel-actor", jobID)
+		err := s.p.DeleteJob(ctx, "JOB", "cancel-actor", jobID)
 		require.NoError(t, err)
 
 		_, err = s.p.GetJob(ctx, jobID)
 		require.ErrorIs(t, err, components.ErrNoJob)
 
-		// Cancelling again reports the job is gone
-		err = s.p.CancelJob(ctx, "JOB", "cancel-actor", jobID)
+		// Deleting again reports the job is gone
+		err = s.p.DeleteJob(ctx, "JOB", "cancel-actor", jobID)
+		require.ErrorIs(t, err, components.ErrNoJob)
+	})
+
+	t.Run("delete is scoped to the actor that owns the job", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		jobID := dispatch(t, ctx, "scope-actor", "s1", "process", ref.AlarmProperties{DueTime: s.p.Now().Add(time.Hour)}, nil)
+
+		// Another actor's ID must not reach this job
+		err := s.p.DeleteJob(ctx, "JOB", "other-actor", jobID)
+		require.ErrorIs(t, err, components.ErrNoJob)
+
+		_, err = s.p.GetJob(ctx, jobID)
+		require.NoError(t, err, "the job must survive a deletion scoped to a different actor")
+	})
+
+	t.Run("one delete verb removes a job that has ended", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		// The caller uses the same verb whether the job is still scheduled or has already ended
+		jobID := dispatch(t, ctx, "unified-actor", "u1", "process", ref.AlarmProperties{DueTime: s.p.Now()}, nil)
+		lease := leaseFor(t, ctx, jobID)
+		require.NoError(t, s.p.DeadLetterAlarm(ctx, lease, components.DeadLetterAlarmReq{Reason: "boom", Attempts: 3}))
+
+		err := s.p.DeleteJob(ctx, "JOB", "unified-actor", jobID)
+		require.NoError(t, err)
+
+		_, err = s.p.GetJob(ctx, jobID)
+		require.ErrorIs(t, err, components.ErrNoJob)
+	})
+
+	t.Run("a completed job is retained when the dispatch asked for it", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		jobID := dispatch(t, ctx, "done-actor", "dn1", "process", ref.AlarmProperties{DueTime: s.p.Now()}, []byte("done-payload"))
+		lease := leaseFor(t, ctx, jobID)
+
+		err := s.p.CompleteJob(ctx, lease, components.CompleteJobReq{Attempts: 1, Retention: time.Hour})
+		require.NoError(t, err)
+
+		// The record reports the run as completed rather than failed, and carries no error
+		info, err := s.p.GetJob(ctx, jobID)
+		require.NoError(t, err)
+		assert.Equal(t, components.JobStatusCompleted, info.Status)
+		assert.Equal(t, 1, info.Attempts)
+		assert.Empty(t, info.LastError)
+		assert.False(t, info.EndedAt.IsZero(), "a terminal job records when it ended")
+
+		// A completed record drops the input, which is only ever needed to replay a dead job
+		done, err := s.p.GetTerminalJob(ctx, jobID)
+		require.NoError(t, err)
+		assert.Equal(t, components.JobStatusCompleted, done.Status)
+		assert.Empty(t, done.Data, "a completed record should not carry the job payload")
+		require.NotNil(t, done.Expiration)
+
+		// It appears in the actor's listing alongside any live job
+		jobs, err := s.p.ListJobs(ctx, "JOB", "done-actor")
+		require.NoError(t, err)
+		require.Len(t, jobs, 1)
+		assert.Equal(t, components.JobStatusCompleted, jobs[0].Status)
+
+		// The live alarm row is gone, so the lease no longer resolves
+		_, err = s.p.GetLeasedAlarm(ctx, lease)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
+
+		// A completed job has nothing to retry
+		_, err = s.p.RetryDeadJob(ctx, jobID)
+		require.ErrorIs(t, err, components.ErrNoJob)
+
+		// The same delete verb removes it
+		require.NoError(t, s.p.DeleteJob(ctx, "JOB", "done-actor", jobID))
+		_, err = s.p.GetJob(ctx, jobID)
+		require.ErrorIs(t, err, components.ErrNoJob)
+	})
+
+	t.Run("a terminal record reads as gone once its retention has elapsed", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		jobID := dispatch(t, ctx, "expire-actor", "e1", "process", ref.AlarmProperties{DueTime: s.p.Now()}, nil)
+		lease := leaseFor(t, ctx, jobID)
+
+		require.NoError(t, s.p.CompleteJob(ctx, lease, components.CompleteJobReq{Attempts: 1, Retention: time.Second}))
+
+		// It is readable while the retention holds
+		_, err := s.p.GetJob(ctx, jobID)
+		require.NoError(t, err)
+
+		// Past the retention it reads as gone, whether or not the collector has run yet
+		_ = s.p.AdvanceClock(2 * time.Second) //nolint:errcheck
+
+		_, err = s.p.GetJob(ctx, jobID)
+		require.ErrorIs(t, err, components.ErrNoJob)
+
+		_, err = s.p.GetTerminalJob(ctx, jobID)
+		require.ErrorIs(t, err, components.ErrNoJob)
+
+		jobs, err := s.p.ListJobs(ctx, "JOB", "expire-actor")
+		require.NoError(t, err)
+		assert.Empty(t, jobs)
+
+		// The collector then removes it for good
+		require.NoError(t, s.p.CleanupExpired(ctx))
+		_, err = s.p.GetJob(ctx, jobID)
 		require.ErrorIs(t, err, components.ErrNoJob)
 	})
 
@@ -5837,17 +5944,18 @@ func (s Suite) TestJobs(t *testing.T) {
 		assert.Equal(t, "boom", info.LastError)
 
 		// The dead job carries its input so it can be replayed
-		dead, err := s.p.GetDeadJob(ctx, jobID)
+		dead, err := s.p.GetTerminalJob(ctx, jobID)
 		require.NoError(t, err)
 		assert.Equal(t, "process", dead.Method)
 		assert.Equal(t, []byte("dead-payload"), dead.Data)
+		assert.Equal(t, components.JobStatusDeadLettered, dead.Status)
 
 		// The live alarm row is gone, so the lease no longer resolves
 		_, err = s.p.GetLeasedAlarm(ctx, lease)
 		require.ErrorIs(t, err, components.ErrNoAlarm)
 
 		// Deleting the dead job removes it entirely
-		err = s.p.DeleteDeadJob(ctx, jobID)
+		err = s.p.DeleteJob(ctx, "JOB", "dead-actor", jobID)
 		require.NoError(t, err)
 		_, err = s.p.GetJob(ctx, jobID)
 		require.ErrorIs(t, err, components.ErrNoJob)
@@ -5921,10 +6029,10 @@ func (s Suite) TestJobs(t *testing.T) {
 		_, err := s.p.GetJob(ctx, "11111111-1111-7111-8111-111111111111")
 		require.ErrorIs(t, err, components.ErrNoJob)
 
-		_, err = s.p.GetDeadJob(ctx, "11111111-1111-7111-8111-111111111111")
+		_, err = s.p.GetTerminalJob(ctx, "11111111-1111-7111-8111-111111111111")
 		require.ErrorIs(t, err, components.ErrNoJob)
 
-		err = s.p.DeleteDeadJob(ctx, "11111111-1111-7111-8111-111111111111")
+		err = s.p.DeleteJob(ctx, "JOB", "missing-actor", "11111111-1111-7111-8111-111111111111")
 		require.ErrorIs(t, err, components.ErrNoJob)
 	})
 }
@@ -5945,7 +6053,7 @@ func (s Suite) TestBackupRestore(t *testing.T) {
 		setA := DecodeBackup(t, bufA.Bytes())
 		require.NotEmpty(t, setA.States, "expected actor state in the backup")
 		require.GreaterOrEqual(t, len(setA.Alarms), 2, "expected a plain alarm and a live job in the backup")
-		require.NotEmpty(t, setA.DeadJobs, "expected a dead job in the backup")
+		require.NotEmpty(t, setA.TerminalJobs, "expected a terminal job in the backup")
 
 		// Add records that are absent from the snapshot, so a correct restore must remove them
 		AddExtraBackupData(t, ctx, s.p, s.p.Now())

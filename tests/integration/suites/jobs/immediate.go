@@ -104,7 +104,7 @@ func (s *immediateJobs) Run(t *testing.T) {
 			return
 		}
 
-		err = svc.CancelJob(ctx, shared.ProbeActorType, actorID, jobID)
+		err = svc.DeleteJob(ctx, shared.ProbeActorType, actorID, jobID)
 		require.NoError(t, err)
 	})
 
@@ -133,7 +133,7 @@ func (s *immediateJobs) Run(t *testing.T) {
 		actorID := "cancel-preleased-" + string(s.kind) + "-" + string(s.variant)
 		jobID, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobDelay(canceledJobDelay))
 		require.NoError(t, err)
-		err = svc.CancelJob(ctx, shared.ProbeActorType, actorID, jobID)
+		err = svc.DeleteJob(ctx, shared.ProbeActorType, actorID, jobID)
 		require.NoError(t, err)
 
 		assert.Never(t, func() bool {

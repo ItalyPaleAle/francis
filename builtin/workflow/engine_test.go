@@ -199,18 +199,6 @@ func (f *fakeHost) ListJobs(ctx context.Context, actorType string, actorID strin
 	return out, nil
 }
 
-func (f *fakeHost) CancelJob(ctx context.Context, actorType string, actorID string, jobID string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	_, ok := f.jobs[jobID]
-	if !ok {
-		return actor.ErrJobNotFound
-	}
-	f.removeJobLocked(jobID)
-	return nil
-}
-
 func (f *fakeHost) RetryJob(ctx context.Context, jobID string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -229,7 +217,7 @@ func (f *fakeHost) RetryJob(ctx context.Context, jobID string) (string, error) {
 	return newID, nil
 }
 
-func (f *fakeHost) DeleteJob(ctx context.Context, jobID string) error {
+func (f *fakeHost) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 

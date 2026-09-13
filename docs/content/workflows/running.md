@@ -125,12 +125,12 @@ workflow.WithRetention(workflow.RetentionPolicy{
 })
 ```
 
-Retention is enforced in two layers. The **purge sweep** is the primary mechanism: it removes the journal, the instance's dead-letters, and its children. A **state TTL** is the backstop: on termination the journal is written with a TTL of twice the policy duration, so an instance whose sweep never runs still expires. It is twice the duration so the sweep always finds the journal it needs in order to clean up the rest.
+Retention is enforced in two layers. The **purge sweep** is the primary mechanism: it removes the journal, the instance's jobs, and its children. A **state TTL** is the backstop: on termination the journal is written with a TTL of twice the policy duration, so an instance whose sweep never runs still expires. It is twice the duration so the sweep always finds the journal it needs in order to clean up the rest. The engine's own jobs carry the same TTL, so nothing an instance leaves behind outlives the journal that accounts for it.
 
 Three levels, from explicit to automatic:
 
 ```go
-// One terminated instance: its children first, then its dead-letters, then its journal
+// One terminated instance: its children first, then its own jobs, then its journal
 err := svc.Purge(ctx, id)
 
 // Every terminated instance past its retention, skipping any that still has a parent

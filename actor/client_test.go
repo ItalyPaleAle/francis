@@ -83,15 +83,13 @@ func (f *fakeHost) ListJobs(context.Context, string, string) ([]JobInfo, error) 
 	return nil, nil
 }
 
-func (f *fakeHost) CancelJob(context.Context, string, string, string) error {
-	return nil
-}
+
 
 func (f *fakeHost) RetryJob(context.Context, string) (string, error) {
 	return "", nil
 }
 
-func (f *fakeHost) DeleteJob(context.Context, string) error {
+func (f *fakeHost) DeleteJob(context.Context, string, string, string) error {
 	return nil
 }
 
@@ -165,7 +163,7 @@ func TestClientRejectsBuiltInTarget(t *testing.T) {
 	_, listStatesErr := c.ListStates(ctx, nil)
 	require.ErrorIs(t, listStatesErr, ErrActorTypeReserved)
 
-	err = c.CancelJob(ctx, "job")
+	err = c.DeleteJob(ctx, "job")
 	require.ErrorIs(t, err, ErrActorTypeReserved)
 
 	// Invoking a built-in target is rejected regardless of which actor the client is bound to

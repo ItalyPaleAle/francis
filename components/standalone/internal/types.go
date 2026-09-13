@@ -159,41 +159,53 @@ func (a *Alarm) Clone() *Alarm {
 	return clone
 }
 
-// DeadJob is a job that exhausted its retries or failed permanently.
-type DeadJob struct {
+// TerminalJob is a job that ended, either by completing or by exhausting its retries.
+// Expiration is nil when the record is kept until something removes it.
+type TerminalJob struct {
 	JobID       string
 	ActorType   string
 	ActorID     string
 	Method      string
 	Data        []byte
+	Status      string
 	Attempts    int
 	LastError   string
-	FailedAt    time.Time
+	EndedAt     time.Time
 	OriginalDue time.Time
 	Interval    string
 	Cron        string
+	Expiration  *time.Time
 }
 
-func (d *DeadJob) GetActorKey() ActorKey {
+// HasExpired reports whether the record's retention has elapsed, so it reads as gone even before the collector removes it.
+func (d *TerminalJob) HasExpired(now time.Time) bool {
+	return d.Expiration != nil && d.Expiration.Before(now)
+}
+
+func (d *TerminalJob) GetActorKey() ActorKey {
 	return ActorKey{
 		ActorType: d.ActorType,
 		ActorID:   d.ActorID,
 	}
 }
 
-// Clone creates a deep copy of the DeadJob.
-func (d *DeadJob) Clone() *DeadJob {
-	clone := &DeadJob{
+// Clone creates a deep copy of the TerminalJob.
+func (d *TerminalJob) Clone() *TerminalJob {
+	clone := &TerminalJob{
 		JobID:       d.JobID,
 		ActorType:   d.ActorType,
 		ActorID:     d.ActorID,
 		Method:      d.Method,
+		Status:      d.Status,
 		Attempts:    d.Attempts,
 		LastError:   d.LastError,
-		FailedAt:    d.FailedAt,
+		EndedAt:     d.EndedAt,
 		OriginalDue: d.OriginalDue,
 		Interval:    d.Interval,
 		Cron:        d.Cron,
+	}
+	if d.Expiration != nil {
+		clone.Expiration = new(*d.Expiration)
 	}
 	if d.Data != nil {
 		clone.Data = make([]byte, len(d.Data))

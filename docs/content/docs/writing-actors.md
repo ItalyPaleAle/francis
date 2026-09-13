@@ -164,6 +164,7 @@ Actor registration uses functional options:
 | `WithConcurrencyLimit` | `0` (unlimited) | Maximum number of actors of this type active on a single host|
 | `WithMaxAttempts` | `3` | Maximum attempts when invoking the actor or running an alarm|
 | `WithInitialRetryDelay` | `2s` | Initial delay before retrying a failed invocation, with backoff|
+| `WithJobRetention` | `0` (no record) | How long a job dispatched to this actor type keeps a record after it ends. Without it a completed job leaves nothing behind, and a dead-lettered one is kept until something removes it|
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -172,6 +173,7 @@ Actor registration uses functional options:
 | `ConcurrencyLimit` | `0` (unlimited) | Maximum number of actors of this type active on a single host. |
 | `MaxAttempts` | `3` | Maximum attempts when invoking the actor or running an alarm. |
 | `InitialRetryDelay` | `2s` | Initial delay before retrying a failed invocation, with backoff. |
+| `JobRetention` | `0` (no record) | How long a job dispatched to this actor type keeps a record after it ends. |
 
 ## Singleton actors
 

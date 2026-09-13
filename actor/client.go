@@ -37,16 +37,14 @@ type Client[T any] interface {
 	Peek(ctx context.Context, actorType string, actorID string, method string, data any, opts ...InvokeOption) (Envelope, error)
 	// Dispatch sends a durable, fire-and-forget job to the current actor.
 	Dispatch(ctx context.Context, method string, input any, opts ...JobOption) (jobID string, err error)
-	// GetJob returns the information for a job by its ID, spanning both live and dead-lettered jobs.
+	// GetJob returns the information for a job by its ID, spanning both live and terminal jobs.
 	GetJob(ctx context.Context, jobID string) (JobInfo, error)
-	// ListJobs returns all live and dead-lettered jobs for the current actor.
+	// ListJobs returns all of the current actor's jobs: the live ones, and any terminal record still retained.
 	ListJobs(ctx context.Context) ([]JobInfo, error)
-	// CancelJob cancels a live job for the current actor.
-	CancelJob(ctx context.Context, jobID string) error
+	// DeleteJob removes one of the current actor's jobs, whatever state it is in.
+	DeleteJob(ctx context.Context, jobID string) error
 	// RetryJob re-dispatches a dead-lettered job and returns the new job ID.
 	RetryJob(ctx context.Context, jobID string) (newJobID string, err error)
-	// DeleteJob removes a dead-lettered job's record without re-dispatching it.
-	DeleteJob(ctx context.Context, jobID string) error
 	// Halt the current actor upon returning.
 	Halt()
 }
@@ -283,7 +281,7 @@ func (c *client[T]) GetJob(ctx context.Context, jobID string) (JobInfo, error) {
 	return c.service.GetJob(ctx, jobID)
 }
 
-// ListJobs returns all live and dead-lettered jobs for the current actor.
+// ListJobs returns all of the current actor's jobs: the live ones, and any terminal record still retained.
 func (c *client[T]) ListJobs(ctx context.Context) ([]JobInfo, error) {
 	if !c.canTarget(c.actorType) {
 		return nil, ErrActorTypeReserved
@@ -292,23 +290,18 @@ func (c *client[T]) ListJobs(ctx context.Context) ([]JobInfo, error) {
 	return c.service.listJobs(ctx, c.actorType, c.actorID)
 }
 
-// CancelJob cancels a live job for the current actor.
-func (c *client[T]) CancelJob(ctx context.Context, jobID string) error {
+// DeleteJob removes one of the current actor's jobs, whatever state it is in.
+func (c *client[T]) DeleteJob(ctx context.Context, jobID string) error {
 	if !c.canTarget(c.actorType) {
 		return ErrActorTypeReserved
 	}
 
-	return c.service.cancelJob(ctx, c.actorType, c.actorID, jobID)
+	return c.service.deleteJob(ctx, c.actorType, c.actorID, jobID)
 }
 
 // RetryJob re-dispatches a dead-lettered job and returns the new job ID.
 func (c *client[T]) RetryJob(ctx context.Context, jobID string) (newJobID string, err error) {
 	return c.service.RetryJob(ctx, jobID)
-}
-
-// DeleteJob removes a dead-lettered job's record without re-dispatching it.
-func (c *client[T]) DeleteJob(ctx context.Context, jobID string) error {
-	return c.service.DeleteJob(ctx, jobID)
 }
 
 // Halt the current actor upon returning.

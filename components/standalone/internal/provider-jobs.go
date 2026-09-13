@@ -181,6 +181,38 @@ func (p *Provider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, r
 }
 
 func (p *Provider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLease, req components.DeadLetterAlarmReq) error {
+	return p.endJob(ctx, lease, endJobReq{
+		status:      components.JobStatusDeadLettered,
+		reason:      req.Reason,
+		attempts:    req.Attempts,
+		retention:   req.Retention,
+		reschedule:  req.Reschedule,
+		nextDueTime: req.NextDueTime,
+	})
+}
+
+func (p *Provider) CompleteJob(ctx context.Context, lease *ref.AlarmLease, req components.CompleteJobReq) error {
+	return p.endJob(ctx, lease, endJobReq{
+		status:      components.JobStatusCompleted,
+		attempts:    req.Attempts,
+		retention:   req.Retention,
+		reschedule:  req.Reschedule,
+		nextDueTime: req.NextDueTime,
+	})
+}
+
+// endJobReq is the shared shape of the two ways a job ends, since completing and dead-lettering differ only in what they record
+type endJobReq struct {
+	status      components.JobStatus
+	reason      string
+	attempts    int
+	retention   time.Duration
+	reschedule  bool
+	nextDueTime time.Time
+}
+
+// endJob moves a leased job out of the alarms map and into the terminal-job store, optionally re-creating its recurrence in the same change set
+func (p *Provider) endJob(ctx context.Context, lease *ref.AlarmLease, req endJobReq) error {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 
@@ -190,33 +222,44 @@ func (p *Provider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLease, r
 	a, ok := p.AlarmsByID[lease.Key()]
 	valid := ok && a.HasValidLease(lease.LeaseID(), now)
 	var (
-		alarmKey AlarmKey
-		oldID    string
-		deadJob  *DeadJob
-		newAlarm *Alarm
+		alarmKey    AlarmKey
+		oldID       string
+		terminalJob *TerminalJob
+		newAlarm    *Alarm
 	)
 	if valid {
 		alarmKey = a.GetAlarmKey()
 		oldID = a.ID
-		deadJob = &DeadJob{
+		// Only a dead job keeps its input, since that is what a replay needs and a completed one is never replayed
+		// This is what keeps a wide fan-out's retained records cheap, where the payload is much larger than the metadata around it
+		var data []byte
+		if req.status == components.JobStatusDeadLettered {
+			data = a.Data
+		}
+
+		terminalJob = &TerminalJob{
 			JobID:       oldID,
 			ActorType:   a.ActorType,
 			ActorID:     a.ActorID,
 			Method:      a.JobMethod,
-			Data:        a.Data,
-			Attempts:    req.Attempts,
-			LastError:   req.Reason,
-			FailedAt:    now,
+			Data:        data,
+			Status:      string(req.status),
+			Attempts:    req.attempts,
+			LastError:   req.reason,
+			EndedAt:     now,
 			OriginalDue: a.DueTime,
 			Interval:    a.Interval,
 			Cron:        a.Cron,
 		}
+		if req.retention > 0 {
+			terminalJob.Expiration = new(now.Add(req.retention))
+		}
 
-		// Re-create the recurrence (same name, fresh ID) so a repeating job survives the dead-lettering of one occurrence
-		if req.Reschedule {
+		// Re-create the recurrence (same name, fresh ID) so a repeating job survives one occurrence ending
+		if req.reschedule {
 			newAlarm = a.Clone()
 			newAlarm.ID = uuid.NewV7().String()
-			newAlarm.DueTime = req.NextDueTime
+			newAlarm.DueTime = req.nextDueTime
 			newAlarm.LeaseID = nil
 			newAlarm.LeaseExpiration = nil
 		}
@@ -230,7 +273,7 @@ func (p *Provider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLease, r
 	changes := NewChanges()
 	defer changes.Release()
 	changes.Alarms.Delete = append(changes.Alarms.Delete, oldID)
-	changes.DeadJobs.Set = append(changes.DeadJobs.Set, DeadJobChange{Key: oldID, Value: deadJob})
+	changes.TerminalJobs.Set = append(changes.TerminalJobs.Set, TerminalJobChange{Key: oldID, Value: terminalJob})
 	if newAlarm != nil {
 		changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: newAlarm.ID, Value: newAlarm})
 	}
@@ -239,7 +282,7 @@ func (p *Provider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLease, r
 		delete(p.Alarms, alarmKey)
 		delete(p.AlarmsByID, oldID)
 
-		p.DeadJobs[oldID] = deadJob
+		p.TerminalJobs[oldID] = terminalJob
 
 		if newAlarm != nil {
 			p.Alarms[alarmKey] = newAlarm
@@ -274,13 +317,14 @@ func (p *Provider) GetJob(ctx context.Context, jobID string) (components.JobInfo
 		}, nil
 	}
 
-	// Then look for a dead-lettered job
-	d, ok := p.DeadJobs[jobID]
-	if !ok {
+	// Then look for a job that ended, whether it completed or dead-lettered
+	// An expired record is treated as gone before the collector gets to it, exactly as expired state is
+	d, ok := p.TerminalJobs[jobID]
+	if !ok || d.HasExpired(now) {
 		return components.JobInfo{}, components.ErrNoJob
 	}
 
-	return deadJobToInfo(d), nil
+	return terminalJobToInfo(d), nil
 }
 
 func (p *Provider) ListJobs(ctx context.Context, actorType string, actorID string) ([]components.JobInfo, error) {
@@ -289,8 +333,8 @@ func (p *Provider) ListJobs(ctx context.Context, actorType string, actorID strin
 
 	now := p.Clock.Now()
 
-	// Allocate with enough capacity for at least all the dead jobs
-	res := make([]components.JobInfo, 0, len(p.DeadJobs)+1)
+	// Allocate with enough capacity for at least all the terminal jobs
+	res := make([]components.JobInfo, 0, len(p.TerminalJobs)+1)
 
 	// Live jobs
 	for _, a := range p.Alarms {
@@ -315,65 +359,85 @@ func (p *Provider) ListJobs(ctx context.Context, actorType string, actorID strin
 		})
 	}
 
-	// Dead-lettered jobs
-	for _, d := range p.DeadJobs {
-		if d.ActorType != actorType || d.ActorID != actorID {
+	// Jobs that ended, whether they completed or dead-lettered
+	for _, d := range p.TerminalJobs {
+		if d.ActorType != actorType || d.ActorID != actorID || d.HasExpired(now) {
 			continue
 		}
 
-		res = append(res, deadJobToInfo(d))
+		res = append(res, terminalJobToInfo(d))
 	}
 
 	return res, nil
 }
 
-func (p *Provider) CancelJob(ctx context.Context, actorType string, actorID string, jobID string) error {
+func (p *Provider) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string) error {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 
+	// A job lives in one of two maps depending on whether it has ended, and the caller does not have to know which
+	// The actor scope is optional: with both parts empty the job is removed by ID alone, which is what an operator holding a job ID does
+	inScope := func(at string, ai string) bool {
+		return actorType == "" || actorID == "" || (at == actorType && ai == actorID)
+	}
+
 	p.Mu.RLock()
-	a, ok := p.AlarmsByID[jobID]
-	canCancel := ok && a.Kind == string(components.AlarmKindJob) && a.ActorType == actorType && a.ActorID == actorID
+	a, live := p.AlarmsByID[jobID]
+	live = live && a.Kind == string(components.AlarmKindJob) && inScope(a.ActorType, a.ActorID)
 	var alarmKey AlarmKey
-	if canCancel {
+	if live {
 		alarmKey = a.GetAlarmKey()
 	}
+	d, terminal := p.TerminalJobs[jobID]
+	terminal = terminal && inScope(d.ActorType, d.ActorID)
 	p.Mu.RUnlock()
 
-	if !canCancel {
+	if !live && !terminal {
 		return components.ErrNoJob
 	}
 
 	changes := NewChanges()
 	defer changes.Release()
-	changes.Alarms.Delete = append(changes.Alarms.Delete, jobID)
+	if live {
+		changes.Alarms.Delete = append(changes.Alarms.Delete, jobID)
+	}
+	if terminal {
+		changes.TerminalJobs.Delete = append(changes.TerminalJobs.Delete, jobID)
+	}
 
 	return p.persistThenApply(ctx, &p.Mu, changes, func() {
-		delete(p.Alarms, alarmKey)
-		delete(p.AlarmsByID, jobID)
+		if live {
+			delete(p.Alarms, alarmKey)
+			delete(p.AlarmsByID, jobID)
+		}
+		if terminal {
+			delete(p.TerminalJobs, jobID)
+		}
 	})
 }
 
-func (p *Provider) GetDeadJob(ctx context.Context, jobID string) (components.GetDeadJobRes, error) {
+func (p *Provider) GetTerminalJob(ctx context.Context, jobID string) (components.GetTerminalJobRes, error) {
 	p.Mu.RLock()
 	defer p.Mu.RUnlock()
 
-	d, ok := p.DeadJobs[jobID]
-	if !ok {
-		return components.GetDeadJobRes{}, components.ErrNoJob
+	d, ok := p.TerminalJobs[jobID]
+	if !ok || d.HasExpired(p.Clock.Now()) {
+		return components.GetTerminalJobRes{}, components.ErrNoJob
 	}
 
-	res := components.GetDeadJobRes{
+	res := components.GetTerminalJobRes{
 		JobID:       d.JobID,
 		ActorType:   d.ActorType,
 		ActorID:     d.ActorID,
 		Method:      d.Method,
+		Status:      components.JobStatus(d.Status),
 		Attempts:    d.Attempts,
 		LastError:   d.LastError,
-		FailedAt:    d.FailedAt,
+		EndedAt:     d.EndedAt,
 		OriginalDue: d.OriginalDue,
 		Interval:    d.Interval,
 		Cron:        d.Cron,
+		Expiration:  d.Expiration,
 	}
 	if len(d.Data) > 0 {
 		res.Data = make([]byte, len(d.Data))
@@ -382,34 +446,15 @@ func (p *Provider) GetDeadJob(ctx context.Context, jobID string) (components.Get
 	return res, nil
 }
 
-func (p *Provider) DeleteDeadJob(ctx context.Context, jobID string) error {
-	p.writeMu.Lock()
-	defer p.writeMu.Unlock()
-
-	p.Mu.RLock()
-	_, ok := p.DeadJobs[jobID]
-	p.Mu.RUnlock()
-
-	if !ok {
-		return components.ErrNoJob
-	}
-
-	changes := NewChanges()
-	defer changes.Release()
-	changes.DeadJobs.Delete = append(changes.DeadJobs.Delete, jobID)
-
-	return p.persistThenApply(ctx, &p.Mu, changes, func() {
-		delete(p.DeadJobs, jobID)
-	})
-}
-
 func (p *Provider) RetryDeadJob(ctx context.Context, jobID string) (string, error) {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 
 	// Read the dead job's fields needed to re-dispatch it
+	// A job that ended by completing has nothing to retry, so only a dead-lettered one is taken
 	p.Mu.RLock()
-	d, ok := p.DeadJobs[jobID]
+	d, ok := p.TerminalJobs[jobID]
+	ok = ok && d.Status == string(components.JobStatusDeadLettered) && !d.HasExpired(p.Clock.Now())
 	var (
 		actorType, actorID, method string
 		data                       []byte
@@ -447,11 +492,11 @@ func (p *Provider) RetryDeadJob(ctx context.Context, jobID string) (string, erro
 	// Remove the dead-letter record and add the new job in one change set, so the two are persisted atomically
 	changes := NewChanges()
 	defer changes.Release()
-	changes.DeadJobs.Delete = append(changes.DeadJobs.Delete, jobID)
+	changes.TerminalJobs.Delete = append(changes.TerminalJobs.Delete, jobID)
 	changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: newID, Value: newAlarm})
 
 	err := p.persistThenApply(ctx, &p.Mu, changes, func() {
-		delete(p.DeadJobs, jobID)
+		delete(p.TerminalJobs, jobID)
 		p.Alarms[key] = newAlarm
 		p.AlarmsByID[newID] = newAlarm
 	})
@@ -462,28 +507,29 @@ func (p *Provider) RetryDeadJob(ctx context.Context, jobID string) (string, erro
 	return newID, nil
 }
 
-// deadJobToInfo maps a stored dead job to the public JobInfo, deriving the creation time from the job ID.
-func deadJobToInfo(d *DeadJob) components.JobInfo {
+// terminalJobToInfo maps a stored terminal job to the public JobInfo, deriving the creation time from the job ID.
+func terminalJobToInfo(d *TerminalJob) components.JobInfo {
 	return components.JobInfo{
 		JobID:     d.JobID,
 		ActorType: d.ActorType,
 		ActorID:   d.ActorID,
 		Method:    d.Method,
-		Status:    components.JobStatusDeadLettered,
+		Status:    components.JobStatus(d.Status),
 		DueTime:   d.OriginalDue,
 		Interval:  d.Interval,
 		Cron:      d.Cron,
 		Attempts:  d.Attempts,
 		LastError: d.LastError,
-		CreatedAt: jobCreatedAtOrFailed(d),
+		CreatedAt: jobCreatedAtOrEnded(d),
+		EndedAt:   d.EndedAt,
 	}
 }
 
-// jobCreatedAtOrFailed derives the creation time from the job ID, falling back to the failure time if the ID is not a parseable UUIDv7.
-func jobCreatedAtOrFailed(d *DeadJob) time.Time {
+// jobCreatedAtOrEnded derives the creation time from the job ID, falling back to the time the job ended if the ID is not a parseable UUIDv7.
+func jobCreatedAtOrEnded(d *TerminalJob) time.Time {
 	t := components.JobCreatedAt(d.JobID)
 	if t.IsZero() {
-		return d.FailedAt
+		return d.EndedAt
 	}
 	return t
 }

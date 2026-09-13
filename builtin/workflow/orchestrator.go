@@ -638,10 +638,10 @@ func (o *orchestrator) cancelOutstanding(ctx context.Context, sr *stepRecord, d 
 		}
 
 		for _, j := range jobs {
-			if j.Status == actor.JobStatusDeadLettered {
+			if j.Status.IsTerminal() {
 				continue
 			}
-			_ = client.CancelJob(ctx, j.JobID)
+			_ = client.DeleteJob(ctx, j.JobID)
 		}
 	}
 }

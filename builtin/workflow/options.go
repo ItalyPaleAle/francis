@@ -49,6 +49,17 @@ type RetentionPolicy struct {
 	Cancelled time.Duration
 }
 
+// jobRetention is how long the engine's own jobs keep a record once they end
+// It matches the journal's own TTL backstop, so a task's record and the journal entry that accounts for it disappear together, and a dead-lettered job can never be left behind by an instance that expired without ever being purged
+func (d *definition) jobRetention() time.Duration {
+	longest := max(
+		d.retention.forStatus(StatusCompleted),
+		d.retention.forStatus(StatusFailed),
+		d.retention.forStatus(StatusCancelled),
+	)
+	return 2 * longest
+}
+
 // forStatus returns the retention configured for a terminal status, falling back to the default for one the policy leaves unset
 func (r RetentionPolicy) forStatus(s Status) time.Duration {
 	var d time.Duration
