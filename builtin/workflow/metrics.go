@@ -21,8 +21,6 @@ type engineMetrics struct {
 	taskAttempts metric.Int64Counter
 	// transportFailures counts attempts that failed because a report could not be delivered, rather than because the handler failed
 	transportFailures metric.Int64Counter
-	// deadLettersRecovered counts dead-lettered jobs the watchdog scan folded back into a journal
-	deadLettersRecovered metric.Int64Counter
 	// compensationsRun and compensationsFailed count the unwind's work
 	compensationsRun    metric.Int64Counter
 	compensationsFailed metric.Int64Counter
@@ -86,12 +84,6 @@ func newEngineMetrics(meter metric.Meter) (*engineMetrics, error) {
 
 	m.transportFailures, err = meter.Int64Counter("francis.workflow.task.transport_failures",
 		metric.WithDescription("Number of attempts that failed because the report could not be delivered"))
-	if err != nil {
-		return nil, err
-	}
-
-	m.deadLettersRecovered, err = meter.Int64Counter("francis.workflow.deadletters.recovered",
-		metric.WithDescription("Number of dead-lettered jobs the watchdog recovered"))
 	if err != nil {
 		return nil, err
 	}

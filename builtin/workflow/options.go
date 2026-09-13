@@ -14,8 +14,8 @@ const (
 	defaultTimeout = time.Hour
 	// defaultConcurrency is the strict per-host task limit when WithConcurrency is not set
 	defaultConcurrency = 1
-	// defaultWatchdogInterval is how often an instance re-runs advance and reconcile and scans for dead-letters
-	defaultWatchdogInterval = 10 * time.Minute
+	// defaultParkInterval is how long an instance whose version this host cannot serve waits before looking again for a host that can
+	defaultParkInterval = 10 * time.Minute
 	// defaultMaxDepth bounds the parent chain of child instances, which is the only thing that stops a definition referencing itself
 	defaultMaxDepth = 8
 
@@ -81,8 +81,6 @@ type options struct {
 	maxOutputSize             int
 	maxJournalSize            int
 	maxDepth                  int
-	watchdog                  time.Duration
-	watchdogSet               bool
 	unknownVersion            UnknownVersionPolicy
 	compensationFailurePolicy CompensationFailurePolicy
 	logger                    *slog.Logger
@@ -188,15 +186,6 @@ func WithMaxJournalSize(n int) Option {
 func WithMaxDepth(n int) Option {
 	return func(o *options) {
 		o.maxDepth = n
-	}
-}
-
-// WithWatchdog sets how often an instance re-runs advance and reconcile, re-arms its deadline, and scans for dead-letters, defaulting to ten minutes
-// Passing zero disables it, which gives up the engine's recovery of a lost dispatch or a deleted alarm
-func WithWatchdog(d time.Duration) Option {
-	return func(o *options) {
-		o.watchdog = d
-		o.watchdogSet = true
 	}
 }
 

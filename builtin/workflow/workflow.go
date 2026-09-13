@@ -98,7 +98,6 @@ type definition struct {
 	maxOutputSize             int
 	maxJournalSize            int
 	maxDepth                  int
-	watchdog                  time.Duration
 	unknownVersion            UnknownVersionPolicy
 	compensationFailurePolicy CompensationFailurePolicy
 }
@@ -197,13 +196,6 @@ func applyDefaults(o *options) {
 		o.maxDepth = defaultMaxDepth
 	}
 
-	// A watchdog interval is only taken as "disabled" when the caller asked for it explicitly, so an unset option still gets the default
-	if !o.watchdogSet {
-		o.watchdog = defaultWatchdogInterval
-	} else if o.watchdog < 0 {
-		o.watchdog = 0
-	}
-
 	if o.unknownVersion == "" {
 		o.unknownVersion = ParkUnknownVersion
 	}
@@ -253,7 +245,6 @@ func newDefinition(name string, o *options) (*definition, error) {
 		maxOutputSize:             o.maxOutputSize,
 		maxJournalSize:            o.maxJournalSize,
 		maxDepth:                  o.maxDepth,
-		watchdog:                  o.watchdog,
 		unknownVersion:            o.unknownVersion,
 		compensationFailurePolicy: o.compensationFailurePolicy,
 	}

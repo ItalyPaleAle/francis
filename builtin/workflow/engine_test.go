@@ -469,18 +469,15 @@ func TestTurnConvergesAfterAFaultBetweenTheStateWriteAndTheDispatch(t *testing.T
 	assert.JSONEq(t, `"one"`, string(st.step("a").task(0).Output))
 }
 
-// TestWatchdogRecoversADeadLetteredReportAndLeavesNoRecord makes a worker's job dead-letter and asserts the instance recovers through the watchdog scan
+// TestATransportFailureIsFoldedAsOneRetryableAttempt drives the report a worker sends when its own run job dead-letters, which is the engine's whole recovery path for a task that ran and could not say so
 //
-// A dead-lettered job frees its idempotency key, so reconcile must never redispatch a scheduled-not-done task blindly, and no dead-letter record may outlive the journal entry that accounts for it (§7.8)
-func TestWatchdogRecoversADeadLetteredReportAndLeavesNoRecord(t *testing.T) {
+// A dead-lettered job frees its idempotency key, so the next attempt is dispatched under a key of its own rather than coalescing onto the one that died
+func TestATransportFailureIsFoldedAsOneRetryableAttempt(t *testing.T) {
 	host := newFakeHost()
 
-	wf, err := New("deadletter",
-		WithWatchdog(time.Minute),
-		WithSteps(
-			Step("a", WithRun(noopRun), WithMaxAttempts(3), WithRetryBackoff(time.Millisecond, time.Millisecond)),
-		),
-	)
+	wf, err := New("deadletter", WithSteps(
+		Step("a", WithRun(noopRun), WithMaxAttempts(3), WithRetryBackoff(time.Millisecond, time.Millisecond)),
+	))
 	require.NoError(t, err)
 
 	o := newTestOrchestrator(t, wf, host, "inst-1")
@@ -494,24 +491,52 @@ func TestWatchdogRecoversADeadLetteredReportAndLeavesNoRecord(t *testing.T) {
 	require.NotEmpty(t, runJob)
 	host.deadLetter(runJob, "could not reach the orchestrator")
 
-	// A tick folds it into the journal as one failed attempt of transport kind and dispatches the next attempt under its own key
-	require.NoError(t, o.Job(t.Context(), methodTick, nil))
+	// The worker's JobFailed hook sends exactly this, and the orchestrator folds it as one failed attempt of transport kind
+	require.NoError(t, o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{
+		Step: "a", Index: 0, Attempt: 1,
+		Error:     "task could not report its outcome: could not reach the orchestrator",
+		Retryable: true,
+		Transport: true,
+	}}))
 
 	st := readJournal(t, host, wf, "inst-1")
 	tr := st.step("a").task(0)
-	assert.Equal(t, 2, tr.Attempts, "the dead-lettered job is accounted for as one failed attempt")
+	assert.Equal(t, 2, tr.Attempts, "the lost report is accounted for as one failed attempt")
 	assert.False(t, tr.Done)
 	assert.Contains(t, tr.LastError, "could not report")
 
-	// The record is gone, so it cannot outlive the journal entry that accounts for it, and the work was re-driven
-	_, err = host.GetJob(t.Context(), runJob)
-	require.ErrorIs(t, err, actor.ErrJobNotFound)
-	assert.Equal(t, []string{methodRun}, host.dispatchedTo(workerType, workerID))
+	// The work was re-driven rather than left waiting on the key the dead job freed, and the dead record stays put until the instance is purged
+	assert.Equal(t, []string{methodRun, methodRun}, host.dispatchedTo(workerType, workerID))
+	dead, err := host.GetJob(t.Context(), runJob)
+	require.NoError(t, err)
+	assert.Equal(t, actor.JobStatusDeadLettered, dead.Status)
 
-	// A second scan must not count the same dead-letter again, which is what the recorded job ID guards against
-	require.NoError(t, o.Job(t.Context(), methodTick, nil))
+	// The same report arriving twice is a duplicate of an attempt already accounted for, and must not cost a second one
+	require.NoError(t, o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{
+		Step: "a", Index: 0, Attempt: 1, Error: "task could not report its outcome", Retryable: true, Transport: true,
+	}}))
 	st = readJournal(t, host, wf, "inst-1")
 	assert.Equal(t, 2, st.step("a").task(0).Attempts)
+}
+
+// TestADeadLetteredReportArmsTheDeadline verifies the instance's own JobFailed hook forces a turn, which is what re-dispatches whatever the journal still says is outstanding
+func TestADeadLetteredReportArmsTheDeadline(t *testing.T) {
+	host := newFakeHost()
+
+	wf, err := New("nudge", WithSteps(Step("a", WithRun(noopRun))))
+	require.NoError(t, err)
+
+	o := newTestOrchestrator(t, wf, host, "inst-1")
+	require.NoError(t, o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}}))
+
+	instanceType := ref.BuiltInActorTypePrefix + wf.baseType
+	require.NoError(t, o.JobFailed(t.Context(), "job-1", methodDone, nil, errors.New("could not deliver")))
+
+	host.mu.Lock()
+	armed, ok := host.alarms[key(instanceType, "inst-1", alarmDeadline)]
+	host.mu.Unlock()
+	require.True(t, ok, "a lost report arms the deadline so a turn runs")
+	assert.False(t, armed.DueTime.After(time.Now()), "the deadline is armed to fire at once")
 }
 
 // TestReconcileDoesNotRedispatchATaskThatIsAlreadyPending verifies a repeated turn coalesces on the task's idempotency key rather than queueing a second copy of the same work
@@ -528,9 +553,9 @@ func TestReconcileDoesNotRedispatchATaskThatIsAlreadyPending(t *testing.T) {
 	workerID := workerActorID("inst-1", "a", 0)
 	require.Len(t, host.dispatchedTo(workerType, workerID), 1)
 
-	// Ticking re-runs advance and reconcile, which is safe to do at any time precisely because the dispatch coalesces
+	// Re-running advance and reconcile is safe to do at any time precisely because the dispatch coalesces
 	for range 3 {
-		require.NoError(t, o.Job(t.Context(), methodTick, nil))
+		require.NoError(t, o.Alarm(t.Context(), alarmDeadline, nil))
 	}
 	assert.Len(t, host.dispatchedTo(workerType, workerID), 1)
 }
@@ -654,11 +679,11 @@ func TestAControlJobWaitsForTheStartJob(t *testing.T) {
 	assert.Equal(t, StatusSuspended, st.Status)
 }
 
-// TestTerminationDropsTheTimers verifies a terminated instance stops holding a deadline and a repeating watchdog
+// TestTerminationDropsTheTimers verifies a terminated instance stops holding its deadline
 func TestTerminationDropsTheTimers(t *testing.T) {
 	host := newFakeHost()
 
-	wf, err := New("timers", WithWatchdog(time.Minute), WithSteps(Step("a", WithRun(noopRun))))
+	wf, err := New("timers", WithTimeout(time.Hour), WithSteps(Step("a", WithRun(noopRun))))
 	require.NoError(t, err)
 
 	o := newTestOrchestrator(t, wf, host, "inst-1")
@@ -669,7 +694,6 @@ func TestTerminationDropsTheTimers(t *testing.T) {
 	_, armed := host.alarms[key(instanceType, "inst-1", alarmDeadline)]
 	host.mu.Unlock()
 	assert.True(t, armed, "a running instance holds its deadline")
-	assert.Contains(t, host.dispatchedTo(instanceType, "inst-1"), methodTick)
 
 	require.NoError(t, o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "a", Index: 0, Attempt: 1}}))
 
@@ -677,7 +701,6 @@ func TestTerminationDropsTheTimers(t *testing.T) {
 	_, stillArmed := host.alarms[key(instanceType, "inst-1", alarmDeadline)]
 	host.mu.Unlock()
 	assert.False(t, stillArmed)
-	assert.NotContains(t, host.dispatchedTo(instanceType, "inst-1"), methodTick)
 }
 
 // TestTheDeadlineFailsTheStepItHit verifies what a timeout costs depends on the step it elapsed on, which the per-step policies decide exactly as a handler failure would

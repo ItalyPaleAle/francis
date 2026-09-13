@@ -49,14 +49,14 @@ Two cases look like exceptions and are not:
 
 ## The turn
 
-Every turn — whether triggered by the start job, a task report, an event, a cancel, a suspend or resume, the watchdog, or the deadline alarm — runs the same four phases:
+Every turn — whether triggered by the start job, a task report, an event, a cancel, a suspend or resume, or the deadline alarm — runs the same four phases:
 
 1. **Read the journal.** It is the source of truth, and a terminated instance ignores everything but a purge and the unwind a parent may send.
 2. **Fold the event in.** A duplicate, or a report for a task the journal already has an outcome for, records nothing. That includes this very turn being retried after its state write succeeded and its dispatch failed.
 3. **Advance.** Decide what comes next, as a pure function of the journal and the definition: a completed step opens the next one, a failed attempt schedules the next, a failed step opens the unwind, a fully unwound instance terminates. This is unit-testable from a serialized journal alone, and it cannot block.
 4. **Persist, then reconcile.** The journal is durable before anything is scheduled. Then everything the journal says should be running is dispatched, idempotently.
 
-**Recovery is not a special code path.** Re-delivering any event, or firing the watchdog, re-runs advance and reconcile and converges on the same journal.
+**Recovery is not a special code path.** Re-delivering any event, or simply firing the deadline alarm, re-runs advance and reconcile and converges on the same journal.
 
 ## The three ordering invariants
 
@@ -92,22 +92,17 @@ The flip side of rewriting the whole document is the property that buys: **a ste
 
 ## Timers
 
-The instance keeps two durable timers, chosen for different reasons.
+The instance keeps one durable timer.
 
 **The deadline alarm** is recomputed every turn to the earliest of the instance timeout, the current step's `WithStepTimeout`, and a wait step's `WithEventTimeout`. It is an **alarm** because alarms are replaceable by name, so recomputing is one write — and the turn skips the write when the newly computed time is unchanged, which keeps a wide fan-out's reports from each costing a second write on the same row. Re-arming from inside its own handler is safe because Francis completes alarms by lease, not by name.
 
 When it fires, the actor determines from the journal which deadline actually elapsed and applies it: fail the outstanding attempts of a timed-out step, or fail the instance on an instance timeout. What a timeout *costs* depends on the step it hit, which the per-step policies decide.
 
-**The watchdog** is a repeating job the instance dispatches to itself at start and cancels at termination, on by default at a ten-minute interval. It is a **job** because a repeating job survives a failed occurrence — one that dead-letters is recorded while the recurrence continues — whereas an alarm whose handler fails its attempts is deleted, repeating or not, and the watchdog's whole purpose is to survive the conditions that make handlers fail. Ten thousand running instances cost seventeen ticks a second.
+There is deliberately no periodic sweep behind it. A repeating per-instance tick costs a write per instance per interval whether or not anything is wrong — ten thousand running instances is seventeen ticks a second, forever — and the failures it would catch are ones where something is already badly wrong. The engine spends that budget on making the ordinary paths reliable instead.
 
-A tick does what no ordinary turn can afford to do on every report:
+The `Workflow` type itself is registered with 20 attempts and a 5-second initial retry delay, far above the framework defaults. Its turns are idempotent, so retrying is always safe, and a generous budget is what carries a report across a host that dies mid-round-trip, a rebalance, or a provider query that times out under load.
 
-1. re-run advance and reconcile, which recovers a lost dispatch;
-2. re-arm the deadline unconditionally, which restores one that was deleted;
-3. scan the workers of every scheduled-not-done task for a dead-lettered job, and the instance's own dead-letters for a lost report;
-4. re-assert the status labels, in case a state write raced a purge.
-
-The `Workflow` type itself is registered with 20 attempts and a 5-second initial retry delay, far above the framework defaults. Its turns are idempotent, so retrying is always safe, and a generous policy is what keeps a ten-second database blip from dead-lettering a report or deleting a deadline in the first place. The watchdog is the backstop for the cases that still get through.
+A database outage needs none of that. While the provider is unreachable nothing is fetched and nothing is leased, so no occurrence is dispatched, no attempt is spent, and no alarm is deleted — the work simply resumes when the database comes back. Retry budgets exist for failures that happen *while the system is up*.
 
 ## Attempts and dead-letters
 
@@ -122,12 +117,13 @@ Each attempt costs a round trip through the orchestrator — one report turn and
 
 A worker's `Job` handler returns an error to Francis in exactly one situation: **the report dispatch itself failed**. Francis retries the job in place; the worker still holds the result of the attempt in memory, so the retried job re-sends the report rather than re-running the handler. The worker types are registered with 5 attempts to cover this case only.
 
-**Dead-letters.** A worker's job dead-letters only when it could not report — five failed report dispatches, or a host that died mid-attempt more than five times. Two mechanisms cover it:
+**Dead-letters.** A worker's job dead-letters only when it could not report — five failed report dispatches, or a host that died mid-attempt more than five times. The worker's own dead-letter hook is what recovers it: it reports the attempt to the orchestrator as a failure of **transport kind**, which the step's policy then retries exactly like any other retryable failure. A dead-lettered job frees its idempotency key, so the replacement attempt is dispatched under a key of its own rather than coalescing onto the one that died.
 
-- The worker's dead-letter hook reports the failure to the orchestrator, so in the common case it learns within a turn. The hook is best-effort, so it is the fast path, not the guarantee.
-- **The watchdog scans.** For every scheduled-not-done task it lists the worker's jobs; a dead-lettered run or compensate is folded into the journal as one failed attempt of transport kind and its record removed, and reconcile dispatches the next attempt under its own key in the same turn. The same dead job seen twice is not counted twice. It also lists the instance's own jobs and **retries** any dead-lettered report or event it finds — those are re-dispatched rather than re-derived, because nothing else can reconstruct a lost report.
+The instance's own `done` and `compensated` jobs can dead-letter the same way, and its hook arms the deadline to fire at once, which runs a turn whose reconcile re-dispatches everything the journal still says is outstanding.
 
-The invariant that falls out: **no dead-letter record outlives the journal entry that accounts for it.** By the time an instance terminates, every dead-letter it produced has been retried or deleted, which is what lets `Purge` be a state delete plus a bounded sweep rather than a search.
+**Nothing stands behind those hooks, by design.** A dead-lettered job takes its payload with it, so a report lost that way cannot be reconstructed from the journal — only re-derived by running the task again. If the hook itself cannot be delivered, the task stays scheduled-not-done until the instance's deadline fires and fails it like any other timeout. An instance configured with no timeout at all waits indefinitely; that is the reason to configure one.
+
+Dead-letter records accumulate for the life of an instance — bounded by its attempts — and `Purge` removes them with the journal. They also carry the journal's own retention, so an instance that expires without ever being purged does not leave them behind.
 
 ## Job methods and idempotency keys
 
@@ -140,7 +136,6 @@ The invariant that falls out: **no dead-letter record outlives the journal entry
 | `cancel` | `Workflow` | `Service.Cancel`, or a parent | `cancel`, or `cancel\|<attempt>` from a parent |
 | `unwind` | `Workflow` (a completed child) | a parent instance | `unwind\|<attempt>` |
 | `suspend` / `resume` | `Workflow` | `Service.Suspend` / `Resume` | `suspend` / `resume` |
-| `tick` | `Workflow` | itself, as a repeating job | `watchdog` |
 | `run` | worker | `Workflow` | `run\|<attempt>` |
 | `compensate` | undo worker | `Workflow` | `compensate\|<attempt>` |
 

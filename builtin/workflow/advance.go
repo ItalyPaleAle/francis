@@ -23,7 +23,6 @@ const (
 	evUnwind      eventKind = "unwind"
 	evSuspend     eventKind = "suspend"
 	evResume      eventKind = "resume"
-	evTick        eventKind = "tick"
 	evDeadline    eventKind = "deadline"
 )
 
@@ -67,8 +66,7 @@ func apply(st *instanceState, def *definition, ev *event, now time.Time) (duplic
 		return applySuspend(st, def, ev.reason, now)
 	case evResume:
 		return applyResume(st, def, now)
-	case evTick, evDeadline:
-		// A tick records nothing by design: it exists to re-run advance and reconcile
+	case evDeadline:
 		// A deadline is resolved against the journal by the orchestrator, which folds the outcome as a failure rather than as its own event
 		return true
 	default:

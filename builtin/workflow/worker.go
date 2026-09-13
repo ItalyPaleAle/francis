@@ -261,7 +261,7 @@ func (w *worker) report(ctx context.Context, method string, p *runPayload, res *
 }
 
 // JobFailed reports a dead-lettered attempt to the orchestrator, which is the fast path for a worker that could not report
-// It is best-effort, so the watchdog's scan remains the guarantee
+// It is best-effort and it is the only thing that can recover the attempt, since a dead-lettered job takes its payload with it
 func (w *worker) JobFailed(ctx context.Context, _ string, method string, data actor.Envelope, jobErr error) error {
 	if method != methodRun && method != methodCompensate {
 		return nil

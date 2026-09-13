@@ -31,7 +31,6 @@ wf, err := workflow.New("order-fulfillment",
 | `francis.workflow.step.duration` | histogram (s) | `workflow`, `step`, `outcome` |
 | `francis.workflow.task.attempts` | counter | `workflow`, `step`, `failed` |
 | `francis.workflow.task.transport_failures` | counter | `workflow`, `step` or `method` |
-| `francis.workflow.deadletters.recovered` | counter | `workflow`, `step` or `method` |
 | `francis.workflow.compensations.run` | counter | `workflow`, `step` |
 | `francis.workflow.compensations.failed` | counter | `workflow`, `step` |
 | `francis.workflow.instances.suspended` | counter | `workflow` |
@@ -41,7 +40,7 @@ wf, err := workflow.New("order-fulfillment",
 | `francis.workflow.turns.duplicate_events` | counter | `workflow`, `event` |
 | `francis.workflow.definition.conflicts` | counter | `workflow`, `version` |
 
-`task.transport_failures` is worth separating from ordinary attempt failures: it counts attempts that failed because the **report could not be delivered**, not because the handler failed. A task that ran and could not say so is a different problem from a task that ran and failed, and `deadletters.recovered` counts how many of those the watchdog put back.
+`task.transport_failures` is worth separating from ordinary attempt failures: it counts attempts that failed because the **report could not be delivered**, not because the handler failed. A task that ran and could not say so is a different problem from a task that ran and failed — it means the work may well have happened and is about to happen again.
 
 ## What to alert on
 

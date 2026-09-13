@@ -33,8 +33,6 @@ type orchestrator struct {
 	// armedDeadline is what this activation last wrote to the deadline alarm, so an unchanged deadline costs no second write on the same row
 	// A fresh activation starts empty and therefore re-arms once, which is also how an alarm someone deleted comes back
 	armedDeadline time.Time
-	// watchdogArmed records that this activation has already dispatched the repeating watchdog job
-	watchdogArmed bool
 }
 
 // newOrchestrator builds the Workflow actor for one instance
@@ -114,7 +112,7 @@ func (o *orchestrator) Peek(ctx context.Context, method string, _ actor.Envelope
 }
 
 // JobFailed reacts to one of the instance's own jobs being dead-lettered, which means a report or an event could not be delivered
-// It is best-effort, so it is the fast path rather than the guarantee: it arms the deadline to fire at once so the watchdog's scan does not have to wait for the next tick
+// The payload it carried is gone, so this cannot reconstruct it; what it can do is force a turn, whose reconcile re-dispatches everything the journal still says is outstanding
 func (o *orchestrator) JobFailed(ctx context.Context, jobID string, method string, _ actor.Envelope, jobErr error) error {
 	o.wf.metrics.transportFailures.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("workflow", o.def.name),
@@ -125,7 +123,7 @@ func (o *orchestrator) JobFailed(ctx context.Context, jobID string, method strin
 		o.log.WarnContext(ctx, "Workflow job was dead-lettered", slog.String("jobID", jobID), slog.String("method", method), slog.Any("error", jobErr))
 	}
 
-	// Arming the deadline for now brings the recovery scan forward without adding a second timer
+	// Arming the deadline for now runs a turn without adding a second timer
 	err := o.client.SetAlarm(ctx, alarmDeadline, actor.AlarmProperties{DueTime: time.Now()})
 	if err != nil {
 		return fmt.Errorf("failed to arm the deadline after a dead-letter: %w", err)
@@ -186,9 +184,6 @@ func (o *orchestrator) decodeEvent(method string, data actor.Envelope) (*event, 
 	case methodResume:
 		return &event{kind: evResume}, nil
 
-	case methodTick:
-		return &event{kind: evTick}, nil
-
 	default:
 		// A method this actor does not know would retry forever, so it fails permanently instead
 		return nil, fmt.Errorf("%w: unknown workflow job method %q", actor.ErrJobPermanentFailure, method)
@@ -238,11 +233,8 @@ func (o *orchestrator) turn(ctx context.Context, ev *event) (err error) {
 		return nil
 	}
 
-	// The deadline and the watchdog act on the journal rather than folding an event of their own, so their recovery happens here
-	err = o.recover(ctx, &st, ev, now)
-	if err != nil {
-		return err
-	}
+	// The deadline acts on the journal rather than folding an event of its own, so resolving it happens here
+	o.recover(&st, ev, now)
 
 	// The step statuses are snapshotted before advance so the turn can tell which steps it settled, which is what the step-duration histogram measures
 	before := stepStatuses(&st)
@@ -286,23 +278,14 @@ func (o *orchestrator) admits(st *instanceState, ev *event) (bool, error) {
 	return true, nil
 }
 
-// recover runs the parts of a turn that only the deadline and the watchdog drive: resolving an elapsed deadline against the journal, and scanning for dead-letters
-func (o *orchestrator) recover(ctx context.Context, st *instanceState, ev *event, now time.Time) error {
-	if ev.kind != evTick && ev.kind != evDeadline {
-		return nil
+// recover is the part of a turn only the deadline drives: resolving an elapsed deadline against the journal
+// One alarm stands for every deadline the instance has, so which one elapsed is resolved from the journal rather than carried on the event
+func (o *orchestrator) recover(st *instanceState, ev *event, now time.Time) {
+	if ev.kind != evDeadline {
+		return
 	}
 
-	// A tick re-arms the deadline unconditionally, which restores an alarm that was deleted, so this activation forgets what it last armed
-	if ev.kind == evTick {
-		o.armedDeadline = time.Time{}
-	}
-
-	// One alarm stands for every deadline the instance has, so which one elapsed is resolved from the journal
-	if ev.kind == evDeadline {
-		o.applyElapsedDeadlines(st, now)
-	}
-
-	return o.scanDeadLetters(ctx, st, now)
+	o.applyElapsedDeadlines(st, now)
 }
 
 // persist writes the journal, its status labels, and its retention TTL in one operation, and fails the instance rather than letting it outgrow what it can store
@@ -422,12 +405,6 @@ func (o *orchestrator) reconcile(ctx context.Context, st *instanceState, now tim
 	}
 
 	err := o.armDeadline(ctx, st)
-	if err != nil {
-		return err
-	}
-
-	// The watchdog is armed once per activation, which is enough because its key makes the dispatch idempotent and a fresh activation is exactly when a lost recurrence would need restoring
-	err = o.ensureWatchdog(ctx, st)
 	if err != nil {
 		return err
 	}
@@ -676,32 +653,7 @@ func (o *orchestrator) finish(ctx context.Context) error {
 		return fmt.Errorf("failed to drop the deadline: %w", err)
 	}
 
-	// The watchdog is a repeating job, so it has to be cancelled rather than left to expire
-	err = o.cancelWatchdog(ctx)
-	if err != nil {
-		return err
-	}
-
 	o.client.Halt()
-	return nil
-}
-
-// cancelWatchdog removes the repeating job the instance dispatched to itself at start
-func (o *orchestrator) cancelWatchdog(ctx context.Context) error {
-	jobs, err := o.client.ListJobs(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to list the instance's jobs: %w", err)
-	}
-
-	for _, j := range jobs {
-		if j.Method != methodTick || j.Status == actor.JobStatusDeadLettered {
-			continue
-		}
-		err = o.client.CancelJob(ctx, j.JobID)
-		if err != nil && !errors.Is(err, actor.ErrJobNotFound) {
-			return fmt.Errorf("failed to cancel the watchdog: %w", err)
-		}
-	}
 	return nil
 }
 
@@ -817,15 +769,7 @@ func (o *orchestrator) handleUnknownVersionDeadline(ctx context.Context) error {
 		o.log.WarnContext(ctx, "Workflow deadline fired on a host without the instance's version; parking",
 			slog.Int("instanceVersion", st.Version), slog.Int("hostVersion", o.def.version))
 	}
-	return o.client.SetAlarm(ctx, alarmDeadline, actor.AlarmProperties{DueTime: now.Add(o.parkInterval())})
-}
-
-// parkInterval is how long a parked instance waits before looking again for a host that can serve its version
-func (o *orchestrator) parkInterval() time.Duration {
-	if o.def.watchdog > 0 {
-		return o.def.watchdog
-	}
-	return defaultWatchdogInterval
+	return o.client.SetAlarm(ctx, alarmDeadline, actor.AlarmProperties{DueTime: now.Add(defaultParkInterval)})
 }
 
 // memberDef resolves the definition that governs one task of a step, which for a parallel group is the member that runs it

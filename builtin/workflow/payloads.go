@@ -22,8 +22,6 @@ const (
 	// methodSuspend and methodResume pause and continue an instance
 	methodSuspend = "suspend"
 	methodResume  = "resume"
-	// methodTick is the watchdog's own repeating job
-	methodTick = "tick"
 	// methodRun delivers one attempt of a forward task to a worker
 	methodRun = "run"
 	// methodCompensate delivers one attempt of a compensation to an undo worker
@@ -44,8 +42,6 @@ const (
 const (
 	// alarmDeadline is the instance's single deadline alarm, replaceable by name so recomputing it is one write
 	alarmDeadline = "deadline"
-	// keyWatchdog keys the repeating watchdog job
-	keyWatchdog = "watchdog"
 )
 
 // startPayload begins an instance

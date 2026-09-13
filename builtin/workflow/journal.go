@@ -143,8 +143,6 @@ type taskRecord struct {
 	Comp        *compRecord `msgpack:"comp,omitempty"`
 	Compensated bool        `msgpack:"compensated,omitempty"`
 	CompletedAt time.Time   `msgpack:"completedAt,omitzero"`
-	// DeadJobID is the dead-lettered job last folded into this task's attempts, so a re-scan cannot count the same one twice
-	DeadJobID string `msgpack:"deadJobId,omitempty"`
 }
 
 // compRecord is a task's compensation, which gets its own attempts because a failed rollback is worth trying harder than the forward work was (§9.3)
@@ -155,8 +153,6 @@ type compRecord struct {
 	// Error is set once the compensation has failed for good
 	Error string `msgpack:"error,omitempty"`
 	Done  bool   `msgpack:"done"`
-	// DeadJobID is the dead-lettered job last folded into this compensation's attempts
-	DeadJobID string `msgpack:"deadJobId,omitempty"`
 }
 
 // suspendRecord is what a suspended instance remembers, so Resume can put the deadlines back where it found them

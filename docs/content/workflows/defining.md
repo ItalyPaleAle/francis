@@ -97,7 +97,6 @@ One call registers everything the workflow needs: the orchestrator, the worker a
 | `WithCompensationFailurePolicy(p)` | What a failing compensation costs the rest of the unwind. Defaults to `ContinueUnwinding`. |
 | `WithUnknownVersionPolicy(p)` | What to do with an instance no host can serve. Defaults to `ParkUnknownVersion`. |
 | `WithMaxDepth(n)` | How deep a chain of child instances may go. Defaults to `8`. |
-| `WithWatchdog(d)` | How often an instance re-runs its recovery pass. Defaults to 10 minutes; `0` disables it. |
 | `WithMaxInputSize(n)` | Cap on the encoded workflow input, checked at `Start`. Defaults to 64 KiB. |
 | `WithMaxOutputSize(n)` | Cap on a single task's encoded output, checked on the worker. Defaults to 16 KiB. |
 | `WithMaxJournalSize(n)` | Cap on the encoded journal, checked before every write. Defaults to 1 MiB. |
