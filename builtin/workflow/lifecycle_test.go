@@ -419,3 +419,69 @@ func TestInputSizeCapIsEnforcedAtStart(t *testing.T) {
 	_, _, err = svc.Start(t.Context(), make([]int, 100))
 	require.ErrorIs(t, err, workflow.ErrInputTooLarge)
 }
+
+// TestPurgeRefusesAChildOfARunningParent verifies a child is never removed from under a parent that might still unwind it
+func TestPurgeRefusesAChildOfARunningParent(t *testing.T) {
+	child, err := workflow.New("purge-child",
+		workflow.WithSteps(
+			workflow.Step("quick", workflow.WithRun(func(ctx context.Context, tk workflow.Task) (any, error) {
+				return "done", nil
+			})),
+		),
+	)
+	require.NoError(t, err)
+
+	release := make(chan struct{})
+	parent, err := workflow.New("purge-parent",
+		workflow.WithSteps(
+			workflow.Child("sub", workflow.WithDefinition(child)),
+			// Holding the parent open is what keeps it running while the child has already terminated
+			workflow.Step("hold", workflow.WithRun(func(ctx context.Context, tk workflow.Task) (any, error) {
+				select {
+				case <-release:
+				case <-time.After(20 * time.Second):
+				}
+				return "held", nil
+			})),
+		),
+	)
+	require.NoError(t, err)
+
+	host := startHost(t, child, parent)
+	parentSvc := parent.Service(host.Service())
+	childSvc := child.Service(host.Service())
+
+	id, _, err := parentSvc.Start(t.Context(), nil, workflow.WithInstanceID("tenant-3"))
+	require.NoError(t, err)
+
+	// Wait for the child to terminate while its parent is still going
+	var childID string
+	require.Eventually(t, func() bool {
+		status, sErr := parentSvc.GetStatus(t.Context(), id)
+		if sErr != nil || len(status.Steps) == 0 {
+			return false
+		}
+
+		sub := stepView(t, status, "sub")
+		if len(sub.ChildIDs) == 0 {
+			return false
+		}
+		childID = sub.ChildIDs[0]
+
+		childStatus, cErr := childSvc.GetStatus(t.Context(), childID)
+		return cErr == nil && childStatus.Status == workflow.StatusCompleted
+	}, 20*time.Second, 50*time.Millisecond)
+
+	// The child has terminated, but its parent has not, so the parent's own purge is what must reach it
+	err = childSvc.Purge(t.Context(), childID)
+	require.ErrorIs(t, err, workflow.ErrInstanceActive)
+
+	close(release)
+	awaitStatus(t, parentSvc, id, workflow.StatusCompleted)
+
+	// Purging the parent removes the child with it
+	require.NoError(t, parentSvc.Purge(t.Context(), id))
+
+	_, err = childSvc.GetStatus(t.Context(), childID)
+	require.ErrorIs(t, err, workflow.ErrInstanceNotFound)
+}

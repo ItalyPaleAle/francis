@@ -837,6 +837,15 @@ func (o *orchestrator) purge(ctx context.Context) (any, error) {
 		return purgeResult{Found: true, Active: true}, nil
 	}
 
+	// A child is never purged from under a parent that might still unwind it, so the parent's own purge is what reaches it
+	active, err := o.parentStillRunning(ctx, st.Parent)
+	if err != nil {
+		return nil, err
+	}
+	if active {
+		return purgeResult{Found: true, Active: true}, nil
+	}
+
 	// Children go first, recursively, so a child is never left orphaned by its parent's removal
 	for i := range st.Steps {
 		for j := range st.Steps[i].Tasks {
@@ -871,6 +880,24 @@ func (o *orchestrator) purge(ctx context.Context) (any, error) {
 	o.wf.metrics.instancesPurged.Add(ctx, 1, metric.WithAttributes(attribute.String("workflow", o.def.name)))
 	o.client.Halt()
 	return purgeResult{Found: true}, nil
+}
+
+// parentStillRunning reports whether this instance's parent exists and has not terminated
+// Reading the parent's journal is a bounded state read rather than an invocation, so it stays on the right side of the orchestration boundary
+func (o *orchestrator) parentStillRunning(ctx context.Context, parent *parentRef) (bool, error) {
+	if parent == nil {
+		return false, nil
+	}
+
+	parentType := workflowActorTypePrefix + parent.Workflow
+	client := builtinactor.NewClient[instanceState](parentType, parent.InstanceID, o.svc)
+	parentState, err := client.GetState(ctx)
+	if err != nil {
+		return false, fmt.Errorf("failed to read the parent's journal: %w", err)
+	}
+
+	// A parent whose journal is gone was purged already, and cannot come back to unwind anything
+	return parentState.Status != "" && !parentState.Status.IsTerminal(), nil
 }
 
 // purgeDeadLetters removes the dead-letter records the instance and its workers left behind
