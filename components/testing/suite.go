@@ -3,6 +3,7 @@ package comptesting
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -5240,10 +5241,12 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 		require.ErrorIs(t, err, components.ErrNoAlarm)
 	})
 
-	t.Run("returns ErrNoAlarm for alarm with no lease", func(t *testing.T) {
+	// An alarm with no lease is one whose actor deactivated, which is what an actor halting itself from its own handler does
+	// Finalizing the occurrence that execution just ran has to survive that, or it is left behind to be leased and delivered again
+	// The alarm ID is what makes this safe to accept: replacing an alarm by name mints a new one, so a lease can never name a row it did not execute
+	t.Run("deletes an alarm whose lease its own actor released", func(t *testing.T) {
 		ctx := t.Context()
 
-		// Create a custom test spec with an unleased alarm
 		customSpec := Spec{
 			Hosts: []HostSpec{
 				{HostID: SpecHostH1, Address: "127.0.0.1:4001", LastHealthAgo: 2 * time.Second},
@@ -5262,19 +5265,32 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 				},
 			},
 		}
-
-		// Seed with custom data
 		require.NoError(t, s.p.Seed(ctx, customSpec))
 
-		// Try to delete an alarm that was never leased
-		fakeLease := ref.NewAlarmLease(ref.NewAlarmRef("at", "aid", "name"), "944f30d6-bbc4-474c-9d6a-734a6bb92577", s.p.Now(), "e362bf50-a974-4927-b3c6-06ec45ed4c32")
-		err := s.p.DeleteLeasedAlarm(ctx, fakeLease)
-		require.ErrorIs(t, err, components.ErrNoAlarm)
+		lease := ref.NewAlarmLease(ref.NewAlarmRef("TestType", "test-actor", "test-alarm"), "944f30d6-bbc4-474c-9d6a-734a6bb92577", s.p.Now(), "e362bf50-a974-4927-b3c6-06ec45ed4c32")
+		err := s.p.DeleteLeasedAlarm(ctx, lease)
+		require.NoError(t, err)
 
-		// Verify the unleased alarm still exists via GetAlarm
 		alarmRef := ref.AlarmRef{ActorType: "TestType", ActorID: "test-actor", Name: "test-alarm"}
 		_, err = s.p.GetAlarm(ctx, alarmRef)
-		require.NoError(t, err, "unleased alarm should still exist")
+		require.ErrorIs(t, err, components.ErrNoAlarm, "the finalized occurrence must be gone")
+	})
+
+	// A lease that merely expired keeps its id, so it names an occurrence this execution no longer owns and must not remove
+	t.Run("returns ErrNoAlarm for an expired lease", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		leases, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{Hosts: []string{SpecHostH1}})
+		require.NoError(t, err)
+		require.NotEmpty(t, leases)
+		lease := leases[0]
+
+		// Past the lease duration the alarm is another host's to take, and this execution may no longer finalize it
+		_ = s.p.AdvanceClock(2 * time.Minute) //nolint:errcheck
+
+		err = s.p.DeleteLeasedAlarm(ctx, lease)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
 	})
 
 	t.Run("returns ErrNoAlarm for wrong lease ID", func(t *testing.T) {
@@ -6052,6 +6068,56 @@ func (s Suite) TestJobs(t *testing.T) {
 		}
 		assert.Equal(t, 1, live, "the recurrence should still have one live job")
 		assert.Equal(t, 1, completed, "the occurrence that ran should be recorded")
+	})
+
+	// A worker halts itself once it has reported, and deactivating an actor releases the leases of its alarms
+	// The occurrence being finalized must survive that, or it is left behind to be leased and delivered again on the next poll, forever
+	t.Run("a job can be finalized after its own actor released the lease", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			finalize func(t *testing.T, ctx context.Context, lease *ref.AlarmLease)
+		}{
+			{
+				name: "completed",
+				finalize: func(t *testing.T, ctx context.Context, lease *ref.AlarmLease) {
+					require.NoError(t, s.p.CompleteJob(ctx, lease, components.CompleteJobReq{Attempts: 1, Retention: time.Hour}))
+				},
+			},
+			{
+				name: "dead-lettered",
+				finalize: func(t *testing.T, ctx context.Context, lease *ref.AlarmLease) {
+					require.NoError(t, s.p.DeadLetterAlarm(ctx, lease, components.DeadLetterAlarmReq{Reason: "boom", Attempts: 3}))
+				},
+			},
+			{
+				name: "deleted",
+				finalize: func(t *testing.T, ctx context.Context, lease *ref.AlarmLease) {
+					require.NoError(t, s.p.DeleteLeasedAlarm(ctx, lease))
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx := t.Context()
+				require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+				actorID := "halt-" + tc.name
+				jobID := dispatch(t, ctx, actorID, "h1", "process", ref.AlarmProperties{DueTime: s.p.Now()}, nil)
+				lease := leaseFor(t, ctx, jobID)
+
+				// The actor halting itself from its own handler is what releases the lease
+				require.NoError(t, s.p.RemoveActor(ctx, ref.NewActorRef("JOB", actorID)))
+
+				tc.finalize(t, ctx, lease)
+
+				// Whatever the outcome, the occurrence must no longer be live, or the next poll runs it again
+				info, err := s.p.GetJob(ctx, jobID)
+				if errors.Is(err, components.ErrNoJob) {
+					return
+				}
+				require.NoError(t, err)
+				assert.True(t, info.Status.IsTerminal(), "a finalized occurrence must not be live, got %q", info.Status)
+			})
+		}
 	})
 
 	t.Run("get and delete report missing jobs", func(t *testing.T) {

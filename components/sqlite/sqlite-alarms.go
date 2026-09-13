@@ -508,9 +508,17 @@ func (s *SQLiteProvider) DeleteLeasedAlarm(ctx context.Context, lease *ref.Alarm
 		DELETE FROM `+s.tablePrefix+`alarms
 		WHERE
 			alarm_id = ?
-			AND alarm_lease_id = ?
-			AND alarm_lease_expiration_time IS NOT NULL
-			AND alarm_lease_expiration_time >= ?`,
+			-- A job handler that halts its own actor is the common case for a worker, and deactivating an actor drops the leases of its alarms so another host can pick them up
+			-- For the occurrence being finalized right now that release must not undo the finalization, so a lease this execution owns and a lease that was released both count
+			-- A lease that merely expired keeps its id, and one another replica took holds its own id, so neither is matched here
+			AND (
+				(
+					alarm_lease_id = ?
+					AND alarm_lease_expiration_time IS NOT NULL
+					AND alarm_lease_expiration_time >= ?
+				)
+				OR alarm_lease_id IS NULL
+			)`,
 		lease.Key(), lease.LeaseID(), s.clock.Now().UnixMilli(),
 	)
 	if err != nil {

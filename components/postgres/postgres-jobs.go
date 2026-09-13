@@ -170,9 +170,17 @@ func (p *PostgresProvider) endJob(ctx context.Context, lease *ref.AlarmLease, re
 				DELETE FROM `+p.tablePrefix+`alarms
 				WHERE
 					alarm_id = $1
-					AND alarm_lease_id = $2
-					AND alarm_lease_expiration_time IS NOT NULL
-					AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')
+			-- A job handler that halts its own actor is the common case for a worker, and deactivating an actor drops the leases of its alarms so another host can pick them up
+			-- For the occurrence being finalized right now that release must not undo the finalization, so a lease this execution owns and a lease that was released both count
+			-- A lease that merely expired keeps its id, and one another replica took holds its own id, so neither is matched here
+					AND (
+						(
+							alarm_lease_id = $2
+							AND alarm_lease_expiration_time IS NOT NULL
+							AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')
+						)
+						OR alarm_lease_id IS NULL
+					)
 				RETURNING actor_type, actor_id, job_method, alarm_data, alarm_due_time, alarm_interval, alarm_cron
 			)
 			INSERT INTO `+p.tablePrefix+`terminal_jobs
@@ -228,9 +236,17 @@ func (p *PostgresProvider) endJob(ctx context.Context, lease *ref.AlarmLease, re
 				DELETE FROM `+p.tablePrefix+`alarms
 				WHERE
 					alarm_id = $1
-					AND alarm_lease_id = $2
-					AND alarm_lease_expiration_time IS NOT NULL
-					AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')
+			-- A job handler that halts its own actor is the common case for a worker, and deactivating an actor drops the leases of its alarms so another host can pick them up
+			-- For the occurrence being finalized right now that release must not undo the finalization, so a lease this execution owns and a lease that was released both count
+			-- A lease that merely expired keeps its id, and one another replica took holds its own id, so neither is matched here
+					AND (
+						(
+							alarm_lease_id = $2
+							AND alarm_lease_expiration_time IS NOT NULL
+							AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')
+						)
+						OR alarm_lease_id IS NULL
+					)
 				RETURNING actor_type, actor_id, alarm_name, job_method, alarm_data, alarm_due_time, alarm_interval, alarm_cron, alarm_ttl_time
 			),
 			ended AS (

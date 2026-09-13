@@ -78,11 +78,13 @@ type ActorProvider interface {
 	DispatchJob(ctx context.Context, ref ref.AlarmRef, req SetAlarmReq) (jobID string, lease *ref.AlarmLease, err error)
 
 	// DeadLetterAlarm atomically moves a leased job from the alarms table to the terminal-job store, recording it as dead-lettered.
+	// It accepts a lease the job's own actor released by deactivating, for the reason given on DeleteLeasedAlarm.
 	// When req.Reschedule is set, the recurrence is re-created for its next occurrence in the same transaction, so a repeating job survives the dead-lettering of one occurrence.
 	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
 	DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLease, req DeadLetterAlarmReq) error
 
 	// CompleteJob atomically moves a leased job from the alarms table to the terminal-job store, recording it as completed.
+	// It accepts a lease the job's own actor released by deactivating, for the reason given on DeleteLeasedAlarm.
 	// It is the successful counterpart of DeadLetterAlarm, and is only called for a job whose actor type asked for its completed occurrences to be retained; otherwise the occurrence is simply deleted.
 	// When req.Reschedule is set, the recurrence is re-created for its next occurrence in the same transaction, so a repeating job keeps running while each occurrence leaves a record.
 	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
@@ -128,8 +130,9 @@ type ActorProvider interface {
 	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
 	UpdateLeasedAlarm(ctx context.Context, lease *ref.AlarmLease, req UpdateLeasedAlarmReq) error
 
-	// DeleteLeasedAlarm deletes an alarm using an alarm lease object.
-	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
+	// DeleteLeasedAlarm deletes an alarm using an alarm lease object, finalizing the occurrence the lease's holder just executed.
+	// A lease whose actor released it by deactivating is accepted, because an actor that halts itself from its own handler drops the leases of its own alarms, and the occurrence being finalized must not be left behind to be delivered again. Replacing an alarm by name mints a new alarm ID, so a lease can never name a row its holder did not execute.
+	// Returns ErrNoAlarm if the alarm doesn't exist, or the lease expired or belongs to someone else.
 	DeleteLeasedAlarm(ctx context.Context, lease *ref.AlarmLease) error
 
 	// GetState retrieves the persistent state of an actor.

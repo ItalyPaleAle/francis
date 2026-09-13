@@ -220,7 +220,7 @@ func (p *Provider) endJob(ctx context.Context, lease *ref.AlarmLease, req endJob
 
 	p.Mu.RLock()
 	a, ok := p.AlarmsByID[lease.Key()]
-	valid := ok && a.HasValidLease(lease.LeaseID(), now)
+	valid := ok && a.CanFinalize(lease.LeaseID(), now)
 	var (
 		alarmKey    AlarmKey
 		oldID       string

@@ -130,6 +130,14 @@ func (a *Alarm) HasValidLease(leaseID any, now time.Time) bool {
 	return a.LeaseID != nil && *a.LeaseID == leaseID && a.LeaseExpiration != nil && !a.LeaseExpiration.Before(now)
 }
 
+// CanFinalize reports whether an execution holding this lease may finalize the occurrence, by completing, dead-lettering, or deleting it.
+// A job handler that halts its own actor is the common case for a worker, and deactivating an actor drops the leases of its alarms so another host can pick them up.
+// For the occurrence being finalized right now that release must not undo the finalization, so a lease this execution owns and a lease that was released both count.
+// A lease that merely expired keeps its id, and one another replica took holds its own id, so neither is accepted here.
+func (a *Alarm) CanFinalize(leaseID any, now time.Time) bool {
+	return a.HasValidLease(leaseID, now) || a.LeaseID == nil
+}
+
 // Clone creates a deep copy of the Alarm.
 func (a *Alarm) Clone() *Alarm {
 	clone := &Alarm{
