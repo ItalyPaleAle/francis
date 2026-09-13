@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/italypaleale/francis/components"
@@ -90,16 +91,24 @@ func (s *SQLiteProvider) ListStates(ctx context.Context, req components.ListStat
 	args := make([]any, 0, 4+2*len(req.Labels))
 	args = append(args, req.ActorType, req.After, s.clock.Now().UnixMilli())
 
-	// Each requested label becomes an EXISTS over the row's own label object
-	// SQLite has no index for arbitrary JSON keys, so this is evaluated per row, within the actor_type range the primary key already narrows the scan to
-	// json_each is used rather than a json_extract path so a label key needs no escaping to be matched
+	// SQLite has no index that covers arbitrary JSON keys, so each requested label is matched one of two ways
+	// A key this deployment asked to index is spelled as the same json_extract expression the index was built on, which is the only form the planner will match it against
+	// Any other key is matched with json_each, which needs no escaping whatever the key contains, at the cost of being evaluated per row within the actor_type range the primary key already narrows the scan to
 	var labelClauses strings.Builder
 	if len(req.Labels) > 0 {
-		// json_each requires well-formed JSON, so a row with no labels at all is excluded before it is reached
+		// json_extract and json_each both need well-formed JSON, so a row with no labels at all is excluded before either is reached
 		labelClauses.WriteString(`
 			AND actor_state_labels IS NOT NULL`)
 	}
 	for k, v := range req.Labels {
+		if slices.Contains(s.stateLabelIndexes, k) {
+			// #nosec G202 -- the key was validated as a plain identifier before its index was created, so there is nothing to escape here
+			labelClauses.WriteString(`
+			AND ` + stateLabelExtract(k) + ` = ?`)
+			args = append(args, v)
+			continue
+		}
+
 		labelClauses.WriteString(`
 			AND EXISTS (
 				SELECT 1 FROM json_each(actor_state_labels) l

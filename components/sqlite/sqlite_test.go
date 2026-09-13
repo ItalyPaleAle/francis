@@ -725,3 +725,125 @@ func TestActiveHostsList_HostForActorType(t *testing.T) {
 		assert.Nil(t, ahl.HostForActorType("typeA"))
 	})
 }
+
+// TestSQLiteStateLabelIndexes verifies the expression indexes a deployment declares are created and actually used
+//
+// SQLite has no index that covers arbitrary JSON keys, but it does index expressions, and it will only match one when the query repeats the indexed expression verbatim
+func TestSQLiteStateLabelIndexes(t *testing.T) {
+	newProvider := func(t *testing.T, keys ...string) *SQLiteProvider {
+		t.Helper()
+
+		clock := clocktesting.NewFakeClock(time.Now())
+		log := slog.New(slog.DiscardHandler)
+		p, err := NewSQLiteProvider(log, SQLiteProviderOptions{
+			ConnectionString:  testutil.SQLiteConnString(t),
+			CleanupInterval:   -1,
+			StateLabelIndexes: keys,
+			clock:             clock,
+		}, comptesting.GetProviderConfig())
+		require.NoError(t, err)
+		t.Cleanup(func() { assert.NoError(t, p.Close()) })
+		require.NoError(t, p.Init(t.Context()))
+		return p
+	}
+
+	t.Run("a declared key gets an index the planner uses", func(t *testing.T) {
+		p := newProvider(t, "status")
+
+		var names string
+		err := p.db.QueryRowContext(t.Context(),
+			`SELECT coalesce(group_concat(name), '') FROM sqlite_master WHERE type = 'index'`,
+		).Scan(&names)
+		require.NoError(t, err)
+		assert.Contains(t, names, "francis_actor_state_label_status_idx")
+
+		// Enough rows that the planner has a reason to prefer an index over walking the actor type
+		for i := range 400 {
+			id := fmt.Sprintf("actor-%03d", i)
+			status := "running"
+			if i == 7 {
+				status = "completed"
+			}
+			require.NoError(t, p.SetState(t.Context(), ref.NewActorRef("W", id), []byte("data"), components.SetStateOpts{
+				Labels: map[string]string{"status": status},
+			}))
+		}
+		_, err = p.db.ExecContext(t.Context(), "ANALYZE")
+		require.NoError(t, err)
+
+		// The listing must name the index in its plan, which is the whole point of declaring the key
+		plan := queryPlan(t, p, "W", "status", "completed")
+		assert.Contains(t, plan, "francis_actor_state_label_status_idx", "plan was: %s", plan)
+
+		// And it must still return the right row
+		res, err := p.ListStates(t.Context(), components.ListStatesReq{ActorType: "W", Labels: map[string]string{"status": "completed"}})
+		require.NoError(t, err)
+		require.Len(t, res.States, 1)
+		assert.Equal(t, "actor-007", res.States[0].ActorID)
+	})
+
+	t.Run("an undeclared key is still filtered, just not indexed", func(t *testing.T) {
+		p := newProvider(t, "status")
+
+		require.NoError(t, p.SetState(t.Context(), ref.NewActorRef("W", "a1"), []byte("data"), components.SetStateOpts{
+			Labels: map[string]string{"status": "running", "tier": "gold"},
+		}))
+		require.NoError(t, p.SetState(t.Context(), ref.NewActorRef("W", "a2"), []byte("data"), components.SetStateOpts{
+			Labels: map[string]string{"status": "running", "tier": "silver"},
+		}))
+
+		res, err := p.ListStates(t.Context(), components.ListStatesReq{ActorType: "W", Labels: map[string]string{"tier": "gold"}})
+		require.NoError(t, err)
+		require.Len(t, res.States, 1)
+		assert.Equal(t, "a1", res.States[0].ActorID)
+	})
+
+	t.Run("a key that is not a plain identifier is refused", func(t *testing.T) {
+		clock := clocktesting.NewFakeClock(time.Now())
+		p, err := NewSQLiteProvider(slog.New(slog.DiscardHandler), SQLiteProviderOptions{
+			ConnectionString:  testutil.SQLiteConnString(t),
+			CleanupInterval:   -1,
+			StateLabelIndexes: []string{"not a valid'key"},
+			clock:             clock,
+		}, comptesting.GetProviderConfig())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = p.Close() })
+
+		err = p.Init(t.Context())
+		require.ErrorContains(t, err, "not a plain identifier")
+	})
+}
+
+// queryPlan returns SQLite's plan for a label-filtered listing, in the same shape ListStates builds it
+func queryPlan(t *testing.T, p *SQLiteProvider, actorType string, labelKey string, labelValue string) string {
+	t.Helper()
+
+	// #nosec G202 -- the only concatenated values are the static table prefix and a label key the test controls, not user input
+	rows, err := p.db.QueryContext(t.Context(),
+		`EXPLAIN QUERY PLAN
+		SELECT actor_id, actor_state_data
+		FROM `+p.tablePrefix+`actor_state
+		WHERE
+			actor_type = ?
+			AND actor_id > ?
+			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > ?)
+			AND actor_state_labels IS NOT NULL
+			AND `+stateLabelExtract(labelKey)+` = ?
+		ORDER BY actor_id
+		LIMIT ?`,
+		actorType, "", p.clock.Now().UnixMilli(), labelValue, 101,
+	)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var plan strings.Builder
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		require.NoError(t, rows.Scan(&id, &parent, &notUsed, &detail))
+		plan.WriteString(detail)
+		plan.WriteString("; ")
+	}
+	require.NoError(t, rows.Err())
+	return plan.String()
+}

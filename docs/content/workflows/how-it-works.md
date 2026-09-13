@@ -151,7 +151,18 @@ A worker's actor ID is deterministic — `<instanceID>|<step>|<index>` — so a 
 
 `List` is built on **state labels**: the orchestrator writes `status`, `version`, and `parent` with every journal write. They live in the state row itself, as a JSON object in a column of its own, so they are written, replaced, and removed in the same statement as the journal and cannot disagree with it or outlive it.
 
-On Postgres the column carries a `jsonb_path_ops` GIN index and a filter is one containment test, which the planner uses when the filter is selective enough to beat walking the page in actor-ID order. SQLite has no index for arbitrary JSON keys, so a filter there is evaluated per row, within the actor-type range the primary key already narrows the scan to.
+On Postgres the column carries a `jsonb_path_ops` GIN index and a filter is one containment test, which the planner uses when the filter is selective enough to beat walking the page in actor-ID order.
+
+SQLite has no index that covers arbitrary JSON keys, but it does index expressions. Name the keys you filter on and each gets an index of its own, which turns the filter into an index lookup:
+
+```go
+local.WithSQLiteProvider(sqlite.SQLiteProviderOptions{
+	ConnectionString:  "...",
+	StateLabelIndexes: []string{"status", "version", "parent"},
+})
+```
+
+Those three are the keys this engine writes, so a deployment that uses `List` filters on SQLite wants all of them. A key left out is still stored and still filterable, just matched per row within the actor-type range the primary key already narrows the scan to.
 
 Labels are equality-only, so a range question — "terminated more than a week ago" — cannot be asked of them. The retention sweep therefore filters by status server-side and checks each instance's completion time on the decoded journal.
 
