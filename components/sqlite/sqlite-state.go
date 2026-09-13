@@ -43,7 +43,6 @@ func (s *SQLiteProvider) SetState(ctx context.Context, ref ref.ActorRef, data []
 		exp = new(s.clock.Now().Add(opts.TTL).UnixMilli())
 	}
 
-	// The labels live in the state row, so writing them is part of the same statement and the set passed in replaces whatever the actor had
 	labelsJSON, err := opts.LabelsJSON()
 	if err != nil {
 		return err
