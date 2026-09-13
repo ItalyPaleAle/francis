@@ -180,7 +180,8 @@ func (s *builtinCron) Run(t *testing.T) {
 	// Exactly one recurring job is registered, even though every host bootstrapped it
 	t.Run("registers exactly once", func(t *testing.T) {
 		require.Eventually(t, func() bool {
-			return s.liveRunJobs(t) == 1
+			n, err := s.liveRunJobs(ctx)
+			return err == nil && n == 1
 		}, eventuallyTimeout, eventuallyTick, "exactly one recurring job should be registered")
 	})
 
@@ -236,8 +237,13 @@ func (s *builtinCron) Run(t *testing.T) {
 		}, eventuallyTimeout, eventuallyTick, "the jittered cron job should run repeatedly on its schedule")
 
 		// There is no recurring job to find: the schedule only ever exists as the occurrences that are still live, and a chain that forked would show up here as more of them
-		assert.Zero(t, s.liveJobs(t, s.jitterType, "run"), "a jittered schedule registers no recurring job")
-		assert.LessOrEqual(t, s.liveJobs(t, s.jitterType, "scheduled-run"), 2, "at most the occurrence running and the one it planned should be live")
+		recurring, err := s.liveJobs(ctx, s.jitterType, "run")
+		require.NoError(t, err)
+		assert.Zero(t, recurring, "a jittered schedule registers no recurring job")
+
+		occurrences, err := s.liveJobs(ctx, s.jitterType, "scheduled-run")
+		require.NoError(t, err)
+		assert.LessOrEqual(t, occurrences, 2, "at most the occurrence running and the one it planned should be live")
 	})
 
 	// Unregistering a jittered job cancels the occurrence the chain is waiting on, which is what ends it
@@ -246,7 +252,8 @@ func (s *builtinCron) Run(t *testing.T) {
 		require.NoError(t, err)
 
 		require.Eventually(t, func() bool {
-			return s.liveJobs(t, s.jitterType, "scheduled-run") == 0
+			n, err := s.liveJobs(ctx, s.jitterType, "scheduled-run")
+			return err == nil && n == 0
 		}, eventuallyTimeout, eventuallyTick, "unregister should leave no occurrence of the chain behind")
 
 		// With nothing left to carry the schedule forward, executions stop
@@ -262,7 +269,8 @@ func (s *builtinCron) Run(t *testing.T) {
 
 		// The recurring job is removed
 		require.Eventually(t, func() bool {
-			return s.liveRunJobs(t) == 0
+			n, err := s.liveRunJobs(ctx)
+			return err == nil && n == 0
 		}, eventuallyTimeout, eventuallyTick, "unregister should cancel the recurring job")
 
 		// And the run count stops growing
@@ -272,28 +280,30 @@ func (s *builtinCron) Run(t *testing.T) {
 	})
 }
 
-// liveRunJobs returns how many live (non-dead-lettered) recurring "run" jobs the runner has
+// liveRunJobs returns how many live recurring "run" jobs the runner has
 // A duplicate registration would surface here as more than one
-func (s *builtinCron) liveRunJobs(t *testing.T) int {
-	t.Helper()
-	return s.liveJobs(t, s.cronType, "run")
+func (s *builtinCron) liveRunJobs(ctx context.Context) (int, error) {
+	return s.liveJobs(ctx, s.cronType, "run")
 }
 
-// liveJobs returns how many live (non-dead-lettered) jobs with the given method a cron job's runner has
+// liveJobs returns how many live jobs with the given method a cron job's runner has
 // The scheduler dispatches every job to the runner instance, so that is where they live: one recurring "run" job for a plain schedule, or the "scheduled-run" occurrences a jittered one is made of
+// A job that has ended is not live: the cron actor retains completed and dead-lettered records for observability, so a schedule that has been running for a while has more of them than it ever had live jobs
 // It inspects through the host because the public Service rejects built-in actor types
-func (s *builtinCron) liveJobs(t *testing.T, actorType string, method string) int {
-	t.Helper()
-	jobs, err := s.cluster.Host(0).ListJobs(t.Context(), actorType, runnerActorID)
-	require.NoError(t, err)
+// It returns an error rather than failing the test because it is called from inside Eventually conditions, whose goroutine can outlive the subtest that started it
+func (s *builtinCron) liveJobs(ctx context.Context, actorType string, method string) (int, error) {
+	jobs, err := s.cluster.Host(0).ListJobs(ctx, actorType, runnerActorID)
+	if err != nil {
+		return 0, err
+	}
 
 	var n int
 	for _, j := range jobs {
-		if j.Status != actor.JobStatusDeadLettered && j.Method == method {
+		if !j.Status.IsTerminal() && j.Method == method {
 			n++
 		}
 	}
-	return n
+	return n, nil
 }
 
 // assertClientRejected checks that every Service method targeting an actor by type rejects the built-in cron type with ErrActorTypeReserved

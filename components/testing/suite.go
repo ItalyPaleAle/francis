@@ -6016,12 +6016,13 @@ func (s Suite) TestJobs(t *testing.T) {
 		err := s.p.DeadLetterAlarm(ctx, lease, components.DeadLetterAlarmReq{Reason: "boom", Attempts: 1, Reschedule: true, NextDueTime: next})
 		require.NoError(t, err)
 
-		// The failed occurrence is dead-lettered under the original ID
+		// The job ID still resolves to the recurrence, due at its next occurrence: a schedule keeps one identity for its whole life, so a caller that holds the ID can still reconcile or delete it
 		info, err := s.p.GetJob(ctx, jobID)
 		require.NoError(t, err)
-		assert.Equal(t, components.JobStatusDeadLettered, info.Status)
+		assert.NotEqual(t, components.JobStatusDeadLettered, info.Status)
+		assert.WithinDuration(t, next, info.DueTime, time.Millisecond)
 
-		// The recurrence continues as a new live job for the same actor
+		// The failed occurrence is recorded alongside it, under an ID of its own
 		jobs, err := s.p.ListJobs(ctx, "JOB", "repeat-actor")
 		require.NoError(t, err)
 		var live, dead int
@@ -6029,9 +6030,10 @@ func (s Suite) TestJobs(t *testing.T) {
 			switch j.Status {
 			case components.JobStatusDeadLettered:
 				dead++
+				assert.NotEqual(t, jobID, j.JobID, "the ended occurrence must have an ID of its own")
 			default:
 				live++
-				assert.NotEqual(t, jobID, j.JobID, "the recurrence must have a fresh job ID")
+				assert.Equal(t, jobID, j.JobID, "the recurrence must keep the job ID")
 			}
 		}
 		assert.Equal(t, 1, live, "the recurrence should still have one live job")
@@ -6042,32 +6044,46 @@ func (s Suite) TestJobs(t *testing.T) {
 		ctx := t.Context()
 		require.NoError(t, s.p.Seed(ctx, jobSeed()))
 
-		jobID := dispatch(t, ctx, "done-repeat-actor", "dr1", "process", ref.AlarmProperties{DueTime: s.p.Now(), Interval: "PT1H"}, nil)
+		// The cadence is short so the next occurrence can be leased back without moving the clock past the host's health check deadline
+		jobID := dispatch(t, ctx, "done-repeat-actor", "dr1", "process", ref.AlarmProperties{DueTime: s.p.Now(), Interval: "PT1S"}, []byte("payload"))
 		lease := leaseFor(t, ctx, jobID)
 
-		next := s.p.Now().Add(time.Hour)
+		next := s.p.Now().Add(time.Second)
 		err := s.p.CompleteJob(ctx, lease, components.CompleteJobReq{Attempts: 1, Retention: time.Hour, Reschedule: true, NextDueTime: next})
 		require.NoError(t, err)
 
-		// The occurrence that ran is recorded under the original ID
+		// The job ID still resolves to the recurrence, due at its next occurrence
 		info, err := s.p.GetJob(ctx, jobID)
 		require.NoError(t, err)
-		assert.Equal(t, components.JobStatusCompleted, info.Status)
+		assert.False(t, info.Status.IsTerminal())
+		assert.WithinDuration(t, next, info.DueTime, time.Millisecond)
 
-		// The recurrence continues as a new live job for the same actor, so each occurrence leaves its own record without stopping the schedule
+		// The occurrence that ran is recorded under an ID of its own, so each occurrence leaves its own record without stopping the schedule or changing its identity
 		jobs, err := s.p.ListJobs(ctx, "JOB", "done-repeat-actor")
 		require.NoError(t, err)
 		var live, completed int
 		for _, j := range jobs {
 			if j.Status.IsTerminal() {
 				completed++
+				assert.NotEqual(t, jobID, j.JobID, "the ended occurrence must have an ID of its own")
 				continue
 			}
 			live++
-			assert.NotEqual(t, jobID, j.JobID, "the recurrence must have a fresh job ID")
+			assert.Equal(t, jobID, j.JobID, "the recurrence must keep the job ID")
 		}
 		assert.Equal(t, 1, live, "the recurrence should still have one live job")
 		assert.Equal(t, 1, completed, "the occurrence that ran should be recorded")
+
+		// The next occurrence still has the input every occurrence is delivered with
+		// Only the record of the occurrence that ended drops the payload, never the row it was read out of
+		_ = s.p.AdvanceClock(time.Second) //nolint:errcheck
+
+		nextLease := leaseFor(t, ctx, jobID)
+		alarm, err := s.p.GetLeasedAlarm(ctx, nextLease)
+		require.NoError(t, err)
+		assert.Equal(t, "process", alarm.JobMethod)
+		assert.Equal(t, []byte("payload"), alarm.Data)
+		assert.Equal(t, "PT1S", alarm.Interval)
 	})
 
 	// A worker halts itself once it has reported, and deactivating an actor releases the leases of its alarms

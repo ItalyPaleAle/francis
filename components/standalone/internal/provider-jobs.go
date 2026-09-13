@@ -223,13 +223,22 @@ func (p *Provider) endJob(ctx context.Context, lease *ref.AlarmLease, req endJob
 	valid := ok && a.CanFinalize(lease.LeaseID(), now)
 	var (
 		alarmKey    AlarmKey
-		oldID       string
+		jobID       string
 		terminalJob *TerminalJob
 		newAlarm    *Alarm
 	)
 	if valid {
 		alarmKey = a.GetAlarmKey()
-		oldID = a.ID
+		jobID = a.ID
+
+		// A repeating job keeps one identity for the life of its schedule, so the occurrence that just ended is recorded under an ID of its own and the job ID goes back to the recurrence
+		// Callers hold that ID for as long as the schedule exists: a cron actor deletes and reconciles its recurrence by it, and re-minting it on every occurrence would orphan the schedule
+		// A one-shot job has no recurrence to carry it, so its record keeps the ID the caller already knows
+		occurrenceID := jobID
+		if req.reschedule {
+			occurrenceID = uuid.NewV7().String()
+		}
+
 		// Only a dead job keeps its input, since that is what a replay needs and a completed one is never replayed
 		// This is what keeps a wide fan-out's retained records cheap, where the payload is much larger than the metadata around it
 		var data []byte
@@ -238,7 +247,7 @@ func (p *Provider) endJob(ctx context.Context, lease *ref.AlarmLease, req endJob
 		}
 
 		terminalJob = &TerminalJob{
-			JobID:       oldID,
+			JobID:       occurrenceID,
 			ActorType:   a.ActorType,
 			ActorID:     a.ActorID,
 			Method:      a.JobMethod,
@@ -255,10 +264,9 @@ func (p *Provider) endJob(ctx context.Context, lease *ref.AlarmLease, req endJob
 			terminalJob.Expiration = new(now.Add(req.retention))
 		}
 
-		// Re-create the recurrence (same name, fresh ID) so a repeating job survives one occurrence ending
+		// Carry the recurrence forward to its next occurrence, keeping the row it already had, so a repeating job survives one occurrence ending
 		if req.reschedule {
 			newAlarm = a.Clone()
-			newAlarm.ID = uuid.NewV7().String()
 			newAlarm.DueTime = req.nextDueTime
 			newAlarm.LeaseID = nil
 			newAlarm.LeaseExpiration = nil
@@ -272,22 +280,25 @@ func (p *Provider) endJob(ctx context.Context, lease *ref.AlarmLease, req endJob
 
 	changes := NewChanges()
 	defer changes.Release()
-	changes.Alarms.Delete = append(changes.Alarms.Delete, oldID)
-	changes.TerminalJobs.Set = append(changes.TerminalJobs.Set, TerminalJobChange{Key: oldID, Value: terminalJob})
+	changes.TerminalJobs.Set = append(changes.TerminalJobs.Set, TerminalJobChange{Key: terminalJob.JobID, Value: terminalJob})
 	if newAlarm != nil {
+		// The recurrence keeps its row, so there is nothing to delete: the write replaces it in place
 		changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: newAlarm.ID, Value: newAlarm})
+	} else {
+		changes.Alarms.Delete = append(changes.Alarms.Delete, jobID)
 	}
 
 	return p.persistThenApply(ctx, &p.Mu, changes, func() {
-		delete(p.Alarms, alarmKey)
-		delete(p.AlarmsByID, oldID)
-
-		p.TerminalJobs[oldID] = terminalJob
+		p.TerminalJobs[terminalJob.JobID] = terminalJob
 
 		if newAlarm != nil {
 			p.Alarms[alarmKey] = newAlarm
 			p.AlarmsByID[newAlarm.ID] = newAlarm
+			return
 		}
+
+		delete(p.Alarms, alarmKey)
+		delete(p.AlarmsByID, jobID)
 	})
 }
 

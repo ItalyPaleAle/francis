@@ -239,14 +239,24 @@ func (s *SQLiteProvider) endJob(ctx context.Context, lease *ref.AlarmLease, req 
 
 		method := derefString(jobMethod)
 
-		// Only a dead job keeps its input, since that is what a replay needs and a completed one is never replayed
-		// This is what keeps a wide fan-out's retained records cheap, where the payload is much larger than the metadata around it
-		if req.status != components.JobStatusDeadLettered {
-			data = nil
+		// A repeating job keeps one identity for the life of its schedule, so the occurrence that just ended is recorded under an ID of its own and the job ID goes back to the recurrence
+		// Callers hold that ID for as long as the schedule exists: a cron actor deletes and reconciles its recurrence by it, and re-minting it on every occurrence would orphan the schedule
+		// A one-shot job has no recurrence to carry it, so its record keeps the ID the caller already knows
+		occurrenceID := lease.Key()
+		if req.reschedule {
+			occurrenceID = uuid.NewV7().String()
 		}
 
-		// Record the ended occurrence in the terminal-job store, preserving the original job ID
-		// A replaced record is possible when a repeating job's occurrence ends twice under the same ID, so the write is an upsert rather than a plain insert
+		// Only a dead job keeps its input, since that is what a replay needs and a completed one is never replayed
+		// This is what keeps a wide fan-out's retained records cheap, where the payload is much larger than the metadata around it
+		// The payload is dropped from the record rather than from the row it came out of, because a recurrence still needs it for its next occurrence
+		recordData := data
+		if req.status != components.JobStatusDeadLettered {
+			recordData = nil
+		}
+
+		// Record the ended occurrence in the terminal-job store
+		// A replaced record is possible when a one-shot job ends twice under the same ID, so the write is an upsert rather than a plain insert
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, txErr = tx.ExecContext(ctx, `
 			REPLACE INTO `+s.tablePrefix+`terminal_jobs
@@ -254,17 +264,15 @@ func (s *SQLiteProvider) endJob(ctx context.Context, lease *ref.AlarmLease, req 
 				job_status, attempts, last_error, ended_at, original_due, job_interval, job_cron, expiration_time)
 			VALUES
 				(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			lease.Key(), actorType, actorID, method, data,
+			occurrenceID, actorType, actorID, method, recordData,
 			string(req.status), req.attempts, reason, now, dueTime, interval, cron, exp,
 		)
 		if txErr != nil {
 			return struct{}{}, fmt.Errorf("error recording terminal job: %w", txErr)
 		}
 
-		// Re-create the recurrence for its next occurrence so a repeating job survives one occurrence ending
+		// Re-create the recurrence for its next occurrence, under the job ID it has always had, so a repeating job survives one occurrence ending
 		if req.reschedule {
-			newID := uuid.NewV7().String()
-
 			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 			_, txErr = tx.ExecContext(ctx, `
 				INSERT INTO `+s.tablePrefix+`alarms
@@ -274,7 +282,7 @@ func (s *SQLiteProvider) endJob(ctx context.Context, lease *ref.AlarmLease, req 
 					alarm_lease_id, alarm_lease_expiration_time)
 				VALUES
 					(?, ?, ?, ?, ?, ?, ?, ?, ?, 'job', ?, NULL, NULL)`,
-				newID, actorType, actorID, alarmName,
+				lease.Key(), actorType, actorID, alarmName,
 				req.nextDueTime.UnixMilli(), interval, cron, ttl, data, method,
 			)
 			if txErr != nil {

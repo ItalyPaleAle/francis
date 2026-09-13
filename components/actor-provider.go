@@ -80,6 +80,7 @@ type ActorProvider interface {
 	// DeadLetterAlarm atomically moves a leased job from the alarms table to the terminal-job store, recording it as dead-lettered.
 	// It accepts a lease the job's own actor released by deactivating, for the reason given on DeleteLeasedAlarm.
 	// When req.Reschedule is set, the recurrence is re-created for its next occurrence in the same transaction, so a repeating job survives the dead-lettering of one occurrence.
+	// The recurrence keeps the job ID and the dead-lettered occurrence is recorded under one of its own, because a job ID identifies a schedule for as long as it exists.
 	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
 	DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLease, req DeadLetterAlarmReq) error
 
@@ -87,6 +88,7 @@ type ActorProvider interface {
 	// It accepts a lease the job's own actor released by deactivating, for the reason given on DeleteLeasedAlarm.
 	// It is the successful counterpart of DeadLetterAlarm, and is only called for a job whose actor type asked for its completed occurrences to be retained; otherwise the occurrence is simply deleted.
 	// When req.Reschedule is set, the recurrence is re-created for its next occurrence in the same transaction, so a repeating job keeps running while each occurrence leaves a record.
+	// The recurrence keeps the job ID and the completed occurrence is recorded under one of its own, because a job ID identifies a schedule for as long as it exists.
 	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
 	CompleteJob(ctx context.Context, lease *ref.AlarmLease, req CompleteJobReq) error
 
@@ -504,7 +506,7 @@ type DeadLetterAlarmReq struct {
 	// Retention is how long the record is kept before it is garbage collected
 	// Zero keeps it until something removes it, which is what a dead-lettered job gets when its actor type set no retention
 	Retention time.Duration
-	// Reschedule, when true, re-creates the alarm for its next occurrence in the same transaction
+	// Reschedule, when true, re-creates the alarm for its next occurrence in the same transaction, under the same job ID
 	// This is how a repeating job's recurrence survives the dead-lettering of one occurrence
 	Reschedule bool
 	// NextDueTime is the due time of the rescheduled occurrence, used only when Reschedule is true
@@ -518,7 +520,7 @@ type CompleteJobReq struct {
 	// Retention is how long the record is kept before it is garbage collected
 	// It is always set, since a job whose actor type asked for no retention is deleted outright rather than recorded here
 	Retention time.Duration
-	// Reschedule, when true, re-creates the alarm for its next occurrence in the same transaction
+	// Reschedule, when true, re-creates the alarm for its next occurrence in the same transaction, under the same job ID
 	// This is how each occurrence of a repeating job can leave a record without stopping the recurrence
 	Reschedule bool
 	// NextDueTime is the due time of the rescheduled occurrence, used only when Reschedule is true

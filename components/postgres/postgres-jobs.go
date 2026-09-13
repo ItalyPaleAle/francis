@@ -211,8 +211,13 @@ func (p *PostgresProvider) endJob(ctx context.Context, lease *ref.AlarmLease, re
 	}
 
 	// A repeating job records the ended occurrence and re-creates the recurrence
-	// The recurrence reuses the alarm name, so its INSERT into alarms cannot share the statement as the DELETE without risking a unique-index conflict
-	// It runs as a second statement in the transaction, after the DELETE has cleared the name
+	// The recurrence reuses the alarm name and the job ID, so its INSERT into alarms cannot share the statement as the DELETE without conflicting on either
+	// It runs as a second statement in the transaction, after the DELETE has cleared them
+	//
+	// A repeating job keeps one identity for the life of its schedule, so the occurrence that just ended is recorded under an ID of its own and the job ID goes back to the recurrence
+	// Callers hold that ID for as long as the schedule exists: a cron actor deletes and reconciles its recurrence by it, and re-minting it on every occurrence would orphan the schedule
+	occurrenceID := uuid.NewV7()
+
 	tx, err := p.db.Begin(queryCtx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -253,7 +258,7 @@ func (p *PostgresProvider) endJob(ctx context.Context, lease *ref.AlarmLease, re
 				INSERT INTO `+p.tablePrefix+`terminal_jobs
 					(job_id, actor_type, actor_id, job_method, job_data,
 					job_status, attempts, last_error, ended_at, original_due, job_interval, job_cron, expiration_time)
-				SELECT $1, actor_type, actor_id, COALESCE(job_method, ''), CASE WHEN $3 = 'dead' THEN alarm_data END, $3, $4, $5, now() AT TIME ZONE 'utc', alarm_due_time, alarm_interval, alarm_cron, (now() AT TIME ZONE 'utc') + $6
+				SELECT $7, actor_type, actor_id, COALESCE(job_method, ''), CASE WHEN $3 = 'dead' THEN alarm_data END, $3, $4, $5, now() AT TIME ZONE 'utc', alarm_due_time, alarm_interval, alarm_cron, (now() AT TIME ZONE 'utc') + $6
 				FROM deleted
 				ON CONFLICT (job_id) DO UPDATE SET
 					job_method = EXCLUDED.job_method,
@@ -269,7 +274,7 @@ func (p *PostgresProvider) endJob(ctx context.Context, lease *ref.AlarmLease, re
 			)
 			SELECT actor_type, actor_id, alarm_name, job_method, alarm_data, alarm_interval, alarm_cron, alarm_ttl_time
 			FROM deleted`,
-			lease.Key(), lease.LeaseID(), string(req.status), req.attempts, reason, retention,
+			jobID, lease.LeaseID(), string(req.status), req.attempts, reason, retention, occurrenceID,
 		).
 		Scan(&actorType, &actorID, &alarmName, &jobMethod, &data, &interval, &cron, &ttl)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -283,8 +288,7 @@ func (p *PostgresProvider) endJob(ctx context.Context, lease *ref.AlarmLease, re
 		method = *jobMethod
 	}
 
-	// Re-create the recurrence for its next occurrence so a repeating job survives one occurrence ending
-	newID := uuid.NewV7()
+	// Re-create the recurrence for its next occurrence, under the job ID it has always had, so a repeating job survives one occurrence ending
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	_, err = tx.Exec(queryCtx, `
 		INSERT INTO `+p.tablePrefix+`alarms
@@ -296,7 +300,7 @@ func (p *PostgresProvider) endJob(ctx context.Context, lease *ref.AlarmLease, re
 			($1, $2, $3, $4, $5, $6, $7, $8, $9, 'job', $10, NULL, NULL)`,
 		// alarm_due_time is stored as UTC
 		// ttl already comes from the DB as UTC
-		newID, actorType, actorID, alarmName,
+		jobID, actorType, actorID, alarmName,
 		req.nextDueTime.UTC(), interval, cron, ttl, data, method,
 	)
 	if err != nil {
