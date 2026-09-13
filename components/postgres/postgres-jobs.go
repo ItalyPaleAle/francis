@@ -181,11 +181,15 @@ func (p *PostgresProvider) endJob(ctx context.Context, lease *ref.AlarmLease, re
 			SELECT $1, actor_type, actor_id, COALESCE(job_method, ''), CASE WHEN $3 = 'dead' THEN alarm_data END, $3, $4, $5, now() AT TIME ZONE 'utc', alarm_due_time, alarm_interval, alarm_cron, (now() AT TIME ZONE 'utc') + $6
 			FROM deleted
 			ON CONFLICT (job_id) DO UPDATE SET
+				job_method = EXCLUDED.job_method,
+				job_data = EXCLUDED.job_data,
 				job_status = EXCLUDED.job_status,
 				attempts = EXCLUDED.attempts,
 				last_error = EXCLUDED.last_error,
 				ended_at = EXCLUDED.ended_at,
 				original_due = EXCLUDED.original_due,
+				job_interval = EXCLUDED.job_interval,
+				job_cron = EXCLUDED.job_cron,
 				expiration_time = EXCLUDED.expiration_time`,
 			jobID, lease.LeaseID(), string(req.status), req.attempts, reason, retention,
 		)
@@ -236,11 +240,15 @@ func (p *PostgresProvider) endJob(ctx context.Context, lease *ref.AlarmLease, re
 				SELECT $1, actor_type, actor_id, COALESCE(job_method, ''), CASE WHEN $3 = 'dead' THEN alarm_data END, $3, $4, $5, now() AT TIME ZONE 'utc', alarm_due_time, alarm_interval, alarm_cron, (now() AT TIME ZONE 'utc') + $6
 				FROM deleted
 				ON CONFLICT (job_id) DO UPDATE SET
+					job_method = EXCLUDED.job_method,
+					job_data = EXCLUDED.job_data,
 					job_status = EXCLUDED.job_status,
 					attempts = EXCLUDED.attempts,
 					last_error = EXCLUDED.last_error,
 					ended_at = EXCLUDED.ended_at,
 					original_due = EXCLUDED.original_due,
+					job_interval = EXCLUDED.job_interval,
+					job_cron = EXCLUDED.job_cron,
 					expiration_time = EXCLUDED.expiration_time
 			)
 			SELECT actor_type, actor_id, alarm_name, job_method, alarm_data, alarm_interval, alarm_cron, alarm_ttl_time
