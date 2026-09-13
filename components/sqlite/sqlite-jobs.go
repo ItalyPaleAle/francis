@@ -448,19 +448,11 @@ func (s *SQLiteProvider) DeleteJob(ctx context.Context, actorType string, actorI
 
 	// A job lives in one of two tables depending on whether it has ended, and the caller does not have to know which
 	// Both deletions run in one transaction so the removal is a single, indivisible outcome whichever table held it
-	// The actor scope is optional: with both parts empty the job is removed by ID alone, which is what an operator holding a job ID does
-	scope := ""
-	args := []any{jobID}
-	if actorType != "" && actorID != "" {
-		scope = ` AND actor_type = ? AND actor_id = ?`
-		args = append(args, actorType, actorID)
-	}
-
 	affected, err := sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (int64, error) {
-		// #nosec G202 -- the only concatenated values are the static table prefix and a fixed scope clause, not user input
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		liveRes, txErr := tx.ExecContext(queryCtx,
-			`DELETE FROM `+s.tablePrefix+`alarms WHERE alarm_id = ? AND alarm_kind = 'job'`+scope,
-			args...,
+			`DELETE FROM `+s.tablePrefix+`alarms WHERE alarm_id = ? AND alarm_kind = 'job' AND actor_type = ? AND actor_id = ?`,
+			jobID, actorType, actorID,
 		)
 		if txErr != nil {
 			return 0, fmt.Errorf("error removing live job: %w", txErr)
@@ -470,10 +462,10 @@ func (s *SQLiteProvider) DeleteJob(ctx context.Context, actorType string, actorI
 			return 0, fmt.Errorf("error counting affected rows: %w", txErr)
 		}
 
-		// #nosec G202 -- the only concatenated values are the static table prefix and a fixed scope clause, not user input
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		termRes, txErr := tx.ExecContext(queryCtx,
-			`DELETE FROM `+s.tablePrefix+`terminal_jobs WHERE job_id = ?`+scope,
-			args...,
+			`DELETE FROM `+s.tablePrefix+`terminal_jobs WHERE job_id = ? AND actor_type = ? AND actor_id = ?`,
+			jobID, actorType, actorID,
 		)
 		if txErr != nil {
 			return 0, fmt.Errorf("error removing terminal job: %w", txErr)

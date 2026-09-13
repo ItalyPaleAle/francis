@@ -460,30 +460,22 @@ func (p *PostgresProvider) DeleteJob(ctx context.Context, actorType string, acto
 
 	// A job lives in one of two tables depending on whether it has ended, and the caller does not have to know which
 	// One data-modifying CTE covers both in a single round-trip, and the count tells us whether anything matched
-	// The actor scope is optional: with both parts empty the job is removed by ID alone, which is what an operator holding a job ID does
-	scope := ""
-	args := []any{id}
-	if actorType != "" && actorID != "" {
-		scope = ` AND actor_type = $2 AND actor_id = $3`
-		args = append(args, actorType, actorID)
-	}
-
 	var affected int64
-	// #nosec G202 -- the only concatenated values are static table prefixes and a fixed scope clause, not user input
+	// #nosec G202 -- the only concatenated values are static table prefixes, not user input
 	err = p.db.
 		QueryRow(queryCtx, `
 			WITH live AS (
 				DELETE FROM `+p.tablePrefix+`alarms
-				WHERE alarm_id = $1 AND alarm_kind = 'job'`+scope+`
+				WHERE alarm_id = $1 AND alarm_kind = 'job' AND actor_type = $2 AND actor_id = $3
 				RETURNING 1
 			),
 			terminal AS (
 				DELETE FROM `+p.tablePrefix+`terminal_jobs
-				WHERE job_id = $1`+scope+`
+				WHERE job_id = $1 AND actor_type = $2 AND actor_id = $3
 				RETURNING 1
 			)
 			SELECT (SELECT count(*) FROM live) + (SELECT count(*) FROM terminal)`,
-			args...,
+			id, actorType, actorID,
 		).
 		Scan(&affected)
 	if err != nil {

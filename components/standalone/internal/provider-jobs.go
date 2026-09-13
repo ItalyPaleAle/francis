@@ -376,9 +376,8 @@ func (p *Provider) DeleteJob(ctx context.Context, actorType string, actorID stri
 	defer p.writeMu.Unlock()
 
 	// A job lives in one of two maps depending on whether it has ended, and the caller does not have to know which
-	// The actor scope is optional: with both parts empty the job is removed by ID alone, which is what an operator holding a job ID does
 	inScope := func(at string, ai string) bool {
-		return actorType == "" || actorID == "" || (at == actorType && ai == actorID)
+		return at == actorType && ai == actorID
 	}
 
 	p.Mu.RLock()

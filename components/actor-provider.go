@@ -95,9 +95,9 @@ type ActorProvider interface {
 	// ListJobs returns all of an actor's jobs: the live ones, and any terminal record still retained.
 	ListJobs(ctx context.Context, actorType string, actorID string) ([]JobInfo, error)
 
-	// DeleteJob removes a job by its ID, whatever state it is in: live (scheduled or leased) or terminal (completed or dead-lettered).
-	// When actorType and actorID are both non-empty the removal is scoped to that actor, so a caller can only remove a job it owns; when both are empty any job with that ID is removed.
-	// Returns ErrNoJob if no job with that ID exists within the given scope.
+	// DeleteJob removes one of an actor's jobs by its ID, whatever state it is in: live (scheduled or leased) or terminal (completed or dead-lettered).
+	// The removal is scoped to the actor, so a caller holding a job ID can only remove it from the actor it belongs to.
+	// Returns ErrNoJob if that actor has no job with that ID.
 	DeleteJob(ctx context.Context, actorType string, actorID string, jobID string) error
 
 	// GetTerminalJob returns a completed or dead-lettered job by its ID, including its raw input data.
