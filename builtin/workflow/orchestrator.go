@@ -343,9 +343,6 @@ func (o *orchestrator) labels(st *instanceState) map[string]string {
 	if st.Parent != nil {
 		labels[labelParent] = st.Parent.InstanceID
 	}
-	if st.Status.IsTerminal() && !st.CompletedAt.IsZero() {
-		labels[labelTerminatedAt] = st.CompletedAt.UTC().Format(dayLayout)
-	}
 	return labels
 }
 

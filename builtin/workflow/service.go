@@ -20,13 +20,9 @@ import (
 
 const (
 	// The state labels written with every journal write, which is what makes a filtered listing a range scan rather than a walk of every retained journal
-	labelStatus       = "status"
-	labelVersion      = "version"
-	labelParent       = "parent"
-	labelTerminatedAt = "terminatedAt"
-
-	// dayLayout is the granularity of the terminatedAt label, which the sweep only needs to the day
-	dayLayout = "2006-01-02"
+	labelStatus  = "status"
+	labelVersion = "version"
+	labelParent  = "parent"
 )
 
 // Service binds the workflow to an actor.Service, returning a WorkflowService that drives instances against that service
@@ -232,6 +228,7 @@ func (s *WorkflowService) PurgeTerminated(ctx context.Context) (int, error) {
 				if inst.Parent != nil {
 					continue
 				}
+				// The cutoff is a range, and a label filter is an equality, so the retention check is made here on the decoded journal rather than server-side
 				if inst.CompletedAt.IsZero() || inst.CompletedAt.After(cutoff) {
 					continue
 				}

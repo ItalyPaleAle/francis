@@ -576,7 +576,6 @@ func TestTurnWritesTheStatusLabelsWithTheJournal(t *testing.T) {
 
 	assert.Equal(t, string(StatusRunning), labels[labelStatus])
 	assert.Equal(t, "4", labels[labelVersion])
-	assert.NotContains(t, labels, labelTerminatedAt)
 
 	require.NoError(t, o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "a", Index: 0, Attempt: 1}}))
 
@@ -585,7 +584,6 @@ func TestTurnWritesTheStatusLabelsWithTheJournal(t *testing.T) {
 	host.mu.Unlock()
 
 	assert.Equal(t, string(StatusCompleted), labels[labelStatus])
-	assert.NotEmpty(t, labels[labelTerminatedAt])
 }
 
 // TestAHostWithoutTheInstanceVersionDeclinesTheJob verifies an old instance is left for a host that can serve it, without counting an attempt and without dead-lettering
