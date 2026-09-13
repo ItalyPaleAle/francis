@@ -210,12 +210,12 @@ func (s *SQLiteProvider) Init(ctx context.Context) error {
 	return nil
 }
 
-// stateLabelIndexKeyRegexp is what an indexable label key must match, so the index name is readable and the JSON path needs no escaping
-var stateLabelIndexKeyRegexp = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
-
 // ensureStateLabelIndexes creates one expression index per declared state-label key
 // SQLite can only use an expression index when the query repeats the indexed expression verbatim, which is why ListStates inlines the same json_extract path for a key shaped like an identifier
 func (s *SQLiteProvider) ensureStateLabelIndexes(ctx context.Context) error {
+	// stateLabelIndexKeyRegexp is what an indexable label key must match, so the index name is readable and the JSON path needs no escaping
+	var stateLabelIndexKeyRegexp = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+
 	for _, key := range s.stateLabelIndexes {
 		if !stateLabelIndexKeyRegexp.MatchString(key) {
 			return fmt.Errorf("state label index key %q is not a plain identifier", key)

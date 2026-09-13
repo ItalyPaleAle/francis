@@ -43,15 +43,12 @@ func (s *SQLiteProvider) SetState(ctx context.Context, ref ref.ActorRef, data []
 		exp = new(s.clock.Now().Add(opts.TTL).UnixMilli())
 	}
 
+	var labels *string
 	labelsJSON, err := opts.LabelsJSON()
 	if err != nil {
 		return err
-	}
-
-	// The column is declared text in a STRICT table, so the encoded object is bound as a string rather than as a blob
-	var labels *string
-	if labelsJSON != nil {
-		labels = new(string(labelsJSON))
+	} else if labelsJSON != "" {
+		labels = &labelsJSON
 	}
 
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
@@ -103,7 +100,9 @@ func (s *SQLiteProvider) ListStates(ctx context.Context, req components.ListStat
 		if slices.Contains(s.stateLabelIndexes, k) {
 			// #nosec G202 -- the key was validated as a plain identifier before its index was created, so there is nothing to escape here
 			labelClauses.WriteString(`
-			AND ` + stateLabelExtract(k) + ` = ?`)
+			AND `)
+			labelClauses.WriteString(stateLabelExtract(k))
+			labelClauses.WriteString(` = ?`)
 			args = append(args, v)
 			continue
 		}

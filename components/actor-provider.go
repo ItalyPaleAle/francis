@@ -360,9 +360,14 @@ type SetStateOpts struct {
 }
 
 // LabelsJSON encodes the labels as the JSON object a provider stores in the state row's label column.
-// It returns nil when there are no labels, so the column is left empty rather than holding an empty object.
-func (o SetStateOpts) LabelsJSON() ([]byte, error) {
-	return EncodeLabels(o.Labels)
+// It returns an empty string when there are no labels
+func (o SetStateOpts) LabelsJSON() (string, error) {
+	b, err := EncodeLabels(o.Labels)
+	if err != nil {
+		return "", err
+	}
+
+	return string(b), nil
 }
 
 // ListStatesReq is the request object for the ListStates method.

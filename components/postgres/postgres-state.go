@@ -44,14 +44,12 @@ func (p *PostgresProvider) SetState(ctx context.Context, ref ref.ActorRef, data 
 		exp = &opts.TTL
 	}
 
+	var labels *string
 	labelsJSON, err := opts.LabelsJSON()
 	if err != nil {
 		return err
-	}
-
-	var labels *string
-	if labelsJSON != nil {
-		labels = new(string(labelsJSON))
+	} else if labelsJSON != "" {
+		labels = &labelsJSON
 	}
 
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
@@ -94,9 +92,6 @@ func (p *PostgresProvider) ListStates(ctx context.Context, req components.ListSt
 	// The label filter adds at most one argument, so the count is known up front: the two fixed ones, the labels object when there is one, and the limit
 	args := make([]any, 0, 4)
 	args = append(args, req.ActorType, req.After)
-
-	// Matching against the row's own label object is served by the GIN index, so a filtered listing is an index lookup rather than a walk of every stored state
-	// One comparison covers every label asked for, because @> is true only when the row's labels hold all of them
 	labelsJSON, err := req.LabelsJSON()
 	if err != nil {
 		return components.ListStatesRes{}, err
@@ -104,7 +99,7 @@ func (p *PostgresProvider) ListStates(ctx context.Context, req components.ListSt
 
 	var labelClause string
 	if labelsJSON != nil {
-		// #nosec G202 -- the only concatenated value is a generated placeholder number, not user input
+		// #nosec G202 -- the only concatenated value is a placeholder number
 		labelClause = `
 			AND actor_state_labels @> $` + strconv.Itoa(len(args)+1) + `::jsonb`
 		args = append(args, string(labelsJSON))
@@ -114,7 +109,7 @@ func (p *PostgresProvider) ListStates(ctx context.Context, req components.ListSt
 
 	// The (actor_type, actor_id) primary key serves both the range scan and the ordering, using the database's collation for actor_id
 	// An empty cursor selects the first page, since every actor ID sorts after the empty string
-	// #nosec G202 -- the only concatenated values are the static table prefix, a fixed column name, and generated placeholder numbers, not user input
+	// #nosec G202 -- the only concatenated values are the static table prefix, a fixed column name, and placeholder numbers, not user input
 	rows, err := p.db.Query(queryCtx,
 		`SELECT actor_id, `+dataCol+`
 		FROM `+p.tablePrefix+`actor_state
@@ -171,7 +166,6 @@ func (p *PostgresProvider) DeleteState(ctx context.Context, ref ref.ActorRef) er
 
 	// We exclude expired state from the deletion because we want to be able to get an appropriate count of affected rows, and return ErrNoState if nothing was deleted
 	// Expired state entries are garbage collected periodically anyways
-	// The labels are a column of the row, so they go with it and can never outlive the state they describe
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := p.db.Exec(queryCtx,
 		`DELETE FROM `+p.tablePrefix+`actor_state
