@@ -44,8 +44,7 @@ type Host interface {
 type SetStateOpts struct {
 	// Optional TTL for the state
 	TTL time.Duration
-	// Labels is an optional set of short string pairs indexed alongside the state, which ListStates can then filter on by equality
-	// They are written in the same operation as the state and expire with it, so an index built from them can never disagree with the state it describes
+	// Optional set of short string pairs indexed alongside the state, which ListStates can then filter on by equality
 	// Passing a nil or empty map removes every label the actor had
 	Labels map[string]string
 }
@@ -54,8 +53,8 @@ type SetStateOpts struct {
 type ListStatesOpts struct {
 	// When true, the stored state is returned alongside each actor ID
 	IncludeData bool
-	// Labels restricts the listing to actors whose state carries every one of these labels with the given value
-	// Matching is by equality on an indexed column, so a filtered listing is a range scan rather than a walk of every stored state
+	// Restrict the listing to actors whose state carries _every one_ of these labels with the given value
+	// Matching is by equality on values
 	Labels map[string]string
 	// Pagination cursor: only actor IDs sorting strictly after this value are returned
 	After string
