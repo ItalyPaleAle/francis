@@ -418,7 +418,7 @@ func (rt *Runtime) dispatchAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 	// Record the execution time before dispatch,  a successful response may refine it
 	lease.SetExecutionTime(rt.clock.Now())
 
-	// Capture the job details so the terminal-failure path can dead-letter the job
+	// Capture the job details so the paths that end a job can record it: dead-lettering a terminal failure, or recording a successful run its actor type asked to keep
 	if alarm.Kind == components.AlarmKindJob {
 		jobInfo.isJob = true
 		jobInfo.method = alarm.JobMethod

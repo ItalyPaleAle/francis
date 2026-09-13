@@ -629,7 +629,7 @@ func (a *cronJobScheduler) liveScheduledRuns(ctx context.Context) ([]actor.JobIn
 
 	live := make([]actor.JobInfo, 0, 2)
 	for _, job := range jobs {
-		if job.Method == methodScheduledRun && job.Status != actor.JobStatusDeadLettered {
+		if job.Method == methodScheduledRun && !job.Status.IsTerminal() {
 			live = append(live, job)
 		}
 	}

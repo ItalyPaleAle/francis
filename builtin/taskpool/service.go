@@ -22,6 +22,8 @@ const (
 	TaskStatusActive
 	// TaskStatusDeadLettered indicates the task exhausted its retries (or failed permanently) and was recorded in the dead-letter store
 	TaskStatusDeadLettered
+	// TaskStatusCompleted indicates the task ran successfully and its record was retained
+	TaskStatusCompleted
 )
 
 // String implements fmt.Stringer
@@ -33,6 +35,8 @@ func (s TaskStatus) String() string {
 		return "active"
 	case TaskStatusDeadLettered:
 		return "dead-lettered"
+	case TaskStatusCompleted:
+		return "completed"
 	default:
 		return "unknown"
 	}
@@ -205,6 +209,8 @@ func taskStatusFromJob(s actor.JobStatus) TaskStatus {
 	switch s {
 	case actor.JobStatusActive:
 		return TaskStatusActive
+	case actor.JobStatusCompleted:
+		return TaskStatusCompleted
 	case actor.JobStatusDeadLettered:
 		return TaskStatusDeadLettered
 	default:

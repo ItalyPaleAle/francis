@@ -7,9 +7,11 @@
 // - dead-lettering on exhausted retries and on permanent failure with the JobFailed hook
 // - GetJob/ListJobs/DeleteJob/RetryJob
 // - a repeating job whose one failing occurrence dead-letters while the recurrence continues
+// - a completed job retained by an actor type that asked for it
 package jobs
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -39,6 +41,11 @@ const (
 	eventuallyTick    = 100 * time.Millisecond
 	// stabilizeWindow is how long a count must hold steady to count as settled
 	stabilizeWindow = pollInterval * 4
+
+	// retainedProbeActorType is a second probe registration whose jobs keep a record once they end, which is what exercises the retention path end to end
+	retainedProbeActorType = "probe-retained"
+	// jobRetention is long enough that a retained record cannot expire mid-scenario
+	jobRetention = time.Hour
 )
 
 // matrix is the representative set of topology/provider combinations the job scenarios run against
@@ -82,6 +89,16 @@ func (s *jobs) Setup(t *testing.T) []framework.Option {
 				actorcore.WithMaxAttempts(maxAttempts),
 				actorcore.WithInitialRetryDelay(initialRetryDelay),
 			),
+			{
+				Type:    retainedProbeActorType,
+				Factory: shared.NewProbeActor,
+				Opts: []actorcore.RegisterActorOption{
+					actorcore.WithIdleTimeout(time.Minute),
+					actorcore.WithMaxAttempts(maxAttempts),
+					actorcore.WithInitialRetryDelay(initialRetryDelay),
+					actorcore.WithJobRetention(jobRetention),
+				},
+			},
 		},
 		AlarmsPollInterval: pollInterval,
 	})
@@ -294,6 +311,51 @@ func (s *jobs) Run(t *testing.T) {
 		}
 		assert.GreaterOrEqual(t, dead, 1, "the failed occurrence should be in the dead-letter store")
 		assert.GreaterOrEqual(t, live, 1, "the recurrence should still have a live job")
+	})
+
+	// A job dispatched to a type that asked for retention leaves a record behind once it has run
+	t.Run("a completed job is retained when its actor type asks for it", func(t *testing.T) {
+		actorID := "retained-1-" + string(s.kind) + "-" + string(s.variant)
+		jobID, err := svc.Dispatch(ctx, retainedProbeActorType, actorID, "process", nil)
+		require.NoError(t, err)
+
+		settleJob(t, actorID, 1)
+
+		// The record survives the run, reporting the job as completed rather than as missing
+		require.Eventually(t, func() bool {
+			info, gErr := svc.GetJob(ctx, jobID)
+			return gErr == nil && info.Status == actor.JobStatusCompleted
+		}, eventuallyTimeout, eventuallyTick, "a completed job should leave a record when its type asks for one")
+
+		info, err := svc.GetJob(ctx, jobID)
+		require.NoError(t, err)
+		assert.Equal(t, "process", info.Method)
+		assert.False(t, info.EndedAt.IsZero(), "a terminal job records when it ended")
+
+		// It is listed alongside the actor's live jobs, which is what makes a successful run observable
+		list, err := svc.ListJobs(ctx, retainedProbeActorType, actorID)
+		require.NoError(t, err)
+		require.Len(t, list, 1)
+		assert.Equal(t, actor.JobStatusCompleted, list[0].Status)
+
+		// The same verb removes a record as removes a live job
+		require.NoError(t, svc.DeleteJob(ctx, retainedProbeActorType, actorID, jobID))
+		_, err = svc.GetJob(ctx, jobID)
+		require.ErrorIs(t, err, actor.ErrJobNotFound)
+	})
+
+	// Without a retention, the default, a completed job leaves nothing behind
+	t.Run("a completed job leaves no record by default", func(t *testing.T) {
+		actorID := "unretained-1-" + string(s.kind) + "-" + string(s.variant)
+		jobID, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil)
+		require.NoError(t, err)
+
+		settleJob(t, actorID, 1)
+
+		require.Eventually(t, func() bool {
+			_, gErr := svc.GetJob(ctx, jobID)
+			return errors.Is(gErr, actor.ErrJobNotFound)
+		}, eventuallyTimeout, eventuallyTick, "a completed job should be deleted when its type asked for no retention")
 	})
 
 	// GetJob reports the public not-found error for an unknown job

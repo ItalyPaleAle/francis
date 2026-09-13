@@ -115,11 +115,12 @@ func (o *orchestrator) status(ctx context.Context) (any, error) {
 	}
 
 	// An instance with no journal yet is either pending, with its start job still live, or was never started at all
+	// Only a job that has not ended says the instance is pending: a retained record of a start that already ran belongs to a journal that has since expired
 	if st.Status == "" {
 		jobs, jErr := o.client.ListJobs(ctx)
 		if jErr == nil {
 			for _, j := range jobs {
-				if j.Method == methodStart && j.Status != actor.JobStatusDeadLettered {
+				if j.Method == methodStart && !j.Status.IsTerminal() {
 					return statusResult{Found: true, Status: statusView(o.instanceID, &instanceState{
 						Workflow:  o.def.name,
 						Version:   o.def.version,

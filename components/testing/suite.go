@@ -6022,6 +6022,38 @@ func (s Suite) TestJobs(t *testing.T) {
 		assert.Equal(t, 1, dead, "the failed occurrence should be dead-lettered")
 	})
 
+	t.Run("a completed repeating occurrence is recorded and the recurrence continues", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		jobID := dispatch(t, ctx, "done-repeat-actor", "dr1", "process", ref.AlarmProperties{DueTime: s.p.Now(), Interval: "PT1H"}, nil)
+		lease := leaseFor(t, ctx, jobID)
+
+		next := s.p.Now().Add(time.Hour)
+		err := s.p.CompleteJob(ctx, lease, components.CompleteJobReq{Attempts: 1, Retention: time.Hour, Reschedule: true, NextDueTime: next})
+		require.NoError(t, err)
+
+		// The occurrence that ran is recorded under the original ID
+		info, err := s.p.GetJob(ctx, jobID)
+		require.NoError(t, err)
+		assert.Equal(t, components.JobStatusCompleted, info.Status)
+
+		// The recurrence continues as a new live job for the same actor, so each occurrence leaves its own record without stopping the schedule
+		jobs, err := s.p.ListJobs(ctx, "JOB", "done-repeat-actor")
+		require.NoError(t, err)
+		var live, completed int
+		for _, j := range jobs {
+			if j.Status.IsTerminal() {
+				completed++
+				continue
+			}
+			live++
+			assert.NotEqual(t, jobID, j.JobID, "the recurrence must have a fresh job ID")
+		}
+		assert.Equal(t, 1, live, "the recurrence should still have one live job")
+		assert.Equal(t, 1, completed, "the occurrence that ran should be recorded")
+	})
+
 	t.Run("get and delete report missing jobs", func(t *testing.T) {
 		ctx := t.Context()
 		require.NoError(t, s.p.Seed(ctx, jobSeed()))
