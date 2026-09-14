@@ -10,6 +10,7 @@ import (
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/builtinactor"
+	"github.com/italypaleale/francis/internal/builtinkey"
 )
 
 // purge removes everything a terminated instance left behind: its children first, then its dead-letters, then its journal
@@ -196,10 +197,12 @@ func (o *orchestrator) reportToParent(ctx context.Context, st *instanceState) er
 // markReported records that the parent has been told, so a retried turn does not report the same termination twice
 func (o *orchestrator) markReported(ctx context.Context, st *instanceState) error {
 	st.Reported = true
-	err := o.client.SetState(ctx, *st, &actor.SetStateOpts{
-		Labels: o.labels(st),
-		TTL:    2 * o.def.retention.forStatus(st.Status),
-	})
+	opts := &actor.SetStateOpts{
+		TTL: 2 * o.def.retention.forStatus(st.Status),
+	}
+	opts.SetWorkflowLabels(builtinkey.Key{}, o.labels(st))
+
+	err := o.client.SetState(ctx, *st, opts)
 	if err != nil {
 		return fmt.Errorf("failed to record the report to the parent: %w", err)
 	}

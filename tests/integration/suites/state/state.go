@@ -376,41 +376,6 @@ func (s *list) Run(t *testing.T) {
 		assert.Equal(t, []string{"list-02", "list-03", "list-04"}, ids)
 	})
 
-	// Labels are written in the same operation as the state and filter a listing by equality, so an index can never disagree with what it describes
-	t.Run("filters a listing by label", func(t *testing.T) {
-		for i, status := range []string{"running", "done", "running"} {
-			err := svc.SetState(ctx, shared.ProbeActorType, fmt.Sprintf("label-%02d", i), shared.ProbeState{N: int64(i)},
-				&actor.SetStateOpts{Labels: map[string]string{"status": status, "version": "1"}})
-			require.NoError(t, err)
-		}
-
-		ids, _ := listIDs(t, &actor.ListStatesOpts{Labels: map[string]string{"status": "running"}})
-		assert.Equal(t, []string{"label-00", "label-02"}, ids)
-
-		// Every label in the filter has to match, and one the actor does not carry excludes it
-		ids, _ = listIDs(t, &actor.ListStatesOpts{Labels: map[string]string{"status": "running", "version": "2"}})
-		assert.Empty(t, ids)
-		ids, _ = listIDs(t, &actor.ListStatesOpts{Labels: map[string]string{"absent": "x"}})
-		assert.Empty(t, ids)
-
-		// A later write replaces the labels the actor had rather than adding to them
-		err := svc.SetState(ctx, shared.ProbeActorType, "label-00", shared.ProbeState{N: 0},
-			&actor.SetStateOpts{Labels: map[string]string{"status": "done"}})
-		require.NoError(t, err)
-
-		ids, _ = listIDs(t, &actor.ListStatesOpts{Labels: map[string]string{"status": "running"}})
-		assert.Equal(t, []string{"label-02"}, ids)
-
-		// The rewrite dropped label-00's version label entirely, while the actors it did not touch keep theirs
-		ids, _ = listIDs(t, &actor.ListStatesOpts{Labels: map[string]string{"version": "1"}})
-		assert.Equal(t, []string{"label-01", "label-02"}, ids)
-
-		// The labels do not outlive the state they describe
-		require.NoError(t, svc.DeleteState(ctx, shared.ProbeActorType, "label-02"))
-		ids, _ = listIDs(t, &actor.ListStatesOpts{Labels: map[string]string{"status": "running"}})
-		assert.Empty(t, ids)
-	})
-
 	// Built-in actor types are not addressable through the service
 	t.Run("rejects a built-in actor type", func(t *testing.T) {
 		_, err := svc.ListStates(ctx, ref.BuiltInActorTypePrefix+"cronjob", nil)

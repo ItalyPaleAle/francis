@@ -61,7 +61,7 @@ func AssertBackupContentsEqual(t testing.TB, want, got BackupContents) {
 		g, ok := got.States[k]
 		require.Truef(t, ok, "missing state %q", k)
 		assert.Truef(t, bytes.Equal(w.Data, g.Data), "state %q data", k)
-		assert.Equalf(t, w.Labels, g.Labels, "state %q labels", k)
+		assert.Equalf(t, w.WorkflowLabels, g.WorkflowLabels, "state %q workflow labels", k)
 		assertTimePtrEqual(t, w.Expiration, g.Expiration, "state "+k+" expiration")
 	}
 
@@ -133,9 +133,9 @@ func SeedBackupSample(t testing.TB, ctx context.Context, p components.ActorProvi
 	require.NoError(t, err)
 
 	// Actor state, without expiration so the values do not depend on the provider clock
-	// One entry carries labels and one carries none, so the round-trip covers both
+	// One entry carries workflow labels and one carries none, so the round-trip covers both
 	err = p.SetState(ctx, ref.NewActorRef(actorType, "state-1"), []byte("state-data-1"), components.SetStateOpts{
-		Labels: map[string]string{"status": "running", "version": "2"},
+		WorkflowLabels: &components.WorkflowLabels{Status: "running", Version: 2, Parent: "parent-1"},
 	})
 	require.NoError(t, err)
 	err = p.SetState(ctx, ref.NewActorRef(actorType, "state-2"), []byte("state-data-2"), components.SetStateOpts{})

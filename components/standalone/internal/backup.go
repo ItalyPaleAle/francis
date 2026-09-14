@@ -61,13 +61,18 @@ func (p *Provider) snapshotStateRecords() []*backup.StateRecord {
 			continue
 		}
 
-		recs = append(recs, &backup.StateRecord{
+		rec := &backup.StateRecord{
 			ActorType:  key.ActorType,
 			ActorID:    key.ActorID,
 			Data:       entry.Data,
 			Expiration: entry.Expiration,
-			Labels:     entry.Labels,
-		})
+		}
+
+		if entry.WorkflowLabels != nil {
+			rec.WorkflowLabels = new(*entry.WorkflowLabels)
+		}
+
+		recs = append(recs, rec)
 	}
 	return recs
 }
@@ -217,7 +222,7 @@ func (p *Provider) Restore(ctx context.Context, r io.Reader) error {
 		case backup.RecordTypeState:
 			stateSets = append(stateSets, ActorStateChange{
 				Key:   NewActorKey(rec.State.ActorType, rec.State.ActorID),
-				Value: &StateEntry{Data: rec.State.Data, Expiration: rec.State.Expiration, Labels: rec.State.Labels},
+				Value: &StateEntry{Data: rec.State.Data, Expiration: rec.State.Expiration, WorkflowLabels: rec.State.WorkflowLabels},
 			})
 			if len(stateSets) >= restoreBatchSize {
 				err = flushStateDomain()

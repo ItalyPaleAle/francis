@@ -1,9 +1,10 @@
 package internal
 
 import (
-	"maps"
 	"slices"
 	"time"
+
+	"github.com/italypaleale/francis/components"
 )
 
 type Host struct {
@@ -232,18 +233,28 @@ type AlarmProperties struct {
 type StateEntry struct {
 	Data       []byte
 	Expiration *time.Time
-	// Labels are the short string pairs stored alongside the state, which ListStates filters on by equality
-	Labels map[string]string
+	// WorkflowLabels is the workflow engine's label object for this row, nil for a row that has none
+	WorkflowLabels *components.WorkflowLabels
 }
 
-// MatchesLabels returns true when the entry carries every one of the requested labels with the given value
-// An empty request matches every entry, so an unfiltered listing takes the same code path as a filtered one
-func (s *StateEntry) MatchesLabels(want map[string]string) bool {
-	for k, v := range want {
-		got, ok := s.Labels[k]
-		if !ok || got != v {
-			return false
-		}
+// MatchesWorkflowLabels returns true when the entry's labels match every field the filter sets
+// A nil filter matches every entry, so an unfiltered listing takes the same code path as a filtered one
+func (s *StateEntry) MatchesWorkflowLabels(want *components.WorkflowLabels) bool {
+	if want == nil || want.IsZero() {
+		return true
+	}
+	if s.WorkflowLabels == nil {
+		return false
+	}
+
+	got := *s.WorkflowLabels
+	switch {
+	case want.Status != "" && want.Status != got.Status:
+		return false
+	case want.Version != 0 && want.Version != got.Version:
+		return false
+	case want.Parent != "" && want.Parent != got.Parent:
+		return false
 	}
 	return true
 }
@@ -263,8 +274,8 @@ func (s *StateEntry) Clone() *StateEntry {
 	if s.Expiration != nil {
 		clone.Expiration = s.Expiration
 	}
-	if s.Labels != nil {
-		clone.Labels = maps.Clone(s.Labels)
+	if s.WorkflowLabels != nil {
+		clone.WorkflowLabels = new(*s.WorkflowLabels)
 	}
 	return clone
 }

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 	"uuid"
@@ -14,15 +13,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/builtinactor"
+	"github.com/italypaleale/francis/internal/builtinkey"
 	"github.com/italypaleale/francis/internal/ref"
-)
-
-const (
-	// These labels are written with every journal write, so a filtered listing is a range scan rather than a walk of every retained journal
-	labelStatus  = "status"
-	labelVersion = "version"
-	labelParent  = "parent"
 )
 
 // Service binds the workflow to an actor.Service, returning a WorkflowService that drives instances against that service
@@ -286,7 +280,7 @@ func (l InstanceList) AfterID() string {
 	return l.Instances[len(l.Instances)-1].InstanceID
 }
 
-// List returns a page of instances, filtered server-side on the state labels the orchestrator writes with every journal write
+// List returns a page of instances, filtered server-side on the workflow labels the orchestrator writes with every journal write
 // A label filter is an equality on an indexed column, so "every running instance" is a range scan rather than a walk of every retained journal
 func (s *WorkflowService) List(ctx context.Context, opts *ListOptions) (InstanceList, error) {
 	var o ListOptions
@@ -294,24 +288,20 @@ func (s *WorkflowService) List(ctx context.Context, opts *ListOptions) (Instance
 		o = *opts
 	}
 
-	labels := map[string]string{}
-	if o.Status != "" {
-		labels[labelStatus] = string(o.Status)
-	}
-	if o.Version > 0 {
-		labels[labelVersion] = strconv.Itoa(o.Version)
-	}
-	if o.Parent != "" {
-		labels[labelParent] = o.Parent
-	}
-
-	client := builtinactor.NewClient[instanceState](s.wf.baseType, "", s.svc)
-	page, err := client.ListStates(ctx, &actor.ListStatesOpts{
+	// The labels written with every journal write are what make this a range scan on an indexed column rather than a walk of every retained journal
+	listOpts := &actor.ListStatesOpts{
 		IncludeData: true,
-		Labels:      labels,
 		After:       o.After,
 		Limit:       o.Limit,
+	}
+	listOpts.SetWorkflowLabels(builtinkey.Key{}, components.WorkflowLabels{
+		Status:  string(o.Status),
+		Version: o.Version,
+		Parent:  o.Parent,
 	})
+
+	client := builtinactor.NewClient[instanceState](s.wf.baseType, "", s.svc)
+	page, err := client.ListStates(ctx, listOpts)
 	if err != nil {
 		return InstanceList{}, fmt.Errorf("failed to list workflow instances: %w", err)
 	}

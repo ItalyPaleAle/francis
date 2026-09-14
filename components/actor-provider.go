@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"time"
 	"uuid"
 
@@ -354,20 +355,9 @@ type UpdateLeasedAlarmReq struct {
 // SetStateOpts contains options for SetState
 type SetStateOpts struct {
 	TTL time.Duration
-	// Labels is an optional set of short string pairs stored in the state row itself, so they carry its expiration and are replaced with it, which ListStates filters on by equality
-	// A nil or empty map removes every label previously stored for the actor
-	Labels map[string]string
-}
-
-// LabelsJSON encodes the labels as the JSON object a provider stores in the state row's label column.
-// It returns an empty string when there are no labels
-func (o SetStateOpts) LabelsJSON() (string, error) {
-	b, err := EncodeLabels(o.Labels)
-	if err != nil {
-		return "", err
-	}
-
-	return string(b), nil
+	// WorkflowLabels, when set, is stored in the state row itself, so it carries the row's expiration and is replaced with it.
+	// Nil removes whatever the row had.
+	WorkflowLabels *WorkflowLabels
 }
 
 // ListStatesReq is the request object for the ListStates method.
@@ -376,19 +366,13 @@ type ListStatesReq struct {
 	ActorType string
 	// When true, the stored state data is returned alongside each actor ID
 	IncludeData bool
-	// Labels restricts the listing to actors whose state carries every one of these labels with the given value
-	Labels map[string]string
+	// WorkflowLabels, when set, restricts the listing to rows whose labels match every field it sets, by equality.
+	WorkflowLabels *WorkflowLabels
 	// Pagination cursor: only actor IDs sorting strictly after this value are returned
 	After string
 	// Maximum number of states to return
 	// Zero means DefaultListStatesLimit, and values above MaxListStatesLimit are capped
 	Limit int
-}
-
-// LabelsJSON encodes the requested label filter as a JSON object, for providers that match it against a JSON column.
-// It returns nil when the request filters on no labels.
-func (r ListStatesReq) LabelsJSON() ([]byte, error) {
-	return EncodeLabels(r.Labels)
 }
 
 // EffectiveLimit returns the number of states the provider should return for this request, applying the default when the caller didn't set a limit and the cap when it asked for too many.
@@ -403,29 +387,75 @@ func (r ListStatesReq) EffectiveLimit() int {
 	}
 }
 
-// EncodeLabels marshals a label set into the JSON object providers store it as, returning nil for an empty set.
-func EncodeLabels(labels map[string]string) ([]byte, error) {
-	if len(labels) == 0 {
-		return nil, nil
-	}
+// Names of the workflow label fields, as they are stored in the JSON object and as the indexes created by the providers' migrations extract them.
+// A provider that matches a label per field, rather than matching the whole object at once, must use these names so its query lines up with its indexes.
+const (
+	WorkflowLabelStatus  = "status"
+	WorkflowLabelVersion = "version"
+	WorkflowLabelParent  = "parent"
+)
 
-	res, err := json.Marshal(labels)
-	if err != nil {
-		return nil, fmt.Errorf("failed to encode state labels: %w", err)
-	}
-	return res, nil
+// WorkflowLabels is the small, fixed set of fields the workflow engine stores alongside an instance's journal so that instances can be listed without reading every journal.
+// It is deliberately not a general-purpose facility: the set is closed, each field is indexed by a migration, and only Francis' own workflow engine writes it.
+// As a filter on ListStates, a field left at its zero value is not matched on, so the zero value matches every row that has labels at all.
+//
+// Every field is stored as a JSON string, Version included, because labels are only ever compared for equality: nothing asks a range question of them.
+// That keeps the two SQL providers symmetric, since SQLite's json_extract and Postgres' ->> then both yield text, which is what their indexes are built on and what Fields binds against.
+// A JSON number would compare unequal to that bound text on SQLite, silently matching nothing.
+type WorkflowLabels struct {
+	// Status is the instance's status
+	Status string `json:"status,omitempty"`
+	// Version is the version of the definition the instance is running, which is always positive for a stored instance
+	Version int `json:"version,string,omitempty"`
+	// Parent is the instance ID of the parent instance, empty for a top-level instance
+	Parent string `json:"parent,omitempty"`
 }
 
-// DecodeLabels reads a label set back from the JSON object a provider stored it as, treating an absent value as no labels.
-func DecodeLabels(data []byte) (map[string]string, error) {
+// IsZero reports whether no field is set.
+func (l WorkflowLabels) IsZero() bool {
+	return l.Status == "" && l.Version == 0 && l.Parent == ""
+}
+
+// JSON encodes the labels as the JSON object a provider stores in the row's label column.
+// It returns an empty string when no field is set, so the column is left NULL rather than holding an empty object.
+func (l WorkflowLabels) JSON() (string, error) {
+	if l.IsZero() {
+		return "", nil
+	}
+
+	res, err := json.Marshal(l)
+	if err != nil {
+		return "", fmt.Errorf("failed to encode the workflow labels: %w", err)
+	}
+	return string(res), nil
+}
+
+// Fields returns the label fields that are set, keyed by the names above, with every value rendered as the string the stored JSON holds.
+// A provider that filters per field iterates this rather than reaching for the struct fields one at a time.
+func (l WorkflowLabels) Fields() map[string]string {
+	res := make(map[string]string, 3)
+	if l.Status != "" {
+		res[WorkflowLabelStatus] = l.Status
+	}
+	if l.Version != 0 {
+		res[WorkflowLabelVersion] = strconv.Itoa(l.Version)
+	}
+	if l.Parent != "" {
+		res[WorkflowLabelParent] = l.Parent
+	}
+	return res
+}
+
+// DecodeWorkflowLabels reads the labels back from the JSON object a provider stored them as, returning nil when the column held nothing.
+func DecodeWorkflowLabels(data []byte) (*WorkflowLabels, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
 
-	var res map[string]string
-	err := json.Unmarshal(data, &res)
+	res := &WorkflowLabels{}
+	err := json.Unmarshal(data, res)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode state labels: %w", err)
+		return nil, fmt.Errorf("failed to decode the workflow labels: %w", err)
 	}
 	return res, nil
 }

@@ -16,6 +16,7 @@ import (
 	msgpack "github.com/vmihailenco/msgpack/v5"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
 )
 
@@ -28,8 +29,8 @@ type fakeHost struct {
 
 	// state holds each actor's encoded state, so a read sees exactly what a write stored
 	state map[string][]byte
-	// labels holds the labels written alongside each actor's state
-	labels map[string]map[string]string
+	// labels holds the workflow labels written alongside each actor's state
+	labels map[string]*components.WorkflowLabels
 	// alarms records the alarms currently set
 	alarms map[string]actor.AlarmProperties
 	// jobs holds the jobs dispatched, keyed by job ID
@@ -54,7 +55,7 @@ type fakeHost struct {
 func newFakeHost() *fakeHost {
 	return &fakeHost{
 		state:            map[string][]byte{},
-		labels:           map[string]map[string]string{},
+		labels:           map[string]*components.WorkflowLabels{},
 		alarms:           map[string]actor.AlarmProperties{},
 		jobs:             map[string]actor.JobInfo{},
 		jobPayloads:      map[string]any{},
@@ -251,7 +252,7 @@ func (f *fakeHost) SetState(ctx context.Context, actorType string, actorID strin
 
 	f.state[key(actorType, actorID)] = enc
 	if opts != nil {
-		f.labels[key(actorType, actorID)] = opts.Labels
+		f.labels[key(actorType, actorID)] = opts.WorkflowLabels()
 	}
 	return nil
 }
@@ -573,8 +574,8 @@ func TestFanOutWindowAdmitsTasksInIndexOrder(t *testing.T) {
 	assert.Empty(t, host.dispatchedTo(workerType, workerActorID("inst-1", "work", 3)))
 }
 
-// TestTurnWritesTheStatusLabelsWithTheJournal verifies the listing index can never disagree with the journal, because both are written in the same operation
-func TestTurnWritesTheStatusLabelsWithTheJournal(t *testing.T) {
+// TestTurnWritesTheWorkflowLabelsWithTheJournal verifies the listing index can never disagree with the journal, because both are written in the same operation
+func TestTurnWritesTheWorkflowLabelsWithTheJournal(t *testing.T) {
 	host := newFakeHost()
 
 	wf, err := New("labels", WithVersion(4), WithSteps(Step("a", WithRun(noopRun))))
@@ -587,8 +588,9 @@ func TestTurnWritesTheStatusLabelsWithTheJournal(t *testing.T) {
 	labels := host.labels[key(ref.BuiltInActorTypePrefix+wf.baseType, "inst-1")]
 	host.mu.Unlock()
 
-	assert.Equal(t, string(StatusRunning), labels[labelStatus])
-	assert.Equal(t, "4", labels[labelVersion])
+	require.NotNil(t, labels)
+	assert.Equal(t, string(StatusRunning), labels.Status)
+	assert.Equal(t, 4, labels.Version)
 
 	require.NoError(t, o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "a", Index: 0, Attempt: 1}}))
 
@@ -596,7 +598,8 @@ func TestTurnWritesTheStatusLabelsWithTheJournal(t *testing.T) {
 	labels = host.labels[key(ref.BuiltInActorTypePrefix+wf.baseType, "inst-1")]
 	host.mu.Unlock()
 
-	assert.Equal(t, string(StatusCompleted), labels[labelStatus])
+	require.NotNil(t, labels)
+	assert.Equal(t, string(StatusCompleted), labels.Status)
 }
 
 // TestAHostWithoutTheInstanceVersionDeclinesTheJob verifies an old instance is left for a host that can serve it, without counting an attempt and without dead-lettering

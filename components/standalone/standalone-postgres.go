@@ -410,7 +410,7 @@ func (s *StandalonePostgresBacked) loadTerminalJobs(ctx context.Context) error {
 
 func (s *StandalonePostgresBacked) loadActorState(ctx context.Context) error {
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	rows, err := s.db.Query(ctx, "SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time, actor_state_labels FROM "+s.tablePrefix+"actor_state")
+	rows, err := s.db.Query(ctx, "SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time, workflow_labels FROM "+s.tablePrefix+"actor_state")
 	if err != nil {
 		return err
 	}
@@ -430,9 +430,9 @@ func (s *StandalonePostgresBacked) loadActorState(ctx context.Context) error {
 		}
 
 		entry := &internal.StateEntry{
-			Data:       data,
-			Expiration: exp,
-			Labels:     decodeStateLabels(labels),
+			Data:           data,
+			Expiration:     exp,
+			WorkflowLabels: decodeWorkflowLabels(labels),
 		}
 
 		key := internal.NewActorKey(actorType, actorID)
@@ -768,13 +768,13 @@ func (s *StandalonePostgresBacked) persistActorStateChanges(ctx context.Context,
 
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.Exec(ctx,
-			`INSERT INTO `+s.tablePrefix+`actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time, actor_state_labels)
+			`INSERT INTO `+s.tablePrefix+`actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time, workflow_labels)
 			VALUES ($1, $2, $3, $4, $5)
 			ON CONFLICT(actor_type, actor_id) DO UPDATE SET
 				actor_state_data = EXCLUDED.actor_state_data,
 				actor_state_expiration_time = EXCLUDED.actor_state_expiration_time,
-				actor_state_labels = EXCLUDED.actor_state_labels`,
-			key.ActorType, key.ActorID, entry.Data, expVal, encodeStateLabels(entry.Labels),
+				workflow_labels = EXCLUDED.workflow_labels`,
+			key.ActorType, key.ActorID, entry.Data, expVal, encodeWorkflowLabels(entry.WorkflowLabels),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to upsert actor state: %w", err)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"embed"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -440,7 +439,7 @@ func (s *StandaloneSQLiteBacked) loadTerminalJobs(ctx context.Context) error {
 
 func (s *StandaloneSQLiteBacked) loadActorState(ctx context.Context) error {
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	rows, err := s.db.QueryContext(ctx, "SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time, actor_state_labels FROM "+s.tablePrefix+"actor_state")
+	rows, err := s.db.QueryContext(ctx, "SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time, workflow_labels FROM "+s.tablePrefix+"actor_state")
 	if err != nil {
 		return err
 	}
@@ -460,8 +459,8 @@ func (s *StandaloneSQLiteBacked) loadActorState(ctx context.Context) error {
 		}
 
 		entry := &internal.StateEntry{
-			Data:   data,
-			Labels: decodeStateLabels(labels),
+			Data:           data,
+			WorkflowLabels: decodeWorkflowLabels(labels),
 		}
 		if expMs.Valid {
 			t := time.UnixMilli(expMs.Int64)
@@ -760,8 +759,8 @@ func (s *StandaloneSQLiteBacked) persistActorStateChanges(ctx context.Context, t
 
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.ExecContext(ctx,
-			`REPLACE INTO `+s.tablePrefix+`actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time, actor_state_labels) VALUES (?, ?, ?, ?, ?)`,
-			key.ActorType, key.ActorID, entry.Data, expVal, encodeStateLabels(entry.Labels),
+			`REPLACE INTO `+s.tablePrefix+`actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time, workflow_labels) VALUES (?, ?, ?, ?, ?)`,
+			key.ActorType, key.ActorID, entry.Data, expVal, encodeWorkflowLabels(entry.WorkflowLabels),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to upsert actor state: %w", err)
@@ -771,28 +770,27 @@ func (s *StandaloneSQLiteBacked) persistActorStateChanges(ctx context.Context, t
 	return nil
 }
 
-// encodeStateLabels serializes an actor state's labels for the backing store, returning nil when there are none so the column stays NULL
-func encodeStateLabels(labels map[string]string) any {
-	if len(labels) == 0 {
+// encodeWorkflowLabels serializes an actor state's workflow labels for the backing store, returning nil when there are none so the column stays NULL
+func encodeWorkflowLabels(labels *components.WorkflowLabels) any {
+	if labels == nil {
 		return nil
 	}
 
-	// The map is small and the encoding never fails for a map of strings, so an error here would be a programming error rather than a runtime condition
-	enc, err := json.Marshal(labels)
-	if err != nil {
+	// The struct is three plain fields and the encoding never fails for them, so an error here would be a programming error rather than a runtime condition
+	enc, err := labels.JSON()
+	if err != nil || enc == "" {
 		return nil
 	}
-	return string(enc)
+	return enc
 }
 
-// decodeStateLabels reads an actor state's labels back from the backing store, treating a NULL or unparseable column as no labels
-func decodeStateLabels(raw sql.NullString) map[string]string {
+// decodeWorkflowLabels reads an actor state's workflow labels back from the backing store, treating a NULL or unparseable column as none
+func decodeWorkflowLabels(raw sql.NullString) *components.WorkflowLabels {
 	if !raw.Valid || raw.String == "" {
 		return nil
 	}
 
-	var labels map[string]string
-	err := json.Unmarshal([]byte(raw.String), &labels)
+	labels, err := components.DecodeWorkflowLabels([]byte(raw.String))
 	if err != nil {
 		return nil
 	}

@@ -9,6 +9,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/tracing"
 	"github.com/italypaleale/francis/internal/types"
@@ -31,13 +32,9 @@ func (h *Host) SetState(ctx context.Context, actorType string, actorID string, s
 		return err
 	}
 
-	var (
-		ttl    time.Duration
-		labels map[string]string
-	)
+	var ttl time.Duration
 	if opts != nil {
 		ttl = opts.TTL
-		labels = opts.Labels
 	}
 
 	// Encode the state using msgpack
@@ -50,11 +47,11 @@ func (h *Host) SetState(ctx context.Context, actorType string, actorID string, s
 	reqCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
 	defer cancel()
 	err = h.runtimeClient.SetState(reqCtx, protocol.SetStateRequest{
-		ActorType: actorType,
-		ActorID:   actorID,
-		Data:      data,
-		TTLMs:     ttl.Milliseconds(),
-		Labels:    labels,
+		ActorType:      actorType,
+		ActorID:        actorID,
+		Data:           data,
+		TTLMs:          ttl.Milliseconds(),
+		WorkflowLabels: workflowLabelsToProtocol(opts.WorkflowLabels()),
 	})
 	if err != nil {
 		return fmt.Errorf("failed saving state: %w", err)
@@ -124,7 +121,7 @@ func (h *Host) ListStates(ctx context.Context, actorType string, opts *actor.Lis
 	}
 	if opts != nil {
 		req.IncludeData = opts.IncludeData
-		req.Labels = opts.Labels
+		req.WorkflowLabels = workflowLabelsToProtocol(opts.WorkflowLabels())
 		req.After = opts.After
 		req.Limit = opts.Limit
 	}
@@ -189,4 +186,17 @@ func (h *Host) DeleteState(ctx context.Context, actorType string, actorID string
 	}
 
 	return nil
+}
+
+// workflowLabelsToProtocol restates the workflow engine's labels in the wire's own shape, or returns nil when there are none
+func workflowLabelsToProtocol(labels *components.WorkflowLabels) *protocol.WorkflowLabels {
+	if labels == nil {
+		return nil
+	}
+
+	return &protocol.WorkflowLabels{
+		Status:  labels.Status,
+		Version: labels.Version,
+		Parent:  labels.Parent,
+	}
 }

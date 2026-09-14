@@ -149,21 +149,17 @@ A worker's actor ID is deterministic — `<instanceID>|<step>|<index>` — so a 
 
 ## Listing
 
-`List` is built on **state labels**: the orchestrator writes `status`, `version`, and `parent` with every journal write. They live in the state row itself, as a JSON object in a column of its own, so they are written, replaced, and removed in the same statement as the journal and cannot disagree with it or outlive it.
+`List` is built on **workflow labels**: the orchestrator writes `status`, `version`, and `parent` with every journal write. They live in the state row itself, as a JSON object in a `workflow_labels` column, so they are written, replaced, and removed in the same statement as the journal and cannot disagree with it or outlive it.
 
-On Postgres the column carries a `jsonb_path_ops` GIN index, which the planner uses when the filter is selective enough to beat walking the page in actor-ID order.
+The set is **closed and internal**. There is no facility here for an application to attach labels of its own: the three fields are a `components.WorkflowLabels` struct, each provider's migration creates an index for each of them, and only this engine writes them — the public `SetState` and `ListStates` options do not mention labels at all. Nothing has to be configured for `List` to be fast, and there is no way to ask for a label the schema has no index for.
 
-SQLite has no index that covers arbitrary JSON keys, but it does index expressions. Name the keys you filter on and each gets an index of its own, which turns the filter into an index lookup:
+Each provider indexes each field explicitly, on `(actor_type, <field>, actor_id)` so that a filtered listing is an index range scan already in the order it pages in:
 
-```go
-local.WithSQLiteProvider(sqlite.SQLiteProviderOptions{
-	ConnectionString:  "...",
-	StateLabelIndexes: []string{"status", "version", "parent"},
-})
-```
+- Postgres indexes the `->>` of each field. Three expression indexes beat one `jsonb_path_ops` GIN index here, because GIN cannot serve the `ORDER BY actor_id` that paging needs.
+- SQLite indexes the `json_extract` of each field. SQLite only uses an expression index when the query repeats the indexed expression verbatim, so one function renders that path for both the migration and the listing.
 
-Those three are the keys this engine writes, so a deployment that uses `List` filters on SQLite wants all of them. A key left out is still stored and still filterable, just matched per row within the actor-type range the primary key already narrows the scan to.
+Each index is partial — `WHERE workflow_labels IS NOT NULL` — because only a workflow instance's state carries labels at all, and extracting a field from a NULL column yields NULL, so the partial index still covers every row a filter can match.
 
 Labels are equality-only, so a range question — "terminated more than a week ago" — cannot be asked of them. The retention sweep therefore filters by status server-side and checks each instance's completion time on the decoded journal.
 
-A secondary index actor would have needed no framework change, but it would have been a second write on a second actor, updated *after* the journal write and therefore able to lag or dangle. A side table of label rows has the same shape of problem in miniature — two writes to keep consistent, and rows to clean up when the state they describe expires. A column of the row it describes has neither. Labels are also useful to every actor application, not only this one.
+A secondary index actor would have needed no framework change, but it would have been a second write on a second actor, updated *after* the journal write and therefore able to lag or dangle. A side table of label rows has the same shape of problem in miniature — two writes to keep consistent, and rows to clean up when the state they describe expires. A column of the row it describes has neither.

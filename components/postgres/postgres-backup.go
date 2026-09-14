@@ -63,7 +63,7 @@ func (p *PostgresProvider) Backup(ctx context.Context, w io.Writer) error {
 func (p *PostgresProvider) Restore(ctx context.Context, r io.Reader) error {
 	// Column lists for the restore COPY, matching the order produced by the value functions below
 	var (
-		backupStateColumns       = []string{"actor_type", "actor_id", "actor_state_data", "actor_state_expiration_time", "actor_state_labels"}
+		backupStateColumns       = []string{"actor_type", "actor_id", "actor_state_data", "actor_state_expiration_time", "workflow_labels"}
 		backupAlarmColumns       = []string{"alarm_id", "actor_type", "actor_id", "alarm_name", "alarm_due_time", "alarm_interval", "alarm_cron", "alarm_ttl_time", "alarm_data", "alarm_lease_id", "alarm_lease_expiration_time", "alarm_kind", "job_method"}
 		backupTerminalJobColumns = []string{"job_id", "actor_type", "actor_id", "job_method", "job_data", "job_status", "attempts", "last_error", "ended_at", "original_due", "job_interval", "job_cron", "expiration_time"}
 	)
@@ -195,7 +195,7 @@ func (p *PostgresProvider) wipePersistentData(ctx context.Context, tx pgx.Tx) er
 func (p *PostgresProvider) backupState(ctx context.Context, tx pgx.Tx, bw *backup.Writer) error {
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	rows, err := tx.Query(ctx,
-		`SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time, actor_state_labels
+		`SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time, workflow_labels
 		FROM `+p.tablePrefix+`actor_state
 		WHERE actor_state_expiration_time IS NULL OR actor_state_expiration_time > (now() AT TIME ZONE 'utc')`,
 	)
@@ -208,7 +208,7 @@ func (p *PostgresProvider) backupState(ctx context.Context, tx pgx.Tx, bw *backu
 		var (
 			rec    backup.StateRecord
 			exp    *time.Time
-			labels []byte
+			labels *string
 		)
 		err = rows.Scan(&rec.ActorType, &rec.ActorID, &rec.Data, &exp, &labels)
 		if err != nil {
@@ -218,11 +218,11 @@ func (p *PostgresProvider) backupState(ctx context.Context, tx pgx.Tx, bw *backu
 		if exp != nil {
 			rec.Expiration = new(exp.UTC())
 		}
-
-		// The backup format carries labels as a map, so it stays portable across providers that store them differently
-		rec.Labels, err = components.DecodeLabels(labels)
-		if err != nil {
-			return err
+		if labels != nil {
+			rec.WorkflowLabels, err = components.DecodeWorkflowLabels([]byte(*labels))
+			if err != nil {
+				return err
+			}
 		}
 
 		err = bw.WriteState(&rec)
@@ -354,14 +354,15 @@ func stateToCopyValues(rec backup.Record) ([]any, error) {
 		exp = r.Expiration.UTC()
 	}
 
-	labelsJSON, err := components.EncodeLabels(r.Labels)
-	if err != nil {
-		return nil, err
-	}
-
 	var labels any
-	if labelsJSON != nil {
-		labels = string(labelsJSON)
+	if r.WorkflowLabels != nil {
+		labelsJSON, err := r.WorkflowLabels.JSON()
+		if err != nil {
+			return nil, err
+		}
+		if labelsJSON != "" {
+			labels = labelsJSON
+		}
 	}
 
 	return []any{r.ActorType, r.ActorID, data, exp, labels}, nil

@@ -308,8 +308,16 @@ type SetStateRequest struct {
 	// TTLMs is an optional time-to-live for the state, in milliseconds
 	// Zero means no TTL
 	TTLMs int64 `msgpack:"ttl,omitempty"`
-	// Labels is an optional set of short string pairs stored alongside the state, which a listing can filter on by equality
-	Labels map[string]string `msgpack:"labels,omitempty"`
+	// WorkflowLabels is the workflow engine's labels for the row, set only by Francis' own workflow engine
+	WorkflowLabels *WorkflowLabels `msgpack:"workflowLabels,omitempty"`
+}
+
+// WorkflowLabels is the workflow engine's label set as it travels on the wire
+// It restates the same closed set of fields as components.WorkflowLabels, so the wire format stays independent of the provider interface
+type WorkflowLabels struct {
+	Status  string `msgpack:"status,omitempty"`
+	Version int    `msgpack:"version,omitempty"`
+	Parent  string `msgpack:"parent,omitempty"`
 }
 
 // DeleteStateRequest deletes the persistent state of an actor
@@ -322,8 +330,8 @@ type ListStatesRequest struct {
 	ActorType string `msgpack:"type"`
 	// IncludeData requests the stored state data alongside each actor ID
 	IncludeData bool `msgpack:"includeData,omitempty"`
-	// Labels restricts the listing to actors whose state carries every one of these labels with the given value
-	Labels map[string]string `msgpack:"labels,omitempty"`
+	// WorkflowLabels restricts the listing to rows whose workflow labels match every field it sets
+	WorkflowLabels *WorkflowLabels `msgpack:"workflowLabels,omitempty"`
 	// After is the pagination cursor, and only actor IDs sorting strictly after it are returned
 	After string `msgpack:"after,omitempty"`
 	// Limit is the maximum number of states to return, where zero means the provider's default

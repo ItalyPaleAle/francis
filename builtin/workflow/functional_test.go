@@ -578,7 +578,7 @@ func TestCancelUnwinds(t *testing.T) {
 	assert.True(t, undone.Load())
 }
 
-// TestListAndPurge verifies instances are listed by their status labels and that a terminated one can be purged while a running one cannot
+// TestListAndPurge verifies instances are listed by their workflow labels and that a terminated one can be purged while a running one cannot
 func TestListAndPurge(t *testing.T) {
 	wf, err := workflow.New("listable",
 		workflow.WithSteps(

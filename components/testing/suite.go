@@ -38,7 +38,7 @@ func (s Suite) RunTests(t *testing.T) {
 
 	t.Run("actor state", s.TestState)
 	t.Run("list actor states", s.TestListStates)
-	t.Run("actor state labels", s.TestStateLabels)
+	t.Run("workflow labels", s.TestWorkflowLabels)
 
 	t.Run("get alarm", s.TestGetAlarm)
 	t.Run("set alarm", s.TestSetAlarm)
@@ -2813,11 +2813,12 @@ func (s Suite) TestListStates(t *testing.T) {
 	})
 }
 
-func (s Suite) TestStateLabels(t *testing.T) {
-	// setState stores state and labels for an actor of the given type
-	setState := func(t *testing.T, ctx context.Context, actorType string, actorID string, labels map[string]string) {
+func (s Suite) TestWorkflowLabels(t *testing.T) {
+	// setState stores state and workflow labels for an actor of the given type
+	// A nil labels argument stores none, which is how the write clears whatever the row had
+	setState := func(t *testing.T, ctx context.Context, actorType string, actorID string, labels *components.WorkflowLabels) {
 		t.Helper()
-		err := s.p.SetState(ctx, ref.ActorRef{ActorType: actorType, ActorID: actorID}, []byte("data"), components.SetStateOpts{Labels: labels})
+		err := s.p.SetState(ctx, ref.ActorRef{ActorType: actorType, ActorID: actorID}, []byte("data"), components.SetStateOpts{WorkflowLabels: labels})
 		require.NoError(t, err)
 	}
 
@@ -2837,78 +2838,93 @@ func (s Suite) TestStateLabels(t *testing.T) {
 	// Seed with empty database
 	require.NoError(t, s.p.Seed(t.Context(), Spec{}))
 
-	t.Run("filters a listing by a single label", func(t *testing.T) {
+	t.Run("filters a listing on one field", func(t *testing.T) {
 		ctx := t.Context()
 
-		setState(t, ctx, "LabelFilter", "actor-01", map[string]string{"status": "running"})
-		setState(t, ctx, "LabelFilter", "actor-02", map[string]string{"status": "done"})
-		setState(t, ctx, "LabelFilter", "actor-03", map[string]string{"status": "running"})
+		setState(t, ctx, "LabelFilter", "actor-01", &components.WorkflowLabels{Status: "running", Version: 1})
+		setState(t, ctx, "LabelFilter", "actor-02", &components.WorkflowLabels{Status: "done", Version: 1})
+		setState(t, ctx, "LabelFilter", "actor-03", &components.WorkflowLabels{Status: "running", Version: 1})
 
-		ids := listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelFilter", Labels: map[string]string{"status": "running"}})
+		ids := listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelFilter", WorkflowLabels: &components.WorkflowLabels{Status: "running"}})
 		assert.Equal(t, []string{"actor-01", "actor-03"}, ids)
 	})
 
-	t.Run("requires every label in the filter to match", func(t *testing.T) {
+	t.Run("requires every field the filter sets to match", func(t *testing.T) {
 		ctx := t.Context()
 
-		setState(t, ctx, "LabelMulti", "actor-01", map[string]string{"status": "running", "version": "1"})
-		setState(t, ctx, "LabelMulti", "actor-02", map[string]string{"status": "running", "version": "2"})
-		setState(t, ctx, "LabelMulti", "actor-03", map[string]string{"status": "done", "version": "2"})
+		setState(t, ctx, "LabelMulti", "actor-01", &components.WorkflowLabels{Status: "running", Version: 1})
+		setState(t, ctx, "LabelMulti", "actor-02", &components.WorkflowLabels{Status: "running", Version: 2})
+		setState(t, ctx, "LabelMulti", "actor-03", &components.WorkflowLabels{Status: "done", Version: 2})
 
-		ids := listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelMulti", Labels: map[string]string{"status": "running", "version": "2"}})
+		ids := listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelMulti", WorkflowLabels: &components.WorkflowLabels{Status: "running", Version: 2}})
 		assert.Equal(t, []string{"actor-02"}, ids)
 
-		// A label the actor does not carry at all excludes it, just like a mismatched value
-		ids = listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelMulti", Labels: map[string]string{"absent": "x"}})
+		// A field the row does not carry at all excludes it, just like a mismatched value
+		ids = listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelMulti", WorkflowLabels: &components.WorkflowLabels{Parent: "nobody"}})
 		assert.Empty(t, ids)
+	})
+
+	t.Run("filters on the parent of a child instance", func(t *testing.T) {
+		ctx := t.Context()
+
+		setState(t, ctx, "LabelParent", "child-01", &components.WorkflowLabels{Status: "running", Version: 1, Parent: "p1"})
+		setState(t, ctx, "LabelParent", "child-02", &components.WorkflowLabels{Status: "running", Version: 1, Parent: "p2"})
+		setState(t, ctx, "LabelParent", "top-01", &components.WorkflowLabels{Status: "running", Version: 1})
+
+		ids := listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelParent", WorkflowLabels: &components.WorkflowLabels{Parent: "p1"}})
+		assert.Equal(t, []string{"child-01"}, ids)
 	})
 
 	t.Run("an unfiltered listing returns every actor regardless of labels", func(t *testing.T) {
 		ctx := t.Context()
 
-		setState(t, ctx, "LabelUnfiltered", "actor-01", map[string]string{"status": "running"})
+		setState(t, ctx, "LabelUnfiltered", "actor-01", &components.WorkflowLabels{Status: "running", Version: 1})
 		setState(t, ctx, "LabelUnfiltered", "actor-02", nil)
 
 		ids := listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelUnfiltered"})
+		assert.Equal(t, []string{"actor-01", "actor-02"}, ids)
+
+		// A filter with no field set is the same as no filter at all, rather than matching nothing
+		ids = listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelUnfiltered", WorkflowLabels: &components.WorkflowLabels{}})
 		assert.Equal(t, []string{"actor-01", "actor-02"}, ids)
 	})
 
 	t.Run("a later write replaces the previous labels", func(t *testing.T) {
 		ctx := t.Context()
 
-		setState(t, ctx, "LabelReplace", "actor-01", map[string]string{"status": "running"})
-		setState(t, ctx, "LabelReplace", "actor-01", map[string]string{"status": "done"})
+		setState(t, ctx, "LabelReplace", "actor-01", &components.WorkflowLabels{Status: "running", Version: 1})
+		setState(t, ctx, "LabelReplace", "actor-01", &components.WorkflowLabels{Status: "done", Version: 1})
 
-		assert.Empty(t, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelReplace", Labels: map[string]string{"status": "running"}}))
-		assert.Equal(t, []string{"actor-01"}, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelReplace", Labels: map[string]string{"status": "done"}}))
+		assert.Empty(t, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelReplace", WorkflowLabels: &components.WorkflowLabels{Status: "running"}}))
+		assert.Equal(t, []string{"actor-01"}, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelReplace", WorkflowLabels: &components.WorkflowLabels{Status: "done"}}))
 
-		// Writing with no labels at all clears the set the actor had
+		// Writing with no labels at all clears what the row had
 		setState(t, ctx, "LabelReplace", "actor-01", nil)
-		assert.Empty(t, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelReplace", Labels: map[string]string{"status": "done"}}))
+		assert.Empty(t, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelReplace", WorkflowLabels: &components.WorkflowLabels{Status: "done"}}))
 		assert.Equal(t, []string{"actor-01"}, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelReplace"}))
 	})
 
 	t.Run("labels do not outlive the state they describe", func(t *testing.T) {
 		ctx := t.Context()
 
-		setState(t, ctx, "LabelDeleted", "actor-01", map[string]string{"status": "running"})
+		setState(t, ctx, "LabelDeleted", "actor-01", &components.WorkflowLabels{Status: "running", Version: 1})
 		require.NoError(t, s.p.DeleteState(ctx, ref.ActorRef{ActorType: "LabelDeleted", ActorID: "actor-01"}))
 
-		// The state is gone, so a filtered listing must not resurrect it through a stale label row
-		assert.Empty(t, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelDeleted", Labels: map[string]string{"status": "running"}}))
+		// The state is gone, so a filtered listing must not resurrect it
+		assert.Empty(t, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelDeleted", WorkflowLabels: &components.WorkflowLabels{Status: "running"}}))
 
 		// And writing the actor again with no labels must not inherit the old ones
 		setState(t, ctx, "LabelDeleted", "actor-01", nil)
-		assert.Empty(t, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelDeleted", Labels: map[string]string{"status": "running"}}))
+		assert.Empty(t, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelDeleted", WorkflowLabels: &components.WorkflowLabels{Status: "running"}}))
 	})
 
 	t.Run("a filtered listing pages in actor-ID order", func(t *testing.T) {
 		ctx := t.Context()
 
 		for i := 1; i <= 6; i++ {
-			labels := map[string]string{"group": "b"}
+			labels := &components.WorkflowLabels{Status: "done", Version: 1}
 			if i%2 == 1 {
-				labels = map[string]string{"group": "a"}
+				labels = &components.WorkflowLabels{Status: "running", Version: 1}
 			}
 			setState(t, ctx, "LabelPaged", fmt.Sprintf("actor-%02d", i), labels)
 		}
@@ -2918,7 +2934,7 @@ func (s Suite) TestStateLabels(t *testing.T) {
 			cursor string
 		)
 		for {
-			res, err := s.p.ListStates(ctx, components.ListStatesReq{ActorType: "LabelPaged", Labels: map[string]string{"group": "a"}, After: cursor, Limit: 2})
+			res, err := s.p.ListStates(ctx, components.ListStatesReq{ActorType: "LabelPaged", WorkflowLabels: &components.WorkflowLabels{Status: "running"}, After: cursor, Limit: 2})
 			require.NoError(t, err)
 			for _, state := range res.States {
 				seen = append(seen, state.ActorID)

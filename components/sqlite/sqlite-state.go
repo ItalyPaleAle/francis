@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 
 	"github.com/italypaleale/francis/components"
@@ -44,11 +43,14 @@ func (s *SQLiteProvider) SetState(ctx context.Context, ref ref.ActorRef, data []
 	}
 
 	var labels *string
-	labelsJSON, err := opts.LabelsJSON()
-	if err != nil {
-		return err
-	} else if labelsJSON != "" {
-		labels = &labelsJSON
+	if opts.WorkflowLabels != nil {
+		labelsJSON, jErr := opts.WorkflowLabels.JSON()
+		if jErr != nil {
+			return jErr
+		}
+		if labelsJSON != "" {
+			labels = &labelsJSON
+		}
 	}
 
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
@@ -56,9 +58,9 @@ func (s *SQLiteProvider) SetState(ctx context.Context, ref ref.ActorRef, data []
 
 	// Performs a upsert
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	_, err = s.db.ExecContext(queryCtx,
+	_, err := s.db.ExecContext(queryCtx,
 		`REPLACE INTO `+s.tablePrefix+`actor_state
-			(actor_type, actor_id, actor_state_data, actor_state_expiration_time, actor_state_labels)
+			(actor_type, actor_id, actor_state_data, actor_state_expiration_time, workflow_labels)
 		VALUES (?, ?, ?, ?, ?)`,
 		ref.ActorType, ref.ActorID, data, exp, labels,
 	)
@@ -83,36 +85,27 @@ func (s *SQLiteProvider) ListStates(ctx context.Context, req components.ListStat
 	// This avoids a second query just to compute HasMore
 	limit := req.EffectiveLimit()
 
-	// The size is known up front: the three fixed arguments, two per label clause, and the limit
-	args := make([]any, 0, 4+2*len(req.Labels))
+	// Each requested label field is matched as the same json_extract expression its index was built on, which is the only form the planner matches an expression index against
+	var labelFields map[string]string
+	if req.WorkflowLabels != nil {
+		labelFields = req.WorkflowLabels.Fields()
+	}
+
+	// The size is known up front: the three fixed arguments, one per label field, and the limit
+	args := make([]any, 0, 4+len(labelFields))
 	args = append(args, req.ActorType, req.After, s.clock.Now().UnixMilli())
 
-	// SQLite has no index that covers arbitrary JSON keys, so each requested label is matched one of two ways
-	// A key this deployment asked to index is spelled as the same json_extract expression the index was built on, which is the only form the planner will match it against
-	// Any other key is matched with json_each, which needs no escaping whatever the key contains, at the cost of being evaluated per row within the actor_type range the primary key already narrows the scan to
 	var labelClauses strings.Builder
-	if len(req.Labels) > 0 {
-		// json_extract and json_each both need well-formed JSON, so a row with no labels at all is excluded before either is reached
+	if len(labelFields) > 0 {
+		// json_extract needs well-formed JSON, so a row with no labels at all is excluded before it is reached
 		labelClauses.WriteString(`
-			AND actor_state_labels IS NOT NULL`)
+			AND workflow_labels IS NOT NULL`)
 	}
-	for k, v := range req.Labels {
-		if slices.Contains(s.stateLabelIndexes, k) {
-			// #nosec G202 -- the key was validated as a plain identifier before its index was created, so there is nothing to escape here
-			labelClauses.WriteString(`
-			AND `)
-			labelClauses.WriteString(stateLabelExtract(k))
-			labelClauses.WriteString(` = ?`)
-			args = append(args, v)
-			continue
-		}
-
+	for field, v := range labelFields {
+		// #nosec G202 -- the only concatenated value is one of the closed set of label field names, not user input
 		labelClauses.WriteString(`
-			AND EXISTS (
-				SELECT 1 FROM json_each(actor_state_labels) l
-				WHERE l.key = ? AND l.value = ?
-			)`)
-		args = append(args, k, v)
+			AND ` + workflowLabelExtract(field) + ` = ?`)
+		args = append(args, v)
 	}
 	args = append(args, limit+1)
 

@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/vmihailenco/msgpack/v5"
+
+	"github.com/italypaleale/francis/components"
 )
 
 const (
@@ -54,11 +56,13 @@ type Header struct {
 // StateRecord is a single actor-state entry
 // Expiration is nil when the state does not expire
 type StateRecord struct {
-	ActorType  string            `msgpack:"actorType"`
-	ActorID    string            `msgpack:"actorId"`
-	Data       []byte            `msgpack:"data,omitempty"`
-	Expiration *time.Time        `msgpack:"expiration,omitempty"`
-	Labels     map[string]string `msgpack:"labels,omitempty"`
+	ActorType  string     `msgpack:"actorType"`
+	ActorID    string     `msgpack:"actorId"`
+	Data       []byte     `msgpack:"data,omitempty"`
+	Expiration *time.Time `msgpack:"expiration,omitempty"`
+	// WorkflowLabels is the workflow engine's labels for the row, nil for a row that has none
+	// It is carried as its fields rather than as the JSON text a provider stored, because a provider may normalise that text (Postgres' jsonb reorders keys and adds spaces), and a record has to be identical whichever provider produced it
+	WorkflowLabels *components.WorkflowLabels `msgpack:"workflowLabels,omitempty"`
 }
 
 // AlarmRecord is a single alarm (Kind "alarm") or live job (Kind "job")

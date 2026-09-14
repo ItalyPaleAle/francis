@@ -32,13 +32,9 @@ func (h *Host) SetState(ctx context.Context, actorType string, actorID string, s
 		return err
 	}
 
-	var (
-		ttl    time.Duration
-		labels map[string]string
-	)
+	var ttl time.Duration
 	if opts != nil {
 		ttl = opts.TTL
-		labels = opts.Labels
 	}
 
 	// Encode the state using msgpack
@@ -48,8 +44,8 @@ func (h *Host) SetState(ctx context.Context, actorType string, actorID string, s
 	}
 
 	err = h.actorProvider.SetState(ctx, ref.NewActorRef(actorType, actorID), data, components.SetStateOpts{
-		TTL:    ttl,
-		Labels: labels,
+		TTL:            ttl,
+		WorkflowLabels: opts.WorkflowLabels(),
 	})
 	if err != nil {
 		return fmt.Errorf("failed saving state: %w", err)
@@ -111,7 +107,7 @@ func (h *Host) ListStates(ctx context.Context, actorType string, opts *actor.Lis
 	}
 	if opts != nil {
 		req.IncludeData = opts.IncludeData
-		req.Labels = opts.Labels
+		req.WorkflowLabels = opts.WorkflowLabels()
 		req.After = opts.After
 		req.Limit = opts.Limit
 	}

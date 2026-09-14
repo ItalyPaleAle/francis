@@ -840,7 +840,7 @@ func (rt *Runtime) handleSetState(parentCtx context.Context, _ *hostConn, req *p
 	}
 
 	opts := components.SetStateOpts{
-		Labels: payload.Labels,
+		WorkflowLabels: workflowLabelsFromProtocol(payload.WorkflowLabels),
 	}
 	if payload.TTLMs > 0 {
 		opts.TTL = time.Duration(payload.TTLMs) * time.Millisecond
@@ -901,11 +901,11 @@ func (rt *Runtime) handleListStates(parentCtx context.Context, _ *hostConn, req 
 	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
 	defer cancel()
 	res, err := rt.provider.ListStates(ctx, components.ListStatesReq{
-		ActorType:   payload.ActorType,
-		IncludeData: payload.IncludeData,
-		Labels:      payload.Labels,
-		After:       payload.After,
-		Limit:       payload.Limit,
+		ActorType:      payload.ActorType,
+		IncludeData:    payload.IncludeData,
+		WorkflowLabels: workflowLabelsFromProtocol(payload.WorkflowLabels),
+		After:          payload.After,
+		Limit:          payload.Limit,
 	})
 	if err != nil {
 		rt.log.ErrorContext(ctx, "Failed to list states", slog.Any("error", err))
@@ -952,4 +952,17 @@ func (rt *Runtime) deletePlacement(key string) {
 // placementCacheTTL returns the TTL used for placement cache entries, bounded by the health check deadline
 func (rt *Runtime) placementCacheTTL() time.Duration {
 	return min(lookupCacheMaxTTL, rt.hostHealthCheckDeadline)
+}
+
+// workflowLabelsFromProtocol reads the workflow engine's labels back off the wire, or returns nil when the request carries none
+func workflowLabelsFromProtocol(labels *protocol.WorkflowLabels) *components.WorkflowLabels {
+	if labels == nil {
+		return nil
+	}
+
+	return &components.WorkflowLabels{
+		Status:  labels.Status,
+		Version: labels.Version,
+		Parent:  labels.Parent,
+	}
 }

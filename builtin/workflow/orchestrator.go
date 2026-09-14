@@ -14,7 +14,9 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/builtinactor"
+	"github.com/italypaleale/francis/internal/builtinkey"
 	"github.com/italypaleale/francis/internal/tracing"
 )
 
@@ -243,7 +245,7 @@ func (o *orchestrator) turn(ctx context.Context, ev *event) (err error) {
 	advance(&st, o.def, o.instanceID, now)
 
 	// Phase 4a: the journal is durable before anything is scheduled, so a lost dispatch is always recoverable and an orphan result never is
-	// The status labels are written in the same operation as the state, so the listing index can never disagree with the journal
+	// The workflow labels are written in the same operation as the state, so the listing index can never disagree with the journal
 	err = o.persist(ctx, &st, now)
 	if err != nil {
 		return err
@@ -288,11 +290,10 @@ func (o *orchestrator) recover(st *instanceState, ev *event, now time.Time) {
 	o.applyElapsedDeadlines(st, now)
 }
 
-// persist writes the journal, its status labels, and its retention TTL in one operation, and fails the instance rather than letting it outgrow what it can store
+// persist writes the journal, its workflow labels, and its retention TTL in one operation, and fails the instance rather than letting it outgrow what it can store
 func (o *orchestrator) persist(ctx context.Context, st *instanceState, now time.Time) error {
-	opts := &actor.SetStateOpts{
-		Labels: o.labels(st),
-	}
+	opts := &actor.SetStateOpts{}
+	opts.SetWorkflowLabels(builtinkey.Key{}, o.labels(st))
 
 	// A terminated journal is written with a TTL of twice its retention, so an instance whose sweep never runs still expires while the sweep can still find what it needs to clean up
 	if st.Status.IsTerminal() {
@@ -306,7 +307,7 @@ func (o *orchestrator) persist(ctx context.Context, st *instanceState, now time.
 	}
 	if size > o.def.maxJournalSize {
 		failForOversizedJournal(st, size, o.def.maxJournalSize, now)
-		opts.Labels = o.labels(st)
+		opts.SetWorkflowLabels(builtinkey.Key{}, o.labels(st))
 		opts.TTL = 2 * o.def.retention.forStatus(st.Status)
 	}
 
@@ -318,13 +319,13 @@ func (o *orchestrator) persist(ctx context.Context, st *instanceState, now time.
 }
 
 // labels are what makes "list the running instances" a range scan on an indexed column rather than a walk of every retained journal
-func (o *orchestrator) labels(st *instanceState) map[string]string {
-	labels := map[string]string{
-		labelStatus:  string(st.Status),
-		labelVersion: strconv.Itoa(st.Version),
+func (o *orchestrator) labels(st *instanceState) components.WorkflowLabels {
+	labels := components.WorkflowLabels{
+		Status:  string(st.Status),
+		Version: st.Version,
 	}
 	if st.Parent != nil {
-		labels[labelParent] = st.Parent.InstanceID
+		labels.Parent = st.Parent.InstanceID
 	}
 	return labels
 }

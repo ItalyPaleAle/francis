@@ -8,7 +8,7 @@
 //   - a step that fails terminally unwinds the work that already succeeded, in reverse order
 //   - a wait step parks the instance until an event arrives, and suspend stops it starting anything new
 //   - a child workflow keeps its own journal, and only its result enters the parent's
-//   - listing filters on the state labels the orchestrator writes with every journal write
+//   - listing filters on the workflow labels the orchestrator writes with every journal write
 //   - clients cannot invoke a built-in actor directly
 package workflow
 
@@ -465,7 +465,7 @@ func (s *builtinWorkflow) Run(t *testing.T) {
 		s.awaitStatus(t, svc, id, workflow.StatusCompleted)
 	})
 
-	// Listing filters on the state labels the orchestrator writes in the same operation as the journal
+	// Listing filters on the workflow labels the orchestrator writes in the same operation as the journal
 	t.Run("lists by status", func(t *testing.T) {
 		page, err := svc.List(ctx, &workflow.ListOptions{Status: workflow.StatusCompleted, Limit: 100})
 		require.NoError(t, err)

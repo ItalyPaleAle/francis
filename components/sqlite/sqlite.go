@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"path"
-	"regexp"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -58,8 +57,6 @@ type SQLiteProvider struct {
 	gc              cleanup.GarbageCollector
 	clock           clock.WithTicker
 	tablePrefix     string
-	// stateLabelIndexes are the label keys this deployment asked to index, which is also the set ListStates inlines a json_extract path for
-	stateLabelIndexes []string
 
 	// Fetch-upcoming-alarm queries, with the table prefix already applied, computed once at construction
 	fetchUpcomingAlarmsNoConstraintsQuery   string
@@ -73,13 +70,12 @@ func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, provi
 	}
 
 	s := &SQLiteProvider{
-		cfg:               providerConfig,
-		log:               log,
-		timeout:           sqliteOpts.Timeout,
-		cleanupInterval:   sqliteOpts.CleanupInterval,
-		clock:             sqliteOpts.clock,
-		db:                sqliteOpts.DB,
-		stateLabelIndexes: sqliteOpts.StateLabelIndexes,
+		cfg:             providerConfig,
+		log:             log,
+		timeout:         sqliteOpts.Timeout,
+		cleanupInterval: sqliteOpts.CleanupInterval,
+		clock:           sqliteOpts.clock,
+		db:              sqliteOpts.DB,
 	}
 
 	// Resolve the table prefix
@@ -170,12 +166,6 @@ type SQLiteProviderOptions struct {
 	// Defaults to "francis" when empty
 	TablePrefix string
 
-	// StateLabelIndexes names the state-label keys to build an index for
-	// SQLite has no index that covers arbitrary JSON keys, but it does index expressions, so one index per declared key turns a listing filtered on that key into an index lookup instead of a scan of every row of the actor type
-	// Declare the keys an application actually filters on: a key left out is still stored and still filterable, just matched per row
-	// Each key must be a plain identifier (letters, digits and underscores), so the index name stays readable and its JSON path needs no escaping
-	StateLabelIndexes []string
-
 	// QueryLog controls optional SQL statement logging when this constructor opens the database connection
 	// When a connection is passed in via DB, the caller can add statement tracing and logging by opening the database with instrument/sqlite.Open from go-sql-utils
 	QueryLog components.QueryLogConfig
@@ -201,48 +191,14 @@ func (s *SQLiteProvider) Init(ctx context.Context) error {
 		return fmt.Errorf("failed to perform schema migrations: %w", err)
 	}
 
-	// The label indexes are per-deployment rather than part of the schema, since which keys are worth indexing is the application's to say
-	err = s.ensureStateLabelIndexes(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to create state label indexes: %w", err)
-	}
-
 	return nil
 }
 
-// ensureStateLabelIndexes creates one expression index per declared state-label key
-// SQLite can only use an expression index when the query repeats the indexed expression verbatim, which is why ListStates inlines the same json_extract path for a key shaped like an identifier
-func (s *SQLiteProvider) ensureStateLabelIndexes(ctx context.Context) error {
-	// stateLabelIndexKeyRegexp is what an indexable label key must match, so the index name is readable and the JSON path needs no escaping
-	var stateLabelIndexKeyRegexp = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
-
-	for _, key := range s.stateLabelIndexes {
-		if !stateLabelIndexKeyRegexp.MatchString(key) {
-			return fmt.Errorf("state label index key %q is not a plain identifier", key)
-		}
-
-		queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
-		// #nosec G202 -- the only concatenated values are the static table prefix and a key validated as a plain identifier, not free-form user input
-		_, err := s.db.ExecContext(queryCtx,
-			`CREATE INDEX IF NOT EXISTS `+s.tablePrefix+`actor_state_label_`+key+`_idx
-			ON `+s.tablePrefix+`actor_state (actor_type, `+stateLabelExtract(key)+`, actor_id)
-			WHERE actor_state_labels IS NOT NULL`,
-		)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("error creating index for state label %q: %w", key, err)
-		}
-
-		s.log.DebugContext(ctx, "Ensured state label index", slog.String("label", key))
-	}
-
-	return nil
-}
-
-// stateLabelExtract renders the json_extract expression for a label key, which both the index and the listing's predicate must spell identically
-// It is only ever called with a key that matched stateLabelIndexKeyRegexp
-func stateLabelExtract(key string) string {
-	return `json_extract(actor_state_labels, '$.` + key + `')`
+// workflowLabelExtract renders the json_extract expression for one workflow label field
+// SQLite only uses an expression index when the query repeats the indexed expression verbatim, so this is the single place that spells the path, and the migration's indexes spell the same one
+// The field name always comes from the closed set of components.WorkflowLabel* constants, so there is nothing here to escape
+func workflowLabelExtract(field string) string {
+	return `json_extract(workflow_labels, '$.` + field + `')`
 }
 
 func (s *SQLiteProvider) Run(ctx context.Context) error {

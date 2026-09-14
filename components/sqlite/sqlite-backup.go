@@ -169,7 +169,7 @@ func (s *SQLiteProvider) backupState(ctx context.Context, tx *sql.Tx, bw *backup
 
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	rows, err := tx.QueryContext(ctx,
-		`SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time, actor_state_labels
+		`SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time, workflow_labels
 		FROM `+s.tablePrefix+`actor_state
 		WHERE actor_state_expiration_time IS NULL OR actor_state_expiration_time > ?`,
 		nowMs,
@@ -183,7 +183,7 @@ func (s *SQLiteProvider) backupState(ctx context.Context, tx *sql.Tx, bw *backup
 		var (
 			rec    backup.StateRecord
 			expMs  sql.NullInt64
-			labels []byte
+			labels sql.NullString
 		)
 		err = rows.Scan(&rec.ActorType, &rec.ActorID, &rec.Data, &expMs, &labels)
 		if err != nil {
@@ -193,9 +193,7 @@ func (s *SQLiteProvider) backupState(ctx context.Context, tx *sql.Tx, bw *backup
 		if expMs.Valid {
 			rec.Expiration = new(time.UnixMilli(expMs.Int64).UTC())
 		}
-
-		// The backup format carries labels as a map, so it stays portable across providers that store them differently
-		rec.Labels, err = components.DecodeLabels(labels)
+		rec.WorkflowLabels, err = components.DecodeWorkflowLabels([]byte(labels.String))
 		if err != nil {
 			return err
 		}
@@ -338,20 +336,21 @@ func (s *SQLiteProvider) restoreState(ctx context.Context, conn *sql.Conn, r *ba
 		data = []byte{}
 	}
 
-	labelsJSON, err := components.EncodeLabels(r.Labels)
-	if err != nil {
-		return err
-	}
-
-	// The column is declared text in a STRICT table, so the encoded object is bound as a string rather than as a blob
-	var labels any
-	if labelsJSON != nil {
-		labels = string(labelsJSON)
+	// The column is declared text in a STRICT table, so the encoded object is bound as a string rather than as a blob, and a row with no labels leaves it NULL
+	var labels *string
+	if r.WorkflowLabels != nil {
+		labelsJSON, err := r.WorkflowLabels.JSON()
+		if err != nil {
+			return err
+		}
+		if labelsJSON != "" {
+			labels = &labelsJSON
+		}
 	}
 
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	_, err = conn.ExecContext(ctx,
-		`INSERT INTO `+s.tablePrefix+`actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time, actor_state_labels) VALUES (?, ?, ?, ?, ?)`,
+	_, err := conn.ExecContext(ctx,
+		`INSERT INTO `+s.tablePrefix+`actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time, workflow_labels) VALUES (?, ?, ?, ?, ?)`,
 		r.ActorType, r.ActorID, data, exp, labels,
 	)
 	if err != nil {
