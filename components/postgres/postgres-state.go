@@ -47,9 +47,9 @@ func (p *PostgresProvider) SetState(ctx context.Context, ref ref.ActorRef, data 
 
 	var labels *string
 	if opts.WorkflowLabels != nil {
-		labelsJSON, jErr := opts.WorkflowLabels.JSON()
-		if jErr != nil {
-			return jErr
+		labelsJSON, err := opts.WorkflowLabels.JSON()
+		if err != nil {
+			return err
 		}
 		if labelsJSON != "" {
 			labels = &labelsJSON
@@ -93,7 +93,7 @@ func (p *PostgresProvider) ListStates(ctx context.Context, req components.ListSt
 	// This avoids a second query just to compute HasMore
 	limit := req.EffectiveLimit()
 
-	// Each requested label field is matched as the same ->> expression its index was built on, so the planner can serve the filter and the ordering from one index
+	// To use the index, each requested label field is matched as the same ->> expression its index was built on
 	var labelFields map[string]string
 	if req.WorkflowLabels != nil {
 		labelFields = req.WorkflowLabels.Fields()
@@ -105,9 +105,12 @@ func (p *PostgresProvider) ListStates(ctx context.Context, req components.ListSt
 
 	var labelClauses strings.Builder
 	for field, v := range labelFields {
+		labelClauses.Grow(32 + len(field))
 		// #nosec G202 -- the only concatenated values are one of the closed set of label field names and a placeholder number
-		labelClauses.WriteString(`
-			AND workflow_labels->>'` + field + `' = $` + strconv.Itoa(len(args)+1))
+		labelClauses.WriteString(` AND workflow_labels->>'`)
+		labelClauses.WriteString(field)
+		labelClauses.WriteString(`' = $`)
+		labelClauses.WriteString(strconv.Itoa(len(args) + 1))
 		args = append(args, v)
 	}
 	limitArg := strconv.Itoa(len(args) + 1)

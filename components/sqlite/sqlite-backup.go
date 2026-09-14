@@ -336,7 +336,6 @@ func (s *SQLiteProvider) restoreState(ctx context.Context, conn *sql.Conn, r *ba
 		data = []byte{}
 	}
 
-	// The column is declared text in a STRICT table, so the encoded object is bound as a string rather than as a blob, and a row with no labels leaves it NULL
 	var labels *string
 	if r.WorkflowLabels != nil {
 		labelsJSON, err := r.WorkflowLabels.JSON()

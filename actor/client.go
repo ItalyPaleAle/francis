@@ -281,7 +281,7 @@ func (c *client[T]) GetJob(ctx context.Context, jobID string) (JobInfo, error) {
 	return c.service.GetJob(ctx, jobID)
 }
 
-// ListJobs returns all of the current actor's jobs: the live ones, and any terminal record still retained.
+// ListJobs returns all of the current actor's jobs,including running ones and any terminal record still retained.
 func (c *client[T]) ListJobs(ctx context.Context) ([]JobInfo, error) {
 	if !c.canTarget(c.actorType) {
 		return nil, ErrActorTypeReserved

@@ -4,14 +4,12 @@ ALTER TABLE %sdead_jobs RENAME TO %sterminal_jobs;
 ALTER TABLE %sterminal_jobs RENAME COLUMN failed_at TO ended_at;
 
 -- How the job ended: 'completed' or 'dead'
--- Every row that existed before this migration was dead-lettered, which is what the default records
+-- Every row that existed before this migration was dead-lettered, so we set a default to start
+-- The default only exists to backfill the rows that were already there, so we drop it right after
 ALTER TABLE %sterminal_jobs ADD COLUMN job_status text NOT NULL DEFAULT 'dead';
--- The default only exists to backfill the rows that were already there, and is dropped so an insert that forgets the column fails rather than silently recording a failure
 ALTER TABLE %sterminal_jobs ALTER COLUMN job_status DROP DEFAULT;
 
--- If set, the time after which the record is garbage collected
--- Stored as UTC
--- A record with no expiration is kept until something removes it, which is what a job whose actor type asked for no retention gets
+-- If set, the time after which the record is garbage collected (as UTC)
 ALTER TABLE %sterminal_jobs ADD COLUMN expiration_time timestamp;
 
 DROP INDEX %sdead_jobs_actor_idx;

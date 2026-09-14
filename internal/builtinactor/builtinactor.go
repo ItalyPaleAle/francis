@@ -60,7 +60,7 @@ type MultiBuiltInActor interface {
 
 // DefaultJobRetention is how long a built-in actor's jobs keep a record once they end, unless the built-in asks for a different window
 // Built-ins run work on a caller's behalf without the caller holding a handle to it, so the record of a run that succeeded is the only way to see that it happened at all
-// An application actor still defaults to keeping none, since only its author knows whether a job's history is worth storing
+// An application actor still defaults to keeping none
 const DefaultJobRetention = 24 * time.Hour
 
 // RegistrationsFor returns the actor-type registrations a host must create for a built-in actor

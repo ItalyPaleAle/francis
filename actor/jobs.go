@@ -18,9 +18,9 @@ const (
 	JobStatusPending JobStatus = iota
 	// JobStatusActive indicates the job is currently being executed (it holds a lease)
 	JobStatusActive
-	// JobStatusCompleted indicates the job ran successfully and its record was retained, which an actor type asks for with WithJobRetention
+	// JobStatusCompleted indicates the job ran successfully and its record was retained
 	JobStatusCompleted
-	// JobStatusDeadLettered indicates the job exhausted its retries (or failed permanently) and was recorded in the terminal-job store
+	// JobStatusDeadLettered indicates the job exhausted its retries (or failed permanently) and was recorded in the terminal job store
 	JobStatusDeadLettered
 )
 

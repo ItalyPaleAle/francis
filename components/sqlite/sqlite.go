@@ -195,9 +195,9 @@ func (s *SQLiteProvider) Init(ctx context.Context) error {
 }
 
 // workflowLabelExtract renders the json_extract expression for one workflow label field
-// SQLite only uses an expression index when the query repeats the indexed expression verbatim, so this is the single place that spells the path, and the migration's indexes spell the same one
-// The field name always comes from the closed set of components.WorkflowLabel* constants, so there is nothing here to escape
+// SQLite only uses an expression index when the query repeats the indexed expression exactly as-is, so this is the single place that spells the path, and the migration's indexes spell the same one
 func workflowLabelExtract(field string) string {
+	// The field name always comes from the closed set of components.WorkflowLabel* constants, so there is nothing here to escape
 	return `json_extract(workflow_labels, '$.` + field + `')`
 }
 

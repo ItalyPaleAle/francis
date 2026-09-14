@@ -85,7 +85,7 @@ func (s *SQLiteProvider) ListStates(ctx context.Context, req components.ListStat
 	// This avoids a second query just to compute HasMore
 	limit := req.EffectiveLimit()
 
-	// Each requested label field is matched as the same json_extract expression its index was built on, which is the only form the planner matches an expression index against
+	// Each requested label field is matched as the same json_extract expression its index was built on, which is required to use the index
 	var labelFields map[string]string
 	if req.WorkflowLabels != nil {
 		labelFields = req.WorkflowLabels.Fields()
@@ -98,13 +98,15 @@ func (s *SQLiteProvider) ListStates(ctx context.Context, req components.ListStat
 	var labelClauses strings.Builder
 	if len(labelFields) > 0 {
 		// json_extract needs well-formed JSON, so a row with no labels at all is excluded before it is reached
-		labelClauses.WriteString(`
-			AND workflow_labels IS NOT NULL`)
+		labelClauses.WriteString(` AND workflow_labels IS NOT NULL `)
 	}
 	for field, v := range labelFields {
 		// #nosec G202 -- the only concatenated value is one of the closed set of label field names, not user input
-		labelClauses.WriteString(`
-			AND ` + workflowLabelExtract(field) + ` = ?`)
+		fieldLabel := workflowLabelExtract(field)
+		labelClauses.Grow(10 + len(fieldLabel))
+		labelClauses.WriteString(` AND `)
+		labelClauses.WriteString(fieldLabel)
+		labelClauses.WriteString(` = ?`)
 		args = append(args, v)
 	}
 	args = append(args, limit+1)
@@ -168,7 +170,6 @@ func (s *SQLiteProvider) DeleteState(ctx context.Context, ref ref.ActorRef) erro
 
 	// We exclude expired state from the deletion because we want to be able to get an appropriate count of affected rows, and return ErrNoState if nothing was deleted
 	// Expired state entries are garbage collected periodically anyways
-	// The labels are a column of the row, so they go with it and can never outlive the state they describe
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := s.db.ExecContext(queryCtx,
 		`DELETE FROM `+s.tablePrefix+`actor_state
