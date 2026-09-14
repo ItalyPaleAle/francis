@@ -44,6 +44,10 @@ const (
 	RecordTypeState       RecordType = "state"
 	RecordTypeAlarm       RecordType = "alarm"
 	RecordTypeTerminalJob RecordType = "terminaljob"
+
+	// RecordTypeDeadJob is what a terminal job was called in backups taken before the dead-letter store became the terminal-job store, when it held only the jobs that failed
+	// It is read and never written: a record carrying it is folded into a TerminalJobRecord on the way out of the reader, so a consumer only ever sees one shape
+	RecordTypeDeadJob RecordType = "deadjob"
 )
 
 // Header is the first value in a backup stream
@@ -99,6 +103,22 @@ type TerminalJobRecord struct {
 	Expiration  *time.Time `msgpack:"expiration,omitempty"`
 }
 
+// DeadJobRecord is a single dead-lettered job as an older Francis wrote it, before the store was widened to hold completed jobs too
+// It exists so such a backup still restores: the reader folds it into a TerminalJobRecord, and nothing writes it
+type DeadJobRecord struct {
+	JobID       string    `msgpack:"jobId"`
+	ActorType   string    `msgpack:"actorType"`
+	ActorID     string    `msgpack:"actorId"`
+	Method      string    `msgpack:"method"`
+	Data        []byte    `msgpack:"data,omitempty"`
+	Attempts    int       `msgpack:"attempts"`
+	LastError   string    `msgpack:"lastError,omitempty"`
+	FailedAt    time.Time `msgpack:"failedAt"`
+	OriginalDue time.Time `msgpack:"originalDue"`
+	Interval    string    `msgpack:"interval,omitempty"`
+	Cron        string    `msgpack:"cron,omitempty"`
+}
+
 // Record is one entry in a backup stream
 // Exactly one payload pointer is set, selected by Type
 type Record struct {
@@ -106,6 +126,9 @@ type Record struct {
 	State       *StateRecord       `msgpack:"state,omitempty"`
 	Alarm       *AlarmRecord       `msgpack:"alarm,omitempty"`
 	TerminalJob *TerminalJobRecord `msgpack:"terminalJob,omitempty"`
+
+	// DeadJob is set only while reading a backup written before the rename, and is folded into TerminalJob before the record is yielded
+	DeadJob *DeadJobRecord `msgpack:"deadJob,omitempty"`
 }
 
 // Writer streams backup records to an io.Writer
@@ -209,8 +232,31 @@ func (r *Reader) All() iter.Seq2[Record, error] {
 	}
 }
 
-// normalizeRecord canonicalizes a decoded record so an empty byte slice is represented as nil, matching the providers' len(data)==0 convention
+// normalizeRecord canonicalizes a decoded record so every consumer sees the current shape, whichever version of Francis wrote the stream
+// It folds a pre-rename dead-job record into a terminal job, and represents an empty byte slice as nil, matching the providers' len(data)==0 convention
 func normalizeRecord(rec *Record) {
+	// A backup taken before completed jobs could be retained carries its dead jobs under their own type and payload
+	// Every one of them ended by failing, which is the status the record did not need to carry back then, and none of them expired, which is what a nil expiration still means
+	if rec.DeadJob != nil {
+		d := rec.DeadJob
+		rec.Type = RecordTypeTerminalJob
+		rec.TerminalJob = &TerminalJobRecord{
+			JobID:       d.JobID,
+			ActorType:   d.ActorType,
+			ActorID:     d.ActorID,
+			Method:      d.Method,
+			Data:        d.Data,
+			Status:      string(components.JobStatusDeadLettered),
+			Attempts:    d.Attempts,
+			LastError:   d.LastError,
+			EndedAt:     d.FailedAt,
+			OriginalDue: d.OriginalDue,
+			Interval:    d.Interval,
+			Cron:        d.Cron,
+		}
+		rec.DeadJob = nil
+	}
+
 	switch {
 	case rec.State != nil:
 		if len(rec.State.Data) == 0 {

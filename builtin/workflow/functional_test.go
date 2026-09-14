@@ -93,7 +93,27 @@ func awaitStatus(t *testing.T, svc *workflow.WorkflowService, id string, want ..
 	return last
 }
 
+// awaitStepStatus waits for one step of an instance to reach one of the given statuses
+// It exists because an instance's own status says nothing about how far through its steps it is, and a test that acts on the wrong side of a step's report is racing the engine
+func awaitStepStatus(t *testing.T, svc *workflow.WorkflowService, id string, step string, want ...workflow.StepStatus) {
+	t.Helper()
+
+	require.Eventually(t, func() bool {
+		s, err := svc.GetStatus(t.Context(), id)
+		if err != nil {
+			return false
+		}
+		for _, sv := range s.Steps {
+			if sv.Name == step {
+				return slices.Contains(want, sv.Status)
+			}
+		}
+		return false
+	}, 15*time.Second, 50*time.Millisecond, "step %q of instance %s did not reach %v", step, id, want)
+}
+
 // stepView returns one step of a status by name, so assertions read by name rather than by position
+// It fails the test when there is no such step, so it belongs in an assertion rather than inside an Eventually condition, whose goroutine can outlive the test
 func stepView(t *testing.T, status workflow.InstanceStatus, name string) workflow.StepStatusView {
 	t.Helper()
 
@@ -516,10 +536,7 @@ func TestSuspendAndResume(t *testing.T) {
 
 	// The work already dispatched runs to completion and its report is recorded, but nothing after it is started
 	close(release)
-	require.Eventually(t, func() bool {
-		s, sErr := svc.GetStatus(t.Context(), id)
-		return sErr == nil && stepView(t, s, "first").Status == workflow.StepCompleted
-	}, 15*time.Second, 50*time.Millisecond)
+	awaitStepStatus(t, svc, id, "first", workflow.StepCompleted)
 
 	assert.False(t, secondRan.Load(), "a suspended instance must not start the next step")
 
@@ -535,17 +552,12 @@ func TestSuspendAndResume(t *testing.T) {
 
 // TestCancelUnwinds verifies Cancel moves a running instance into an unwind and terminates it as cancelled
 func TestCancelUnwinds(t *testing.T) {
-	var (
-		started = make(chan struct{})
-		once    sync.Once
-		undone  atomic.Bool
-	)
+	var undone atomic.Bool
 
 	wf, err := workflow.New("cancellable",
 		workflow.WithSteps(
 			workflow.Step("hold",
 				workflow.WithRun(func(ctx context.Context, tk workflow.Task) (any, error) {
-					once.Do(func() { close(started) })
 					return "held", nil
 				}),
 				workflow.WithCompensate(func(ctx context.Context, c workflow.Compensation) error {
@@ -564,11 +576,10 @@ func TestCancelUnwinds(t *testing.T) {
 	id, _, err := svc.Start(t.Context(), nil)
 	require.NoError(t, err)
 
-	select {
-	case <-started:
-	case <-time.After(15 * time.Second):
-		t.Fatal("the first step never ran")
-	}
+	// Cancel only once the first step's result is on the journal, which is what puts it on the compensation stack
+	// Cancelling while it is still in flight is a different scenario with a different outcome: the engine closes the running step out rather than waiting on it, so an instance whose stack is still empty terminates with nothing to undo
+	// The instance parks on the event wait after this, so there is no risk of it finishing on its own before the cancel lands
+	awaitStepStatus(t, svc, id, "hold", workflow.StepCompleted)
 
 	require.NoError(t, svc.Cancel(t.Context(), id, "customer changed their mind"))
 

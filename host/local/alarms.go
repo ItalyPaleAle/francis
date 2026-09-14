@@ -346,9 +346,16 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 
 	status, ok := statusAny.(executeAlarmStatus)
 	if !ok {
-		// If result was not executeAlarmStatus, it means that something failed getting the actor
-		// We'll retry
-		status = executeAlarmStatusRetryable
+		// If result was not executeAlarmStatus, it means that something failed getting or locking the actor, rather than the handler failing
+		// An actor that is halting, or is no longer active or placed here, says nothing about this occurrence: the placement we checked above has gone stale underneath us
+		// Handing the lease back has the next poll re-resolve and re-activate, which costs one poll interval instead of a full retry backoff and does not spend an attempt
+		// A workflow instance halts its activation the moment it terminates, so a job that arrives for it in that window (a parent unwinding a completed child, say) takes this path
+		switch {
+		case errors.Is(err, actor.ErrActorHalted), errors.Is(err, actor.ErrActorNotActive), errors.Is(err, actor.ErrActorNotHosted):
+			status = executeAlarmStatusReleased
+		default:
+			status = executeAlarmStatusRetryable
+		}
 	}
 	switch status {
 	case executeAlarmStatusAbandoned:
@@ -375,9 +382,9 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		return
 
 	case executeAlarmStatusReleased:
-		// The host declined this occurrence (capacity group full, or the handler returned ErrJobRejected)
-		// Hand it back so another host runs it, without counting an attempt or dead-lettering
-		log.Debug("Job occurrence released for re-routing", slog.Any("error", err))
+		// The host declined this occurrence (capacity group full, or the handler returned ErrJobRejected), or could not lock the actor because its placement went stale
+		// Hand it back so another host, or this one on a later poll, runs it without counting an attempt or dead-lettering
+		log.Debug("Alarm released for re-routing", slog.Any("error", err))
 		h.releaseForReroute(ctx, lease, aRef, log)
 		return
 
