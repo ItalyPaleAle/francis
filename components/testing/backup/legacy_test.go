@@ -198,13 +198,13 @@ func TestRestoreOfLegacyBackups(t *testing.T) {
 						return
 					}
 
-					ctx := t.Context()
-					require.NoError(t, p.Restore(ctx, bytes.NewReader(encodeLegacyStream(t, tc))))
+					err := p.Restore(t.Context(), bytes.NewReader(encodeLegacyStream(t, tc)))
+					require.NoError(t, err)
 
-					tc.assert(t, ctx, p)
+					tc.assert(t, t.Context(), p)
 
 					// Every case seeds this row, so a case whose own records went missing cannot pass on an empty database
-					stateData, err := p.GetState(ctx, ref.NewActorRef("OLD", "actor-1"))
+					stateData, err := p.GetState(t.Context(), ref.NewActorRef("OLD", "actor-1"))
 					require.NoError(t, err)
 					assert.Equal(t, []byte("state-data"), stateData, "the rest of the stream should have restored too")
 				})

@@ -452,6 +452,7 @@ func DecodeWorkflowLabels(data []byte) (*WorkflowLabels, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode the workflow labels: %w", err)
 	}
+
 	return res, nil
 }
 

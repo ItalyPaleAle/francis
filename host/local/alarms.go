@@ -495,7 +495,7 @@ func (h *Host) deadLetterJob(ctx context.Context, lease *ref.AlarmLease, props r
 	req := components.DeadLetterAlarmReq{
 		Reason:    jobErr.Error(),
 		Attempts:  lease.Attempts(),
-		Retention: h.jobRetention(lease.ActorRef().ActorType),
+		Retention: h.core.ActorsConfig[lease.ActorRef().ActorType].JobRetention,
 	}
 
 	// Keep a repeating job's recurrence alive by rescheduling its next occurrence as part of the dead-letter move
@@ -628,7 +628,7 @@ func (h *Host) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, l
 	// A job whose actor type asked for retention leaves a record behind, so a successful run is visible afterwards
 	retention := time.Duration(0)
 	if alarm.Kind == components.AlarmKindJob {
-		retention = h.jobRetention(lease.ActorRef().ActorType)
+		retention = h.core.ActorsConfig[lease.ActorRef().ActorType].JobRetention
 	}
 
 	if next.IsZero() {
@@ -713,11 +713,6 @@ func (h *Host) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, l
 
 	// The next occurrence is too far out to keep the lease, so a later fetch will pick it up
 	return false, nil
-}
-
-// jobRetention is how long this host's registration of an actor type asks for a job's record to be kept once it ends, and is zero when it asked for none
-func (h *Host) jobRetention(actorType string) time.Duration {
-	return h.core.ActorsConfig[actorType].JobRetention
 }
 
 func (h *Host) runLeaseRenewal(parentCtx context.Context) (err error) {

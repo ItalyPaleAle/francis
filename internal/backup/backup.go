@@ -5,10 +5,6 @@
 //
 // The wire layout is a single Header value followed by a sequence of Record values
 // Records are emitted grouped by type in a fixed order (state, then alarms, then terminal jobs), which lets a reader load one entity type at a time (and, for providers that support it, bulk-load each section) while relying on Reader.Unread to detect a section boundary with a single record of lookahead
-//
-// A change a reader can absorb does not bump Version: the reader keeps the older record shape, decodes it into its own field, and normalizeRecord folds it into the current one, so every consumer sees one shape whichever build wrote the stream
-// The writer only ever emits the current shape, so a restored backup comes back out in today's form
-// RecordTypeDeadJob is the worked example, and every such shape needs a case in the legacy-restore test under components/testing/backup, since nothing else would notice a stream silently losing the records a reader no longer recognizes
 package backup
 
 import (

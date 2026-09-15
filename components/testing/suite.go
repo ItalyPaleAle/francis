@@ -5297,7 +5297,9 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 		ctx := t.Context()
 		require.NoError(t, s.p.Seed(ctx, GetSpec()))
 
-		leases, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{Hosts: []string{SpecHostH1}})
+		leases, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{SpecHostH1},
+		})
 		require.NoError(t, err)
 		require.NotEmpty(t, leases)
 		lease := leases[0]
@@ -5443,6 +5445,7 @@ func (s Suite) TestJobs(t *testing.T) {
 	// dispatch creates a job and returns its ID
 	dispatch := func(t *testing.T, ctx context.Context, actorID string, name string, method string, props ref.AlarmProperties, data []byte) string {
 		t.Helper()
+
 		props.Data = data
 		jobID, _, err := s.p.DispatchJob(ctx, ref.NewAlarmRef("JOB", actorID, name), components.SetAlarmReq{
 			AlarmProperties: props,
@@ -5457,13 +5460,18 @@ func (s Suite) TestJobs(t *testing.T) {
 	// leaseFor dispatches the actor's alarms via the fetcher and returns the lease whose ID matches jobID
 	leaseFor := func(t *testing.T, ctx context.Context, jobID string) *ref.AlarmLease {
 		t.Helper()
-		leases, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{Hosts: []string{jobHost}})
+
+		leases, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{jobHost},
+		})
 		require.NoError(t, err)
+
 		for _, l := range leases {
 			if l.Key() == jobID {
 				return l
 			}
 		}
+
 		t.Fatalf("did not lease the dispatched job %q", jobID)
 		return nil
 	}
@@ -5517,7 +5525,9 @@ func (s Suite) TestJobs(t *testing.T) {
 		assert.WithinDuration(t, ttl, *stored.TTL, time.Second)
 		assert.Equal(t, []byte("payload"), stored.Data)
 		assert.Equal(t, "process", stored.JobMethod)
-		placement, err := s.p.LookupActor(ctx, jobRef.ActorRef(), components.LookupActorOpts{ActiveOnly: true})
+		placement, err := s.p.LookupActor(ctx, jobRef.ActorRef(), components.LookupActorOpts{
+			ActiveOnly: true,
+		})
 		require.NoError(t, err)
 		assert.Equal(t, jobHost, placement.HostID)
 
@@ -6133,19 +6143,28 @@ func (s Suite) TestJobs(t *testing.T) {
 			{
 				name: "completed",
 				finalize: func(t *testing.T, ctx context.Context, lease *ref.AlarmLease) {
-					require.NoError(t, s.p.CompleteJob(ctx, lease, components.CompleteJobReq{Attempts: 1, Retention: time.Hour}))
+					err := s.p.CompleteJob(ctx, lease, components.CompleteJobReq{
+						Attempts:  1,
+						Retention: time.Hour,
+					})
+					require.NoError(t, err)
 				},
 			},
 			{
 				name: "dead-lettered",
 				finalize: func(t *testing.T, ctx context.Context, lease *ref.AlarmLease) {
-					require.NoError(t, s.p.DeadLetterAlarm(ctx, lease, components.DeadLetterAlarmReq{Reason: "boom", Attempts: 3}))
+					err := s.p.DeadLetterAlarm(ctx, lease, components.DeadLetterAlarmReq{
+						Reason:   "boom",
+						Attempts: 3,
+					})
+					require.NoError(t, err)
 				},
 			},
 			{
 				name: "deleted",
 				finalize: func(t *testing.T, ctx context.Context, lease *ref.AlarmLease) {
-					require.NoError(t, s.p.DeleteLeasedAlarm(ctx, lease))
+					err := s.p.DeleteLeasedAlarm(ctx, lease)
+					require.NoError(t, err)
 				},
 			},
 		} {
@@ -6158,7 +6177,8 @@ func (s Suite) TestJobs(t *testing.T) {
 				lease := leaseFor(t, ctx, jobID)
 
 				// The actor halting itself from its own handler is what releases the lease
-				require.NoError(t, s.p.RemoveActor(ctx, ref.NewActorRef("JOB", actorID)))
+				err := s.p.RemoveActor(ctx, ref.NewActorRef("JOB", actorID))
+				require.NoError(t, err)
 
 				tc.finalize(t, ctx, lease)
 
@@ -6167,6 +6187,7 @@ func (s Suite) TestJobs(t *testing.T) {
 				if errors.Is(err, components.ErrNoJob) {
 					return
 				}
+
 				require.NoError(t, err)
 				assert.True(t, info.Status.IsTerminal(), "a finalized occurrence must not be live, got %q", info.Status)
 			})
@@ -6226,7 +6247,8 @@ func (s Suite) TestJobs(t *testing.T) {
 			{
 				name: "an alarm that is already gone",
 				lease: func(t *testing.T, ctx context.Context, held *ref.AlarmLease) *ref.AlarmLease {
-					require.NoError(t, s.p.DeleteLeasedAlarm(ctx, held))
+					err := s.p.DeleteLeasedAlarm(ctx, held)
+					require.NoError(t, err)
 					return held
 				},
 				stillLive: false,

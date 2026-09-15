@@ -407,7 +407,8 @@ func (s *StandaloneSQLiteBacked) loadTerminalJobs(ctx context.Context) error {
 
 		err := rows.Scan(
 			&d.JobID, &d.ActorType, &d.ActorID, &d.Method, &data,
-			&d.Status, &d.Attempts, &lastError, &endedAtMs, &originalMs, &interval, &cron, &expMs,
+			&d.Status, &d.Attempts, &lastError, &endedAtMs,
+			&originalMs, &interval, &cron, &expMs,
 		)
 		if err != nil {
 			return err
