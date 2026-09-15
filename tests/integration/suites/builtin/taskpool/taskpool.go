@@ -315,7 +315,7 @@ func (s *builtinTaskPool) assertClientRejected(t *testing.T, svc *actor.Service,
 	_, invErr := svc.Invoke(ctx, s.poolType, actorID, "run", nil)
 	require.ErrorIs(t, invErr, actor.ErrActorTypeReserved, "host %d Invoke", host)
 
-	_, dispatchErr := svc.Dispatch(ctx, s.poolType, actorID, "run", nil)
+	_, _, dispatchErr := svc.Dispatch(ctx, s.poolType, actorID, "run", nil)
 	require.ErrorIs(t, dispatchErr, actor.ErrActorTypeReserved, "host %d Dispatch", host)
 
 	setStateErr := svc.SetState(ctx, s.poolType, actorID, struct{}{}, nil)

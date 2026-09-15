@@ -145,7 +145,7 @@ func (s *TaskPoolService) Submit(ctx context.Context, input any, opts ...SubmitO
 
 	// Dispatch through a privileged client, since the public service rejects built-in actor types
 	client := builtinactor.NewClient[struct{}](bareType, actorID, s.svc)
-	jobID, err := client.Dispatch(ctx, methodRun, input, jobOpts...)
+	jobID, _, err := client.Dispatch(ctx, methodRun, input, jobOpts...)
 	if err != nil {
 		return "", fmt.Errorf("failed to submit task: %w", err)
 	}

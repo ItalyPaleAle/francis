@@ -160,7 +160,7 @@ func TestAChildThatFinishedFirstStillReportsItsUnwind(t *testing.T) {
 func TestAStuckUnwindEndsAtTheInstanceDeadline(t *testing.T) {
 	host := newFakeHost()
 	wf, err := New("stuck-unwind",
-		WithTimeout(time.Nanosecond),
+		WithTimeout(time.Minute),
 		WithSteps(
 			Step("first", WithRun(noopRun), WithCompensate(noopCompensate)),
 			Step("boom", WithRun(noopRun)),
@@ -176,8 +176,12 @@ func TestAStuckUnwindEndsAtTheInstanceDeadline(t *testing.T) {
 	st := readJournal(t, host, wf, "inst-1")
 	require.Equal(t, StatusCompensating, st.Status, "the compensation of the first step is outstanding")
 
+	backdateStart(t, host, wf, "inst-1", 2*time.Minute)
+
+	// The deadline is served by a fresh activation, which is also how it arrives in practice: an orchestrator holds its journal for the life of one activation, and this one has been sitting on the unwind
 	// One instance timeout covers the whole run, the unwind included, so a compensation nobody is going to finish is abandoned rather than left running forever
-	require.NoError(t, o.Alarm(t.Context(), alarmDeadline, nil))
+	stale := newTestOrchestrator(t, wf, host, "inst-1")
+	require.NoError(t, stale.Alarm(t.Context(), alarmDeadline, nil))
 
 	st = readJournal(t, host, wf, "inst-1")
 	assert.Equal(t, StatusFailed, st.Status)

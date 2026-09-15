@@ -23,6 +23,19 @@ func alarmDue(t *testing.T, host *fakeHost, wf *Workflow, instanceID string) (ti
 	return props.DueTime, true
 }
 
+// backdateStart moves an instance's start time into the past, so a deadline computed from it has unambiguously elapsed
+// A test cannot get there by declaring a tiny timeout and letting it pass: a clock's resolution can be coarser than the timeout itself, and on some platforms two reads of the clock return the same instant
+func backdateStart(t *testing.T, host *fakeHost, wf *Workflow, instanceID string, by time.Duration) {
+	t.Helper()
+
+	st := readJournal(t, host, wf, instanceID)
+	st.StartedAt = st.StartedAt.Add(-by)
+	st.CreatedAt = st.CreatedAt.Add(-by)
+
+	err := host.SetState(t.Context(), builtinActorType(wf.baseType), instanceID, st, nil)
+	require.NoError(t, err)
+}
+
 // builtinActorType is the full type the fake host records a built-in actor's operations under
 func builtinActorType(bareType string) string {
 	return ref.BuiltInActorTypePrefix + bareType
@@ -176,12 +189,13 @@ func TestTheDeadlineFailsAnInstanceNoHostCanServe(t *testing.T) {
 
 	// The declining host is the one configured to give up, and it only does so once the instance's own timeout has elapsed
 	declining, err := New("abandoned",
-		WithTimeout(time.Nanosecond),
+		WithTimeout(time.Minute),
 		WithUnknownVersionPolicy(FailUnknownVersion),
 		WithSteps(Step("a", WithRun(noopRun))),
 	)
 	require.NoError(t, err)
 	host.registryResponse = registerResponse{OK: false}
+	backdateStart(t, host, declining, "inst-1", 2*time.Minute)
 
 	stale := newTestOrchestrator(t, declining, host, "inst-1")
 	require.NoError(t, stale.Alarm(t.Context(), alarmDeadline, nil))
@@ -362,11 +376,12 @@ func TestADeadlineOnAJournalOfAnotherVersionFollowsThePolicy(t *testing.T) {
 
 		upgraded, err := New("version-drift",
 			WithVersion(2),
-			WithTimeout(time.Nanosecond),
+			WithTimeout(time.Minute),
 			WithUnknownVersionPolicy(FailUnknownVersion),
 			WithSteps(Step("a", WithRun(noopRun))),
 		)
 		require.NoError(t, err)
+		backdateStart(t, host, upgraded, "inst-1", 2*time.Minute)
 
 		o := newTestOrchestrator(t, upgraded, host, "inst-1")
 		require.NoError(t, o.Alarm(t.Context(), alarmDeadline, nil))

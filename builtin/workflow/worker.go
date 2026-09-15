@@ -236,7 +236,7 @@ func (w *worker) report(ctx context.Context, method string, p *runPayload, res *
 
 	if method == methodCompensate {
 		key := fmt.Sprintf("comp%s%s%s%d%s%d", idDelimiter, p.Step, idDelimiter, p.Index, idDelimiter, p.Attempt)
-		_, err := client.Dispatch(ctx, methodCompensated, compReportPayload{
+		_, _, err := client.Dispatch(ctx, methodCompensated, compReportPayload{
 			Step:        p.Step,
 			Index:       p.Index,
 			Attempt:     p.Attempt,
@@ -248,7 +248,7 @@ func (w *worker) report(ctx context.Context, method string, p *runPayload, res *
 	}
 
 	key := fmt.Sprintf("done%s%s%s%d%s%d", idDelimiter, p.Step, idDelimiter, p.Index, idDelimiter, p.Attempt)
-	_, err := client.Dispatch(ctx, methodDone, reportPayload{
+	_, _, err := client.Dispatch(ctx, methodDone, reportPayload{
 		Step:        p.Step,
 		Index:       p.Index,
 		Attempt:     p.Attempt,
@@ -282,7 +282,7 @@ func (w *worker) JobFailed(ctx context.Context, _ string, method string, data ac
 
 	if method == methodCompensate {
 		key := fmt.Sprintf("comp%s%s%s%d%s%d%sdl", idDelimiter, p.Step, idDelimiter, p.Index, idDelimiter, p.Attempt, idDelimiter)
-		_, err = client.Dispatch(ctx, methodCompensated, compReportPayload{
+		_, _, err = client.Dispatch(ctx, methodCompensated, compReportPayload{
 			Step:      p.Step,
 			Index:     p.Index,
 			Attempt:   p.Attempt,
@@ -294,7 +294,7 @@ func (w *worker) JobFailed(ctx context.Context, _ string, method string, data ac
 	}
 
 	key := fmt.Sprintf("done%s%s%s%d%s%d%sdl", idDelimiter, p.Step, idDelimiter, p.Index, idDelimiter, p.Attempt, idDelimiter)
-	_, err = client.Dispatch(ctx, methodDone, reportPayload{
+	_, _, err = client.Dispatch(ctx, methodDone, reportPayload{
 		Step:      p.Step,
 		Index:     p.Index,
 		Attempt:   p.Attempt,

@@ -50,16 +50,16 @@ Use the client (from inside an actor) to dispatch to the current actor:
 
 ```go
 payload := map[string]any{"to": "user@example.com"}
-jobID, err := w.client.Dispatch(ctx, "send-email", payload)
+jobID, created, err := w.client.Dispatch(ctx, "send-email", payload)
 ```
 
 From outside an actor, use the service, which targets any actor:
 
 ```go
-jobID, err := service.Dispatch(ctx, "worker", "worker-7", "send-email", payload)
+jobID, created, err := service.Dispatch(ctx, "worker", "worker-7", "send-email", payload)
 ```
 
-`Dispatch` returns a server-issued `jobID` that is globally unique. Each call dispatches a distinct job: dispatching the same method twice runs it twice, unless you supply an idempotency key (see below).
+`Dispatch` returns a server-issued `jobID` that is globally unique, and `created`, which reports whether this call was the one that created the job. Each call dispatches a distinct job: dispatching the same method twice runs it twice, unless you supply an idempotency key (see below), in which case only the call that created the job gets `created` as true.
 
 ### Job options
 
@@ -76,10 +76,10 @@ Scheduling is controlled with `actor.JobOption` values:
 
 ```go
 // Run in 5 minutes
-jobID, err := w.client.Dispatch(ctx, "reconcile", payload, actor.WithJobDelay(5*time.Minute))
+jobID, _, err := w.client.Dispatch(ctx, "reconcile", payload, actor.WithJobDelay(5*time.Minute))
 
 // Run every weekday at 9am
-jobID, err := w.client.Dispatch(ctx, "daily-report", nil, actor.WithJobCron("0 9 * * 1-5"))
+jobID, _, err := w.client.Dispatch(ctx, "daily-report", nil, actor.WithJobCron("0 9 * * 1-5"))
 ```
 
 ### Idempotency keys
@@ -87,9 +87,9 @@ jobID, err := w.client.Dispatch(ctx, "daily-report", nil, actor.WithJobCron("0 9
 A job ID is server-issued and always unique. An idempotency key is caller-supplied and scoped to the actor: dispatching twice with the same key produces a single job (the first wins), so a retry of the dispatch itself does not enqueue duplicate work.
 
 ```go
-// Re-dispatching with the same key returns the same job
+// Re-dispatching with the same key returns the same job, and only the first call reports created
 // The work runs once
-jobID, err := w.client.Dispatch(ctx, "charge", payload, actor.WithIdempotencyKey("order-42"))
+jobID, created, err := w.client.Dispatch(ctx, "charge", payload, actor.WithIdempotencyKey("order-42"))
 ```
 
 Without a key, every dispatch is a distinct job: this is the anti-coalescing guarantee that distinguishes jobs from alarms.
@@ -179,7 +179,7 @@ func (w *Worker) Invoke(ctx context.Context, method string, data actor.Envelope)
 	case "enqueue-report":
 		// Dispatch background work to self
 		// It runs immediately on whatever host serves this actor
-		jobID, err := w.client.Dispatch(ctx, "report", map[string]any{"day": "today"})
+		jobID, _, err := w.client.Dispatch(ctx, "report", map[string]any{"day": "today"})
 		if err != nil {
 			return nil, err
 		}

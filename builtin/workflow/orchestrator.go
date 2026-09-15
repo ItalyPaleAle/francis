@@ -503,7 +503,7 @@ func (o *orchestrator) dispatchTask(ctx context.Context, st *instanceState, sr *
 	}
 
 	client := builtinactor.NewClient[struct{}](o.wf.workerType(member.capability), workerActorID(o.instanceID, sr.Name, tr.Index), o.svc)
-	_, err := client.Dispatch(ctx, methodRun, payload, opts...)
+	_, _, err := client.Dispatch(ctx, methodRun, payload, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to dispatch task %s[%d]: %w", sr.Name, tr.Index, err)
 	}
@@ -543,7 +543,7 @@ func (o *orchestrator) startChild(ctx context.Context, st *instanceState, sr *st
 	}
 
 	client := builtinactor.NewClient[struct{}](child.baseType, tr.ChildID, o.svc)
-	_, err := client.Dispatch(ctx, methodStart, payload, actor.WithIdempotencyKey(methodStart))
+	_, _, err := client.Dispatch(ctx, methodStart, payload, actor.WithIdempotencyKey(methodStart))
 	if err != nil {
 		return fmt.Errorf("failed to start child %s for %s[%d]: %w", child.name, sr.Name, tr.Index, err)
 	}
@@ -586,7 +586,7 @@ func (o *orchestrator) dispatchCompensations(ctx context.Context, st *instanceSt
 
 		// The compensation runs on the undo queue of the same capability the forward task had, since the undo almost always needs the placement the forward task ran on
 		client := builtinactor.NewClient[struct{}](o.wf.undoType(member.capability), workerActorID(o.instanceID, sr.Name, tr.Index), o.svc)
-		_, err := client.Dispatch(ctx, methodCompensate, payload, opts...)
+		_, _, err := client.Dispatch(ctx, methodCompensate, payload, opts...)
 		if err != nil {
 			return fmt.Errorf("failed to dispatch compensation %s[%d]: %w", sr.Name, tr.Index, err)
 		}
@@ -614,7 +614,7 @@ func (o *orchestrator) unwindChild(ctx context.Context, st *instanceState, stepN
 	}
 
 	client := builtinactor.NewClient[struct{}](child.baseType, tr.ChildID, o.svc)
-	_, err := client.Dispatch(ctx, methodUnwind, reasonPayload{Reason: st.Cause, FromParent: true, CompAttempt: attempt},
+	_, _, err := client.Dispatch(ctx, methodUnwind, reasonPayload{Reason: st.Cause, FromParent: true, CompAttempt: attempt},
 		actor.WithIdempotencyKey(methodUnwind+idDelimiter+strconv.Itoa(attempt)))
 	if err != nil {
 		return fmt.Errorf("failed to unwind child %s: %w", tr.ChildID, err)

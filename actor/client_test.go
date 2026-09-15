@@ -152,7 +152,7 @@ func TestClientRejectsBuiltInTarget(t *testing.T) {
 	err = c.DeleteAlarm(ctx, "a")
 	require.ErrorIs(t, err, ErrActorTypeReserved)
 
-	_, dispatchErr := c.Dispatch(ctx, "run", nil)
+	_, _, dispatchErr := c.Dispatch(ctx, "run", nil)
 	require.ErrorIs(t, dispatchErr, ErrActorTypeReserved)
 
 	_, listErr := c.ListJobs(ctx)
@@ -193,7 +193,7 @@ func TestClientReadOnlyGuards(t *testing.T) {
 	err = c.DeleteAlarm(ctx, "a")
 	require.ErrorIs(t, err, ErrReadOnly)
 
-	_, err = c.Dispatch(ctx, "run", nil)
+	_, _, err = c.Dispatch(ctx, "run", nil)
 	require.ErrorIs(t, err, ErrReadOnly)
 
 	// GetState is always allowed, even under a read-only context

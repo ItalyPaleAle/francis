@@ -258,18 +258,16 @@ func (s *Service) deleteAlarm(ctx context.Context, actorType string, actorID str
 
 // Dispatch sends a durable, fire-and-forget job to a specific actor.
 // The job is delivered to the actor's Job method on whatever host serves the actor type, and is retried automatically and dead-lettered on permanent failure.
-// It returns the server-issued job ID.
-func (s *Service) Dispatch(ctx context.Context, actorType string, actorID string, method string, input any, opts ...JobOption) (jobID string, err error) {
+// It returns the server-issued job ID, and whether this call created the job rather than coalescing onto a live one with the same idempotency key.
+func (s *Service) Dispatch(ctx context.Context, actorType string, actorID string, method string, input any, opts ...JobOption) (jobID string, created bool, err error) {
 	if ref.IsBuiltInActorType(actorType) {
-		return "", ErrActorTypeReserved
+		return "", false, ErrActorTypeReserved
 	}
 
-	jobID, _, err = s.dispatch(ctx, actorType, actorID, method, input, opts...)
-	return jobID, err
+	return s.dispatch(ctx, actorType, actorID, method, input, opts...)
 }
 
 // dispatch is the unguarded Dispatch used by the in-actor client and by the built-in actor lifecycle, which are allowed to target built-in actors
-// It also reports whether this call created the job, which a dispatch that coalesced onto a live one holding the same idempotency key did not
 func (s *Service) dispatch(ctx context.Context, actorType string, actorID string, method string, input any, opts ...JobOption) (jobID string, created bool, err error) {
 	if !s.ready() {
 		return "", false, ErrServiceNotInitialized

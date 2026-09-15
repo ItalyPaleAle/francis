@@ -333,7 +333,7 @@ func (s *builtinCron) assertClientRejected(t *testing.T, svc *actor.Service, hos
 	deleteAlarmErr := svc.DeleteAlarm(ctx, s.cronType, singletonActorID, "a")
 	require.ErrorIs(t, deleteAlarmErr, actor.ErrActorTypeReserved, "host %d DeleteAlarm", host)
 
-	_, dispatchErr := svc.Dispatch(ctx, s.cronType, singletonActorID, "run", nil)
+	_, _, dispatchErr := svc.Dispatch(ctx, s.cronType, singletonActorID, "run", nil)
 	require.ErrorIs(t, dispatchErr, actor.ErrActorTypeReserved, "host %d Dispatch", host)
 
 	_, listErr := svc.ListJobs(ctx, s.cronType, singletonActorID)

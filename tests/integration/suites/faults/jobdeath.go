@@ -71,7 +71,7 @@ func (s *jobSurvivesHostDeath) Run(t *testing.T) {
 	// The job fails its first few executions, so it is still being retried when its host is taken away
 	shared.ProbeObserver.SetJobFault(actorID, jobInducedFailures)
 
-	_, err := s.cluster.Service(0).Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil)
+	_, _, err := s.cluster.Service(0).Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil)
 	require.NoError(t, err)
 
 	// Wait for the first failed execution, which tells us which host holds the job

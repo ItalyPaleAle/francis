@@ -734,7 +734,7 @@ func (s *builtinWorkflow) assertClientRejected(t *testing.T, svc *actor.Service,
 	_, peekErr := svc.Peek(ctx, s.pipelineType, instanceID, "status", nil)
 	require.ErrorIs(t, peekErr, actor.ErrActorTypeReserved, "host %d Peek", host)
 
-	_, dispatchErr := svc.Dispatch(ctx, s.pipelineType, instanceID, "start", nil)
+	_, _, dispatchErr := svc.Dispatch(ctx, s.pipelineType, instanceID, "start", nil)
 	require.ErrorIs(t, dispatchErr, actor.ErrActorTypeReserved, "host %d Dispatch", host)
 
 	setStateErr := svc.SetState(ctx, s.pipelineType, instanceID, struct{}{}, nil)

@@ -36,10 +36,8 @@ type Client[T any] interface {
 	// Note: invoking/peeking your own actor from within its own turn can deadlock on the turn lock.
 	Peek(ctx context.Context, actorType string, actorID string, method string, data any, opts ...InvokeOption) (Envelope, error)
 	// Dispatch sends a durable, fire-and-forget job to the current actor.
-	Dispatch(ctx context.Context, method string, input any, opts ...JobOption) (jobID string, err error)
-	// DispatchNew is Dispatch, and additionally reports whether this call was the one that created the job.
-	// A dispatch that coalesced onto a live job already holding the same idempotency key reports false, which is how a caller tells starting work from finding it already under way.
-	DispatchNew(ctx context.Context, method string, input any, opts ...JobOption) (jobID string, created bool, err error)
+	// The returned created reports whether this call created the job, which one that coalesced onto a live job with the same idempotency key did not.
+	Dispatch(ctx context.Context, method string, input any, opts ...JobOption) (jobID string, created bool, err error)
 	// GetJob returns the information for a job by its ID, spanning both live and terminal jobs.
 	GetJob(ctx context.Context, jobID string) (JobInfo, error)
 	// ListJobs returns all of the current actor's jobs: the live ones, and any terminal record still retained.
@@ -268,13 +266,7 @@ func (c *client[T]) Peek(ctx context.Context, actorType string, actorID string, 
 }
 
 // Dispatch sends a durable, fire-and-forget job to the current actor.
-func (c *client[T]) Dispatch(ctx context.Context, method string, input any, opts ...JobOption) (jobID string, err error) {
-	jobID, _, err = c.DispatchNew(ctx, method, input, opts...)
-	return jobID, err
-}
-
-// DispatchNew is Dispatch, and additionally reports whether this call was the one that created the job.
-func (c *client[T]) DispatchNew(ctx context.Context, method string, input any, opts ...JobOption) (jobID string, created bool, err error) {
+func (c *client[T]) Dispatch(ctx context.Context, method string, input any, opts ...JobOption) (jobID string, created bool, err error) {
 	if !c.canTarget(c.actorType) {
 		return "", false, ErrActorTypeReserved
 	}

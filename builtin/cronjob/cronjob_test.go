@@ -990,12 +990,7 @@ func (f *fakeClient[T]) ListStates(context.Context, *actor.ListStatesOpts) (acto
 	return actor.TypedStateList[T]{}, nil
 }
 
-func (f *fakeClient[T]) Dispatch(ctx context.Context, method string, input any, opts ...actor.JobOption) (string, error) {
-	jobID, _, err := f.DispatchNew(ctx, method, input, opts...)
-	return jobID, err
-}
-
-func (f *fakeClient[T]) DispatchNew(_ context.Context, method string, input any, opts ...actor.JobOption) (string, bool, error) {
+func (f *fakeClient[T]) Dispatch(_ context.Context, method string, input any, opts ...actor.JobOption) (string, bool, error) {
 	if f.dispatchErr != nil {
 		return "", false, f.dispatchErr
 	}

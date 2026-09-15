@@ -373,7 +373,7 @@ func (a *cronJobScheduler) registerChain(ctx context.Context, state cronJobState
 func (a *cronJobScheduler) registerChainNew(ctx context.Context, preserveDueTime time.Time) (err error) {
 	// The chain never runs at registration time, so WithImmediate gets a one-shot run of its own
 	if a.immediate {
-		_, err = a.runner.Dispatch(ctx, methodRun, nil, actor.WithIdempotencyKey(immediateJobIdempotencyKey))
+		_, _, err = a.runner.Dispatch(ctx, methodRun, nil, actor.WithIdempotencyKey(immediateJobIdempotencyKey))
 		if err != nil {
 			return fmt.Errorf("failed to dispatch immediate cron job occurrence: %w", err)
 		}
@@ -514,7 +514,7 @@ func (a *cronJobScheduler) reconcileSchedule(ctx context.Context, jobID string) 
 // It is ignored when WithImmediate is set, since immediate execution takes priority
 func (a *cronJobScheduler) registerNew(ctx context.Context, preserveDueTime time.Time) error {
 	if a.immediate && a.cron != "" {
-		_, err := a.runner.Dispatch(ctx, methodRun, nil, actor.WithIdempotencyKey(immediateJobIdempotencyKey))
+		_, _, err := a.runner.Dispatch(ctx, methodRun, nil, actor.WithIdempotencyKey(immediateJobIdempotencyKey))
 		if err != nil {
 			return fmt.Errorf("failed to dispatch immediate cron job occurrence: %w", err)
 		}
@@ -530,7 +530,7 @@ func (a *cronJobScheduler) registerNew(ctx context.Context, preserveDueTime time
 		jobOpts = append(jobOpts, actor.WithJobDueTime(preserveDueTime))
 	}
 
-	jobID, err := a.runner.Dispatch(ctx, methodRun, nil, jobOpts...)
+	jobID, _, err := a.runner.Dispatch(ctx, methodRun, nil, jobOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to register recurring cron job: %w", err)
 	}
@@ -551,7 +551,7 @@ func (a *cronJobScheduler) registerNew(ctx context.Context, preserveDueTime time
 // trigger dispatches a one-shot immediate run to the runner
 // The fixed idempotency key collapses multiple pending triggers into a single run: while one run is still pending, further triggers return the same job instead of queuing another
 func (a *cronJobScheduler) trigger(ctx context.Context) error {
-	_, err := a.runner.Dispatch(ctx, methodRun, nil, actor.WithIdempotencyKey(triggerJobIdempotencyKey))
+	_, _, err := a.runner.Dispatch(ctx, methodRun, nil, actor.WithIdempotencyKey(triggerJobIdempotencyKey))
 	if err != nil {
 		return fmt.Errorf("failed to dispatch triggered cron job run: %w", err)
 	}
@@ -760,7 +760,7 @@ func (a *cronJobRunner) run(ctx context.Context) error {
 func planRun(ctx context.Context, runner actor.Client[struct{}], nominal time.Time, jitter time.Duration, chainID string, key string) (time.Time, error) {
 	due := jitterDueTime(nominal, jitter)
 
-	_, err := runner.Dispatch(ctx, methodScheduledRun, scheduledRunPayload{ChainID: chainID, Nominal: nominal},
+	_, _, err := runner.Dispatch(ctx, methodScheduledRun, scheduledRunPayload{ChainID: chainID, Nominal: nominal},
 		actor.WithJobDueTime(due),
 		actor.WithIdempotencyKey(key),
 	)

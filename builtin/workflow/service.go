@@ -58,7 +58,7 @@ func WithInstanceID(id string) StartOption {
 // Without WithInstanceID the engine mints a UUIDv7, which sorts by creation time and therefore lists in creation order
 //
 // Start is idempotent only for suppressing a duplicate dispatch of the same request: an instance ID that has already terminated is not restarted, so re-driving a failed run means minting a fresh instance ID
-// The returned created reports whether this call was the one that started the instance, which the dispatch itself decides: concurrent calls racing ahead of the journal all see no instance, and only the one whose start job was inserted created it
+// The returned created reports whether this call started the instance, which the dispatch decides: before the start job runs there is no journal for a second caller to find
 func (s *WorkflowService) Start(ctx context.Context, input any, opts ...StartOption) (instanceID string, created bool, err error) {
 	var so startOptions
 	for _, opt := range opts {
@@ -98,8 +98,8 @@ func (s *WorkflowService) Start(ctx context.Context, input any, opts ...StartOpt
 		CreatedAt:   time.Now(),
 	}
 
-	// Whether this call started the instance is the insertion itself, not the journal read above: before the start job has run there is no journal for a second caller to find
-	_, created, err = client.DispatchNew(ctx, methodStart, payload, actor.WithIdempotencyKey(methodStart))
+	// The insertion is what says who started the instance, since the journal read above finds nothing until the start job has run
+	_, created, err = client.Dispatch(ctx, methodStart, payload, actor.WithIdempotencyKey(methodStart))
 	if err != nil {
 		return "", false, fmt.Errorf("failed to start the workflow instance: %w", err)
 	}
@@ -141,7 +141,7 @@ func (s *WorkflowService) RaiseEvent(ctx context.Context, instanceID string, nam
 	}
 
 	client := builtinactor.NewClient[struct{}](s.wf.baseType, instanceID, s.svc)
-	_, err = client.Dispatch(ctx, methodEvent, eventPayload{Name: name, Payload: encoded},
+	_, _, err = client.Dispatch(ctx, methodEvent, eventPayload{Name: name, Payload: encoded},
 		actor.WithIdempotencyKey(methodEvent+idDelimiter+name))
 	if err != nil {
 		return fmt.Errorf("failed to raise the event: %w", err)
@@ -168,7 +168,7 @@ func (s *WorkflowService) Resume(ctx context.Context, instanceID string) error {
 // dispatchControl sends one of the control jobs, each under a constant key so a repeated call coalesces with a pending one
 func (s *WorkflowService) dispatchControl(ctx context.Context, instanceID string, method string, payload any) error {
 	client := builtinactor.NewClient[struct{}](s.wf.baseType, instanceID, s.svc)
-	_, err := client.Dispatch(ctx, method, payload, actor.WithIdempotencyKey(method))
+	_, _, err := client.Dispatch(ctx, method, payload, actor.WithIdempotencyKey(method))
 	if err != nil {
 		return fmt.Errorf("failed to %s the workflow instance: %w", method, err)
 	}

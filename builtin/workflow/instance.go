@@ -154,7 +154,7 @@ func (o *orchestrator) reportToParent(ctx context.Context, st *instanceState) er
 		}
 
 		key := fmt.Sprintf("comp%s%s%s%d%s%d", idDelimiter, st.Parent.Step, idDelimiter, st.Parent.Index, idDelimiter, st.Parent.UnwoundBy)
-		_, err := client.Dispatch(ctx, methodCompensated, compReportPayload{
+		_, _, err := client.Dispatch(ctx, methodCompensated, compReportPayload{
 			Step:        st.Parent.Step,
 			Index:       st.Parent.Index,
 			Attempt:     st.Parent.UnwoundBy,
@@ -187,7 +187,7 @@ func (o *orchestrator) reportToParent(ctx context.Context, st *instanceState) er
 	}
 
 	key := fmt.Sprintf("done%s%s%s%d%s%d", idDelimiter, st.Parent.Step, idDelimiter, st.Parent.Index, idDelimiter, attempt)
-	_, err := client.Dispatch(ctx, methodDone, report, actor.WithIdempotencyKey(key))
+	_, _, err := client.Dispatch(ctx, methodDone, report, actor.WithIdempotencyKey(key))
 	if err != nil {
 		return fmt.Errorf("failed to report to the parent: %w", err)
 	}

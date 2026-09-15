@@ -78,7 +78,7 @@ func (s *immediateJobs) Run(t *testing.T) {
 	t.Run("inside fetch-ahead executes immediately", func(t *testing.T) {
 		actorID := "immediate-" + string(s.kind) + "-" + string(s.variant)
 		jobData := "pre-leased"
-		_, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", jobData, actor.WithJobDelay(immediateJobDelay))
+		_, _, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", jobData, actor.WithJobDelay(immediateJobDelay))
 		require.NoError(t, err)
 
 		require.Eventually(t, func() bool {
@@ -94,7 +94,7 @@ func (s *immediateJobs) Run(t *testing.T) {
 	// A job outside fetch-ahead must remain stored until a later poll fetches it
 	t.Run("outside fetch-ahead is not enqueued", func(t *testing.T) {
 		actorID := "future-" + string(s.kind) + "-" + string(s.variant)
-		jobID, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobDelay(futureJobDelay))
+		jobID, _, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobDelay(futureJobDelay))
 		require.NoError(t, err)
 
 		neverFired := assert.Never(t, func() bool {
@@ -111,12 +111,12 @@ func (s *immediateJobs) Run(t *testing.T) {
 	// Re-dispatching after the stored occurrence enters fetch-ahead must lease the first-write-wins row
 	t.Run("re-dispatch leases the stored occurrence", func(t *testing.T) {
 		actorID := "redispatch-" + string(s.kind) + "-" + string(s.variant)
-		jobID, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", "original", actor.WithJobDelay(futureJobDelay), actor.WithIdempotencyKey("same-key"))
+		jobID, _, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", "original", actor.WithJobDelay(futureJobDelay), actor.WithIdempotencyKey("same-key"))
 		require.NoError(t, err)
 
 		// Wait until the original due time is inside fetch-ahead while the periodic poll remains idle
 		time.Sleep(redispatchJobWait)
-		duplicateID, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", "replacement", actor.WithIdempotencyKey("same-key"))
+		duplicateID, _, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", "replacement", actor.WithIdempotencyKey("same-key"))
 		require.NoError(t, err)
 		assert.Equal(t, jobID, duplicateID)
 
@@ -131,7 +131,7 @@ func (s *immediateJobs) Run(t *testing.T) {
 	// Cancelling a pre-leased job invalidates the queued lease before it can execute
 	t.Run("cancel pre-leased job", func(t *testing.T) {
 		actorID := "cancel-preleased-" + string(s.kind) + "-" + string(s.variant)
-		jobID, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobDelay(canceledJobDelay))
+		jobID, _, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobDelay(canceledJobDelay))
 		require.NoError(t, err)
 		err = svc.DeleteJob(ctx, shared.ProbeActorType, actorID, jobID)
 		require.NoError(t, err)
