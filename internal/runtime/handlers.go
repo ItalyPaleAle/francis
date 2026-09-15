@@ -201,10 +201,10 @@ func (rt *Runtime) route(ctx context.Context, c *hostConn, req *protocol.Envelop
 		return rt.handleGetJob(ctx, c, req)
 	case protocol.KindListJobs:
 		return rt.handleListJobs(ctx, c, req)
-	case protocol.KindCancelJob:
-		return rt.handleCancelJob(ctx, c, req)
 	case protocol.KindRetryJob:
 		return rt.handleRetryJob(ctx, c, req)
+	case protocol.KindDeleteJob:
+		return rt.handleDeleteJob(ctx, c, req)
 	case protocol.KindGetState:
 		return rt.handleGetState(ctx, c, req)
 	case protocol.KindSetState:
@@ -677,7 +677,7 @@ func (rt *Runtime) handleDispatchJob(parentCtx context.Context, _ *hostConn, req
 	// Persist the job and acquire any immediate lease while keeping the ID stable for an idempotency-key re-dispatch
 	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
 	defer cancel()
-	jobID, lease, err := rt.provider.DispatchJob(ctx, ref.NewAlarmRef(payload.ActorType, payload.ActorID, payload.Name), setReq)
+	jobID, created, lease, err := rt.provider.DispatchJob(ctx, ref.NewAlarmRef(payload.ActorType, payload.ActorID, payload.Name), setReq)
 	if err != nil {
 		rt.log.ErrorContext(ctx, "Failed to dispatch job", slog.Any("error", err))
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to dispatch job"))
@@ -692,7 +692,8 @@ func (rt *Runtime) handleDispatchJob(parentCtx context.Context, _ *hostConn, req
 	}
 
 	return rt.reply(req, protocol.KindDispatchJobResponse, protocol.DispatchJobResponse{
-		JobID: jobID,
+		JobID:   jobID,
+		Created: created,
 	})
 }
 
@@ -751,33 +752,6 @@ func (rt *Runtime) handleListJobs(parentCtx context.Context, _ *hostConn, req *p
 	})
 }
 
-// handleCancelJob cancels a live job for an actor
-func (rt *Runtime) handleCancelJob(parentCtx context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
-	var payload protocol.CancelJobRequest
-	err := req.DecodePayload(&payload)
-	if err != nil {
-		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode cancel job request"))
-	}
-
-	err = ref.ValidateComponents(payload.ActorType, payload.ActorID)
-	if err != nil {
-		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
-	}
-
-	// Cancellation only removes a live job: a dead-lettered job is reported as not found
-	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
-	defer cancel()
-	err = rt.provider.CancelJob(ctx, payload.ActorType, payload.ActorID, payload.JobID)
-	if errors.Is(err, components.ErrNoJob) {
-		return req.ErrorReply(protocol.NewError(protocol.ErrCodeJobNotFound, "job does not exist"))
-	} else if err != nil {
-		rt.log.ErrorContext(ctx, "Failed to cancel job", slog.Any("error", err))
-		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to cancel job"))
-	}
-
-	return req.Reply(protocol.KindCancelJobResponse, nil)
-}
-
 // handleRetryJob re-dispatches a dead-lettered job and removes its dead-letter record
 func (rt *Runtime) handleRetryJob(parentCtx context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
 	var payload protocol.RetryJobRequest
@@ -798,6 +772,32 @@ func (rt *Runtime) handleRetryJob(parentCtx context.Context, _ *hostConn, req *p
 	}
 
 	return rt.reply(req, protocol.KindRetryJobResponse, protocol.RetryJobResponse{JobID: newID})
+}
+
+// handleDeleteJob removes one of an actor's jobs, whatever state it is in
+func (rt *Runtime) handleDeleteJob(parentCtx context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
+	var payload protocol.DeleteJobRequest
+	err := req.DecodePayload(&payload)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode delete job request"))
+	}
+
+	err = ref.ValidateComponents(payload.ActorType, payload.ActorID)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
+	}
+
+	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+	defer cancel()
+	err = rt.provider.DeleteJob(ctx, payload.ActorType, payload.ActorID, payload.JobID, components.DeleteJobReq{LiveOnly: payload.LiveOnly})
+	if errors.Is(err, components.ErrNoJob) {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeJobNotFound, "job does not exist"))
+	} else if err != nil {
+		rt.log.ErrorContext(ctx, "Failed to delete job", slog.Any("error", err))
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to delete job"))
+	}
+
+	return req.Reply(protocol.KindDeleteJobResponse, nil)
 }
 
 // handleGetState retrieves an actor's persistent state
@@ -839,7 +839,9 @@ func (rt *Runtime) handleSetState(parentCtx context.Context, _ *hostConn, req *p
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
 	}
 
-	opts := components.SetStateOpts{}
+	opts := components.SetStateOpts{
+		WorkflowLabels: workflowLabelsFromProtocol(payload.WorkflowLabels),
+	}
 	if payload.TTLMs > 0 {
 		opts.TTL = time.Duration(payload.TTLMs) * time.Millisecond
 	}
@@ -899,10 +901,11 @@ func (rt *Runtime) handleListStates(parentCtx context.Context, _ *hostConn, req 
 	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
 	defer cancel()
 	res, err := rt.provider.ListStates(ctx, components.ListStatesReq{
-		ActorType:   payload.ActorType,
-		IncludeData: payload.IncludeData,
-		After:       payload.After,
-		Limit:       payload.Limit,
+		ActorType:      payload.ActorType,
+		IncludeData:    payload.IncludeData,
+		WorkflowLabels: workflowLabelsFromProtocol(payload.WorkflowLabels),
+		After:          payload.After,
+		Limit:          payload.Limit,
 	})
 	if err != nil {
 		rt.log.ErrorContext(ctx, "Failed to list states", slog.Any("error", err))
@@ -949,4 +952,17 @@ func (rt *Runtime) deletePlacement(key string) {
 // placementCacheTTL returns the TTL used for placement cache entries, bounded by the health check deadline
 func (rt *Runtime) placementCacheTTL() time.Duration {
 	return min(lookupCacheMaxTTL, rt.hostHealthCheckDeadline)
+}
+
+// workflowLabelsFromProtocol reads the workflow engine's labels back off the wire, or returns nil when the request carries none
+func workflowLabelsFromProtocol(labels *protocol.WorkflowLabels) *components.WorkflowLabels {
+	if labels == nil {
+		return nil
+	}
+
+	return &components.WorkflowLabels{
+		Status:  labels.Status,
+		Version: labels.Version,
+		Parent:  labels.Parent,
+	}
 }

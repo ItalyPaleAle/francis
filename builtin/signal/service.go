@@ -26,7 +26,7 @@ const (
 // Obtain the service from a host with host.Service()
 //
 // Calling it more than once with the same actor.Service returns the same SignalService
-// The waiters of one signal are aggregated onto a single invocation by the service they were started from, so handing every caller the same instance is what makes that aggregation hold no matter where in an application Service is called
+// The waiters of one signal are aggregated onto a single invocation by the service they were started from, so handing every caller the same instance keeps that aggregation working no matter where in an application Service is called
 func (s *Signal) Service(svc *actor.Service) *SignalService {
 	s.servicesMu.Lock()
 	defer s.servicesMu.Unlock()
@@ -60,7 +60,7 @@ type SignalService struct {
 	// mu guards waits
 	mu sync.Mutex
 	// waits holds the in-flight wait of each signal this process is currently waiting on
-	// Every local caller waiting on the same signal attaches to the same entry, so this process holds one invocation per signal rather than one per caller, which is what keeps a signal with thousands of local waiters down to a single stream and a single in-flight slot on the owning host
+	// Every local caller waiting on the same signal attaches to the same entry, so this process holds one invocation per signal rather than one per caller: a signal with thousands of local waiters costs a single stream and a single in-flight slot on the owning host
 	waits map[string]*sharedWait
 }
 

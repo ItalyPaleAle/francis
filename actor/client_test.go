@@ -71,8 +71,8 @@ func (f *fakeHost) DeleteAlarm(context.Context, string, string, string) error {
 	return nil
 }
 
-func (f *fakeHost) Dispatch(context.Context, string, string, string, any, JobProperties) (string, error) {
-	return "", nil
+func (f *fakeHost) Dispatch(context.Context, string, string, string, any, JobProperties) (string, bool, error) {
+	return "", false, nil
 }
 
 func (f *fakeHost) GetJob(context.Context, string) (JobInfo, error) {
@@ -83,12 +83,12 @@ func (f *fakeHost) ListJobs(context.Context, string, string) ([]JobInfo, error) 
 	return nil, nil
 }
 
-func (f *fakeHost) CancelJob(context.Context, string, string, string) error {
-	return nil
-}
-
 func (f *fakeHost) RetryJob(context.Context, string) (string, error) {
 	return "", nil
+}
+
+func (f *fakeHost) DeleteJob(context.Context, string, string, string, ...DeleteJobOption) error {
+	return nil
 }
 
 func (f *fakeHost) SetState(context.Context, string, string, any, *SetStateOpts) error { return nil }
@@ -152,7 +152,7 @@ func TestClientRejectsBuiltInTarget(t *testing.T) {
 	err = c.DeleteAlarm(ctx, "a")
 	require.ErrorIs(t, err, ErrActorTypeReserved)
 
-	_, dispatchErr := c.Dispatch(ctx, "run", nil)
+	_, _, dispatchErr := c.Dispatch(ctx, "run", nil)
 	require.ErrorIs(t, dispatchErr, ErrActorTypeReserved)
 
 	_, listErr := c.ListJobs(ctx)
@@ -161,7 +161,7 @@ func TestClientRejectsBuiltInTarget(t *testing.T) {
 	_, listStatesErr := c.ListStates(ctx, nil)
 	require.ErrorIs(t, listStatesErr, ErrActorTypeReserved)
 
-	err = c.CancelJob(ctx, "job")
+	err = c.DeleteJob(ctx, "job")
 	require.ErrorIs(t, err, ErrActorTypeReserved)
 
 	// Invoking a built-in target is rejected regardless of which actor the client is bound to
@@ -193,7 +193,7 @@ func TestClientReadOnlyGuards(t *testing.T) {
 	err = c.DeleteAlarm(ctx, "a")
 	require.ErrorIs(t, err, ErrReadOnly)
 
-	_, err = c.Dispatch(ctx, "run", nil)
+	_, _, err = c.Dispatch(ctx, "run", nil)
 	require.ErrorIs(t, err, ErrReadOnly)
 
 	// GetState is always allowed, even under a read-only context

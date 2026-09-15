@@ -75,7 +75,7 @@ func (m *MyActor) Invoke(ctx context.Context, method string, data actor.Envelope
 	case "schedule-job":
 		// Demonstrate self-dispatch: the actor enqueues a durable background job to itself
 		// The job runs immediately on whatever host serves this actor, delivered to the Job method below
-		jobID, err := m.client.Dispatch(ctx, "report", map[string]any{
+		jobID, _, err := m.client.Dispatch(ctx, "report", map[string]any{
 			"counter": state.Counter,
 		})
 		if err != nil {

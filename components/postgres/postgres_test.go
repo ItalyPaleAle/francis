@@ -93,7 +93,7 @@ func TestPostgresTablePrefix(t *testing.T) {
 		names := schemaObjects(t, p, testSchema)
 		assert.Contains(t, names, "francis_hosts")
 		assert.Contains(t, names, "francis_alarms")
-		assert.Contains(t, names, "francis_dead_jobs")
+		assert.Contains(t, names, "francis_terminal_jobs")
 		assert.Contains(t, names, "francis_host_active_actor_count")
 		assert.Contains(t, names, "francis_metadata")
 		assert.Contains(t, names, "francis_fetch_and_lease_upcoming_alarms_v1")

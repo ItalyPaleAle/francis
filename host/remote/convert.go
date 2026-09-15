@@ -22,15 +22,29 @@ func componentsActorTypesToProtocol(in []components.ActorHostType) []protocol.Ac
 	out := make([]protocol.ActorHostType, len(in))
 	for i, t := range in {
 		out[i] = protocol.ActorHostType{
-			ActorType:             t.ActorType,
-			IdleTimeoutMs:         t.IdleTimeout.Milliseconds(),
-			ConcurrencyLimit:      t.ConcurrencyLimit,
-			DeactivationTimeoutMs: t.DeactivationTimeout.Milliseconds(),
-			MaxAttempts:           t.MaxAttempts,
-			InitialRetryDelayMs:   t.InitialRetryDelay.Milliseconds(),
+			ActorType:                  t.ActorType,
+			IdleTimeoutMs:              t.IdleTimeout.Milliseconds(),
+			ConcurrencyLimit:           t.ConcurrencyLimit,
+			DeactivationTimeoutMs:      t.DeactivationTimeout.Milliseconds(),
+			MaxAttempts:                t.MaxAttempts,
+			InitialRetryDelayMs:        t.InitialRetryDelay.Milliseconds(),
+			CompletedJobRetentionMs:    retentionToWireMs(t.CompletedJobRetention),
+			DeadLetteredJobRetentionMs: retentionToWireMs(t.DeadLetteredJobRetention),
 		}
 	}
 	return out
+}
+
+// retentionToWireMs returns a duration in ms, ensuring that a positive number is always at least 1ms
+func retentionToWireMs(d time.Duration) int64 {
+	switch {
+	case d < 0:
+		return -1
+	case d > 0:
+		return max(d.Milliseconds(), 1)
+	default:
+		return 0
+	}
 }
 
 // protocolAlarmPropsToActor converts a runtime alarm response into the public actor properties
@@ -89,6 +103,8 @@ func protocolJobStatusToActor(s int) actor.JobStatus {
 	case 1:
 		return actor.JobStatusActive
 	case 2:
+		return actor.JobStatusCompleted
+	case 3:
 		return actor.JobStatusDeadLettered
 	default:
 		return actor.JobStatusPending
@@ -113,6 +129,9 @@ func protocolJobInfoToActor(j protocol.JobInfo) actor.JobInfo {
 	}
 	if j.CreatedAtUnixMs > 0 {
 		out.CreatedAt = time.UnixMilli(j.CreatedAtUnixMs)
+	}
+	if j.EndedAtUnixMs > 0 {
+		out.EndedAt = time.UnixMilli(j.EndedAtUnixMs)
 	}
 	return out
 }

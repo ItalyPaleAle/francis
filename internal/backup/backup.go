@@ -1,10 +1,10 @@
-// Package backup defines a portable, versioned, streaming format for exporting and importing the persistent data of a Francis actor provider: actor state, alarms (including jobs), and dead-lettered jobs
+// Package backup defines a portable, versioned, streaming format for exporting and importing the persistent data of a Francis actor provider: actor state, alarms (including live jobs), and terminal jobs
 //
 // The format is provider-neutral: timestamps are carried as time.Time and binary payloads as byte slices, so a backup taken from one provider (for example PostgreSQL) can be restored into a different one (for example SQLite)
 // It is encoded with MessagePack and handled as a stream, so arbitrarily large datasets can be read and written without being buffered in memory
 //
 // The wire layout is a single Header value followed by a sequence of Record values
-// Records are emitted grouped by type in a fixed order (state, then alarms, then dead jobs), which lets a reader load one entity type at a time (and, for providers that support it, bulk-load each section) while relying on Reader.Unread to detect a section boundary with a single record of lookahead
+// Records are emitted grouped by type in a fixed order (state, then alarms, then terminal jobs), which lets a reader load one entity type at a time (and, for providers that support it, bulk-load each section) while relying on Reader.Unread to detect a section boundary with a single record of lookahead
 package backup
 
 import (
@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/vmihailenco/msgpack/v5"
+
+	"github.com/italypaleale/francis/components"
 )
 
 const (
@@ -39,8 +41,12 @@ var (
 type RecordType string
 
 const (
-	RecordTypeState   RecordType = "state"
-	RecordTypeAlarm   RecordType = "alarm"
+	RecordTypeState       RecordType = "state"
+	RecordTypeAlarm       RecordType = "alarm"
+	RecordTypeTerminalJob RecordType = "terminaljob"
+
+	// RecordTypeDeadJob is what a terminal job was called in backups taken before the dead-letter store became the terminal-job store, when it held only the jobs that failed
+	// It is read and never written: a record carrying it is folded into a TerminalJobRecord on the way out of the reader, so a consumer only ever sees one shape
 	RecordTypeDeadJob RecordType = "deadjob"
 )
 
@@ -58,6 +64,9 @@ type StateRecord struct {
 	ActorID    string     `msgpack:"actorId"`
 	Data       []byte     `msgpack:"data,omitempty"`
 	Expiration *time.Time `msgpack:"expiration,omitempty"`
+	// WorkflowLabels is the workflow engine's labels for the row, nil for a row that has none
+	// It is carried as its fields rather than as the JSON text a provider stored, because a provider may normalise that text (Postgres' jsonb reorders keys and adds spaces), and a record has to be identical whichever provider produced it
+	WorkflowLabels *components.WorkflowLabels `msgpack:"workflowLabels,omitempty"`
 }
 
 // AlarmRecord is a single alarm (Kind "alarm") or live job (Kind "job")
@@ -76,7 +85,26 @@ type AlarmRecord struct {
 	JobMethod string     `msgpack:"jobMethod,omitempty"`
 }
 
-// DeadJobRecord is a single dead-lettered job
+// TerminalJobRecord is a single job that ended, either by completing or by dead-lettering
+// Expiration is nil when the record does not expire
+type TerminalJobRecord struct {
+	JobID       string     `msgpack:"jobId"`
+	ActorType   string     `msgpack:"actorType"`
+	ActorID     string     `msgpack:"actorId"`
+	Method      string     `msgpack:"method"`
+	Data        []byte     `msgpack:"data,omitempty"`
+	Status      string     `msgpack:"status"`
+	Attempts    int        `msgpack:"attempts"`
+	LastError   string     `msgpack:"lastError,omitempty"`
+	EndedAt     time.Time  `msgpack:"endedAt"`
+	OriginalDue time.Time  `msgpack:"originalDue"`
+	Interval    string     `msgpack:"interval,omitempty"`
+	Cron        string     `msgpack:"cron,omitempty"`
+	Expiration  *time.Time `msgpack:"expiration,omitempty"`
+}
+
+// DeadJobRecord is a single dead-lettered job as an older Francis wrote it, before the store was widened to hold completed jobs too
+// It is preserved for backwards-compatibility only - nothing writes to it
 type DeadJobRecord struct {
 	JobID       string    `msgpack:"jobId"`
 	ActorType   string    `msgpack:"actorType"`
@@ -94,14 +122,17 @@ type DeadJobRecord struct {
 // Record is one entry in a backup stream
 // Exactly one payload pointer is set, selected by Type
 type Record struct {
-	Type    RecordType     `msgpack:"type"`
-	State   *StateRecord   `msgpack:"state,omitempty"`
-	Alarm   *AlarmRecord   `msgpack:"alarm,omitempty"`
+	Type        RecordType         `msgpack:"type"`
+	State       *StateRecord       `msgpack:"state,omitempty"`
+	Alarm       *AlarmRecord       `msgpack:"alarm,omitempty"`
+	TerminalJob *TerminalJobRecord `msgpack:"terminalJob,omitempty"`
+
+	// DeadJob is set only while reading a backup written before the rename, and is folded into TerminalJob before the record is yielded
 	DeadJob *DeadJobRecord `msgpack:"deadJob,omitempty"`
 }
 
 // Writer streams backup records to an io.Writer
-// The header is written when the Writer is created, and callers then write records grouped by type in the order state, alarms, dead jobs
+// The header is written when the Writer is created, and callers then write records grouped by type in the order state, alarms, terminal jobs
 type Writer struct {
 	enc *msgpack.Encoder
 }
@@ -133,9 +164,9 @@ func (w *Writer) WriteAlarm(r *AlarmRecord) error {
 	return w.write(Record{Type: RecordTypeAlarm, Alarm: r})
 }
 
-// WriteDeadJob writes a dead-job record
-func (w *Writer) WriteDeadJob(r *DeadJobRecord) error {
-	return w.write(Record{Type: RecordTypeDeadJob, DeadJob: r})
+// WriteTerminalJob writes a terminal-job record
+func (w *Writer) WriteTerminalJob(r *TerminalJobRecord) error {
+	return w.write(Record{Type: RecordTypeTerminalJob, TerminalJob: r})
 }
 
 func (w *Writer) write(rec Record) error {
@@ -192,7 +223,7 @@ func (r *Reader) All() iter.Seq2[Record, error] {
 				return
 			}
 
-			normalizeRecord(&rec)
+			rec.normalize()
 
 			if !yield(rec, nil) {
 				return
@@ -201,8 +232,31 @@ func (r *Reader) All() iter.Seq2[Record, error] {
 	}
 }
 
-// normalizeRecord canonicalizes a decoded record so an empty byte slice is represented as nil, matching the providers' len(data)==0 convention
-func normalizeRecord(rec *Record) {
+// normalize canonicalizes a decoded record so every consumer sees the current shape, whichever version of Francis wrote the stream
+func (rec *Record) normalize() {
+	// A backup taken before completed jobs could be retained carries its dead jobs under their own type and payload
+	// Every one of them ended by failing, which is the status the record did not need to carry back then, and none of them expired, which is what a nil expiration still means
+	if rec.DeadJob != nil {
+		d := rec.DeadJob
+		rec.Type = RecordTypeTerminalJob
+		rec.TerminalJob = &TerminalJobRecord{
+			JobID:       d.JobID,
+			ActorType:   d.ActorType,
+			ActorID:     d.ActorID,
+			Method:      d.Method,
+			Data:        d.Data,
+			Status:      string(components.JobStatusDeadLettered),
+			Attempts:    d.Attempts,
+			LastError:   d.LastError,
+			EndedAt:     d.FailedAt,
+			OriginalDue: d.OriginalDue,
+			Interval:    d.Interval,
+			Cron:        d.Cron,
+		}
+		rec.DeadJob = nil
+	}
+
+	// Represent an empty byte slice as nil, matching the providers' len(data)==0 convention
 	switch {
 	case rec.State != nil:
 		if len(rec.State.Data) == 0 {
@@ -212,9 +266,9 @@ func normalizeRecord(rec *Record) {
 		if len(rec.Alarm.Data) == 0 {
 			rec.Alarm.Data = nil
 		}
-	case rec.DeadJob != nil:
-		if len(rec.DeadJob.Data) == 0 {
-			rec.DeadJob.Data = nil
+	case rec.TerminalJob != nil:
+		if len(rec.TerminalJob.Data) == 0 {
+			rec.TerminalJob.Data = nil
 		}
 	}
 }

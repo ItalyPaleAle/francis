@@ -43,7 +43,7 @@ type Provider struct {
 	ActiveActors   map[ActorKey]*ActiveActor   // actor_type/actor_id -> active actor
 	Alarms         map[AlarmKey]*Alarm         // actor_type/actor_id/alarm_name -> alarm
 	AlarmsByID     map[string]*Alarm           // alarm_id -> alarm
-	DeadJobs       map[string]*DeadJob         // job_id -> dead job
+	TerminalJobs   map[string]*TerminalJob     // job_id -> dead job
 	ActorState     map[ActorKey]*StateEntry    // actor_type/actor_id -> state
 
 	// Cluster is the single-row cluster-admission state (host limit and exclusive-access lease)
@@ -104,7 +104,7 @@ func NewProvider(log *slog.Logger, opts ProviderOptions, providerConfig componen
 		ActiveActors:   make(map[ActorKey]*ActiveActor),
 		Alarms:         make(map[AlarmKey]*Alarm),
 		AlarmsByID:     make(map[string]*Alarm),
-		DeadJobs:       make(map[string]*DeadJob),
+		TerminalJobs:   make(map[string]*TerminalJob),
 		ActorState:     make(map[ActorKey]*StateEntry),
 	}
 
@@ -178,6 +178,12 @@ func (p *Provider) CleanupExpired(ctx context.Context) error {
 	err := p.cleanupDomain(ctx, &p.writeMu, &p.Mu, p.CleanupUnhealthyHosts)
 	if err != nil {
 		return fmt.Errorf("failed to clean up unhealthy hosts: %w", err)
+	}
+
+	// Clean up terminal jobs whose retention has elapsed (Mu domain, where the jobs live)
+	err = p.cleanupDomain(ctx, &p.writeMu, &p.Mu, p.CleanupExpiredTerminalJobs)
+	if err != nil {
+		return fmt.Errorf("failed to clean up expired terminal jobs: %w", err)
 	}
 
 	// Clean up expired state (StateMu domain)
@@ -337,6 +343,27 @@ func (p *Provider) CleanupExpiredState(changes *Changes) (apply func()) {
 	return func() {
 		for _, key := range deleteKeys {
 			delete(p.ActorState, key)
+		}
+	}
+}
+
+// CleanupExpiredTerminalJobs removes the terminal-job records whose retention has elapsed, and returns the function that applies the removal in memory.
+// Must be called while holding the Mu write lock.
+func (p *Provider) CleanupExpiredTerminalJobs(changes *Changes) (apply func()) {
+	now := p.Clock.Now()
+
+	var deleteIDs []string
+	for jobID, d := range p.TerminalJobs {
+		if d.HasExpired(now) {
+			deleteIDs = append(deleteIDs, jobID)
+			changes.TerminalJobs.Delete = append(changes.TerminalJobs.Delete, jobID)
+		}
+	}
+
+	// Return the function that applies the changes in-memory
+	return func() {
+		for _, jobID := range deleteIDs {
+			delete(p.TerminalJobs, jobID)
 		}
 	}
 }

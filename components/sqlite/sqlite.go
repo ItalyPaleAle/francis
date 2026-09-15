@@ -194,6 +194,13 @@ func (s *SQLiteProvider) Init(ctx context.Context) error {
 	return nil
 }
 
+// workflowLabelExtract renders the json_extract expression for one workflow label field
+// SQLite only uses an expression index when the query repeats the indexed expression exactly as-is, so this is the single place that spells the path, and the migration's indexes spell the same one
+func workflowLabelExtract(field string) string {
+	// The field name always comes from the closed set of components.WorkflowLabel* constants, so there is nothing here to escape
+	return `json_extract(workflow_labels, '$.` + field + `')`
+}
+
 func (s *SQLiteProvider) Run(ctx context.Context) error {
 	if !s.running.CompareAndSwap(false, true) {
 		return components.ErrAlreadyRunning
@@ -347,6 +354,20 @@ func (s *SQLiteProvider) initGC() (err error) {
 				WHERE
 					actor_state_expiration_time IS NOT NULL
 					AND actor_state_expiration_time < ?
+				`
+				return q, func() []any {
+					now := s.clock.Now()
+					return []any{
+						now.UnixMilli(),
+					}
+				}
+			},
+			"terminal_jobs": func() (string, func() []any) {
+				q := `
+				DELETE FROM ` + s.tablePrefix + `terminal_jobs
+				WHERE
+					expiration_time IS NOT NULL
+					AND expiration_time < ?
 				`
 				return q, func() []any {
 					now := s.clock.Now()

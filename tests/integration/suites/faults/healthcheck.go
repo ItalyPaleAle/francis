@@ -29,7 +29,7 @@ const (
 // healthCheckFailure takes the database away from one host and verifies that the host notices its own health checks failing and shuts itself down, rather than staying up serving actors the rest of the cluster is about to reassign
 //
 // A busy SQLite database is the everyday cause: writes queue behind a lock they never get, health checks time out, and the host's view of the cluster and the cluster's view of the host drift apart
-// Only the affected host's handle is choked, so the other host keeps using the same database file throughout, which is what makes the split observable
+// Only the affected host's handle is choked, so the other host keeps using the same database file throughout, so the split is observable
 type healthCheckFailure struct {
 	cluster *cluster.Cluster
 }

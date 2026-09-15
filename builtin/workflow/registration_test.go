@@ -1,0 +1,132 @@
+package workflow
+
+import (
+	"log/slog"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+
+	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/internal/builtinactor"
+)
+
+// TestRegistrationsCoverEveryReservedType pins down exactly what a workflow registers on a host, since those names are the reserved contract an operator sees in logs, traces, and placement
+func TestRegistrationsCoverEveryReservedType(t *testing.T) {
+	child, err := New("child", WithSteps(Step("a", WithRun(noopRun))))
+	require.NoError(t, err)
+
+	wf, err := New("orders",
+		WithVersion(2),
+		WithConcurrency(4),
+		WithCompensateConcurrency(2),
+		WithCapability("gpu"),
+		WithAutoPurge("0 3 * * *"),
+		WithTimeout(time.Hour),
+		WithSteps(
+			Step("a", WithRun(noopRun), WithCompensate(noopCompensate), WithRequiredCapability("gpu")),
+			Child("b", WithDefinition(child)),
+		),
+	)
+	require.NoError(t, err)
+
+	got := map[string]builtinactor.BuiltInActorRegistration{}
+	for _, reg := range wf.Registrations() {
+		got[builtinactor.FullActorType(reg.ActorType)] = reg
+	}
+
+	// The orchestrator, a worker and undo queue per capability plus the base ones, the registry, and the auto-purge cron job
+	want := []string{
+		"francis.builtin.workflow.orders",
+		"francis.builtin.workflow.orders.worker",
+		"francis.builtin.workflow.orders.worker.gpu",
+		"francis.builtin.workflow.orders.undo",
+		"francis.builtin.workflow.orders.undo.gpu",
+		"francis.builtin.workflow.orders.registry",
+		"francis.builtin.cronjob.orders.purge",
+	}
+	for _, name := range want {
+		assert.Contains(t, got, name)
+	}
+	assert.Len(t, got, len(want), "a workflow should register exactly these types")
+
+	// The orchestrator is reached at the instance ID, and its generous retry policy stops a database blip from dead-lettering a report
+	orchestrator := got["francis.builtin.workflow.orders"]
+	assert.False(t, orchestrator.Singleton)
+	assert.Equal(t, orchestratorMaxAttempts, orchestrator.RegisterOptions.MaxAttempts)
+	assert.Equal(t, orchestratorRetryDelay, orchestrator.RegisterOptions.InitialRetryDelay)
+	assert.Equal(t, "workflow.orders", wf.ActorType())
+
+	// Every worker queue shares one strict per-host budget, and the undo queues form a second one so an unwind cannot starve forward work
+	workerGroup := got["francis.builtin.workflow.orders.worker"].RegisterOptions
+	assert.Equal(t, 4, workerGroup.CapacityGroupLimit)
+	assert.Equal(t, 4, workerGroup.ConcurrencyLimit)
+	assert.Equal(t, workerGroup.CapacityGroup, got["francis.builtin.workflow.orders.worker.gpu"].RegisterOptions.CapacityGroup)
+
+	undoGroup := got["francis.builtin.workflow.orders.undo"].RegisterOptions
+	assert.Equal(t, 2, undoGroup.CapacityGroupLimit)
+	assert.NotEqual(t, workerGroup.CapacityGroup, undoGroup.CapacityGroup, "the undo queues get their own budget")
+
+	// Every type the engine dispatches jobs to bounds the records they leave, so a dead-lettered job cannot outlive the journal that accounts for it
+	assert.Positive(t, orchestrator.RegisterOptions.CompletedJobRetention)
+	assert.Equal(t, orchestrator.RegisterOptions.CompletedJobRetention, orchestrator.RegisterOptions.DeadLetteredJobRetention)
+	assert.Equal(t, orchestrator.RegisterOptions.CompletedJobRetention, workerGroup.CompletedJobRetention)
+	assert.Equal(t, orchestrator.RegisterOptions.DeadLetteredJobRetention, workerGroup.DeadLetteredJobRetention)
+	assert.Equal(t, orchestrator.RegisterOptions.CompletedJobRetention, undoGroup.CompletedJobRetention)
+	assert.Equal(t, orchestrator.RegisterOptions.DeadLetteredJobRetention, undoGroup.DeadLetteredJobRetention)
+
+	// The auto-purge cron job is the cluster-wide singleton that runs the sweep on one host per schedule
+	assert.True(t, got["francis.builtin.cronjob.orders.purge"].Singleton)
+
+	// A workflow with no capabilities and no auto-purge registers only the base set
+	plain, err := New("plain", WithSteps(Step("a", WithRun(noopRun))))
+	require.NoError(t, err)
+	assert.Len(t, plain.Registrations(), 4)
+	assert.Equal(t, defaultVersion, plain.Version())
+	assert.Equal(t, "plain", plain.Name())
+}
+
+// TestTheSingleTypeContractPointsAtTheOrchestrator pins the fallback a host uses when it registers a built-in actor by its own type rather than through Registrations
+func TestTheSingleTypeContractPointsAtTheOrchestrator(t *testing.T) {
+	wf, err := New("single-type", WithSteps(Step("a", WithRun(noopRun))))
+	require.NoError(t, err)
+
+	regs := wf.Registrations()
+	require.NotEmpty(t, regs)
+	assert.Equal(t, regs[0].RegisterOptions, wf.RegisterOptions())
+
+	// One orchestrator exists per instance, created on demand, so the workflow's own type is not a singleton
+	assert.False(t, wf.Singleton())
+
+	factory := wf.Factory()
+	require.NotNil(t, factory)
+
+	host := newFakeHost()
+	obj := factory("inst-1", actor.NewService(host))
+	_, ok := obj.(*orchestrator)
+	assert.True(t, ok, "the single-type factory should build an orchestrator")
+}
+
+// TestAWorkflowAcceptsACallersLoggerAndMeter verifies the observability options are wired at construction, since a nil meter would otherwise have to be checked at every instrument update
+func TestAWorkflowAcceptsACallersLoggerAndMeter(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	meter := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test")
+
+	wf, err := New("observed",
+		WithLogger(slog.New(slog.DiscardHandler)),
+		WithMeter(meter),
+		WithSteps(Step("a", WithRun(noopRun))),
+	)
+	require.NoError(t, err)
+
+	require.NotNil(t, wf.log)
+	require.NotNil(t, wf.metrics)
+
+	// The engine records without nil checks either way, so a workflow built without either option still has usable instruments
+	plain, err := New("unobserved", WithSteps(Step("a", WithRun(noopRun))))
+	require.NoError(t, err)
+	assert.Nil(t, plain.log)
+	assert.NotNil(t, plain.metrics)
+}

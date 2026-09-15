@@ -275,6 +275,29 @@ func (s *builtinTaskPool) Run(t *testing.T) {
 		}, eventuallyTimeout, eventuallyTick, "the retried task should run to success")
 	})
 
+	// Cancelling is for work that has not run, so a task that already ended keeps the record that says what happened to it
+	t.Run("cancel leaves a dead-lettered task's record alone", func(t *testing.T) {
+		const key = "cancel-dl-1"
+		s.setFailing(key, true)
+		t.Cleanup(func() { s.setFailing(key, false) })
+
+		id, err := svc.Submit(ctx, taskInput{Mode: modeFailOnce}, taskpool.WithTaskKey(key))
+		require.NoError(t, err)
+
+		require.Eventually(t, func() bool {
+			info, gErr := svc.GetTask(ctx, id)
+			return gErr == nil && info.Status == taskpool.TaskStatusDeadLettered
+		}, eventuallyTimeout, eventuallyTick, "the permanently failing task should be dead-lettered")
+
+		// The task is no longer live, so there is nothing to cancel, and the record an operator would retry from survives
+		err = svc.CancelTask(ctx, id)
+		require.ErrorIs(t, err, actor.ErrJobNotFound)
+
+		info, err := svc.GetTask(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, taskpool.TaskStatusDeadLettered, info.Status)
+	})
+
 	// Clients cannot target a built-in actor through the public Service, on any host
 	t.Run("cannot be targeted directly", func(t *testing.T) {
 		for i := range s.cluster.Len() {
@@ -292,7 +315,7 @@ func (s *builtinTaskPool) assertClientRejected(t *testing.T, svc *actor.Service,
 	_, invErr := svc.Invoke(ctx, s.poolType, actorID, "run", nil)
 	require.ErrorIs(t, invErr, actor.ErrActorTypeReserved, "host %d Invoke", host)
 
-	_, dispatchErr := svc.Dispatch(ctx, s.poolType, actorID, "run", nil)
+	_, _, dispatchErr := svc.Dispatch(ctx, s.poolType, actorID, "run", nil)
 	require.ErrorIs(t, dispatchErr, actor.ErrActorTypeReserved, "host %d Dispatch", host)
 
 	setStateErr := svc.SetState(ctx, s.poolType, actorID, struct{}{}, nil)

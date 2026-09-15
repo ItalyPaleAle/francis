@@ -53,6 +53,8 @@ Singleton registration reuses the same functional options as `RegisterActor`, pl
 | `WithConcurrencyLimit` | Concurrency limit |
 | `WithMaxAttempts` | Max attempts |
 | `WithInitialRetryDelay` | Initial retry delay |
+| `WithCompletedJobRetention` | How long a job keeps a record after it completes successfully. Defaults to `0`, keeping none |
+| `WithDeadLetteredJobRetention` | How long a job keeps its record after it is dead-lettered. Defaults to 30 days |
 | `WithBootstrapData` | Optional data delivered to `Bootstrap` as its `data Envelope` argument, like `Invoke` |
 
 ```go

@@ -62,13 +62,13 @@ type recordingDispatchJobProvider struct {
 	leases   chan *ref.AlarmLease
 }
 
-func (p *recordingDispatchJobProvider) DispatchJob(ctx context.Context, alarmRef ref.AlarmRef, req components.SetAlarmReq) (string, *ref.AlarmLease, error) {
-	jobID, lease, err := p.ActorProvider.DispatchJob(ctx, alarmRef, req)
+func (p *recordingDispatchJobProvider) DispatchJob(ctx context.Context, alarmRef ref.AlarmRef, req components.SetAlarmReq) (string, bool, *ref.AlarmLease, error) {
+	jobID, created, lease, err := p.ActorProvider.DispatchJob(ctx, alarmRef, req)
 	p.requests <- req
 	if lease != nil {
 		p.leases <- lease
 	}
-	return jobID, lease, err
+	return jobID, created, lease, err
 }
 
 // leaseTestAlarm sets an alarm and leases it through the provider, returning the resulting lease
@@ -259,12 +259,71 @@ func TestCompleteAlarmDeletesOneShot(t *testing.T) {
 	lease := leaseTestAlarm(t, prov, c.hostID, aref, ref.AlarmProperties{DueTime: time.Now().Add(-time.Second)})
 	lease.SetExecutionTime(time.Now())
 
-	reEnqueue, err := rt.completeAlarm(t.Context(), lease, slog.New(slog.DiscardHandler))
+	reEnqueue, err := rt.completeAlarm(t.Context(), lease, jobExecInfo{}, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	assert.False(t, reEnqueue, "a one-shot alarm must not be re-enqueued")
 
 	_, err = prov.GetAlarm(t.Context(), aref)
 	require.ErrorIs(t, err, components.ErrNoAlarm, "a one-shot alarm should be deleted after completion")
+}
+
+// TestCompleteAlarmRetainsAJobWhoseTypeAsksForIt verifies a successful job leaves a record behind when its actor type set a retention, rather than vanishing the way a plain alarm does
+func TestCompleteAlarmRetainsAJobWhoseTypeAsksForIt(t *testing.T) {
+	rt, prov := newTestRuntime(t)
+	c := connectTestHost(t, rt, prov, "10.1.0.17:1", protocol.ActorHostType{ActorType: "T"})
+
+	aref := ref.NewAlarmRef("T", "a1", "run")
+	jobID, _, lease, err := prov.DispatchJob(t.Context(), aref, components.SetAlarmReq{
+		AlarmProperties: ref.AlarmProperties{DueTime: time.Now().Add(-time.Second), Data: []byte("payload")},
+		Kind:            components.AlarmKindJob,
+		JobMethod:       "Process",
+	})
+	require.NoError(t, err)
+	if lease == nil {
+		leases, fErr := prov.FetchAndLeaseUpcomingAlarms(t.Context(), components.FetchAndLeaseUpcomingAlarmsReq{Hosts: []string{c.hostID}})
+		require.NoError(t, fErr)
+		require.Len(t, leases, 1)
+		lease = leases[0]
+	}
+	lease.SetExecutionTime(time.Now())
+
+	reEnqueue, err := rt.completeAlarm(t.Context(), lease, jobExecInfo{isJob: true, method: "Process", recordCompleted: true, completedRetention: time.Hour}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	assert.False(t, reEnqueue)
+
+	// The live alarm row is gone, and the job now reads as completed rather than as missing
+	info, err := prov.GetJob(t.Context(), jobID)
+	require.NoError(t, err)
+	assert.Equal(t, components.JobStatusCompleted, info.Status)
+	assert.Equal(t, "Process", info.Method)
+	assert.False(t, info.EndedAt.IsZero())
+}
+
+// TestCompleteAlarmDeletesAJobWithNoRetention verifies the default is unchanged: a successful job leaves nothing behind
+func TestCompleteAlarmDeletesAJobWithNoRetention(t *testing.T) {
+	rt, prov := newTestRuntime(t)
+	c := connectTestHost(t, rt, prov, "10.1.0.18:1", protocol.ActorHostType{ActorType: "T"})
+
+	aref := ref.NewAlarmRef("T", "a1", "run")
+	jobID, _, lease, err := prov.DispatchJob(t.Context(), aref, components.SetAlarmReq{
+		AlarmProperties: ref.AlarmProperties{DueTime: time.Now().Add(-time.Second)},
+		Kind:            components.AlarmKindJob,
+		JobMethod:       "Process",
+	})
+	require.NoError(t, err)
+	if lease == nil {
+		leases, fErr := prov.FetchAndLeaseUpcomingAlarms(t.Context(), components.FetchAndLeaseUpcomingAlarmsReq{Hosts: []string{c.hostID}})
+		require.NoError(t, fErr)
+		require.Len(t, leases, 1)
+		lease = leases[0]
+	}
+	lease.SetExecutionTime(time.Now())
+
+	_, err = rt.completeAlarm(t.Context(), lease, jobExecInfo{isJob: true, method: "Process"}, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+
+	_, err = prov.GetJob(t.Context(), jobID)
+	require.ErrorIs(t, err, components.ErrNoJob, "a completed job with no retention leaves no record")
 }
 
 func TestCompleteAlarmReschedulesRepeating(t *testing.T) {
@@ -276,7 +335,7 @@ func TestCompleteAlarmReschedulesRepeating(t *testing.T) {
 	lease := leaseTestAlarm(t, prov, c.hostID, aref, ref.AlarmProperties{DueTime: execTime.Add(-time.Second), Interval: "PT1H"})
 	lease.SetExecutionTime(execTime)
 
-	reEnqueue, err := rt.completeAlarm(t.Context(), lease, slog.New(slog.DiscardHandler))
+	reEnqueue, err := rt.completeAlarm(t.Context(), lease, jobExecInfo{}, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	// The next occurrence is an hour away, well beyond one poll interval, so the lease is dropped rather than kept for re-enqueue
 	assert.False(t, reEnqueue, "a far-future occurrence must not keep the lease for re-enqueue")
@@ -299,7 +358,7 @@ func TestCompleteAlarmKeepsLeaseForNearOccurrence(t *testing.T) {
 	lease.IncreaseAttempts(execTime)
 	lease.SetExecutionTime(execTime)
 
-	reEnqueue, err := rt.completeAlarm(t.Context(), lease, slog.New(slog.DiscardHandler))
+	reEnqueue, err := rt.completeAlarm(t.Context(), lease, jobExecInfo{}, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	require.True(t, reEnqueue, "a near-future occurrence must keep the lease for re-enqueue")
 
@@ -415,7 +474,7 @@ func TestRunAlarmFetcherKeepsProcessorAfterShutdown(t *testing.T) {
 	// After shutdown the field must stay set to the closed processor rather than being nilled, so an in-flight execution that outlives the grace-period drain and reaches the re-enqueue path cannot nil-deref it
 	require.NotNil(t, rt.alarmProcessor)
 
-	// The closed processor rejects new work gracefully instead of panicking, which is what makes the late re-enqueue safe
+	// The closed processor rejects new work gracefully instead of panicking, so the late re-enqueue is safe
 	require.ErrorIs(t, rt.alarmProcessor.Enqueue(), eventqueue.ErrProcessorStopped)
 }
 

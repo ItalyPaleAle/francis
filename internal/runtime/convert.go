@@ -18,12 +18,14 @@ func protocolActorTypesToComponents(in []protocol.ActorHostType) []components.Ac
 	out := make([]components.ActorHostType, len(in))
 	for i, t := range in {
 		out[i] = components.ActorHostType{
-			ActorType:           t.ActorType,
-			IdleTimeout:         time.Duration(t.IdleTimeoutMs) * time.Millisecond,
-			ConcurrencyLimit:    t.ConcurrencyLimit,
-			DeactivationTimeout: time.Duration(t.DeactivationTimeoutMs) * time.Millisecond,
-			MaxAttempts:         t.MaxAttempts,
-			InitialRetryDelay:   time.Duration(t.InitialRetryDelayMs) * time.Millisecond,
+			ActorType:                t.ActorType,
+			IdleTimeout:              time.Duration(t.IdleTimeoutMs) * time.Millisecond,
+			ConcurrencyLimit:         t.ConcurrencyLimit,
+			DeactivationTimeout:      time.Duration(t.DeactivationTimeoutMs) * time.Millisecond,
+			MaxAttempts:              t.MaxAttempts,
+			InitialRetryDelay:        time.Duration(t.InitialRetryDelayMs) * time.Millisecond,
+			CompletedJobRetention:    time.Duration(t.CompletedJobRetentionMs) * time.Millisecond,
+			DeadLetteredJobRetention: time.Duration(t.DeadLetteredJobRetentionMs) * time.Millisecond,
 		}
 	}
 	return out
@@ -62,8 +64,10 @@ func componentsJobStatusToProtocol(s components.JobStatus) int {
 	switch s {
 	case components.JobStatusActive:
 		return 1
-	case components.JobStatusDeadLettered:
+	case components.JobStatusCompleted:
 		return 2
+	case components.JobStatusDeadLettered:
+		return 3
 	default:
 		return 0
 	}
@@ -87,6 +91,9 @@ func componentsJobInfoToProtocol(j components.JobInfo) protocol.JobInfo {
 	}
 	if !j.CreatedAt.IsZero() {
 		out.CreatedAtUnixMs = j.CreatedAt.UnixMilli()
+	}
+	if !j.EndedAt.IsZero() {
+		out.EndedAtUnixMs = j.EndedAt.UnixMilli()
 	}
 	return out
 }

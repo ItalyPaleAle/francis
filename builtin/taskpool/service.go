@@ -22,6 +22,8 @@ const (
 	TaskStatusActive
 	// TaskStatusDeadLettered indicates the task exhausted its retries (or failed permanently) and was recorded in the dead-letter store
 	TaskStatusDeadLettered
+	// TaskStatusCompleted indicates the task ran successfully and its record was retained
+	TaskStatusCompleted
 )
 
 // String implements fmt.Stringer
@@ -33,6 +35,8 @@ func (s TaskStatus) String() string {
 		return "active"
 	case TaskStatusDeadLettered:
 		return "dead-lettered"
+	case TaskStatusCompleted:
+		return "completed"
 	default:
 		return "unknown"
 	}
@@ -141,7 +145,7 @@ func (s *TaskPoolService) Submit(ctx context.Context, input any, opts ...SubmitO
 
 	// Dispatch through a privileged client, since the public service rejects built-in actor types
 	client := builtinactor.NewClient[struct{}](bareType, actorID, s.svc)
-	jobID, err := client.Dispatch(ctx, methodRun, input, jobOpts...)
+	jobID, _, err := client.Dispatch(ctx, methodRun, input, jobOpts...)
 	if err != nil {
 		return "", fmt.Errorf("failed to submit task: %w", err)
 	}
@@ -172,7 +176,8 @@ func (s *TaskPoolService) CancelTask(ctx context.Context, taskID string) error {
 
 	bareType := s.pool.bareTypeOf(info.ActorType)
 	client := builtinactor.NewClient[struct{}](bareType, info.ActorID, s.svc)
-	return client.CancelJob(ctx, taskID)
+	// A task the pool has already finished keeps its record for as long as the retention says, and cancelling never removes one
+	return client.DeleteJob(ctx, taskID, actor.WithLiveJobsOnly())
 }
 
 // RetryTask re-submits a dead-lettered task, scheduled to run as soon as possible, and returns the new task ID
@@ -205,6 +210,8 @@ func taskStatusFromJob(s actor.JobStatus) TaskStatus {
 	switch s {
 	case actor.JobStatusActive:
 		return TaskStatusActive
+	case actor.JobStatusCompleted:
+		return TaskStatusCompleted
 	case actor.JobStatusDeadLettered:
 		return TaskStatusDeadLettered
 	default:

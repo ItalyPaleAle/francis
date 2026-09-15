@@ -14,7 +14,7 @@ import (
 	"github.com/italypaleale/francis/internal/ref"
 )
 
-func (p *PostgresProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) (string, *ref.AlarmLease, error) {
+func (p *PostgresProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) (string, bool, *ref.AlarmLease, error) {
 	var (
 		interval *string
 		cron     *string
@@ -62,17 +62,18 @@ func (p *PostgresProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, r
 		).
 		Scan(&jobID)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to dispatch job: %w", err)
+		return "", false, nil, fmt.Errorf("failed to dispatch job: %w", err)
 	}
 
-	return jobID.String(), nil, nil
+	// The insert proposed this call's own ID, so getting a different one back means a job already held the idempotency key
+	return jobID.String(), jobID == alarmID, nil, nil
 }
 
 // dispatchAndLeaseJob atomically stores a new idempotent job with any required actor placement and lease
-func (p *PostgresProvider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq, alarmID uuid.UUID, interval *string, cron *string) (string, *ref.AlarmLease, error) {
+func (p *PostgresProvider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq, alarmID uuid.UUID, interval *string, cron *string) (string, bool, *ref.AlarmLease, error) {
 	hostUUIDs, err := hostIDsToUUIDs(req.LeaseImmediate)
 	if err != nil {
-		return "", nil, err
+		return "", false, nil, err
 	}
 
 	// The database always returns the durable job ID and includes lease fields only when this call inserted and leased it
@@ -92,18 +93,52 @@ func (p *PostgresProvider) dispatchAndLeaseJob(ctx context.Context, aRef ref.Ala
 		).
 		Scan(&jobID, &dueTime, &leaseID)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to atomically dispatch and lease job: %w", err)
+		return "", false, nil, fmt.Errorf("failed to atomically dispatch and lease job: %w", err)
 	}
+
+	// The insert proposed this call's own ID, so getting a different one back means a job already held the idempotency key
+	created := jobID == alarmID
 	if !leaseID.Valid {
-		return jobID.String(), nil, nil
+		return jobID.String(), created, nil, nil
 	}
 
 	leaseUUID := uuid.UUID(leaseID.Bytes)
 	lease := ref.NewAlarmLease(aRef, jobID.String(), dueTime, leaseUUID.String())
-	return jobID.String(), lease, nil
+	return jobID.String(), created, lease, nil
 }
 
 func (p *PostgresProvider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLease, req components.DeadLetterAlarmReq) error {
+	return p.endJob(ctx, lease, endJobReq{
+		status:      components.JobStatusDeadLettered,
+		reason:      req.Reason,
+		attempts:    req.Attempts,
+		retention:   req.Retention,
+		reschedule:  req.Reschedule,
+		nextDueTime: req.NextDueTime,
+	})
+}
+
+func (p *PostgresProvider) CompleteJob(ctx context.Context, lease *ref.AlarmLease, req components.CompleteJobReq) error {
+	return p.endJob(ctx, lease, endJobReq{
+		status:      components.JobStatusCompleted,
+		attempts:    req.Attempts,
+		retention:   req.Retention,
+		reschedule:  req.Reschedule,
+		nextDueTime: req.NextDueTime,
+	})
+}
+
+type endJobReq struct {
+	status      components.JobStatus
+	reason      string
+	attempts    int
+	retention   time.Duration
+	reschedule  bool
+	nextDueTime time.Time
+}
+
+// endJob atomically moves a leased job out of the alarms table and into the terminal-job store, optionally re-creating its recurrence in the same transaction
+func (p *PostgresProvider) endJob(ctx context.Context, lease *ref.AlarmLease, req endJobReq) error {
 	jobID, err := uuid.Parse(lease.Key())
 	if err != nil {
 		return fmt.Errorf("invalid job ID %q: %w", lease.Key(), err)
@@ -112,30 +147,65 @@ func (p *PostgresProvider) DeadLetterAlarm(ctx context.Context, lease *ref.Alarm
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
-	// A one-shot job just moves to the dead-letter store, which a single data-modifying CTE does atomically in one round-trip
+	// A zero retention keeps the record until something removes it, which is expressed as a NULL expiration
+	var retention *time.Duration
+	if req.retention > 0 {
+		retention = &req.retention
+	}
+
+	// Only a dead job keeps its input, since that is what a replay needs and a completed one is never replayed
+	// A dead-lettered job records the error that ended it, while a completed one has none
+	var reason *string
+	if req.reason != "" {
+		reason = &req.reason
+	}
+
+	// A one-shot job just moves to the terminal-job store, which a single data-modifying CTE does atomically in one round-trip
 	// The DELETE and the INSERT target different tables, so there is no unique-index interaction
 	// A missing or invalid lease deletes nothing, so the insert affects no rows and we report it as not found
-	if !req.Reschedule {
+	// The insert is an upsert because a repeating job's occurrence can end twice under the same ID
+	if !req.reschedule {
+		// Notes on the query:
+		// A job handler that halts its own actor is the common case for a worker, and deactivating an actor drops the leases of its alarms so another host can pick them up
+		// For the occurrence being finalized right now that release must not undo the finalization, so a lease this execution owns and a lease that was released both count
+		// A lease that merely expired keeps its id, and one another replica took holds its own id, so neither is matched here
+		// An unleased row is only this execution's occurrence while it still carries the due time this execution leased, since a recurrence's next occurrence is always scheduled later
 		// #nosec G202 -- the only concatenated values are static table prefixes, not user input
 		res, err := p.db.Exec(queryCtx, `
 			WITH deleted AS (
 				DELETE FROM `+p.tablePrefix+`alarms
 				WHERE
 					alarm_id = $1
-					AND alarm_lease_id = $2
-					AND alarm_lease_expiration_time IS NOT NULL
-					AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')
+					AND (
+						(
+							alarm_lease_id = $2
+							AND alarm_lease_expiration_time IS NOT NULL
+							AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')
+						)
+						OR (alarm_lease_id IS NULL AND alarm_due_time = $7)
+					)
 				RETURNING actor_type, actor_id, job_method, alarm_data, alarm_due_time, alarm_interval, alarm_cron
 			)
-			INSERT INTO `+p.tablePrefix+`dead_jobs
+			INSERT INTO `+p.tablePrefix+`terminal_jobs
 				(job_id, actor_type, actor_id, job_method, job_data,
-				attempts, last_error, failed_at, original_due, job_interval, job_cron)
-			SELECT $1, actor_type, actor_id, COALESCE(job_method, ''), alarm_data, $3, $4, now() AT TIME ZONE 'utc', alarm_due_time, alarm_interval, alarm_cron
-			FROM deleted`,
-			jobID, lease.LeaseID(), req.Attempts, req.Reason,
+				job_status, attempts, last_error, ended_at, original_due, job_interval, job_cron, expiration_time)
+			SELECT $1, actor_type, actor_id, COALESCE(job_method, ''), CASE WHEN $3 = 'dead' THEN alarm_data END, $3, $4, $5, now() AT TIME ZONE 'utc', alarm_due_time, alarm_interval, alarm_cron, (now() AT TIME ZONE 'utc') + $6
+			FROM deleted
+			ON CONFLICT (job_id) DO UPDATE SET
+				job_method = EXCLUDED.job_method,
+				job_data = EXCLUDED.job_data,
+				job_status = EXCLUDED.job_status,
+				attempts = EXCLUDED.attempts,
+				last_error = EXCLUDED.last_error,
+				ended_at = EXCLUDED.ended_at,
+				original_due = EXCLUDED.original_due,
+				job_interval = EXCLUDED.job_interval,
+				job_cron = EXCLUDED.job_cron,
+				expiration_time = EXCLUDED.expiration_time`,
+			jobID, lease.LeaseID(), string(req.status), req.attempts, reason, retention, lease.DueTime().UTC(),
 		)
 		if err != nil {
-			return fmt.Errorf("error dead-lettering job: %w", err)
+			return fmt.Errorf("error ending job: %w", err)
 		}
 		if res.RowsAffected() == 0 {
 			return components.ErrNoAlarm
@@ -143,9 +213,14 @@ func (p *PostgresProvider) DeadLetterAlarm(ctx context.Context, lease *ref.Alarm
 		return nil
 	}
 
-	// A repeating job dead-letters the failed occurrence and re-creates the recurrence
-	// The recurrence reuses the alarm name, so its INSERT into alarms cannot share the statement as the DELETE without risking a unique-index conflict
-	// It runs as a second statement in the transaction, after the DELETE has cleared the name
+	// A repeating job records the ended occurrence and re-creates the recurrence
+	// The recurrence reuses the alarm name and the job ID, so its INSERT into alarms cannot share the statement as the DELETE without conflicting on either
+	// It runs as a second statement in the transaction, after the DELETE has cleared them
+	//
+	// A repeating job keeps one identity for the life of its schedule, so the occurrence that just ended is recorded under an ID of its own and the job ID goes back to the recurrence
+	// Callers hold that ID for as long as the schedule exists: a cron actor deletes and reconciles its recurrence by it, and re-minting it on every occurrence would orphan the schedule
+	occurrenceID := uuid.NewV7()
+
 	tx, err := p.db.Begin(queryCtx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -154,7 +229,7 @@ func (p *PostgresProvider) DeadLetterAlarm(ctx context.Context, lease *ref.Alarm
 		_ = tx.Rollback(queryCtx)
 	}()
 
-	// Move the failed occurrence to the dead-letter store in one statement, returning the row's fields needed to re-create the recurrence
+	// Move the ended occurrence to the terminal-job store in one statement, returning the row's fields needed to re-create the recurrence
 	var (
 		actorType, actorID, alarmName string
 		jobMethod                     *string
@@ -162,34 +237,56 @@ func (p *PostgresProvider) DeadLetterAlarm(ctx context.Context, lease *ref.Alarm
 		interval, cron                *string
 		ttl                           *time.Time
 	)
+
 	// #nosec G202 -- the only concatenated values are static table prefixes, not user input
 	err = tx.
+		// Notes on the query:
+		// A job handler that halts its own actor is the common case for a worker, and deactivating an actor drops the leases of its alarms so another host can pick them up
+		// For the occurrence being finalized right now that release must not undo the finalization, so a lease this execution owns and a lease that was released both count
+		// A lease that merely expired keeps its id, and one another replica took holds its own id, so neither is matched here
+		// An unleased row is only this execution's occurrence while it still carries the due time this execution leased, which is what stops a stale execution from finalizing the occurrence that replaced it
 		QueryRow(queryCtx, `
 			WITH deleted AS (
 				DELETE FROM `+p.tablePrefix+`alarms
 				WHERE
 					alarm_id = $1
-					AND alarm_lease_id = $2
-					AND alarm_lease_expiration_time IS NOT NULL
-					AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')
+					AND (
+						(
+							alarm_lease_id = $2
+							AND alarm_lease_expiration_time IS NOT NULL
+							AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')
+						)
+						OR (alarm_lease_id IS NULL AND alarm_due_time = $8)
+					)
 				RETURNING actor_type, actor_id, alarm_name, job_method, alarm_data, alarm_due_time, alarm_interval, alarm_cron, alarm_ttl_time
 			),
-			dead AS (
-				INSERT INTO `+p.tablePrefix+`dead_jobs
+			ended AS (
+				INSERT INTO `+p.tablePrefix+`terminal_jobs
 					(job_id, actor_type, actor_id, job_method, job_data,
-					attempts, last_error, failed_at, original_due, job_interval, job_cron)
-				SELECT $1, actor_type, actor_id, COALESCE(job_method, ''), alarm_data, $3, $4, now() AT TIME ZONE 'utc', alarm_due_time, alarm_interval, alarm_cron
+					job_status, attempts, last_error, ended_at, original_due, job_interval, job_cron, expiration_time)
+				SELECT $7, actor_type, actor_id, COALESCE(job_method, ''), CASE WHEN $3 = 'dead' THEN alarm_data END, $3, $4, $5, now() AT TIME ZONE 'utc', alarm_due_time, alarm_interval, alarm_cron, (now() AT TIME ZONE 'utc') + $6
 				FROM deleted
+				ON CONFLICT (job_id) DO UPDATE SET
+					job_method = EXCLUDED.job_method,
+					job_data = EXCLUDED.job_data,
+					job_status = EXCLUDED.job_status,
+					attempts = EXCLUDED.attempts,
+					last_error = EXCLUDED.last_error,
+					ended_at = EXCLUDED.ended_at,
+					original_due = EXCLUDED.original_due,
+					job_interval = EXCLUDED.job_interval,
+					job_cron = EXCLUDED.job_cron,
+					expiration_time = EXCLUDED.expiration_time
 			)
 			SELECT actor_type, actor_id, alarm_name, job_method, alarm_data, alarm_interval, alarm_cron, alarm_ttl_time
 			FROM deleted`,
-			lease.Key(), lease.LeaseID(), req.Attempts, req.Reason,
+			jobID, lease.LeaseID(), string(req.status), req.attempts, reason, retention, occurrenceID, lease.DueTime().UTC(),
 		).
 		Scan(&actorType, &actorID, &alarmName, &jobMethod, &data, &interval, &cron, &ttl)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return components.ErrNoAlarm
 	} else if err != nil {
-		return fmt.Errorf("error dead-lettering job: %w", err)
+		return fmt.Errorf("error ending job: %w", err)
 	}
 
 	method := ""
@@ -197,8 +294,7 @@ func (p *PostgresProvider) DeadLetterAlarm(ctx context.Context, lease *ref.Alarm
 		method = *jobMethod
 	}
 
-	// Re-create the recurrence for its next occurrence so a repeating job survives the dead-lettering of one occurrence
-	newID := uuid.NewV7()
+	// Re-create the recurrence for its next occurrence, under the job ID it has always had, so a repeating job survives one occurrence ending
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	_, err = tx.Exec(queryCtx, `
 		INSERT INTO `+p.tablePrefix+`alarms
@@ -210,8 +306,8 @@ func (p *PostgresProvider) DeadLetterAlarm(ctx context.Context, lease *ref.Alarm
 			($1, $2, $3, $4, $5, $6, $7, $8, $9, 'job', $10, NULL, NULL)`,
 		// alarm_due_time is stored as UTC
 		// ttl already comes from the DB as UTC
-		newID, actorType, actorID, alarmName,
-		req.NextDueTime.UTC(), interval, cron, ttl, data, method,
+		jobID, actorType, actorID, alarmName,
+		req.nextDueTime.UTC(), interval, cron, ttl, data, method,
 	)
 	if err != nil {
 		return fmt.Errorf("error rescheduling repeating job: %w", err)
@@ -271,30 +367,33 @@ func (p *PostgresProvider) GetJob(ctx context.Context, jobID string) (components
 			CreatedAt: components.JobCreatedAt(jobID),
 		}, nil
 	case errors.Is(err, pgx.ErrNoRows):
-		// Fall through to the dead-letter store
+		// Fall through to the terminal-job store
 	default:
 		return components.JobInfo{}, fmt.Errorf("error querying live job: %w", err)
 	}
 
-	// Then look for a dead-lettered job
+	// Then look for a job that ended, whether it completed or dead-lettered
+	// An expired record is treated as gone before the collector gets to it, exactly as expired state is
 	var (
+		status      string
 		attempts    int
 		lastError   *string
+		endedAt     time.Time
 		originalDue time.Time
 	)
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	err = p.db.
 		QueryRow(queryCtx, `
-			SELECT actor_type, actor_id, job_method, attempts, last_error, original_due, job_interval, job_cron
-			FROM `+p.tablePrefix+`dead_jobs
-			WHERE job_id = $1`,
+			SELECT actor_type, actor_id, job_method, job_status, attempts, last_error, ended_at, original_due, job_interval, job_cron
+			FROM `+p.tablePrefix+`terminal_jobs
+			WHERE job_id = $1 AND (expiration_time IS NULL OR expiration_time > (now() AT TIME ZONE 'utc'))`,
 			id,
 		).
-		Scan(&actorType, &actorID, &jobMethod, &attempts, &lastError, &originalDue, &interval, &cron)
+		Scan(&actorType, &actorID, &jobMethod, &status, &attempts, &lastError, &endedAt, &originalDue, &interval, &cron)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return components.JobInfo{}, components.ErrNoJob
 	} else if err != nil {
-		return components.JobInfo{}, fmt.Errorf("error querying dead job: %w", err)
+		return components.JobInfo{}, fmt.Errorf("error querying terminal job: %w", err)
 	}
 
 	return components.JobInfo{
@@ -302,13 +401,14 @@ func (p *PostgresProvider) GetJob(ctx context.Context, jobID string) (components
 		ActorType: actorType,
 		ActorID:   actorID,
 		Method:    derefString(jobMethod),
-		Status:    components.JobStatusDeadLettered,
+		Status:    jobStatusFromText(status),
 		DueTime:   originalDue,
 		Interval:  derefString(interval),
 		Cron:      derefString(cron),
 		Attempts:  attempts,
 		LastError: derefString(lastError),
 		CreatedAt: components.JobCreatedAt(jobID),
+		EndedAt:   endedAt,
 	}, nil
 }
 
@@ -316,21 +416,21 @@ func (p *PostgresProvider) ListJobs(ctx context.Context, actorType string, actor
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
-	// Live jobs (alarm rows) and dead-lettered jobs are disjoint by construction, so UNION ALL avoids an extra round-trip without any risk of duplicates
-	// Each branch projects into a common shape: the live branch derives the status and supplies zero attempts and no error, while the dead branch reports its recorded attempts and last error
+	// Live jobs (alarm rows) and terminal ones can never overlap, so UNION ALL avoids an extra round-trip without any risk of duplicates
+	// Each branch projects into a common shape: the live branch derives the status and supplies zero attempts, no error and no end time, while the terminal branch reports what it recorded
 	// #nosec G202 -- the only concatenated values are static table prefixes, not user input
 	rows, err := p.db.Query(queryCtx, `
 		SELECT alarm_id, job_method, alarm_due_time, alarm_interval, alarm_cron,
 			CASE WHEN alarm_lease_id IS NOT NULL AND alarm_lease_expiration_time IS NOT NULL AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')
 				THEN 'active' ELSE 'pending' END,
-			0, NULL::text
+			0, NULL::text, NULL::timestamp
 		FROM `+p.tablePrefix+`alarms
 		WHERE actor_type = $1 AND actor_id = $2 AND alarm_kind = 'job'
 		UNION ALL
-		SELECT job_id, job_method, original_due, job_interval, job_cron,
-			'dead', attempts, last_error
-		FROM `+p.tablePrefix+`dead_jobs
-		WHERE actor_type = $1 AND actor_id = $2`,
+		SELECT
+			job_id, job_method, original_due, job_interval, job_cron, job_status, attempts, last_error, ended_at
+		FROM `+p.tablePrefix+`terminal_jobs
+		WHERE actor_type = $1 AND actor_id = $2 AND (expiration_time IS NULL OR expiration_time > (now() AT TIME ZONE 'utc'))`,
 		actorType, actorID,
 	)
 	if err != nil {
@@ -348,14 +448,15 @@ func (p *PostgresProvider) ListJobs(ctx context.Context, actorType string, actor
 			status         string
 			attempts       int
 			lastError      *string
+			endedAt        *time.Time
 		)
-		err = rows.Scan(&id, &jobMethod, &dueTime, &interval, &cron, &status, &attempts, &lastError)
+		err = rows.Scan(&id, &jobMethod, &dueTime, &interval, &cron, &status, &attempts, &lastError, &endedAt)
 		if err != nil {
 			return nil, fmt.Errorf("error scanning job: %w", err)
 		}
 
 		jobID := id.String()
-		res = append(res, components.JobInfo{
+		info := components.JobInfo{
 			JobID:     jobID,
 			ActorType: actorType,
 			ActorID:   actorID,
@@ -367,7 +468,12 @@ func (p *PostgresProvider) ListJobs(ctx context.Context, actorType string, actor
 			Attempts:  attempts,
 			LastError: derefString(lastError),
 			CreatedAt: components.JobCreatedAt(jobID),
-		})
+		}
+		if endedAt != nil {
+			info.EndedAt = *endedAt
+		}
+
+		res = append(res, info)
 	}
 	err = rows.Err()
 	if err != nil {
@@ -377,7 +483,7 @@ func (p *PostgresProvider) ListJobs(ctx context.Context, actorType string, actor
 	return res, nil
 }
 
-func (p *PostgresProvider) CancelJob(ctx context.Context, actorType string, actorID string, jobID string) error {
+func (p *PostgresProvider) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string, req components.DeleteJobReq) error {
 	id, err := uuid.Parse(jobID)
 	if err != nil {
 		return components.ErrNoJob
@@ -386,79 +492,106 @@ func (p *PostgresProvider) CancelJob(ctx context.Context, actorType string, acto
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
-	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	res, err := p.db.Exec(queryCtx, `
-		DELETE FROM `+p.tablePrefix+`alarms
-		WHERE actor_type = $1 AND actor_id = $2 AND alarm_id = $3 AND alarm_kind = 'job'`,
-		actorType, actorID, id,
-	)
-	if err != nil {
-		return fmt.Errorf("error executing query: %w", err)
+	// A cancellation only removes the live row, and the delete itself is what decides that: a job that finalizes concurrently simply is not there to delete
+	if req.LiveOnly {
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		live, err := p.db.Exec(queryCtx, `
+			DELETE FROM `+p.tablePrefix+`alarms
+			WHERE alarm_id = $1 AND alarm_kind = 'job' AND actor_type = $2 AND actor_id = $3`,
+			id, actorType, actorID,
+		)
+		if err != nil {
+			return fmt.Errorf("error deleting live job: %w", err)
+		}
+		if live.RowsAffected() == 0 {
+			return components.ErrNoJob
+		}
+		return nil
 	}
 
-	if res.RowsAffected() == 0 {
+	// A job lives in one of two tables depending on whether it has ended, and the caller does not have to know which
+	// The two deletes are separate statements in one transaction rather than one data-modifying CTE, because a CTE's branches share a snapshot: a finalization committing while the statement waits would leave the live branch matching nothing and the terminal branch unable to see the row that just arrived
+	// Each statement takes its own snapshot, and the live delete runs first, so it waits out any finalization in flight and the terminal delete then sees wherever the row ended up
+	tx, err := p.db.Begin(queryCtx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(queryCtx)
+	}()
+
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	live, err := tx.Exec(queryCtx, `
+		DELETE FROM `+p.tablePrefix+`alarms
+		WHERE alarm_id = $1 AND alarm_kind = 'job' AND actor_type = $2 AND actor_id = $3`,
+		id, actorType, actorID,
+	)
+	if err != nil {
+		return fmt.Errorf("error deleting live job: %w", err)
+	}
+
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	terminal, err := tx.Exec(queryCtx, `
+		DELETE FROM `+p.tablePrefix+`terminal_jobs
+		WHERE job_id = $1 AND actor_type = $2 AND actor_id = $3`,
+		id, actorType, actorID,
+	)
+	if err != nil {
+		return fmt.Errorf("error deleting terminal job: %w", err)
+	}
+
+	if live.RowsAffected()+terminal.RowsAffected() == 0 {
 		return components.ErrNoJob
+	}
+
+	err = tx.Commit(queryCtx)
+	if err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	return nil
 }
 
-func (p *PostgresProvider) GetDeadJob(ctx context.Context, jobID string) (components.GetDeadJobRes, error) {
+func (p *PostgresProvider) GetTerminalJob(ctx context.Context, jobID string) (components.GetTerminalJobRes, error) {
 	id, err := uuid.Parse(jobID)
 	if err != nil {
-		return components.GetDeadJobRes{}, components.ErrNoJob
+		return components.GetTerminalJobRes{}, components.ErrNoJob
 	}
 
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
 	var (
-		res            components.GetDeadJobRes
+		res            components.GetTerminalJobRes
+		status         string
 		lastError      *string
 		interval, cron *string
+		exp            *time.Time
 	)
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	err = p.db.
 		QueryRow(queryCtx, `
-			SELECT actor_type, actor_id, job_method, job_data, attempts, last_error, failed_at, original_due, job_interval, job_cron
-			FROM `+p.tablePrefix+`dead_jobs
-			WHERE job_id = $1`,
+			SELECT actor_type, actor_id, job_method, job_data, job_status, attempts, last_error, ended_at, original_due, job_interval, job_cron, expiration_time
+			FROM `+p.tablePrefix+`terminal_jobs
+			WHERE job_id = $1 AND (expiration_time IS NULL OR expiration_time > (now() AT TIME ZONE 'utc'))`,
 			id,
 		).
-		Scan(&res.ActorType, &res.ActorID, &res.Method, &res.Data, &res.Attempts, &lastError, &res.FailedAt, &res.OriginalDue, &interval, &cron)
+		Scan(&res.ActorType, &res.ActorID, &res.Method, &res.Data, &status, &res.Attempts, &lastError, &res.EndedAt, &res.OriginalDue, &interval, &cron, &exp)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return components.GetDeadJobRes{}, components.ErrNoJob
+		return components.GetTerminalJobRes{}, components.ErrNoJob
 	} else if err != nil {
-		return components.GetDeadJobRes{}, fmt.Errorf("error executing query: %w", err)
+		return components.GetTerminalJobRes{}, fmt.Errorf("error executing query: %w", err)
 	}
 
 	res.JobID = jobID
+	res.Status = jobStatusFromText(status)
 	res.LastError = derefString(lastError)
 	res.Interval = derefString(interval)
 	res.Cron = derefString(cron)
+	if exp != nil {
+		res.Expiration = new(exp.UTC())
+	}
 	return res, nil
-}
-
-func (p *PostgresProvider) DeleteDeadJob(ctx context.Context, jobID string) error {
-	id, err := uuid.Parse(jobID)
-	if err != nil {
-		return components.ErrNoJob
-	}
-
-	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
-	defer cancel()
-
-	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	res, err := p.db.Exec(queryCtx, `DELETE FROM `+p.tablePrefix+`dead_jobs WHERE job_id = $1`, id)
-	if err != nil {
-		return fmt.Errorf("error executing query: %w", err)
-	}
-
-	if res.RowsAffected() == 0 {
-		return components.ErrNoJob
-	}
-
-	return nil
 }
 
 func (p *PostgresProvider) RetryDeadJob(ctx context.Context, jobID string) (string, error) {
@@ -475,12 +608,16 @@ func (p *PostgresProvider) RetryDeadJob(ctx context.Context, jobID string) (stri
 
 	// Move the dead job back into the alarms table as a fresh, immediate one-shot job in a single statement
 	// A data-modifying CTE runs the delete and the insert atomically in one round-trip, copying the method and data across
-	// When the dead job is missing the delete returns no rows, so the insert affects none and we report it as not found
+	// When the job is missing, or ended by completing rather than dead-lettering, the delete returns no rows, so the insert affects none and we report it as not found
+	// A record past its expiration is treated as absent here too, since reads already hide it and re-dispatching what a caller can no longer see would be a surprise
 	// #nosec G202 -- the only concatenated values are static table prefixes, not user input
 	res, err := p.db.Exec(queryCtx, `
 		WITH deleted AS (
-			DELETE FROM `+p.tablePrefix+`dead_jobs
-			WHERE job_id = $1
+			DELETE FROM `+p.tablePrefix+`terminal_jobs
+			WHERE
+				job_id = $1
+				AND job_status = 'dead'
+				AND (expiration_time IS NULL OR expiration_time > (now() AT TIME ZONE 'utc'))
 			RETURNING actor_type, actor_id, job_method, job_data
 		)
 		INSERT INTO `+p.tablePrefix+`alarms
@@ -515,6 +652,8 @@ func jobStatusFromText(s string) components.JobStatus {
 	switch s {
 	case "active":
 		return components.JobStatusActive
+	case "completed":
+		return components.JobStatusCompleted
 	case "dead":
 		return components.JobStatusDeadLettered
 	default:

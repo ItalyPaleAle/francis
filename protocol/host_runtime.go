@@ -47,6 +47,13 @@ type ActorHostType struct {
 	DeactivationTimeoutMs int64 `msgpack:"deact,omitempty"`
 	// MaxAttempts is the maximum number of attempts when invoking the actor or executing alarms
 	MaxAttempts int `msgpack:"maxAttempts,omitempty"`
+	// CompletedJobRetentionMs is how long a job of this actor type keeps a record after it completes successfully, in milliseconds
+	// Zero keeps no record at all, and a negative value keeps one that never expires
+	CompletedJobRetentionMs int64 `msgpack:"completedJobRetention,omitempty"`
+	// DeadLetteredJobRetentionMs is how long a job of this actor type keeps its record after it is dead-lettered, in milliseconds
+	// A dead-lettered job is always recorded, so this only decides for how long
+	// A negative value disables automatic deletion
+	DeadLetteredJobRetentionMs int64 `msgpack:"deadLetteredJobRetention,omitempty"`
 	// InitialRetryDelayMs is the initial retry delay after a failed attempt, in milliseconds
 	InitialRetryDelayMs int64 `msgpack:"retryDelay,omitempty"`
 }
@@ -222,7 +229,7 @@ type JobInfo struct {
 	ActorType string `msgpack:"type"`
 	ActorID   string `msgpack:"id"`
 	Method    string `msgpack:"method"`
-	// Status is the job lifecycle stage: 0 pending, 1 active, 2 dead-lettered
+	// Status is the job lifecycle stage: 0 pending, 1 active, 2 completed, 3 dead-lettered
 	Status          int    `msgpack:"status"`
 	DueTimeUnixMs   int64  `msgpack:"due,omitempty"`
 	Interval        string `msgpack:"interval,omitempty"`
@@ -230,6 +237,8 @@ type JobInfo struct {
 	Attempts        int    `msgpack:"attempts,omitempty"`
 	LastError       string `msgpack:"lastError,omitempty"`
 	CreatedAtUnixMs int64  `msgpack:"createdAt,omitempty"`
+	// EndedAtUnixMs is when the job reached its terminal status (unset for a live job)
+	EndedAtUnixMs int64 `msgpack:"endedAt,omitempty"`
 }
 
 // DispatchJobRequest creates a job, with the alarm name resolved by the host (idempotency key or a random name)
@@ -245,6 +254,8 @@ type DispatchJobRequest struct {
 // DispatchJobResponse carries the server-issued job ID
 type DispatchJobResponse struct {
 	JobID string `msgpack:"jobId"`
+	// Created reports whether this call inserted the job, rather than coalescing onto a live one that already held its idempotency key
+	Created bool `msgpack:"created,omitempty"`
 }
 
 // GetJobRequest retrieves a job by ID
@@ -267,13 +278,6 @@ type ListJobsResponse struct {
 	Jobs []JobInfo `msgpack:"jobs,omitempty"`
 }
 
-// CancelJobRequest cancels a live job for an actor
-type CancelJobRequest struct {
-	ActorType string `msgpack:"type"`
-	ActorID   string `msgpack:"id"`
-	JobID     string `msgpack:"jobId"`
-}
-
 // RetryJobRequest re-dispatches a dead-lettered job
 type RetryJobRequest struct {
 	JobID string `msgpack:"jobId"`
@@ -282,6 +286,15 @@ type RetryJobRequest struct {
 // RetryJobResponse carries the ID of the newly dispatched job
 type RetryJobResponse struct {
 	JobID string `msgpack:"jobId"`
+}
+
+// DeleteJobRequest removes one of an actor's jobs, in the states the request asks for
+type DeleteJobRequest struct {
+	ActorType string `msgpack:"type"`
+	ActorID   string `msgpack:"id"`
+	JobID     string `msgpack:"jobId"`
+	// LiveOnly restricts the removal to a job that has not ended yet
+	LiveOnly bool `msgpack:"liveOnly,omitempty"`
 }
 
 // GetStateRequest retrieves the persistent state of an actor
@@ -303,6 +316,16 @@ type SetStateRequest struct {
 	// TTLMs is an optional time-to-live for the state, in milliseconds
 	// Zero means no TTL
 	TTLMs int64 `msgpack:"ttl,omitempty"`
+	// WorkflowLabels is the workflow engine's labels for the row, set only by Francis' own workflow engine
+	WorkflowLabels *WorkflowLabels `msgpack:"workflowLabels,omitempty"`
+}
+
+// WorkflowLabels is the workflow engine's label set as it travels on the wire
+// It restates the same closed set of fields as components.WorkflowLabels, so the wire format stays independent of the provider interface
+type WorkflowLabels struct {
+	Status  string `msgpack:"status,omitempty"`
+	Version int    `msgpack:"version,omitempty"`
+	Parent  string `msgpack:"parent,omitempty"`
 }
 
 // DeleteStateRequest deletes the persistent state of an actor
@@ -315,6 +338,8 @@ type ListStatesRequest struct {
 	ActorType string `msgpack:"type"`
 	// IncludeData requests the stored state data alongside each actor ID
 	IncludeData bool `msgpack:"includeData,omitempty"`
+	// WorkflowLabels restricts the listing to rows whose workflow labels match every field it sets
+	WorkflowLabels *WorkflowLabels `msgpack:"workflowLabels,omitempty"`
 	// After is the pagination cursor, and only actor IDs sorting strictly after it are returned
 	After string `msgpack:"after,omitempty"`
 	// Limit is the maximum number of states to return, where zero means the provider's default
