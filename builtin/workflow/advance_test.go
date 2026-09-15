@@ -703,6 +703,80 @@ func TestNewRejectsAnInvalidGraph(t *testing.T) {
 			opts:    []Option{WithSteps(WaitForEvent("w", WithRun(noopRun)))},
 			wantErr: "cannot have a handler",
 		},
+		{
+			name:    "step with no name",
+			opts:    []Option{WithSteps(Step("", WithRun(noopRun)))},
+			wantErr: "step name is required",
+		},
+		{
+			name:    "step name carrying the delimiter that joins a worker's actor ID",
+			opts:    []Option{WithSteps(Step("a|b", WithRun(noopRun)))},
+			wantErr: `must not contain "|"`,
+		},
+		{
+			name:    "step name carrying a path separator",
+			opts:    []Option{WithSteps(Step("a/b", WithRun(noopRun)))},
+			wantErr: "invalid step name",
+		},
+		{
+			name: "group member reusing a top-level step's name",
+			opts: []Option{WithSteps(
+				Step("a", WithRun(noopRun)),
+				Parallel("g", Step("a", WithRun(noopRun))),
+			)},
+			wantErr: "declared more than once",
+		},
+		{
+			name:    "group with no members",
+			opts:    []Option{WithSteps(Parallel("g"))},
+			wantErr: "requires at least one member",
+		},
+		{
+			name:    "group member with no handler",
+			opts:    []Option{WithSteps(Parallel("g", Step("m")))},
+			wantErr: "requires WithRun",
+		},
+		{
+			name:    "child step with no definition",
+			opts:    []Option{WithSteps(Child("c"))},
+			wantErr: "requires WithDefinition",
+		},
+		{
+			name:    "input from a step that does not exist",
+			opts:    []Option{WithSteps(Step("a", WithRun(noopRun), WithInputFrom("nope")))},
+			wantErr: "is not a top-level step of this workflow",
+		},
+		{
+			name:    "skip on failure naming a step that does not exist",
+			opts:    []Option{WithSteps(Step("a", WithRun(noopRun), WithSkipOnFailure("nope")))},
+			wantErr: "is not a top-level step of this workflow",
+		},
+		{
+			name: "condition decided by a step that runs later",
+			opts: []Option{WithSteps(
+				Step("a", WithRun(noopRun), WithSkipIf("b", true)),
+				Step("b", WithRun(noopRun)),
+			)},
+			wantErr: "does not run before it",
+		},
+		{
+			name:    "fan-out iterating its own output",
+			opts:    []Option{WithSteps(ForEach("f", WithItemsFrom("f"), WithRun(noopRun)))},
+			wantErr: "does not run before it",
+		},
+		{
+			name: "fan-out with neither a handler nor a child",
+			opts: []Option{WithSteps(
+				Step("a", WithRun(noopRun)),
+				ForEach("f", WithItemsFrom("a")),
+			)},
+			wantErr: "requires either WithRun or WithChild",
+		},
+		{
+			name:    "step requiring a capability that is not a valid type component",
+			opts:    []Option{WithSteps(Step("a", WithRun(noopRun), WithRequiredCapability("gpu/large")))},
+			wantErr: "invalid required capability",
+		},
 	}
 
 	for _, tt := range tests {
@@ -880,4 +954,209 @@ func TestAdvanceAcceptsAnEventWhileSuspended(t *testing.T) {
 	advance(st, def, "inst-1", now)
 	assert.Equal(t, StepRunning, stepStatus(t, st, "after"))
 	assert.JSONEq(t, `{"by":"ops"}`, string(stepOutput(st.step("approval"), def.byName["approval"])))
+}
+
+func TestAdvanceFailsAFanOutWhoseItemsAreNotAList(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "bad-items", WithSteps(
+		Step("plan", WithRun(noopRun)),
+		ForEach("work", WithItemsFrom("plan"), WithRun(noopRun)),
+	))
+
+	st := startJournal(t, def, now)
+	reportSuccess(t, st, def, "plan", 0, "not a list", now)
+	advance(st, def, "inst-1", now)
+
+	// The list is the fan-out's own input, so a list that cannot be read is the step failing rather than the instance crashing
+	assert.Equal(t, StepFailed, stepStatus(t, st, "work"))
+	assert.Empty(t, st.step("work").Tasks)
+	assert.Contains(t, st.step("work").Error, "output a JSON array")
+	assert.Equal(t, StatusFailed, st.Status)
+}
+
+func TestAdvanceRunsAFanOutOverASkippedStepAsAnEmptyOne(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "skipped-items", WithSteps(
+		Step("decide", WithRun(noopRun)),
+		Step("plan", WithRun(noopRun), WithSkipIf("decide", true)),
+		ForEach("work", WithItemsFrom("plan"), WithRun(noopRun)),
+		Step("after", WithRun(noopRun)),
+	))
+
+	st := startJournal(t, def, now)
+	reportSuccess(t, st, def, "decide", 0, true, now)
+	advance(st, def, "inst-1", now)
+
+	// A fan-out over a skipped step has nothing to iterate, which is an empty fan-out rather than a failure
+	require.Equal(t, StepSkipped, stepStatus(t, st, "plan"))
+	assert.Equal(t, StepCompleted, stepStatus(t, st, "work"))
+	assert.Equal(t, StepRunning, stepStatus(t, st, "after"))
+}
+
+func TestAdvanceRunsAConditionalStepWhenTheConditionIsNotABoolean(t *testing.T) {
+	tests := []struct {
+		name   string
+		output any
+	}{
+		{name: "a value that is not a boolean", output: "maybe"},
+		{name: "no output at all", output: nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := time.Now()
+			def := testDefinition(t, "unreadable-condition", WithSteps(
+				Step("decide", WithRun(noopRun)),
+				Step("verify", WithRun(noopRun), WithSkipIf("decide", true)),
+			))
+
+			st := startJournal(t, def, now)
+			reportSuccess(t, st, def, "decide", 0, tt.output, now)
+			advance(st, def, "inst-1", now)
+
+			// A condition nothing recorded is not a decision to skip, so the step runs rather than being silently dropped
+			assert.Equal(t, StepRunning, stepStatus(t, st, "verify"))
+		})
+	}
+}
+
+func TestAdvanceCompensatesOnlyTheGroupMembersThatDeclaredOne(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "selective-group", WithSteps(
+		Parallel("notify",
+			Step("email", WithRun(noopRun), WithCompensate(noopCompensate)),
+			Step("sms", WithRun(noopRun)),
+		),
+		Step("boom", WithRun(noopRun)),
+	))
+
+	st := startJournal(t, def, now)
+	reportSuccess(t, st, def, "notify", 0, "email-ok", now)
+	reportSuccess(t, st, def, "notify", 1, "sms-ok", now)
+	advance(st, def, "inst-1", now)
+	require.Equal(t, StepCompleted, stepStatus(t, st, "notify"))
+
+	reportFailure(t, st, def, "boom", 0, "induced failure", false, now)
+	advance(st, def, "inst-1", now)
+
+	// A group's member is only compensable when that member declares a compensation of its own
+	notify := st.step("notify")
+	require.Equal(t, StepCompensating, notify.Status)
+	assert.NotNil(t, notify.task(0).Comp, "the member with a compensation is on the frame")
+	assert.Nil(t, notify.task(1).Comp, "the member with nothing to undo is not")
+}
+
+func TestAdvanceIgnoresAResumeOfAnInstanceThatIsNotSuspended(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "spurious-resume", WithSteps(Step("a", WithRun(noopRun))))
+
+	st := startJournal(t, def, now)
+	require.Equal(t, StatusRunning, st.Status)
+
+	// A resume nothing paused is a duplicate rather than an error, since Resume coalesces on a constant key and can be delivered twice
+	dup := apply(st, def, &event{kind: evResume}, now)
+	assert.True(t, dup)
+	assert.Equal(t, StatusRunning, st.Status)
+}
+
+func TestAdvanceIgnoresASecondSuspendOfASuspendedInstance(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "double-suspend", WithSteps(Step("a", WithRun(noopRun))))
+
+	st := startJournal(t, def, now)
+
+	dup := apply(st, def, &event{kind: evSuspend, reason: "first"}, now)
+	require.False(t, dup)
+	require.Equal(t, StatusSuspended, st.Status)
+
+	// A second suspend must not overwrite the status the first one recorded to resume into
+	dup = apply(st, def, &event{kind: evSuspend, reason: "second"}, now)
+	assert.True(t, dup)
+	require.NotNil(t, st.Suspended)
+	assert.Equal(t, "first", st.Suspended.Reason)
+	assert.Equal(t, StatusRunning, st.Suspended.ResumeTo)
+}
+
+func TestAdvanceIgnoresAReportItCannotPlace(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "misplaced-report", WithSteps(
+		Step("a", WithRun(noopRun)),
+		Step("b", WithRun(noopRun)),
+	))
+
+	st := startJournal(t, def, now)
+
+	tests := []struct {
+		name   string
+		report reportPayload
+	}{
+		{name: "a step the journal does not have", report: reportPayload{Step: "nope", Index: 0, Attempt: 1}},
+		{name: "a task index the step does not have", report: reportPayload{Step: "a", Index: 7, Attempt: 1}},
+		{name: "a step that has not opened yet", report: reportPayload{Step: "b", Index: 0, Attempt: 1}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// A report with nowhere to land is dropped rather than failing the turn, since the job would otherwise be retried forever
+			dup := apply(st, def, &event{kind: evDone, report: &tt.report}, now)
+			assert.True(t, dup)
+			assert.Equal(t, StepRunning, stepStatus(t, st, "a"))
+			assert.Equal(t, StepPending, stepStatus(t, st, "b"))
+		})
+	}
+}
+
+func TestAdvanceIgnoresACompensationReportForAFrameItIsNotUnwinding(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "misplaced-comp", WithSteps(
+		Step("a", WithRun(noopRun), WithCompensate(noopCompensate)),
+	))
+
+	st := startJournal(t, def, now)
+
+	tests := []struct {
+		name   string
+		report compReportPayload
+	}{
+		{name: "a step the journal does not have", report: compReportPayload{Step: "nope", Index: 0, Attempt: 1}},
+		{name: "a task index the step does not have", report: compReportPayload{Step: "a", Index: 7, Attempt: 1}},
+		{name: "a task that is not being compensated", report: compReportPayload{Step: "a", Index: 0, Attempt: 1}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dup := apply(st, def, &event{kind: evCompensated, comp: &tt.report}, now)
+			assert.True(t, dup)
+			assert.Equal(t, StatusRunning, st.Status)
+		})
+	}
+}
+
+func TestAdvanceGivesUpOnACompensationThatKeepsFailing(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "comp-budget", WithSteps(
+		Step("a", WithRun(noopRun), WithCompensate(noopCompensate), WithCompensateMaxAttempts(2)),
+		Step("boom", WithRun(noopRun)),
+	))
+
+	st := startJournal(t, def, now)
+	reportSuccess(t, st, def, "a", 0, "done", now)
+	advance(st, def, "inst-1", now)
+	reportFailure(t, st, def, "boom", 0, "induced failure", false, now)
+	advance(st, def, "inst-1", now)
+	require.Equal(t, StepCompensating, stepStatus(t, st, "a"))
+
+	// Each retryable failure costs one of the compensation's own, more generous attempts
+	for attempt := 1; attempt <= 2; attempt++ {
+		comp := st.step("a").task(0).Comp
+		require.NotNil(t, comp)
+		require.False(t, comp.Done, "the compensation still has attempts left after %d", attempt-1)
+		apply(st, def, &event{kind: evCompensated, comp: &compReportPayload{Step: "a", Index: 0, Attempt: comp.Attempts, Error: "cannot undo", Retryable: true}}, now)
+		advance(st, def, "inst-1", now)
+	}
+
+	// A failed rollback leaves the system inconsistent, so the outcome says so rather than reporting a clean unwind
+	assert.Equal(t, StepCompensationFailed, stepStatus(t, st, "a"))
+	assert.Equal(t, StatusFailed, st.Status)
+	assert.Equal(t, CompensationPartial, st.Compensation, "the default policy carries on past a frame it could not undo, so the unwind is partial rather than stopped")
 }

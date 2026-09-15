@@ -109,7 +109,7 @@ func (s *WorkflowService) Start(ctx context.Context, input any, opts ...StartOpt
 // GetStatus returns the current status of an instance, without taking the Workflow actor's exclusive turn
 // It returns ErrInstanceNotFound when the instance does not exist, or its journal has passed its retention
 func (s *WorkflowService) GetStatus(ctx context.Context, instanceID string) (InstanceStatus, error) {
-	env, err := retryWhileHalted(ctx, func(ctx context.Context) (actor.Envelope, error) {
+	env, err := retryWhilePlacementMoves(ctx, func(ctx context.Context) (actor.Envelope, error) {
 		return builtinactor.Peek(ctx, s.svc, s.wf.baseType, instanceID, methodStatus, nil)
 	})
 	if err != nil {
@@ -177,7 +177,7 @@ func (s *WorkflowService) dispatchControl(ctx context.Context, instanceID string
 // Purge removes everything a terminated instance left behind: its children first, recursively, then its dead-letters, then its journal
 // It refuses a running or suspended instance with ErrInstanceActive, and it is idempotent, so an interrupted purge is safe to repeat
 func (s *WorkflowService) Purge(ctx context.Context, instanceID string) error {
-	env, err := retryWhileHalted(ctx, func(ctx context.Context) (actor.Envelope, error) {
+	env, err := retryWhilePlacementMoves(ctx, func(ctx context.Context) (actor.Envelope, error) {
 		return builtinactor.InvokeActor(ctx, s.svc, s.wf.baseType, instanceID, methodPurge, nil)
 	})
 	if err != nil {
@@ -563,30 +563,38 @@ func traceParentFromContext(ctx context.Context) string {
 	return fmt.Sprintf("00-%s-%s-%02x", sc.TraceID(), sc.SpanID(), sc.TraceFlags())
 }
 
-// haltedRetryDelay and haltedRetryAttempts bound how long a call waits out an actor that is halting
+// placementRetryDelay and placementRetryAttempts bound how long a call waits out an actor whose placement is moving
 // An actor halts when it terminates, when it is purged, and when the cluster rebalances, so a caller reaching it right then gets a transient condition rather than an answer
 const (
-	haltedRetryDelay    = 50 * time.Millisecond
-	haltedRetryAttempts = 20
+	placementRetryDelay    = 50 * time.Millisecond
+	placementRetryAttempts = 20
 )
 
-// retryWhileHalted runs fn, re-resolving the actor's placement for as long as it reports the actor is halting
-func retryWhileHalted(ctx context.Context, fn func(ctx context.Context) (actor.Envelope, error)) (actor.Envelope, error) {
+// isPlacementMoving reports whether an error says where the actor lives is still being settled, rather than answering the call
+// These are the same three conditions the messaging layer re-resolves on, and none of them can mean anything else here because the engine never asks for an active-only invocation
+func isPlacementMoving(err error) bool {
+	return errors.Is(err, actor.ErrActorHalted) ||
+		errors.Is(err, actor.ErrActorNotHosted) ||
+		errors.Is(err, actor.ErrActorNotActive)
+}
+
+// retryWhilePlacementMoves runs fn, re-resolving the actor's placement for as long as the call reports it is still moving
+func retryWhilePlacementMoves(ctx context.Context, fn func(ctx context.Context) (actor.Envelope, error)) (actor.Envelope, error) {
 	var (
 		env actor.Envelope
 		err error
 	)
 
-	for range haltedRetryAttempts {
+	for range placementRetryAttempts {
 		env, err = fn(ctx)
-		if !errors.Is(err, actor.ErrActorHalted) {
+		if !isPlacementMoving(err) {
 			return env, err
 		}
 
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(haltedRetryDelay):
+		case <-time.After(placementRetryDelay):
 		}
 	}
 

@@ -1,12 +1,15 @@
 package workflow
 
 import (
+	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
+	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/builtinactor"
 )
 
@@ -83,4 +86,47 @@ func TestRegistrationsCoverEveryReservedType(t *testing.T) {
 	assert.Len(t, plain.Registrations(), 4)
 	assert.Equal(t, defaultVersion, plain.Version())
 	assert.Equal(t, "plain", plain.Name())
+}
+
+// TestTheSingleTypeContractPointsAtTheOrchestrator pins the fallback a host uses when it registers a built-in actor by its own type rather than through Registrations
+func TestTheSingleTypeContractPointsAtTheOrchestrator(t *testing.T) {
+	wf, err := New("single-type", WithSteps(Step("a", WithRun(noopRun))))
+	require.NoError(t, err)
+
+	regs := wf.Registrations()
+	require.NotEmpty(t, regs)
+	assert.Equal(t, regs[0].RegisterOptions, wf.RegisterOptions())
+
+	// One orchestrator exists per instance, created on demand, so the workflow's own type is not a singleton
+	assert.False(t, wf.Singleton())
+
+	factory := wf.Factory()
+	require.NotNil(t, factory)
+
+	host := newFakeHost()
+	obj := factory("inst-1", actor.NewService(host))
+	_, ok := obj.(*orchestrator)
+	assert.True(t, ok, "the single-type factory should build an orchestrator")
+}
+
+// TestAWorkflowAcceptsACallersLoggerAndMeter verifies the observability options are wired at construction, since a nil meter would otherwise have to be checked at every instrument update
+func TestAWorkflowAcceptsACallersLoggerAndMeter(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	meter := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test")
+
+	wf, err := New("observed",
+		WithLogger(slog.New(slog.DiscardHandler)),
+		WithMeter(meter),
+		WithSteps(Step("a", WithRun(noopRun))),
+	)
+	require.NoError(t, err)
+
+	require.NotNil(t, wf.log)
+	require.NotNil(t, wf.metrics)
+
+	// The engine records without nil checks either way, so a workflow built without either option still has usable instruments
+	plain, err := New("unobserved", WithSteps(Step("a", WithRun(noopRun))))
+	require.NoError(t, err)
+	assert.Nil(t, plain.log)
+	assert.NotNil(t, plain.metrics)
 }

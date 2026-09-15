@@ -7,7 +7,10 @@
 //   - a retryable failure is retried per the step's own policy, and the attempts are counted in the journal
 //   - a step that fails terminally unwinds the work that already succeeded, in reverse order
 //   - a wait step parks the instance until an event arrives, and suspend stops it starting anything new
-//   - a child workflow keeps its own journal, and only its result enters the parent's
+//   - a child workflow keeps its own journal, and only its result enters the parent's, and a child that fails fails the parent's task
+//   - cancelling an instance in flight unwinds it and terminates it as cancelled
+//   - the service refuses a missing instance, an unknown event, an ambiguous instance ID, a version still in use, and a purge of an instance that has not terminated
+//   - a purge removes a terminated instance's children before its own journal
 //   - listing filters on the workflow labels the orchestrator writes with every journal write
 //   - clients cannot invoke a built-in actor directly
 package workflow
@@ -279,8 +282,23 @@ func (s *builtinWorkflow) fanOutItem(ctx context.Context, t workflow.Task) (any,
 	return item * item, nil
 }
 
+// shipmentInput is what a child instance receives, which for this graph is the payload of the event preceding its step
+type shipmentInput struct {
+	// FailBooking makes the child's only step fail terminally, so the child's failure becomes the parent's
+	FailBooking bool `json:"failBooking"`
+}
+
 // bookShipment is the child's only step, and returns what its compensation needs to undo it
 func (s *builtinWorkflow) bookShipment(ctx context.Context, t workflow.Task) (any, error) {
+	var in shipmentInput
+	err := t.DecodeInput(&in)
+	if err != nil {
+		return nil, errors.Join(actor.ErrJobPermanentFailure, err)
+	}
+	if in.FailBooking {
+		return nil, errors.Join(actor.ErrJobPermanentFailure, errors.New("induced booking failure"))
+	}
+
 	return map[string]string{"booking": t.InstanceID()}, nil
 }
 
@@ -487,6 +505,137 @@ func (s *builtinWorkflow) Run(t *testing.T) {
 		err = svc.RaiseEvent(ctx, id, "proceed", nil)
 		require.NoError(t, err)
 		s.awaitStatus(t, svc, id, workflow.StatusCompleted)
+	})
+
+	// A child that terminates failed is a failure of the parent's task, which the parent's own step policy then decides what to make of
+	t.Run("fails the parent when its child fails", func(t *testing.T) {
+		const id = "child-fail-1"
+		s.resetUndo()
+
+		_, _, err := svc.Start(ctx, runInput{Items: 1}, workflow.WithInstanceID(id))
+		require.NoError(t, err)
+
+		require.Eventually(t, func() bool {
+			status, sErr := svc.GetStatus(ctx, id)
+			return sErr == nil && status.CurrentStep == "proceed"
+		}, eventuallyTimeout, eventuallyTick, "the instance should reach its wait step")
+
+		// The event's payload is what the child step receives as its input, so this is how the child is told to fail
+		err = svc.RaiseEvent(ctx, id, "proceed", shipmentInput{FailBooking: true})
+		require.NoError(t, err)
+
+		status := s.awaitStatus(t, svc, id, workflow.StatusFailed)
+		assert.Equal(t, workflow.StepFailed, s.stepView(t, status, "ship").Status)
+		assert.Equal(t, workflow.StepSkipped, s.stepView(t, status, "finish").Status)
+
+		// The child did not complete, so nothing of it is undone, and the unwind starts from the frame below it
+		assert.Equal(t, workflow.CompensationCompleted, status.Compensation)
+		assert.Equal(t, []string{id + ":flaky", id + ":gate"}, s.undoneNames())
+
+		// The child's own journal records the failure, so an operator can see which instance failed and why
+		ship := s.stepView(t, status, "ship")
+		require.Len(t, ship.ChildIDs, 1)
+		childStatus, err := s.shipment.Service(s.cluster.Service(0)).GetStatus(ctx, ship.ChildIDs[0])
+		require.NoError(t, err)
+		assert.Equal(t, workflow.StatusFailed, childStatus.Status)
+		assert.Contains(t, childStatus.Cause, "induced booking failure")
+	})
+
+	// Cancel moves an instance in flight into an unwind and terminates it as cancelled, recording the reason every compensation receives
+	t.Run("cancels an instance in flight", func(t *testing.T) {
+		const id = "cancel-1"
+		s.resetUndo()
+
+		_, _, err := svc.Start(ctx, runInput{Items: 1}, workflow.WithInstanceID(id))
+		require.NoError(t, err)
+
+		require.Eventually(t, func() bool {
+			status, sErr := svc.GetStatus(ctx, id)
+			return sErr == nil && status.CurrentStep == "proceed"
+		}, eventuallyTimeout, eventuallyTick, "the instance should reach its wait step")
+
+		require.NoError(t, svc.Cancel(ctx, id, "operator changed their mind"))
+
+		status := s.awaitStatus(t, svc, id, workflow.StatusCancelled)
+		assert.Equal(t, "operator changed their mind", status.Cause)
+		assert.Equal(t, workflow.CompensationCompleted, status.Compensation)
+		assert.Equal(t, []string{id + ":flaky", id + ":gate"}, s.undoneNames())
+
+		// The wait step never got its event, so it is closed out rather than recorded as completed
+		assert.NotEqual(t, workflow.StepCompleted, s.stepView(t, status, "proceed").Status)
+	})
+
+	// The service refuses what it cannot do before anything durable happens, which is where a caller's mistake surfaces
+	t.Run("refuses what it cannot do", func(t *testing.T) {
+		t.Run("an instance that does not exist", func(t *testing.T) {
+			_, err := svc.GetStatus(ctx, "never-started")
+			require.ErrorIs(t, err, workflow.ErrInstanceNotFound)
+
+			err = svc.Purge(ctx, "never-started")
+			require.ErrorIs(t, err, workflow.ErrInstanceNotFound)
+		})
+
+		t.Run("an event nothing waits for", func(t *testing.T) {
+			err := svc.RaiseEvent(ctx, "happy-1", "not-in-the-graph", nil)
+			require.ErrorIs(t, err, workflow.ErrNoSuchEvent)
+		})
+
+		t.Run("an instance ID that would make an actor ID ambiguous", func(t *testing.T) {
+			for _, id := range []string{"orders/1", "orders|1"} {
+				_, _, err := svc.Start(ctx, nil, workflow.WithInstanceID(id))
+				require.Error(t, err, "instance ID %q should be refused", id)
+			}
+		})
+
+		t.Run("a version that still has instances", func(t *testing.T) {
+			// Forgetting a version under a running instance would let a different graph claim its number
+			err := svc.ForgetVersion(ctx, s.pipeline.Version())
+			require.ErrorIs(t, err, workflow.ErrVersionInUse)
+		})
+
+		t.Run("an instance that has not terminated", func(t *testing.T) {
+			const id = "active-purge-1"
+			_, _, err := svc.Start(ctx, runInput{Items: 1}, workflow.WithInstanceID(id))
+			require.NoError(t, err)
+
+			require.Eventually(t, func() bool {
+				status, sErr := svc.GetStatus(ctx, id)
+				return sErr == nil && status.CurrentStep == "proceed"
+			}, eventuallyTimeout, eventuallyTick, "the instance should reach its wait step")
+
+			// Purging a running instance would delete the journal that accounts for the work still in flight
+			err = svc.Purge(ctx, id)
+			require.ErrorIs(t, err, workflow.ErrInstanceActive)
+
+			// Leave the instance terminated, so it does not outlive the subtest that started it
+			require.NoError(t, svc.Cancel(ctx, id, "done with it"))
+			s.awaitStatus(t, svc, id, workflow.StatusCancelled)
+		})
+	})
+
+	// A purge removes a terminated instance's children first, recursively, then its own journal
+	t.Run("purges an instance and its child", func(t *testing.T) {
+		status, err := svc.GetStatus(ctx, "happy-1")
+		require.NoError(t, err)
+		ship := s.stepView(t, status, "ship")
+		require.Len(t, ship.ChildIDs, 1)
+		childID := ship.ChildIDs[0]
+
+		childSvc := s.shipment.Service(s.cluster.Service(0))
+		require.NoError(t, svc.Purge(ctx, "happy-1"))
+
+		_, err = svc.GetStatus(ctx, "happy-1")
+		require.ErrorIs(t, err, workflow.ErrInstanceNotFound)
+
+		// The child is removed with its parent, so a purge never leaves a journal nothing points at
+		require.Eventually(t, func() bool {
+			_, cErr := childSvc.GetStatus(ctx, childID)
+			return errors.Is(cErr, workflow.ErrInstanceNotFound)
+		}, eventuallyTimeout, eventuallyTick, "child %s should be gone with its parent", childID)
+
+		// Repeating an interrupted purge has to be safe, so a second call reports the instance as gone rather than failing
+		err = svc.Purge(ctx, "happy-1")
+		require.ErrorIs(t, err, workflow.ErrInstanceNotFound)
 	})
 
 	// Listing filters on the workflow labels the orchestrator writes in the same operation as the journal
