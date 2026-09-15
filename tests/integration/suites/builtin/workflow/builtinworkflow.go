@@ -49,6 +49,9 @@ const (
 	fanOutHold = 300 * time.Millisecond
 	// fanOutAttempts is how many instances the distribution assertion will run before giving up on observing the overlap
 	fanOutAttempts = 3
+	// sweepRetention is how long the sweeper workflow keeps a terminated instance, which the purge test then waits out
+	// A terminated journal is written with a TTL of twice its retention, so the window in which the test can still read an instance is twice this, and the wait below has to leave room inside it
+	sweepRetention = 5 * time.Second
 )
 
 // matrix runs the scenario across representative topology and provider combinations
@@ -167,8 +170,9 @@ func (s *builtinWorkflow) Setup(t *testing.T) []framework.Option {
 	s.pipeline = pipeline
 
 	// A retention this short means an instance is past it almost at once, which is what gives the sweep something to remove
+	// It is not shorter still because a terminated journal is written with a TTL of twice its retention, and the test has to be able to observe the instance as completed before that expires
 	sweeper, err := workflow.New("e2e-sweeper",
-		workflow.WithRetention(workflow.RetentionPolicy{Completed: time.Second}),
+		workflow.WithRetention(workflow.RetentionPolicy{Completed: sweepRetention}),
 		workflow.WithSteps(
 			workflow.Step("noop", workflow.WithRun(func(ctx context.Context, t workflow.Task) (any, error) {
 				return "done", nil
@@ -669,15 +673,18 @@ func (s *builtinWorkflow) Run(t *testing.T) {
 	t.Run("purges terminated instances", func(t *testing.T) {
 		sweepSvc := s.sweeper.Service(s.cluster.Service(0))
 
+		// Both instances are started before either is awaited, so the first one's journal spends as little of its retention as possible waiting on the second
 		ids := []string{"sweep-1", "sweep-2"}
 		for _, id := range ids {
 			_, _, err := sweepSvc.Start(ctx, nil, workflow.WithInstanceID(id))
 			require.NoError(t, err)
+		}
+		for _, id := range ids {
 			s.awaitStatus(t, sweepSvc, id, workflow.StatusCompleted)
 		}
 
-		// The retention is one second, so both instances are past it by now
-		time.Sleep(1500 * time.Millisecond)
+		// Both instances are past their retention by now, and still well inside the TTL that keeps their journals readable
+		time.Sleep(sweepRetention + 500*time.Millisecond)
 
 		removed, err := sweepSvc.PurgeTerminated(ctx)
 		require.NoError(t, err)
@@ -725,19 +732,32 @@ func (s *builtinWorkflow) assertClientRejected(t *testing.T, svc *actor.Service,
 }
 
 // awaitStatus polls an instance until it reaches the wanted status, and fails the test if it does not
+// It polls in the test's own goroutine rather than through require.Eventually so the last error is still available to report: an instance whose journal passed its retention reads as missing, which is a very different failure from one that is merely slow
 func (s *builtinWorkflow) awaitStatus(t *testing.T, svc *workflow.WorkflowService, id string, want workflow.Status) workflow.InstanceStatus {
 	t.Helper()
 
-	var last workflow.InstanceStatus
-	require.Eventually(t, func() bool {
+	var (
+		last    workflow.InstanceStatus
+		lastErr error
+	)
+
+	deadline := time.Now().Add(eventuallyTimeout)
+	for time.Now().Before(deadline) {
 		status, err := svc.GetStatus(t.Context(), id)
 		if err != nil {
-			return false
+			lastErr = err
+		} else {
+			last = status
+			lastErr = nil
+			if status.Status == want {
+				return last
+			}
 		}
-		last = status
-		return status.Status == want
-	}, eventuallyTimeout, eventuallyTick, "instance %s should reach %q", id, want)
+		time.Sleep(eventuallyTick)
+	}
 
+	require.FailNowf(t, "instance did not reach the wanted status",
+		"instance %s should reach %q, last status was %q on step %q (last error: %v)", id, want, last.Status, last.CurrentStep, lastErr)
 	return last
 }
 
