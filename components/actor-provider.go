@@ -238,17 +238,17 @@ type ActorHostType struct {
 	// Maximum number of attempts when invoking the actor or executing alarms
 	MaxAttempts int
 	// CompletedJobRetention is how long a job of this actor type keeps a record after it completes successfully
-	// Zero keeps no record at all, a positive duration keeps one for that long, and a negative duration keeps one that never expires
+	// Zero keeps no record at all and a negative duration keeps one that never expires
 	CompletedJobRetention time.Duration
 	// DeadLetteredJobRetention is how long a job of this actor type keeps its record after it is dead-lettered
-	// A dead-lettered job is always recorded, since dropping a failure silently is never useful: a positive duration expires the record after that long, and zero or a negative duration keeps it until something removes it
+	// A dead-lettered job is always recorded, since dropping a failure silently is never useful
+	// Set to a positive duration for records to be cleaned up automatically
 	DeadLetteredJobRetention time.Duration
 	// Initial retry delay after failed invocation attempts
 	InitialRetryDelay time.Duration
 }
 
 // CompletedJobRecord reports whether a completed job of this type leaves a record, and the retention to store it with.
-// The two are separate because a provider expresses "never expires" as a zero retention, which is also what "no record" would look like as a single number.
 func (t ActorHostType) CompletedJobRecord() (record bool, retention time.Duration) {
 	switch {
 	case t.CompletedJobRetention == 0:
@@ -265,6 +265,7 @@ func (t ActorHostType) DeadLetteredJobRecordRetention() time.Duration {
 	if t.DeadLetteredJobRetention < 0 {
 		return 0
 	}
+
 	return t.DeadLetteredJobRetention
 }
 

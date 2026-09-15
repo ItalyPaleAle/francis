@@ -331,7 +331,8 @@ func (s *builtinWorkflow) Run(t *testing.T) {
 			return sErr == nil && status.Status.IsTerminal()
 		}, settleWindow, eventuallyTick, "a parked instance must not advance")
 
-		require.NoError(t, svc.RaiseEvent(ctx, id, "proceed", map[string]string{"by": "test"}))
+		err = svc.RaiseEvent(ctx, id, "proceed", map[string]string{"by": "test"})
+		require.NoError(t, err)
 
 		status := s.awaitStatus(t, svc, id, workflow.StatusCompleted)
 		assert.Equal(t, workflow.CompensationNone, status.Compensation)
@@ -373,7 +374,8 @@ func (s *builtinWorkflow) Run(t *testing.T) {
 
 			peak = int(s.maxRunning.Load())
 
-			require.NoError(t, svc.RaiseEvent(ctx, id, "proceed", nil))
+			err = svc.RaiseEvent(ctx, id, "proceed", nil)
+			require.NoError(t, err)
 			s.awaitStatus(t, svc, id, workflow.StatusCompleted)
 
 			if peak >= s.hosts {
@@ -410,7 +412,8 @@ func (s *builtinWorkflow) Run(t *testing.T) {
 			return sErr == nil && status.CurrentStep == "proceed"
 		}, eventuallyTimeout, eventuallyTick, "the run should carry on once the step succeeds")
 
-		require.NoError(t, svc.RaiseEvent(ctx, id, "proceed", nil))
+		err = svc.RaiseEvent(ctx, id, "proceed", nil)
+		require.NoError(t, err)
 		s.awaitStatus(t, svc, id, workflow.StatusCompleted)
 	})
 
@@ -426,7 +429,8 @@ func (s *builtinWorkflow) Run(t *testing.T) {
 			status, sErr := svc.GetStatus(ctx, id)
 			return sErr == nil && status.CurrentStep == "proceed"
 		}, eventuallyTimeout, eventuallyTick, "the instance should reach its wait step")
-		require.NoError(t, svc.RaiseEvent(ctx, id, "proceed", nil))
+		err = svc.RaiseEvent(ctx, id, "proceed", nil)
+		require.NoError(t, err)
 
 		status := s.awaitStatus(t, svc, id, workflow.StatusFailed)
 		assert.Equal(t, workflow.CompensationCompleted, status.Compensation)
@@ -473,13 +477,15 @@ func (s *builtinWorkflow) Run(t *testing.T) {
 			return sErr == nil && s.stepView(t, st, "flaky").Status != workflow.StepPending
 		}, settleWindow, eventuallyTick, "a suspended instance must not start the next step")
 
-		require.NoError(t, svc.Resume(ctx, id))
+		err = svc.Resume(ctx, id)
+		require.NoError(t, err)
 		require.Eventually(t, func() bool {
 			st, sErr := svc.GetStatus(ctx, id)
 			return sErr == nil && st.CurrentStep == "proceed"
 		}, eventuallyTimeout, eventuallyTick, "the resumed instance should carry on")
 
-		require.NoError(t, svc.RaiseEvent(ctx, id, "proceed", nil))
+		err = svc.RaiseEvent(ctx, id, "proceed", nil)
+		require.NoError(t, err)
 		s.awaitStatus(t, svc, id, workflow.StatusCompleted)
 	})
 

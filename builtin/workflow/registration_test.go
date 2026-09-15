@@ -67,7 +67,6 @@ func TestRegistrationsCoverEveryReservedType(t *testing.T) {
 	assert.NotEqual(t, workerGroup.CapacityGroup, undoGroup.CapacityGroup, "the undo queues get their own budget")
 
 	// Every type the engine dispatches jobs to bounds the records they leave, so a dead-lettered job cannot outlive the journal that accounts for it
-	// The engine bounds both windows, so nothing a task leaves behind can outlive the journal that accounts for it
 	assert.Positive(t, orchestrator.RegisterOptions.CompletedJobRetention)
 	assert.Equal(t, orchestrator.RegisterOptions.CompletedJobRetention, orchestrator.RegisterOptions.DeadLetteredJobRetention)
 	assert.Equal(t, orchestrator.RegisterOptions.CompletedJobRetention, workerGroup.CompletedJobRetention)

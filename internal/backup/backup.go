@@ -104,7 +104,7 @@ type TerminalJobRecord struct {
 }
 
 // DeadJobRecord is a single dead-lettered job as an older Francis wrote it, before the store was widened to hold completed jobs too
-// It exists so such a backup still restores: the reader folds it into a TerminalJobRecord, and nothing writes it
+// It is preserved for backwards-compatibility only - nothing writes to it
 type DeadJobRecord struct {
 	JobID       string    `msgpack:"jobId"`
 	ActorType   string    `msgpack:"actorType"`
@@ -223,7 +223,7 @@ func (r *Reader) All() iter.Seq2[Record, error] {
 				return
 			}
 
-			normalizeRecord(&rec)
+			rec.normalize()
 
 			if !yield(rec, nil) {
 				return
@@ -232,9 +232,8 @@ func (r *Reader) All() iter.Seq2[Record, error] {
 	}
 }
 
-// normalizeRecord canonicalizes a decoded record so every consumer sees the current shape, whichever version of Francis wrote the stream
-// It folds a pre-rename dead-job record into a terminal job, and represents an empty byte slice as nil, matching the providers' len(data)==0 convention
-func normalizeRecord(rec *Record) {
+// normalize canonicalizes a decoded record so every consumer sees the current shape, whichever version of Francis wrote the stream
+func (rec *Record) normalize() {
 	// A backup taken before completed jobs could be retained carries its dead jobs under their own type and payload
 	// Every one of them ended by failing, which is the status the record did not need to carry back then, and none of them expired, which is what a nil expiration still means
 	if rec.DeadJob != nil {
@@ -257,6 +256,7 @@ func normalizeRecord(rec *Record) {
 		rec.DeadJob = nil
 	}
 
+	// Represent an empty byte slice as nil, matching the providers' len(data)==0 convention
 	switch {
 	case rec.State != nil:
 		if len(rec.State.Data) == 0 {

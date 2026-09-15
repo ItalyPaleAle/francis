@@ -63,7 +63,6 @@ const (
 	cronJobIdleTimeout = time.Minute
 
 	// cronCompletedJobRetention keeps a week of records of the occurrences that ran, for auditing
-	// A dead-lettered occurrence takes the framework's own default, which is longer, since a failure is worth keeping longer than a success
 	cronCompletedJobRetention = 7 * 24 * time.Hour
 )
 

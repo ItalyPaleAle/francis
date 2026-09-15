@@ -476,10 +476,9 @@ func (w *Workflow) buildRegistrations(o *options) error {
 			return newOrchestrator(w, actorID, svc)
 		},
 		RegisterOptions: actorcore.RegisterActorOptions{
-			IdleTimeout:       orchestratorIdleTimeout,
-			MaxAttempts:       orchestratorMaxAttempts,
-			InitialRetryDelay: orchestratorRetryDelay,
-
+			IdleTimeout:              orchestratorIdleTimeout,
+			MaxAttempts:              orchestratorMaxAttempts,
+			InitialRetryDelay:        orchestratorRetryDelay,
 			CompletedJobRetention:    w.def.jobRetention(),
 			DeadLetteredJobRetention: w.def.jobRetention(),
 		},
@@ -565,10 +564,9 @@ func (w *Workflow) workerRegistration(suffix string, capName string, group strin
 			// The coarse, cluster-wide placement hint mirrors the strict limit so hosts are rarely handed more work than they can run
 			ConcurrencyLimit: limit,
 			// A worker only returns an error to Francis when its report dispatch failed, and this covers that case alone
-			MaxAttempts:        workerMaxAttempts,
-			CapacityGroup:      group,
-			CapacityGroupLimit: limit,
-
+			MaxAttempts:              workerMaxAttempts,
+			CapacityGroup:            group,
+			CapacityGroupLimit:       limit,
 			CompletedJobRetention:    w.def.jobRetention(),
 			DeadLetteredJobRetention: w.def.jobRetention(),
 		},

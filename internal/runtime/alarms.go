@@ -429,7 +429,7 @@ func (rt *Runtime) dispatchAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 		jobInfo.props = alarm.AlarmProperties
 
 		// The retentions are a property of the actor type, read from the host that serves it, exactly as the retry budget is
-		// The two are independent: a type can keep its failures without keeping its successes, which is the common case
+		// The two are independent: a type can keep its failures without keeping its successes
 		at, hasConfig := conn.actorTypeConfig(aRef.ActorType)
 		if hasConfig {
 			cfg := components.ActorHostType{
@@ -663,6 +663,7 @@ func (rt *Runtime) completeAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 		// A retained job moves to the terminal-job store rather than being deleted, so the run it just made is still visible afterwards
 		if jobInfo.isJob && jobInfo.recordCompleted {
 			log.Debug("Recording completed job")
+
 			err = rt.provider.CompleteJob(ctx, lease, components.CompleteJobReq{
 				Attempts:  lease.Attempts() + 1,
 				Retention: jobInfo.completedRetention,
@@ -670,6 +671,7 @@ func (rt *Runtime) completeAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 			if err != nil && !errors.Is(err, components.ErrNoAlarm) {
 				return false, fmt.Errorf("error recording completed job in provider: %w", err)
 			}
+
 			return false, nil
 		}
 
@@ -684,6 +686,7 @@ func (rt *Runtime) completeAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 	// A repeating job that is retained records this occurrence and re-creates the recurrence in one transaction, rather than updating the row in place
 	if jobInfo.isJob && jobInfo.recordCompleted {
 		log.Debug("Recording completed job occurrence and rescheduling", slog.Any("due", next))
+
 		ctx, cancel = context.WithTimeout(parentCtx, rt.providerRequestTimeout)
 		defer cancel()
 		err = rt.provider.CompleteJob(ctx, lease, components.CompleteJobReq{
@@ -695,6 +698,7 @@ func (rt *Runtime) completeAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 		if err != nil && !errors.Is(err, components.ErrNoAlarm) {
 			return false, fmt.Errorf("error recording completed job in provider: %w", err)
 		}
+
 		return false, nil
 	}
 

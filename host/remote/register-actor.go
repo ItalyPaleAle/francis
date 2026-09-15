@@ -49,7 +49,8 @@ func WithCompletedJobRetention(d time.Duration) RegisterActorOption {
 }
 
 // WithDeadLetteredJobRetention sets how long a job dispatched to this actor type keeps its record after it is dead-lettered
-// A dead-lettered job is always recorded, so this only decides for how long: it defaults to 30 days, and a negative duration keeps the record until something removes it
+// Defaults to 30 days
+// Set to <= 0 to disable automatic deletion of records
 func WithDeadLetteredJobRetention(d time.Duration) RegisterActorOption {
 	return actorcore.WithDeadLetteredJobRetention(d)
 }

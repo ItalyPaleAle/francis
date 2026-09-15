@@ -51,7 +51,8 @@ type ActorHostType struct {
 	// Zero keeps no record at all, and a negative value keeps one that never expires
 	CompletedJobRetentionMs int64 `msgpack:"completedJobRetention,omitempty"`
 	// DeadLetteredJobRetentionMs is how long a job of this actor type keeps its record after it is dead-lettered, in milliseconds
-	// A dead-lettered job is always recorded, so this only decides for how long, and a negative value keeps the record until something removes it
+	// A dead-lettered job is always recorded, so this only decides for how long
+	// A negative value disables automatic deletion
 	DeadLetteredJobRetentionMs int64 `msgpack:"deadLetteredJobRetention,omitempty"`
 	// InitialRetryDelayMs is the initial retry delay after a failed attempt, in milliseconds
 	InitialRetryDelayMs int64 `msgpack:"retryDelay,omitempty"`
@@ -236,7 +237,7 @@ type JobInfo struct {
 	Attempts        int    `msgpack:"attempts,omitempty"`
 	LastError       string `msgpack:"lastError,omitempty"`
 	CreatedAtUnixMs int64  `msgpack:"createdAt,omitempty"`
-	// EndedAtUnixMs is when the job reached its terminal status, and is absent for a live job
+	// EndedAtUnixMs is when the job reached its terminal status (unset for a live job)
 	EndedAtUnixMs int64 `msgpack:"endedAt,omitempty"`
 }
 

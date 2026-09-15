@@ -786,7 +786,6 @@ func (rt *Runtime) handleDeleteJob(parentCtx context.Context, _ *hostConn, req *
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, err.Error()))
 	}
 
-	// One verb removes a job whether it is still scheduled or has already ended, so the caller does not have to know which
 	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
 	defer cancel()
 	err = rt.provider.DeleteJob(ctx, payload.ActorType, payload.ActorID, payload.JobID)

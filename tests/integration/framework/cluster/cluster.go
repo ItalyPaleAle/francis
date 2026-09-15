@@ -295,12 +295,12 @@ func (c *Cluster) buildRemote(t *testing.T, opts Options) {
 	}
 }
 
-// DebugLogger returns a debug logger when FRANCIS_TEST_DEBUG is set, and nil otherwise so the process keeps its discarding default
-// A scenario that stalls says nothing useful without the hosts' and runtimes' own logs, and this is how a run is asked for them
+// DebugLogger returns a debug logger when FRANCIS_TEST_DEBUG is set
 func DebugLogger() *slog.Logger {
 	if os.Getenv("FRANCIS_TEST_DEBUG") == "" {
 		return nil
 	}
+
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 

@@ -11,8 +11,6 @@ const (
 	defaultActorDeactivationTimeout = 5 * time.Second
 	defaultAlarmMaxAttempts         = 3
 	defaultAlarmInitialRetryDelay   = 2 * time.Second
-	// defaultDeadLetteredJobRetention is how long a dead-lettered job's record is kept when the actor type does not say
-	// A failure is worth keeping long enough for someone to notice it and replay it, and long enough that a weekly process catches it, without growing without bound
 	defaultDeadLetteredJobRetention = 30 * 24 * time.Hour
 )
 
@@ -62,8 +60,8 @@ type RegisterActorOptions struct {
 	// Defaults to 0, which keeps no record of a completed job, and a negative value keeps one that never expires
 	CompletedJobRetention time.Duration
 	// DeadLetteredJobRetention is how long a job dispatched to this actor type keeps its record after it is dead-lettered
-	// A dead-lettered job is always recorded, so this only decides for how long
-	// Defaults to 30 days, and a negative value keeps the record until something removes it
+	// Defaults to 30 days
+	// A value <= 0 disables automatic deletion of records
 	DeadLetteredJobRetention time.Duration
 	// CapacityGroup, when set, places this actor type into a named host-local capacity group
 	// Every actor type registered on this host with the same group name shares a single strict concurrency budget, enforced in-process when their jobs execute
@@ -123,7 +121,8 @@ func WithCompletedJobRetention(d time.Duration) RegisterActorOption {
 }
 
 // WithDeadLetteredJobRetention sets how long a job dispatched to this actor type keeps its record after it is dead-lettered
-// A dead-lettered job is always recorded, so this only decides for how long: it defaults to 30 days, and a negative duration keeps the record until something removes it
+// Defaults to 30 days
+// Set to <= 0 to disable automatic deletion of records
 func WithDeadLetteredJobRetention(d time.Duration) RegisterActorOption {
 	return func(o *RegisterActorOptions) {
 		o.DeadLetteredJobRetention = d
@@ -185,8 +184,10 @@ func (o *RegisterActorOptions) Validate() error {
 		o.InitialRetryDelay = defaultAlarmInitialRetryDelay
 	}
 
-	// A dead-lettered job is always recorded, so an unset retention takes the default rather than meaning "keep nothing"
-	// A negative value is the way to ask for a record that never expires, and is normalized so every negative spelling behaves the same
+	// For dead-lettered jobs:
+	// zero = default (30 days)
+	// positive = keep for specified duration
+	// negative = do not automatically delete
 	switch {
 	case o.DeadLetteredJobRetention == 0:
 		o.DeadLetteredJobRetention = defaultDeadLetteredJobRetention
@@ -194,7 +195,10 @@ func (o *RegisterActorOptions) Validate() error {
 		o.DeadLetteredJobRetention = -1
 	}
 
-	// A completed job is recorded only when asked for, so zero stays zero, and a negative value is normalized the same way
+	// For completed jobs:
+	// zero = do not store
+	// positive = keep for specified duration
+	// zero or negative = do not automatically delete
 	if o.CompletedJobRetention < 0 {
 		o.CompletedJobRetention = -1
 	}

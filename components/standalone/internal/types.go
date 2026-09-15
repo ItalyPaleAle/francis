@@ -235,8 +235,8 @@ type StateEntry struct {
 }
 
 // MatchesWorkflowLabels returns true when the entry's labels match every field the filter sets
-// A nil filter matches every entry, so an unfiltered listing takes the same code path as a filtered one
 func (s *StateEntry) MatchesWorkflowLabels(want *components.WorkflowLabels) bool {
+	// A nil filter matches every entry
 	if want == nil || want.IsZero() {
 		return true
 	}

@@ -12,11 +12,6 @@ import (
 	"github.com/italypaleale/francis/components"
 )
 
-// TestJobRetentionOptions covers the two job-retention windows, which are deliberately independent and default differently
-//
-// A completed job is only worth keeping when someone asked for it, so that window defaults to keeping nothing.
-// A dead-lettered job is the record of a failure, which is worth keeping whether or not anyone thought to ask, so that window has a default of its own.
-// Both take a negative duration to mean "keep the record with no expiry", since zero already means something else on the completed side.
 func TestJobRetentionOptions(t *testing.T) {
 	t.Run("the two windows default independently", func(t *testing.T) {
 		opts := &RegisterActorOptions{}
@@ -29,13 +24,15 @@ func TestJobRetentionOptions(t *testing.T) {
 	t.Run("either window can be set without the other", func(t *testing.T) {
 		completedOnly := &RegisterActorOptions{}
 		WithCompletedJobRetention(time.Hour)(completedOnly)
-		require.NoError(t, completedOnly.Validate())
+		err := completedOnly.Validate()
+		require.NoError(t, err)
 		assert.Equal(t, time.Hour, completedOnly.CompletedJobRetention)
 		assert.Equal(t, 30*24*time.Hour, completedOnly.DeadLetteredJobRetention, "setting one window leaves the other on its default")
 
 		deadOnly := &RegisterActorOptions{}
 		WithDeadLetteredJobRetention(2 * time.Hour)(deadOnly)
-		require.NoError(t, deadOnly.Validate())
+		err = deadOnly.Validate()
+		require.NoError(t, err)
 		assert.Zero(t, deadOnly.CompletedJobRetention, "setting one window leaves the other on its default")
 		assert.Equal(t, 2*time.Hour, deadOnly.DeadLetteredJobRetention)
 	})
@@ -45,14 +42,14 @@ func TestJobRetentionOptions(t *testing.T) {
 		opts := &RegisterActorOptions{}
 		WithCompletedJobRetention(-5 * time.Hour)(opts)
 		WithDeadLetteredJobRetention(-time.Second)(opts)
-		require.NoError(t, opts.Validate())
+		err := opts.Validate()
+		require.NoError(t, err)
 
 		assert.Equal(t, time.Duration(-1), opts.CompletedJobRetention)
 		assert.Equal(t, time.Duration(-1), opts.DeadLetteredJobRetention)
 	})
 }
 
-// TestActorHostTypeJobRetention covers how a configured window becomes what a provider stores, which is where the three cases for a completed job are told apart
 func TestActorHostTypeJobRetention(t *testing.T) {
 	t.Run("a completed job", func(t *testing.T) {
 		tests := []struct {
