@@ -149,7 +149,7 @@ if errors.Is(err, store.ErrNotFound) {
 | `WithCompensateOnFailure()` | Compensate this step even when it failed. |
 | `WithItemsFrom(step)` | *(fan-out)* the step whose output supplies the items. |
 | `WithMaxParallel(n)` | *(fan-out)* how many tasks are in flight per instance. |
-| `WithFailurePolicy(p)` | *(group or fan-out)* what a failing task costs the step. |
+| `WithFailurePolicy(p)` | *(group or fan-out)* what a failing task costs the step. On a group it is set with `.With(...)`, since the members take the variadic slot. |
 | `WithChild(wf)` / `WithDefinition(wf)` | *(fan-out / child step)* the definition to run. |
 | `WithEventTimeout(d)` / `WithEventName(n)` | *(wait step)* how long to wait, and for what. |
 

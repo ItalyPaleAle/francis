@@ -14,18 +14,19 @@ import (
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/types"
 )
 
 // Dispatch sends a durable, fire-and-forget job to an actor, returning the server-issued job ID.
-func (h *Host) Dispatch(ctx context.Context, actorType string, actorID string, method string, data any, properties actor.JobProperties) (string, error) {
+func (h *Host) Dispatch(ctx context.Context, actorType string, actorID string, method string, data any, properties actor.JobProperties) (string, bool, error) {
 	err := ref.ValidateComponents(actorType, actorID)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	err = properties.Validate()
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	// The idempotency key maps to the alarm name: without one each dispatch gets a fresh random name so it is a distinct job
@@ -33,7 +34,7 @@ func (h *Host) Dispatch(ctx context.Context, actorType string, actorID string, m
 	if name != "" {
 		err = ref.ValidateComponents(name)
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
 	} else {
 		name = uuid.NewV4().String()
@@ -41,16 +42,16 @@ func (h *Host) Dispatch(ctx context.Context, actorType string, actorID string, m
 
 	req, err := jobPropertiesToSetAlarmReq(properties, method, data, h.clock.Now())
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	// Offer this host for an immediate lease only when its in-memory scheduler can retain it
 	req.LeaseImmediate = h.immediateLeaseHosts()
 
 	// Store the job and acquire any immediate lease in the same provider operation
-	jobID, lease, err := h.actorProvider.DispatchJob(ctx, ref.NewAlarmRef(actorType, actorID, name), req)
+	jobID, created, lease, err := h.actorProvider.DispatchJob(ctx, ref.NewAlarmRef(actorType, actorID, name), req)
 	if err != nil {
-		return "", fmt.Errorf("failed to dispatch job: %w", err)
+		return "", false, fmt.Errorf("failed to dispatch job: %w", err)
 	}
 
 	// Attempt the in-memory handoff while preserving the durable job ID because an unqueued lease is fetched again after expiration
@@ -61,7 +62,7 @@ func (h *Host) Dispatch(ctx context.Context, actorType string, actorID string, m
 		}
 	}
 
-	return jobID, nil
+	return jobID, created, nil
 }
 
 // GetJob returns a job by its ID, spanning both live and terminal jobs.
@@ -108,14 +109,19 @@ func (h *Host) RetryJob(ctx context.Context, jobID string) (string, error) {
 	return newID, nil
 }
 
-// DeleteJob removes one of an actor's jobs, whatever state it is in.
-func (h *Host) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string) error {
+// DeleteJob removes one of an actor's jobs, in the states the caller's options ask for.
+func (h *Host) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string, opts ...actor.DeleteJobOption) error {
 	err := ref.ValidateComponents(actorType, actorID)
 	if err != nil {
 		return err
 	}
 
-	err = h.actorProvider.DeleteJob(ctx, actorType, actorID, jobID)
+	var o types.DeleteJobOpts
+	for _, opt := range opts {
+		opt(&o)
+	}
+
+	err = h.actorProvider.DeleteJob(ctx, actorType, actorID, jobID, components.DeleteJobReq{LiveOnly: o.LiveOnly})
 	if errors.Is(err, components.ErrNoJob) {
 		return actor.ErrJobNotFound
 	} else if err != nil {

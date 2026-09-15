@@ -29,10 +29,10 @@ type Host interface {
 	SetAlarm(ctx context.Context, actorType string, actorID string, name string, properties AlarmProperties) error
 	DeleteAlarm(ctx context.Context, actorType string, actorID string, name string) error
 
-	Dispatch(ctx context.Context, actorType string, actorID string, method string, data any, properties JobProperties) (jobID string, err error)
+	Dispatch(ctx context.Context, actorType string, actorID string, method string, data any, properties JobProperties) (jobID string, created bool, err error)
 	GetJob(ctx context.Context, jobID string) (JobInfo, error)
 	ListJobs(ctx context.Context, actorType string, actorID string) ([]JobInfo, error)
-	DeleteJob(ctx context.Context, actorType string, actorID string, jobID string) error
+	DeleteJob(ctx context.Context, actorType string, actorID string, jobID string, opts ...DeleteJobOption) error
 	RetryJob(ctx context.Context, jobID string) (newJobID string, err error)
 
 	SetState(ctx context.Context, actorType string, actorID string, state any, opts *SetStateOpts) error

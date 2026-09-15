@@ -264,18 +264,20 @@ func (s *Service) Dispatch(ctx context.Context, actorType string, actorID string
 		return "", ErrActorTypeReserved
 	}
 
-	return s.dispatch(ctx, actorType, actorID, method, input, opts...)
+	jobID, _, err = s.dispatch(ctx, actorType, actorID, method, input, opts...)
+	return jobID, err
 }
 
 // dispatch is the unguarded Dispatch used by the in-actor client and by the built-in actor lifecycle, which are allowed to target built-in actors
-func (s *Service) dispatch(ctx context.Context, actorType string, actorID string, method string, input any, opts ...JobOption) (jobID string, err error) {
+// It also reports whether this call created the job, which a dispatch that coalesced onto a live one holding the same idempotency key did not
+func (s *Service) dispatch(ctx context.Context, actorType string, actorID string, method string, input any, opts ...JobOption) (jobID string, created bool, err error) {
 	if !s.ready() {
-		return "", ErrServiceNotInitialized
+		return "", false, ErrServiceNotInitialized
 	}
 
 	properties, err := newJobProperties(opts...)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	return s.host.Dispatch(ctx, actorType, actorID, method, input, properties)
@@ -310,22 +312,23 @@ func (s *Service) listJobs(ctx context.Context, actorType string, actorID string
 }
 
 // DeleteJob removes one of an actor's jobs, whatever state it is in: a job still scheduled is cancelled before it runs, and one that has ended has its record removed.
+// Pass WithLiveJobsOnly to cancel without removing the record an already-ended job left behind.
 // Returns ErrJobNotFound if the actor has no job with that ID.
-func (s *Service) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string) error {
+func (s *Service) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string, opts ...DeleteJobOption) error {
 	if ref.IsBuiltInActorType(actorType) {
 		return ErrActorTypeReserved
 	}
 
-	return s.deleteJob(ctx, actorType, actorID, jobID)
+	return s.deleteJob(ctx, actorType, actorID, jobID, opts...)
 }
 
 // deleteJob is the unguarded DeleteJob used by the in-actor client, which is allowed to target built-in actors
-func (s *Service) deleteJob(ctx context.Context, actorType string, actorID string, jobID string) error {
+func (s *Service) deleteJob(ctx context.Context, actorType string, actorID string, jobID string, opts ...DeleteJobOption) error {
 	if !s.ready() {
 		return ErrServiceNotInitialized
 	}
 
-	return s.host.DeleteJob(ctx, actorType, actorID, jobID)
+	return s.host.DeleteJob(ctx, actorType, actorID, jobID, opts...)
 }
 
 // RetryJob re-dispatches a dead-lettered job, scheduled to run as soon as possible.

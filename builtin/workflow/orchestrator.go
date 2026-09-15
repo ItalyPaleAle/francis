@@ -70,7 +70,12 @@ func (o *orchestrator) Job(ctx context.Context, method string, data actor.Envelo
 		return err
 	}
 
-	return o.turn(ctx, ev)
+	// A job for a version this host does not serve goes back to Francis to be re-routed, without counting an attempt
+	err = o.turn(ctx, ev)
+	if errors.Is(err, errVersionNotServed) {
+		return actor.ErrJobRejected
+	}
+	return err
 }
 
 // Alarm handles the instance's single deadline alarm, which is the backstop that guarantees an instance terminates
@@ -89,7 +94,12 @@ func (o *orchestrator) Alarm(ctx context.Context, name string, _ actor.Envelope)
 		return o.handleUnknownVersionDeadline(ctx)
 	}
 
-	return o.turn(ctx, &event{kind: evDeadline})
+	// The journal may be stamped with a version this host does not serve even when this host's own version is fine, and the deadline follows the configured policy rather than being declined forever
+	err = o.turn(ctx, &event{kind: evDeadline})
+	if errors.Is(err, errVersionNotServed) {
+		return o.handleUnknownVersionDeadline(ctx)
+	}
+	return err
 }
 
 // Invoke handles the operations a caller drives synchronously, which are the ones whose result the caller needs
@@ -218,7 +228,7 @@ func (o *orchestrator) turn(ctx context.Context, ev *event) (err error) {
 		return err
 	}
 
-	now := time.Now()
+	now := deadlineTurnTime(&st, ev, time.Now())
 
 	// Phase 2: fold the event into the journal
 	// A duplicate, or a report for a task the journal already has an outcome for, records nothing here, including this very turn being retried after its SetState succeeded and its reconcile failed
@@ -262,8 +272,9 @@ func (o *orchestrator) turn(ctx context.Context, ev *event) (err error) {
 // It returns false with no error for an event there is simply nothing to do about, and an error for one this host should not be the one to handle
 func (o *orchestrator) admits(st *instanceState, ev *event) (bool, error) {
 	// A terminated instance ignores everything but the unwind a parent sends, which is what moves a completed child back into compensating
+	// The exception is a child that still owes its parent a report: nothing else will drive that journal again, so the delivery being retried is the only thing left that can get the report out
 	if st.Status.IsTerminal() && ev.kind != evUnwind {
-		return false, nil
+		return st.Parent != nil && !st.Reported, nil
 	}
 
 	// The journal is created by the start job alone, so a control job that raced ahead of it waits rather than inventing an instance out of nothing
@@ -273,8 +284,12 @@ func (o *orchestrator) admits(st *instanceState, ev *event) (bool, error) {
 	}
 
 	// An instance whose version this host cannot serve is left for a host that can, which is what drains old instances onto old hosts
+	// A start is checked against the version its own payload carries, since there is no journal yet to read it from: applying this host's graph to a journal stamped with another version would populate it from a definition it does not describe
 	if st.Version > 0 && st.Version != o.def.version {
-		return false, actor.ErrJobRejected
+		return false, errVersionNotServed
+	}
+	if ev.kind == evStart && ev.start != nil && ev.start.Version > 0 && ev.start.Version != o.def.version {
+		return false, errVersionNotServed
 	}
 
 	return true, nil
@@ -290,15 +305,22 @@ func (o *orchestrator) recover(st *instanceState, ev *event, now time.Time) {
 	o.applyElapsedDeadlines(st, now)
 }
 
+// terminalStateTTL returns the expiry a terminated instance's journal is written with
+// A journal is given twice its retention, so an instance whose sweep never runs still expires while the sweep can still find what it needs to clean up
+// A child gets none: its parent may ask it to undo itself for as long as the parent is running, and an expiry the parent cannot see would take that journal out from under it
+// A child's journal is removed by its parent's own purge, which reaches its children first, or by the sweep once the parent's journal is gone
+func (o *orchestrator) terminalStateTTL(st *instanceState) time.Duration {
+	if !st.Status.IsTerminal() || st.Parent != nil {
+		return 0
+	}
+	return 2 * o.def.retention.forStatus(st.Status)
+}
+
 // persist writes the journal, its workflow labels, and its retention TTL in one operation, and fails the instance rather than letting it outgrow what it can store
 func (o *orchestrator) persist(ctx context.Context, st *instanceState, now time.Time) error {
 	opts := &actor.SetStateOpts{}
 	opts.SetWorkflowLabels(builtinkey.Key{}, o.labels(st))
-
-	// A terminated journal is written with a TTL of twice its retention, so an instance whose sweep never runs still expires while the sweep can still find what it needs to clean up
-	if st.Status.IsTerminal() {
-		opts.TTL = 2 * o.def.retention.forStatus(st.Status)
-	}
+	opts.TTL = o.terminalStateTTL(st)
 
 	// The size is checked before the write, because an instance that can no longer persist can no longer progress, and failing it is a much better outcome
 	size, err := journalSize(st)
@@ -308,7 +330,7 @@ func (o *orchestrator) persist(ctx context.Context, st *instanceState, now time.
 	if size > o.def.maxJournalSize {
 		failForOversizedJournal(st, size, o.def.maxJournalSize, now)
 		opts.SetWorkflowLabels(builtinkey.Key{}, o.labels(st))
-		opts.TTL = 2 * o.def.retention.forStatus(st.Status)
+		opts.TTL = o.terminalStateTTL(st)
 	}
 
 	err = o.client.SetState(ctx, *st, opts)
@@ -577,28 +599,23 @@ func (o *orchestrator) dispatchCompensations(ctx context.Context, st *instanceSt
 	return nil
 }
 
-// unwindChild asks a child instance to undo itself, cancelling one that is still running and unwinding one that already completed
+// unwindChild asks a child instance to undo itself, which cancels one that is still running and reopens one that already completed
 func (o *orchestrator) unwindChild(ctx context.Context, st *instanceState, stepName string, tr *taskRecord) error {
 	child := o.childDefinitionFor(stepName, tr.Index)
 	if child == nil {
 		return nil
 	}
 
-	// A child that is still running is cancelled and unwinds its own stack, while one that already completed is moved back into compensating
-	method := methodUnwind
-	if !tr.Done || tr.Error != "" {
-		method = methodCancel
-	}
-
-	// The parent's own compensation attempt number travels with the request, so the child's report lands on the record being unwound
+	// The unwind covers both cases, and it is the one verb a terminated instance still accepts: a child that finished just as the parent decided to unwind reports a compensation instead of ignoring the request and leaving the frame outstanding forever
+	// The parent's own compensation attempt number travels with it, so the child's report lands on the record being unwound
 	attempt := 1
 	if tr.Comp != nil {
 		attempt = tr.Comp.Attempts
 	}
 
 	client := builtinactor.NewClient[struct{}](child.baseType, tr.ChildID, o.svc)
-	_, err := client.Dispatch(ctx, method, reasonPayload{Reason: st.Cause, FromParent: true, CompAttempt: attempt},
-		actor.WithIdempotencyKey(method+idDelimiter+strconv.Itoa(attempt)))
+	_, err := client.Dispatch(ctx, methodUnwind, reasonPayload{Reason: st.Cause, FromParent: true, CompAttempt: attempt},
+		actor.WithIdempotencyKey(methodUnwind+idDelimiter+strconv.Itoa(attempt)))
 	if err != nil {
 		return fmt.Errorf("failed to unwind child %s: %w", tr.ChildID, err)
 	}
@@ -695,9 +712,16 @@ func (o *orchestrator) applyElapsedDeadlines(st *instanceState, now time.Time) {
 	// The instance timeout ends the run, whatever it was doing
 	instanceDue := instanceDeadline(st, o.def)
 	if !instanceDue.IsZero() && !now.Before(instanceDue) {
-		if st.Status != StatusCompensating {
-			beginUnwind(st, o.def, "instance timeout elapsed", StatusFailed, now)
+		// One instance timeout covers the whole run, the unwind included, so a compensation still outstanding when it elapses is abandoned rather than left to run forever
+		// The frames left on the stack are what name the effects nothing undid, which is what an operator needs to finish by hand
+		if st.Status == StatusCompensating {
+			st.Cause = unwindAbandonedCause(st.Cause)
+			st.Compensation = CompensationFailed
+			terminate(st, o.def, now)
+			return
 		}
+
+		beginUnwind(st, o.def, "instance timeout elapsed", StatusFailed, now)
 		return
 	}
 

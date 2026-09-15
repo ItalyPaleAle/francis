@@ -28,11 +28,24 @@ func componentsActorTypesToProtocol(in []components.ActorHostType) []protocol.Ac
 			DeactivationTimeoutMs:      t.DeactivationTimeout.Milliseconds(),
 			MaxAttempts:                t.MaxAttempts,
 			InitialRetryDelayMs:        t.InitialRetryDelay.Milliseconds(),
-			CompletedJobRetentionMs:    t.CompletedJobRetention.Milliseconds(),
-			DeadLetteredJobRetentionMs: t.DeadLetteredJobRetention.Milliseconds(),
+			CompletedJobRetentionMs:    retentionToWireMs(t.CompletedJobRetention),
+			DeadLetteredJobRetentionMs: retentionToWireMs(t.DeadLetteredJobRetention),
 		}
 	}
 	return out
+}
+
+// retentionToWireMs renders a retention window as the milliseconds the wire carries, without letting the truncation change what the window means
+// Zero is the one value that says "keep no record", so neither the negative sentinel for "never expires" nor a positive window shorter than a millisecond may land on it
+func retentionToWireMs(d time.Duration) int64 {
+	switch {
+	case d < 0:
+		return -1
+	case d > 0:
+		return max(d.Milliseconds(), 1)
+	default:
+		return 0
+	}
 }
 
 // protocolAlarmPropsToActor converts a runtime alarm response into the public actor properties

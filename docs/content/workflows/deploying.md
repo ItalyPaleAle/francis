@@ -8,13 +8,15 @@ A definition lives in Go code on your hosts. A running instance's journal refers
 
 ## The registry
 
-Each workflow has a cluster-wide singleton that maps every version of the definition to the **fingerprint** of its graph: a hash over the ordered step names, kinds, and the options that change behavior — `WithInputFrom`, `WithSkipOnFailure`, `WithSkipIf`, `WithOptional`, the failure policies, whether a step has a compensation, its required capability, and any child definition's name and version.
+Each workflow has a cluster-wide singleton that maps every version of the definition to the **fingerprint** of its graph: a hash over everything the engine reads while running an instance. That is the ordered step names and kinds, the options that shape the graph — `WithInputFrom`, `WithItemsFrom`, `WithSkipOnFailure`, `WithSkipIf`, `WithOptional`, the failure policies, whether a step has a compensation, its required capability, and any child definition's name and version — and the settings that decide what a turn does with a result: the attempt budgets and backoffs, `WithStepTimeout`, `WithEventTimeout`, `WithMaxParallel`, `WithCompensateOnFailure`, and at the definition level `WithTimeout`, `WithRetention`, the size caps, `WithMaxDepth`, `WithUnknownVersionPolicy`, and `WithCompensationFailurePolicy`.
+
+Two hosts that agree on the graph but not on those would apply different transitions to one journal, which is exactly what the registry exists to stop.
 
 Handler **bodies** are not fingerprinted.
 
 The registry answers one question: is this the graph recorded for this version? If the version is unknown, it records it and answers yes. If it is known with the same fingerprint, yes. Otherwise, **conflict**, with the recorded fingerprint and when it was first seen. It never overwrites, so the first deployment of a version defines it.
 
-The check is made **lazily, once per host per version, and cached for the life of the process**. The first time a host's orchestrator, worker, or undo actor handles a job for a version, it asks; from then on it knows.
+The check is made **lazily, once per host per version, and cached for the life of the process**. The first time a host's orchestrator, worker, or undo actor handles a job for a version, it asks; from then on it knows. Only an answer the registry actually gave is cached: a lookup that could not reach it is retried, so a timeout does not take the version out of service on that host until it restarts.
 
 ## When a host conflicts
 
@@ -37,7 +39,7 @@ err = svc.ForgetVersion(ctx, 3)
 
 ## What needs a new version
 
-**Any change to the graph.** A step added, removed, renamed, reordered, or with a changed policy changes the fingerprint, and the registry refuses it under the old number.
+**Any change to the graph, or to any setting a turn reads.** A step added, removed, renamed, reordered, or with a changed policy, timeout, attempt budget, or backoff changes the fingerprint, and so does a change to the definition's own timeout, retention, caps, or unknown-version and compensation-failure policies. The registry refuses any of them under the old number.
 
 **A change to a handler's body alone does not.** That is the direct consequence of not replaying code — and its converse is worth understanding:
 

@@ -37,12 +37,16 @@ type Client[T any] interface {
 	Peek(ctx context.Context, actorType string, actorID string, method string, data any, opts ...InvokeOption) (Envelope, error)
 	// Dispatch sends a durable, fire-and-forget job to the current actor.
 	Dispatch(ctx context.Context, method string, input any, opts ...JobOption) (jobID string, err error)
+	// DispatchNew is Dispatch, and additionally reports whether this call was the one that created the job.
+	// A dispatch that coalesced onto a live job already holding the same idempotency key reports false, which is how a caller tells starting work from finding it already under way.
+	DispatchNew(ctx context.Context, method string, input any, opts ...JobOption) (jobID string, created bool, err error)
 	// GetJob returns the information for a job by its ID, spanning both live and terminal jobs.
 	GetJob(ctx context.Context, jobID string) (JobInfo, error)
 	// ListJobs returns all of the current actor's jobs: the live ones, and any terminal record still retained.
 	ListJobs(ctx context.Context) ([]JobInfo, error)
 	// DeleteJob removes one of the current actor's jobs, whatever state it is in.
-	DeleteJob(ctx context.Context, jobID string) error
+	// Pass WithLiveJobsOnly to cancel without removing the record an already-ended job left behind.
+	DeleteJob(ctx context.Context, jobID string, opts ...DeleteJobOption) error
 	// RetryJob re-dispatches a dead-lettered job and returns the new job ID.
 	RetryJob(ctx context.Context, jobID string) (newJobID string, err error)
 	// Halt the current actor upon returning.
@@ -266,11 +270,17 @@ func (c *client[T]) Peek(ctx context.Context, actorType string, actorID string, 
 
 // Dispatch sends a durable, fire-and-forget job to the current actor.
 func (c *client[T]) Dispatch(ctx context.Context, method string, input any, opts ...JobOption) (jobID string, err error) {
+	jobID, _, err = c.DispatchNew(ctx, method, input, opts...)
+	return jobID, err
+}
+
+// DispatchNew is Dispatch, and additionally reports whether this call was the one that created the job.
+func (c *client[T]) DispatchNew(ctx context.Context, method string, input any, opts ...JobOption) (jobID string, created bool, err error) {
 	if !c.canTarget(c.actorType) {
-		return "", ErrActorTypeReserved
+		return "", false, ErrActorTypeReserved
 	}
 	if types.IsReadOnly(ctx) {
-		return "", ErrReadOnly
+		return "", false, ErrReadOnly
 	}
 
 	return c.service.dispatch(ctx, c.actorType, c.actorID, method, input, opts...)
@@ -291,12 +301,12 @@ func (c *client[T]) ListJobs(ctx context.Context) ([]JobInfo, error) {
 }
 
 // DeleteJob removes one of the current actor's jobs, whatever state it is in.
-func (c *client[T]) DeleteJob(ctx context.Context, jobID string) error {
+func (c *client[T]) DeleteJob(ctx context.Context, jobID string, opts ...DeleteJobOption) error {
 	if !c.canTarget(c.actorType) {
 		return ErrActorTypeReserved
 	}
 
-	return c.service.deleteJob(ctx, c.actorType, c.actorID, jobID)
+	return c.service.deleteJob(ctx, c.actorType, c.actorID, jobID, opts...)
 }
 
 // RetryJob re-dispatches a dead-lettered job and returns the new job ID.

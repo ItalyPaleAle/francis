@@ -14,7 +14,7 @@ import (
 	"github.com/italypaleale/francis/internal/ref"
 )
 
-func (s *SQLiteProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) (string, *ref.AlarmLease, error) {
+func (s *SQLiteProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) (string, bool, *ref.AlarmLease, error) {
 	var (
 		interval *string
 		cron     *string
@@ -47,10 +47,11 @@ func (s *SQLiteProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req
 		return stored.alarmID, txErr
 	})
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to dispatch job: %w", err)
+		return "", false, nil, fmt.Errorf("failed to dispatch job: %w", err)
 	}
 
-	return jobID, nil, nil
+	// The insert proposed this call's own ID, so getting a different one back means a job already held the idempotency key
+	return jobID, jobID == alarmID, nil, nil
 }
 
 // insertJob creates a job when its idempotency key is new and always returns the stored job
@@ -86,7 +87,7 @@ func (s *SQLiteProvider) insertJob(ctx context.Context, q querier, aRef ref.Alar
 }
 
 // dispatchAndLeaseJob atomically stores a new idempotent job with any required actor placement and lease
-func (s *SQLiteProvider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq, alarmID string, interval *string, cron *string, ttl *int64) (string, *ref.AlarmLease, error) {
+func (s *SQLiteProvider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq, alarmID string, interval *string, cron *string, ttl *int64) (string, bool, *ref.AlarmLease, error) {
 	type dispatchResult struct {
 		jobID string
 		lease *ref.AlarmLease
@@ -146,9 +147,11 @@ func (s *SQLiteProvider) dispatchAndLeaseJob(ctx context.Context, aRef ref.Alarm
 		return dispatchResult{jobID: stored.alarmID, lease: lease}, nil
 	})
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to dispatch job: %w", err)
+		return "", false, nil, fmt.Errorf("failed to dispatch job: %w", err)
 	}
-	return res.jobID, res.lease, nil
+
+	// The insert proposed this call's own ID, so getting a different one back means a job already held the idempotency key
+	return res.jobID, res.jobID == alarmID, res.lease, nil
 }
 
 func (s *SQLiteProvider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLease, req components.DeadLetterAlarmReq) error {
@@ -213,6 +216,7 @@ func (s *SQLiteProvider) endJob(ctx context.Context, lease *ref.AlarmLease, req 
 			// A job handler that halts its own actor is the common case for a worker, and deactivating an actor drops the leases of its alarms so another host can pick them up
 			// For the occurrence being finalized right now that release must not undo the finalization, so a lease this execution owns and a lease that was released both count
 			// A lease that merely expired keeps its id, and one another replica took holds its own id, so neither is matched here
+			// An unleased row is only this execution's occurrence while it still carries the due time this execution leased, since a recurrence's next occurrence is always scheduled later
 			QueryRowContext(ctx, `
 				DELETE FROM `+s.tablePrefix+`alarms
 				WHERE
@@ -223,12 +227,12 @@ func (s *SQLiteProvider) endJob(ctx context.Context, lease *ref.AlarmLease, req 
 							AND alarm_lease_expiration_time IS NOT NULL
 							AND alarm_lease_expiration_time >= ?
 						)
-						OR alarm_lease_id IS NULL
+						OR (alarm_lease_id IS NULL AND alarm_due_time = ?)
 					)
 				RETURNING
 					actor_type, actor_id, alarm_name, job_method, alarm_data,
 					alarm_due_time, alarm_interval, alarm_cron, alarm_ttl_time`,
-				lease.Key(), lease.LeaseID(), now,
+				lease.Key(), lease.LeaseID(), now, lease.DueTime().UnixMilli(),
 			).
 			Scan(&actorType, &actorID, &alarmName, &jobMethod, &data, &dueTime, &interval, &cron, &ttl)
 		if errors.Is(txErr, sql.ErrNoRows) {
@@ -458,7 +462,7 @@ func (s *SQLiteProvider) ListJobs(ctx context.Context, actorType string, actorID
 	return res, nil
 }
 
-func (s *SQLiteProvider) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string) error {
+func (s *SQLiteProvider) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string, req components.DeleteJobReq) error {
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
@@ -476,6 +480,11 @@ func (s *SQLiteProvider) DeleteJob(ctx context.Context, actorType string, actorI
 		live, txErr := liveRes.RowsAffected()
 		if txErr != nil {
 			return 0, fmt.Errorf("error counting affected rows: %w", txErr)
+		}
+
+		// A cancellation only removes the live row, and the delete itself is what decides that: a job that finalizes concurrently simply is not there to delete
+		if req.LiveOnly {
+			return live, nil
 		}
 
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
@@ -555,9 +564,16 @@ func (s *SQLiteProvider) RetryDeadJob(ctx context.Context, jobID string) (string
 			actorType, actorID, method string
 			data                       []byte
 		)
+		// A record past its expiration is treated as absent here too, since reads already hide it and re-dispatching what a caller can no longer see would be a surprise
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		txErr := tx.
-			QueryRowContext(ctx, `DELETE FROM `+s.tablePrefix+`terminal_jobs WHERE job_id = ? AND job_status = 'dead' RETURNING actor_type, actor_id, job_method, job_data`, jobID).
+			QueryRowContext(ctx, `
+				DELETE FROM `+s.tablePrefix+`terminal_jobs
+				WHERE
+					job_id = ?
+					AND job_status = 'dead'
+					AND (expiration_time IS NULL OR expiration_time > ?)
+				RETURNING actor_type, actor_id, job_method, job_data`, jobID, now).
 			Scan(&actorType, &actorID, &method, &data)
 		if errors.Is(txErr, sql.ErrNoRows) {
 			return "", components.ErrNoJob

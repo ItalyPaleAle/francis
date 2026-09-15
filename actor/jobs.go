@@ -8,6 +8,7 @@ import (
 	"github.com/robfig/cron/v3"
 
 	timeutils "github.com/italypaleale/francis/internal/time"
+	"github.com/italypaleale/francis/internal/types"
 )
 
 // JobStatus is the lifecycle stage of a dispatched job.
@@ -204,5 +205,16 @@ func (p JobProperties) EffectiveDueTime(now time.Time) time.Time {
 		return sched.Next(now)
 	default:
 		return now
+	}
+}
+
+// DeleteJobOption configures a DeleteJob call.
+type DeleteJobOption func(*types.DeleteJobOpts)
+
+// WithLiveJobsOnly restricts the deletion to a job that has not ended yet, so the record a completed or dead-lettered job left behind is kept.
+// It is what a cancellation needs: the scope is applied inside the removal itself, so a job that finalizes concurrently is reported as missing rather than having its record destroyed.
+func WithLiveJobsOnly() DeleteJobOption {
+	return func(o *types.DeleteJobOpts) {
+		o.LiveOnly = true
 	}
 }

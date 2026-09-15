@@ -76,7 +76,8 @@ type ActorProvider interface {
 
 	// DispatchJob creates a job as an alarm row with Kind = job, returning the job ID and any lease acquired while storing it
 	// When req carries an alarm name (an idempotency key), a job with the same (actor_type, actor_id, name) is kept and its existing job ID is returned, so re-dispatching with the same key is idempotent (first-write-wins)
-	DispatchJob(ctx context.Context, ref ref.AlarmRef, req SetAlarmReq) (jobID string, lease *ref.AlarmLease, err error)
+	// Created reports whether this call inserted the job, rather than coalescing onto a live one that already held its idempotency key.
+	DispatchJob(ctx context.Context, ref ref.AlarmRef, req SetAlarmReq) (jobID string, created bool, lease *ref.AlarmLease, err error)
 
 	// DeadLetterAlarm moves a leased job from the alarms table to the terminal-job store, recording it as dead-lettered.
 	// It accepts a lease the job's own actor released by deactivating, for the reason given on DeleteLeasedAlarm.
@@ -98,9 +99,9 @@ type ActorProvider interface {
 	// ListJobs returns all of an actor's jobs: the live ones, and any terminal record still retained.
 	ListJobs(ctx context.Context, actorType string, actorID string) ([]JobInfo, error)
 
-	// DeleteJob removes one of an actor's jobs by its ID, whatever state it is in: live (scheduled or leased) or terminal (completed or dead-lettered).
-	// Returns ErrNoJob if that actor has no job with that ID.
-	DeleteJob(ctx context.Context, actorType string, actorID string, jobID string) error
+	// DeleteJob removes one of an actor's jobs by its ID, in the states DeleteJobReq asks for.
+	// Returns ErrNoJob if that actor has no job with that ID in those states.
+	DeleteJob(ctx context.Context, actorType string, actorID string, jobID string, req DeleteJobReq) error
 
 	// GetTerminalJob returns a completed or dead-lettered job by its ID, including its raw input data.
 	// Returns ErrNoJob if the terminal job cannot be found.
@@ -567,6 +568,13 @@ type DeadLetterAlarmReq struct {
 	Reschedule bool
 	// NextDueTime is the due time of the rescheduled occurrence, used only when Reschedule is true
 	NextDueTime time.Time
+}
+
+// DeleteJobReq is the request object for the DeleteJob method.
+type DeleteJobReq struct {
+	// LiveOnly restricts the removal to a job that has not ended yet, so the record a completed or dead-lettered job left behind is kept.
+	// It is what a cancellation needs: the removal has to be atomic, because a job that finalizes between a status read and the removal would have its record destroyed.
+	LiveOnly bool
 }
 
 // CompleteJobReq is the request object for the CompleteJob method.

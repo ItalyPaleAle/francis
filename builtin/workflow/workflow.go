@@ -421,11 +421,21 @@ func requireEarlierStep(def *definition, stepName string, index int, referenced 
 	return nil
 }
 
-// fingerprint hashes the parts of a definition that change behavior, so two hosts cannot serve different graphs under the same version
-// Handler bodies are deliberately not hashed: a change to one needs no new version, which is the direct consequence of not replaying code (§14.3)
+// fingerprint hashes everything about a definition that the engine reads while running an instance, so two hosts cannot serve the same version and then apply different transitions to one journal
+// That is wider than the graph: the caps, the deadlines, the attempt policies, and the unknown-version and compensation-failure choices all decide what a turn does, so a host that disagrees about any of them needs a new version
+// Handler bodies are the one deliberate exception: changing one needs no new version, which is the direct consequence of not replaying code (§14.3)
 func fingerprint(def *definition) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "workflow=%s;version=%d;output=%s\n", def.name, def.version, def.outputStep)
+	fmt.Fprintf(h, "timeout=%d;maxInput=%d;maxOutput=%d;maxJournal=%d;maxDepth=%d;unknownVersion=%s;compFailure=%s\n",
+		def.timeout, def.maxInputSize, def.maxOutputSize, def.maxJournalSize, def.maxDepth,
+		def.unknownVersion, def.compensationFailurePolicy,
+	)
+	fmt.Fprintf(h, "retention=%d/%d/%d\n",
+		def.retention.forStatus(StatusCompleted),
+		def.retention.forStatus(StatusFailed),
+		def.retention.forStatus(StatusCancelled),
+	)
 	for _, d := range def.steps {
 		writeStepFingerprint(h, d)
 	}
@@ -444,6 +454,13 @@ func writeStepFingerprint(w io.Writer, d *stepDef) {
 		d.compensate != nil,
 		d.capability,
 		d.eventName,
+	)
+
+	// The attempt and deadline policies decide how a failure or a timeout is folded into the journal, so a host that disagrees about them would advance the same journal differently
+	fmt.Fprintf(w, ";attempts=%d;backoff=%d/%d;compAttempts=%d;compBackoff=%d/%d;stepTimeout=%d;eventTimeout=%d;maxParallel=%d;compensateOnFailure=%t",
+		d.maxAttempts, d.retryInitial, d.retryMax,
+		d.compMaxAttempt, d.compInitial, d.compMax,
+		d.stepTimeout, d.eventTimeout, d.maxParallel, d.compensateOnFailure,
 	)
 	if d.hasSkipIf {
 		fmt.Fprintf(w, ";skipIf=%s=%t", d.skipIfStep, d.skipIfValue)

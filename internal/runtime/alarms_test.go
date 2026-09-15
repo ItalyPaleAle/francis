@@ -62,13 +62,13 @@ type recordingDispatchJobProvider struct {
 	leases   chan *ref.AlarmLease
 }
 
-func (p *recordingDispatchJobProvider) DispatchJob(ctx context.Context, alarmRef ref.AlarmRef, req components.SetAlarmReq) (string, *ref.AlarmLease, error) {
-	jobID, lease, err := p.ActorProvider.DispatchJob(ctx, alarmRef, req)
+func (p *recordingDispatchJobProvider) DispatchJob(ctx context.Context, alarmRef ref.AlarmRef, req components.SetAlarmReq) (string, bool, *ref.AlarmLease, error) {
+	jobID, created, lease, err := p.ActorProvider.DispatchJob(ctx, alarmRef, req)
 	p.requests <- req
 	if lease != nil {
 		p.leases <- lease
 	}
-	return jobID, lease, err
+	return jobID, created, lease, err
 }
 
 // leaseTestAlarm sets an alarm and leases it through the provider, returning the resulting lease
@@ -273,7 +273,7 @@ func TestCompleteAlarmRetainsAJobWhoseTypeAsksForIt(t *testing.T) {
 	c := connectTestHost(t, rt, prov, "10.1.0.17:1", protocol.ActorHostType{ActorType: "T"})
 
 	aref := ref.NewAlarmRef("T", "a1", "run")
-	jobID, lease, err := prov.DispatchJob(t.Context(), aref, components.SetAlarmReq{
+	jobID, _, lease, err := prov.DispatchJob(t.Context(), aref, components.SetAlarmReq{
 		AlarmProperties: ref.AlarmProperties{DueTime: time.Now().Add(-time.Second), Data: []byte("payload")},
 		Kind:            components.AlarmKindJob,
 		JobMethod:       "Process",
@@ -305,7 +305,7 @@ func TestCompleteAlarmDeletesAJobWithNoRetention(t *testing.T) {
 	c := connectTestHost(t, rt, prov, "10.1.0.18:1", protocol.ActorHostType{ActorType: "T"})
 
 	aref := ref.NewAlarmRef("T", "a1", "run")
-	jobID, lease, err := prov.DispatchJob(t.Context(), aref, components.SetAlarmReq{
+	jobID, _, lease, err := prov.DispatchJob(t.Context(), aref, components.SetAlarmReq{
 		AlarmProperties: ref.AlarmProperties{DueTime: time.Now().Add(-time.Second)},
 		Kind:            components.AlarmKindJob,
 		JobMethod:       "Process",

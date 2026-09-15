@@ -254,6 +254,8 @@ type DispatchJobRequest struct {
 // DispatchJobResponse carries the server-issued job ID
 type DispatchJobResponse struct {
 	JobID string `msgpack:"jobId"`
+	// Created reports whether this call inserted the job, rather than coalescing onto a live one that already held its idempotency key
+	Created bool `msgpack:"created,omitempty"`
 }
 
 // GetJobRequest retrieves a job by ID
@@ -286,11 +288,13 @@ type RetryJobResponse struct {
 	JobID string `msgpack:"jobId"`
 }
 
-// DeleteJobRequest removes one of an actor's jobs, whatever state it is in
+// DeleteJobRequest removes one of an actor's jobs, in the states the request asks for
 type DeleteJobRequest struct {
 	ActorType string `msgpack:"type"`
 	ActorID   string `msgpack:"id"`
 	JobID     string `msgpack:"jobId"`
+	// LiveOnly restricts the removal to a job that has not ended yet, so the record a completed or dead-lettered job left behind is kept
+	LiveOnly bool `msgpack:"liveOnly,omitempty"`
 }
 
 // GetStateRequest retrieves the persistent state of an actor

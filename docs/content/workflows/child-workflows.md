@@ -111,7 +111,7 @@ A parent's `Cancel` cancels its running children through the same path, and a pa
 
 A child's retention follows its parent's. `Purge` on a parent purges its children first, recursively, then its own jobs, then its journal — in that order, so an interrupted purge is safe to repeat.
 
-The auto-purge sweep **skips instances that have a parent**, so a child is never purged from under a parent that might still unwind it.
+The auto-purge sweep **skips instances whose parent is still running**, so a child is never purged from under a parent that might still unwind it. A terminated child's journal is written **without an expiry** for the same reason: a parent may ask it to undo itself for as long as the parent runs, and an expiry the parent cannot see would take that journal out from under it. What removes a child is its parent's purge, or the sweep once the parent's journal is gone — so a child definition wants either `WithAutoPurge` of its own or a parent that is purged.
 
 ## Listing children
 

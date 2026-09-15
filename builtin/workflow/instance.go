@@ -198,7 +198,7 @@ func (o *orchestrator) reportToParent(ctx context.Context, st *instanceState) er
 func (o *orchestrator) markReported(ctx context.Context, st *instanceState) error {
 	st.Reported = true
 	opts := &actor.SetStateOpts{
-		TTL: 2 * o.def.retention.forStatus(st.Status),
+		TTL: o.terminalStateTTL(st),
 	}
 	opts.SetWorkflowLabels(builtinkey.Key{}, o.labels(st))
 

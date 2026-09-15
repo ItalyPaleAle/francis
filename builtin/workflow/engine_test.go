@@ -31,6 +31,8 @@ type fakeHost struct {
 	state map[string][]byte
 	// labels holds the workflow labels written alongside each actor's state
 	labels map[string]*components.WorkflowLabels
+	// ttls holds the expiry written with each actor's state, which is zero when the write asked for none
+	ttls map[string]time.Duration
 	// alarms records the alarms currently set
 	alarms map[string]actor.AlarmProperties
 	// jobs holds the jobs dispatched, keyed by job ID
@@ -50,12 +52,15 @@ type fakeHost struct {
 	panicOnInvoke bool
 	// registryResponse is what the registry's consistency check answers
 	registryResponse registerResponse
+	// registryErr makes the registry's consistency check fail, which is how a lookup that could not reach it is injected
+	registryErr error
 }
 
 func newFakeHost() *fakeHost {
 	return &fakeHost{
 		state:            map[string][]byte{},
 		labels:           map[string]*components.WorkflowLabels{},
+		ttls:             map[string]time.Duration{},
 		alarms:           map[string]actor.AlarmProperties{},
 		jobs:             map[string]actor.JobInfo{},
 		jobPayloads:      map[string]any{},
@@ -74,10 +79,14 @@ func (f *fakeHost) Invoke(ctx context.Context, actorType string, actorID string,
 	f.invokes = append(f.invokes, actorType+"/"+method)
 	panicOnInvoke := f.panicOnInvoke
 	resp := f.registryResponse
+	respErr := f.registryErr
 	f.mu.Unlock()
 
 	// The engine makes exactly one synchronous call from a turn: the cached definition-registry check
 	if method == methodRegister {
+		if respErr != nil {
+			return nil, respErr
+		}
 		return &fakeEnvelope{value: resp}, nil
 	}
 
@@ -143,12 +152,12 @@ func (f *fakeHost) DeleteAlarm(ctx context.Context, actorType string, actorID st
 	return nil
 }
 
-func (f *fakeHost) Dispatch(ctx context.Context, actorType string, actorID string, method string, data any, props actor.JobProperties) (string, error) {
+func (f *fakeHost) Dispatch(ctx context.Context, actorType string, actorID string, method string, data any, props actor.JobProperties) (string, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	if f.failDispatch {
-		return "", errors.New("injected dispatch failure")
+		return "", false, errors.New("injected dispatch failure")
 	}
 
 	// Francis deduplicates an idempotency key against live rows only, so re-dispatching a pending task is a no-op
@@ -156,7 +165,7 @@ func (f *fakeHost) Dispatch(ctx context.Context, actorType string, actorID strin
 		k := key(actorType, actorID, props.IdempotencyKey)
 		existing, ok := f.liveKeys[k]
 		if ok {
-			return existing, nil
+			return existing, false, nil
 		}
 		defer func() { f.liveKeys[k] = fmt.Sprintf("job-%d", f.nextID) }()
 	}
@@ -173,7 +182,7 @@ func (f *fakeHost) Dispatch(ctx context.Context, actorType string, actorID strin
 		CreatedAt: time.Now(),
 	}
 	f.jobPayloads[jobID] = data
-	return jobID, nil
+	return jobID, true, nil
 }
 
 func (f *fakeHost) GetJob(ctx context.Context, jobID string) (actor.JobInfo, error) {
@@ -218,7 +227,7 @@ func (f *fakeHost) RetryJob(ctx context.Context, jobID string) (string, error) {
 	return newID, nil
 }
 
-func (f *fakeHost) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string) error {
+func (f *fakeHost) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string, _ ...actor.DeleteJobOption) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -253,6 +262,7 @@ func (f *fakeHost) SetState(ctx context.Context, actorType string, actorID strin
 	f.state[key(actorType, actorID)] = enc
 	if opts != nil {
 		f.labels[key(actorType, actorID)] = opts.WorkflowLabels()
+		f.ttls[key(actorType, actorID)] = opts.TTL
 	}
 	return nil
 }
@@ -274,6 +284,7 @@ func (f *fakeHost) DeleteState(ctx context.Context, actorType string, actorID st
 
 	delete(f.state, key(actorType, actorID))
 	delete(f.labels, key(actorType, actorID))
+	delete(f.ttls, key(actorType, actorID))
 	return nil
 }
 

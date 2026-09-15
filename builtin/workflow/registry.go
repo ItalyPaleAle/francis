@@ -178,10 +178,11 @@ func (r *registryActor) forget(ctx context.Context, data actor.Envelope) error {
 }
 
 // versionCheck caches this host's answer for one version, for the life of the process
+// Only an answer the registry actually gave is cached: a lookup that could not reach it is retried, since caching a timeout would take the version out of service on this host until it restarts
 type versionCheck struct {
-	once sync.Once
-	ok   bool
-	err  error
+	mu     sync.Mutex
+	asked  bool
+	served bool
 }
 
 // serveVersion reports whether this host may serve a version, asking the registry the first time and caching the answer
@@ -200,11 +201,22 @@ func (w *Workflow) serveVersion(ctx context.Context, svc *actor.Service, version
 	}
 	w.checksMu.Unlock()
 
-	check.once.Do(func() {
-		check.ok, check.err = w.askRegistry(ctx, svc, version)
-	})
+	// The lock is held across the lookup, so concurrent first-time callers for one version ask once between them rather than each making the call
+	check.mu.Lock()
+	defer check.mu.Unlock()
 
-	return check.ok, check.err
+	if check.asked {
+		return check.served, nil
+	}
+
+	served, err := w.askRegistry(ctx, svc, version)
+	if err != nil {
+		return false, err
+	}
+
+	check.asked = true
+	check.served = served
+	return served, nil
 }
 
 // askRegistry performs the one consistency check, and turns a conflict into a decline rather than an error so the work re-routes to hosts whose code matches

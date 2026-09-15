@@ -132,8 +132,10 @@ func (a *Alarm) HasValidLease(leaseID any, now time.Time) bool {
 }
 
 // CanFinalize reports whether an execution holding this lease may finalize the occurrence, by completing, dead-lettering, or deleting it
-func (a *Alarm) CanFinalize(leaseID any, now time.Time) bool {
-	return a.HasValidLease(leaseID, now) || a.LeaseID == nil
+// An unleased row is accepted because deactivating an actor drops the leases of its alarms, which is the common case for a worker that halts itself, but only when it is still the occurrence this execution leased
+// The due time is what says so: a recurrence's next occurrence is always scheduled later, so a stale execution can never finalize the one that replaced it
+func (a *Alarm) CanFinalize(leaseID any, dueTime time.Time, now time.Time) bool {
+	return a.HasValidLease(leaseID, now) || (a.LeaseID == nil && a.DueTime.Equal(dueTime))
 }
 
 // Clone creates a deep copy of the Alarm.

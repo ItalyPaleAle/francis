@@ -71,8 +71,8 @@ func (f *fakeHost) DeleteAlarm(context.Context, string, string, string) error {
 	return nil
 }
 
-func (f *fakeHost) Dispatch(context.Context, string, string, string, any, JobProperties) (string, error) {
-	return "", nil
+func (f *fakeHost) Dispatch(context.Context, string, string, string, any, JobProperties) (string, bool, error) {
+	return "", false, nil
 }
 
 func (f *fakeHost) GetJob(context.Context, string) (JobInfo, error) {
@@ -87,7 +87,7 @@ func (f *fakeHost) RetryJob(context.Context, string) (string, error) {
 	return "", nil
 }
 
-func (f *fakeHost) DeleteJob(context.Context, string, string, string) error {
+func (f *fakeHost) DeleteJob(context.Context, string, string, string, ...DeleteJobOption) error {
 	return nil
 }
 

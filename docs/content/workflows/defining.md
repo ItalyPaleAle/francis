@@ -107,6 +107,6 @@ The three size caps are not arbitrary. Every report rewrites the whole journal, 
 
 ## Versions
 
-`WithVersion` is the definition's version, and it is stamped on every instance the workflow starts. **Bump it for any change to the graph**: a step added, removed, renamed, reordered, or with a changed policy. A cluster-wide registry records the fingerprint of each version and refuses a second, different graph under the same number, so a forgotten bump is loud rather than silent.
+`WithVersion` is the definition's version, and it is stamped on every instance the workflow starts. **Bump it for any change the engine reads while running an instance**: a step added, removed, renamed, reordered, or with a changed policy, timeout, attempt budget or backoff, and any change to the definition's own timeout, retention, size caps, or unknown-version and compensation-failure policies. A cluster-wide registry records the fingerprint of each version and refuses a second, different definition under the same number, so a forgotten bump is loud rather than silent.
 
 A change to a **handler's body** alone changes no fingerprint and needs no new version. [Deploying and versioning](/workflows/deploying) covers what that means in practice, and when to bump anyway.

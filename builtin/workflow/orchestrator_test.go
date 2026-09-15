@@ -306,3 +306,74 @@ func TestASettledStepDropsThePendingJobsOfItsAbandonedTasks(t *testing.T) {
 		assert.True(t, st.step("items").task(i).Abandoned, "an abandoned task stays countable, since a success it reports late is real work")
 	}
 }
+
+func TestAStartForAnotherVersionIsDeclined(t *testing.T) {
+	host := newFakeHost()
+	wf, err := New("version-gate", WithVersion(2), WithSteps(Step("a", WithRun(noopRun))))
+	require.NoError(t, err)
+
+	o := newTestOrchestrator(t, wf, host, "inst-1")
+
+	// A start queued before this host was upgraded names the older version, and applying this host's graph to it would stamp the journal v1 and populate it from the v2 definition
+	err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
+	require.ErrorIs(t, err, actor.ErrJobRejected)
+	assert.Empty(t, host.state, "no journal is written for a version this host does not serve")
+
+	// The version this host does serve starts normally
+	require.NoError(t, o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 2}}))
+	st := readJournal(t, host, wf, "inst-1")
+	assert.Equal(t, 2, st.Version)
+}
+
+func TestADeadlineOnAJournalOfAnotherVersionFollowsThePolicy(t *testing.T) {
+	// The journal is written by the host that serves its version, and the deadline then fires on one that has moved on
+	seedJournal := func(t *testing.T, host *fakeHost) {
+		t.Helper()
+
+		old, err := New("version-drift", WithSteps(Step("a", WithRun(noopRun))))
+		require.NoError(t, err)
+		o := newTestOrchestrator(t, old, host, "inst-1")
+		require.NoError(t, o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}}))
+		require.Equal(t, 1, readJournal(t, host, old, "inst-1").Version)
+	}
+
+	t.Run("parking waits for a host that can serve the version", func(t *testing.T) {
+		host := newFakeHost()
+		seedJournal(t, host)
+
+		upgraded, err := New("version-drift", WithVersion(2), WithSteps(Step("a", WithRun(noopRun))))
+		require.NoError(t, err)
+
+		// This host's own version is registered and servable, so the mismatch is the journal's alone
+		before := time.Now()
+		o := newTestOrchestrator(t, upgraded, host, "inst-1")
+		require.NoError(t, o.Alarm(t.Context(), alarmDeadline, nil))
+
+		due, armed := alarmDue(t, host, upgraded, "inst-1")
+		require.True(t, armed, "the deadline is re-armed rather than declined forever")
+		assert.WithinDuration(t, before.Add(defaultParkInterval), due, time.Minute)
+
+		assert.Equal(t, StatusRunning, readJournal(t, host, upgraded, "inst-1").Status, "parking must not touch the journal it cannot interpret")
+	})
+
+	t.Run("failing ends an instance no host can serve", func(t *testing.T) {
+		host := newFakeHost()
+		seedJournal(t, host)
+
+		upgraded, err := New("version-drift",
+			WithVersion(2),
+			WithTimeout(time.Nanosecond),
+			WithUnknownVersionPolicy(FailUnknownVersion),
+			WithSteps(Step("a", WithRun(noopRun))),
+		)
+		require.NoError(t, err)
+
+		o := newTestOrchestrator(t, upgraded, host, "inst-1")
+		require.NoError(t, o.Alarm(t.Context(), alarmDeadline, nil))
+
+		st := readJournal(t, host, upgraded, "inst-1")
+		assert.Equal(t, StatusFailed, st.Status)
+		assert.Equal(t, CompensationNone, st.Compensation)
+		assert.Contains(t, st.Cause, "unknown version 1")
+	})
+}

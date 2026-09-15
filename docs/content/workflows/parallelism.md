@@ -17,7 +17,7 @@ workflow.Parallel("notify",
 ),
 ```
 
-Members are independent: they receive the same upstream outputs and cannot read each other's. A later step reads the group's output as an object keyed by member name:
+Members are independent: none can read another's output, since `WithInputFrom` only ever names a top-level step that ran before the group. A later step reads the group's output as an object keyed by member name:
 
 ```go
 var group map[string]string
@@ -25,7 +25,16 @@ err := t.DecodeOutput("notify", &group)
 // group["email"], group["sms"]
 ```
 
-A member may be a plain step or a [child step](/workflows/child-workflows). It may declare its own `WithCompensate`, its own retry policy, and its own required capability.
+A member may be a plain step or a [child step](/workflows/child-workflows). Every option a member declares applies to that member's task alone: its own `WithCompensate`, its attempt budget and backoff, its `WithInputFrom` dependencies, and its required capability.
+
+Options that apply to the group as a whole go on the returned spec's `With` method, since the members take the variadic slot:
+
+```go
+workflow.Parallel("notify",
+	workflow.Step("email", workflow.WithRun(sendEmail), workflow.WithMaxAttempts(5)),
+	workflow.Step("sms", workflow.WithRun(sendSMS)),
+).With(workflow.WithFailurePolicy(workflow.TolerateFailures)),
+```
 
 ## Dynamic fan-out
 

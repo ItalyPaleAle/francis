@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -151,4 +152,53 @@ func TestAHostDeclinesAVersionItsOwnCodeDoesNotDefine(t *testing.T) {
 	host.mu.Lock()
 	defer host.mu.Unlock()
 	assert.Empty(t, host.invokes, "a version mismatch is decided locally")
+}
+
+func TestARegistryLookupThatFailedIsNotCached(t *testing.T) {
+	host := newFakeHost()
+	host.registryErr = errors.New("the registry is unreachable")
+
+	wf, err := New("transient-check", WithSteps(Step("a", WithRun(noopRun))))
+	require.NoError(t, err)
+
+	svc := actor.NewService(host)
+
+	// A timeout or a storage blip must not take the version out of service on this host until it restarts
+	_, err = wf.serveVersion(t.Context(), svc, wf.def.version)
+	require.Error(t, err)
+
+	host.registryErr = nil
+	served, err := wf.serveVersion(t.Context(), svc, wf.def.version)
+	require.NoError(t, err)
+	assert.True(t, served, "the version is servable once the registry answers")
+
+	// The answer it did get is cached, so the retry costs one extra call and no more
+	served, err = wf.serveVersion(t.Context(), svc, wf.def.version)
+	require.NoError(t, err)
+	assert.True(t, served)
+
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	assert.Len(t, host.invokes, 2, "the failed lookup is retried once and the answer is then cached")
+}
+
+func TestADeclineIsCachedLikeAnyOtherAnswer(t *testing.T) {
+	host := newFakeHost()
+	host.registryResponse = registerResponse{OK: false, Fingerprint: "someone-elses-graph"}
+
+	wf, err := New("cached-decline", WithSteps(Step("a", WithRun(noopRun))))
+	require.NoError(t, err)
+
+	svc := actor.NewService(host)
+
+	// A conflict is an answer the registry gave, so it is cached: the graph this host runs cannot change without restarting it
+	for range 3 {
+		served, sErr := wf.serveVersion(t.Context(), svc, wf.def.version)
+		require.NoError(t, sErr)
+		assert.False(t, served)
+	}
+
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	assert.Len(t, host.invokes, 1)
 }

@@ -677,7 +677,7 @@ func (rt *Runtime) handleDispatchJob(parentCtx context.Context, _ *hostConn, req
 	// Persist the job and acquire any immediate lease while keeping the ID stable for an idempotency-key re-dispatch
 	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
 	defer cancel()
-	jobID, lease, err := rt.provider.DispatchJob(ctx, ref.NewAlarmRef(payload.ActorType, payload.ActorID, payload.Name), setReq)
+	jobID, created, lease, err := rt.provider.DispatchJob(ctx, ref.NewAlarmRef(payload.ActorType, payload.ActorID, payload.Name), setReq)
 	if err != nil {
 		rt.log.ErrorContext(ctx, "Failed to dispatch job", slog.Any("error", err))
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to dispatch job"))
@@ -692,7 +692,8 @@ func (rt *Runtime) handleDispatchJob(parentCtx context.Context, _ *hostConn, req
 	}
 
 	return rt.reply(req, protocol.KindDispatchJobResponse, protocol.DispatchJobResponse{
-		JobID: jobID,
+		JobID:   jobID,
+		Created: created,
 	})
 }
 
@@ -788,7 +789,7 @@ func (rt *Runtime) handleDeleteJob(parentCtx context.Context, _ *hostConn, req *
 
 	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
 	defer cancel()
-	err = rt.provider.DeleteJob(ctx, payload.ActorType, payload.ActorID, payload.JobID)
+	err = rt.provider.DeleteJob(ctx, payload.ActorType, payload.ActorID, payload.JobID, components.DeleteJobReq{LiveOnly: payload.LiveOnly})
 	if errors.Is(err, components.ErrNoJob) {
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeJobNotFound, "job does not exist"))
 	} else if err != nil {

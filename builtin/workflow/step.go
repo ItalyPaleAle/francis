@@ -117,6 +117,20 @@ type StepSpec struct {
 	d *stepDef
 }
 
+// With applies step options to a spec that was built without them
+// It is how a parallel group declares its own options, since its members take the slot the other constructors give to theirs:
+//
+//	Parallel("notify",
+//		Step("email", WithRun(email)),
+//		Step("sms", WithRun(sms)),
+//	).With(WithFailurePolicy(TolerateFailures))
+func (s StepSpec) With(opts ...StepOption) StepSpec {
+	for _, opt := range opts {
+		opt(s.d)
+	}
+	return s
+}
+
 // StepOption configures a step built by one of the step constructors
 type StepOption func(*stepDef)
 
@@ -144,7 +158,9 @@ func WaitForEvent(name string, opts ...StepOption) StepSpec {
 }
 
 // Parallel declares a static group whose members run at the same time
-// The group completes when every member has reported, and members receive the same upstream outputs and cannot read each other's
+// The group completes when every member has reported, and no member can read another's output, since WithInputFrom only ever names a top-level step that ran before the group
+// Options that apply to the group as a whole, such as WithFailurePolicy, are set with the returned spec's With method, since the members take the variadic slot
+// Each member carries its own attempt, backoff, compensation, and WithInputFrom options, which the engine applies to that member's task alone
 func Parallel(name string, steps ...StepSpec) StepSpec {
 	d := &stepDef{
 		name:    name,

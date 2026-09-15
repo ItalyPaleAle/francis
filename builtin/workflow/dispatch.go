@@ -7,7 +7,7 @@ import (
 // buildRunPayload assembles what one task needs to run, from the journal, in memory
 // Building a payload is orchestration; performing the work it describes is a step, and the engine never ships the whole journal to a worker, so a step's data dependencies stay explicit and auditable from the definition alone (§5.3)
 func (o *orchestrator) buildRunPayload(st *instanceState, sr *stepRecord, d *stepDef, member *stepDef, tr *taskRecord) runPayload {
-	outputs, skipped := o.upstreamOutputs(st, sr, d)
+	outputs, skipped := o.upstreamOutputs(st, sr, d, member)
 
 	p := runPayload{
 		InstanceID:       o.instanceID,
@@ -34,12 +34,19 @@ func (o *orchestrator) buildRunPayload(st *instanceState, sr *stepRecord, d *ste
 	return p
 }
 
-// upstreamOutputs collects the outputs a step's tasks may read: the output of the immediately preceding step, and those of the steps named with WithInputFrom
-func (o *orchestrator) upstreamOutputs(st *instanceState, sr *stepRecord, d *stepDef) (map[string]json.RawMessage, []string) {
+// upstreamOutputs collects the outputs a task may read: the output of the immediately preceding step, and those of the steps named with WithInputFrom
+// A group's member declares its own dependencies alongside the group's, and a task gets both, since the member is what the handler was written against
+func (o *orchestrator) upstreamOutputs(st *instanceState, sr *stepRecord, d *stepDef, member *stepDef) (map[string]json.RawMessage, []string) {
 	outputs := map[string]json.RawMessage{}
 	var skipped []string
 
 	add := func(name string) {
+		// The group's dependencies and its member's can name the same step, and a task reads each output once
+		_, seen := outputs[name]
+		if seen {
+			return
+		}
+
 		other := st.step(name)
 		if other == nil {
 			return
@@ -58,6 +65,11 @@ func (o *orchestrator) upstreamOutputs(st *instanceState, sr *stepRecord, d *ste
 	}
 	for _, name := range d.inputFrom {
 		add(name)
+	}
+	if member != d {
+		for _, name := range member.inputFrom {
+			add(name)
+		}
 	}
 
 	if len(outputs) == 0 {

@@ -285,12 +285,12 @@ func (w *providerWrapper) DeleteAlarm(ctx context.Context, alarmRef ref.AlarmRef
 }
 
 // DispatchJob implements components.ActorProvider
-func (w *providerWrapper) DispatchJob(ctx context.Context, alarmRef ref.AlarmRef, req components.SetAlarmReq) (jobID string, lease *ref.AlarmLease, err error) {
+func (w *providerWrapper) DispatchJob(ctx context.Context, alarmRef ref.AlarmRef, req components.SetAlarmReq) (jobID string, created bool, lease *ref.AlarmLease, err error) {
 	spanCtx, span, start := w.beginOp(ctx, "DispatchJob")
-	jobID, lease, err = w.base.DispatchJob(spanCtx, alarmRef, req)
+	jobID, created, lease, err = w.base.DispatchJob(spanCtx, alarmRef, req)
 	w.finishOp(spanCtx, span, "DispatchJob", start, err)
 
-	return jobID, lease, err
+	return jobID, created, lease, err
 }
 
 // DeadLetterAlarm implements components.ActorProvider
@@ -330,9 +330,9 @@ func (w *providerWrapper) ListJobs(ctx context.Context, actorType string, actorI
 }
 
 // DeleteJob implements components.ActorProvider
-func (w *providerWrapper) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string) (err error) {
+func (w *providerWrapper) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string, req components.DeleteJobReq) (err error) {
 	spanCtx, span, start := w.beginOp(ctx, "DeleteJob")
-	err = w.base.DeleteJob(spanCtx, actorType, actorID, jobID)
+	err = w.base.DeleteJob(spanCtx, actorType, actorID, jobID, req)
 	w.finishOp(spanCtx, span, "DeleteJob", start, err)
 
 	return err

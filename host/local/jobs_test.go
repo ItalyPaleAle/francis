@@ -43,10 +43,10 @@ func TestHostDispatch(t *testing.T) {
 					return req.Kind == components.AlarmKindJob && req.JobMethod == "send" && req.DueTime.Equal(clock.Now())
 				}),
 			).
-			Return("job-id-1", nil, nil).
+			Return("job-id-1", true, nil, nil).
 			Once()
 
-		jobID, err := host.Dispatch(t.Context(), "T", "a1", "send", nil, actor.JobProperties{IdempotencyKey: "key-1"})
+		jobID, _, err := host.Dispatch(t.Context(), "T", "a1", "send", nil, actor.JobProperties{IdempotencyKey: "key-1"})
 		require.NoError(t, err)
 		assert.Equal(t, "job-id-1", jobID)
 		provider.AssertExpectations(t)
@@ -65,10 +65,10 @@ func TestHostDispatch(t *testing.T) {
 					return req.Kind == components.AlarmKindJob && req.JobMethod == "send"
 				}),
 			).
-			Return("job-id-2", nil, nil).
+			Return("job-id-2", true, nil, nil).
 			Once()
 
-		jobID, err := host.Dispatch(t.Context(), "T", "a1", "send", nil, actor.JobProperties{})
+		jobID, _, err := host.Dispatch(t.Context(), "T", "a1", "send", nil, actor.JobProperties{})
 		require.NoError(t, err)
 		assert.Equal(t, "job-id-2", jobID)
 		provider.AssertExpectations(t)
@@ -97,10 +97,10 @@ func TestHostDispatch(t *testing.T) {
 					return req.Kind == components.AlarmKindJob && req.JobMethod == "send" && req.DueTime.Equal(dueTime) && len(req.LeaseImmediate) == 1 && req.LeaseImmediate[0] == host.hostID
 				}),
 			).
-			Return("job-id-immediate", lease, nil).
+			Return("job-id-immediate", true, lease, nil).
 			Once()
 
-		jobID, err := host.Dispatch(t.Context(), "T", "a1", "send", nil, actor.JobProperties{
+		jobID, _, err := host.Dispatch(t.Context(), "T", "a1", "send", nil, actor.JobProperties{
 			Delay:          time.Hour,
 			IdempotencyKey: "key-immediate",
 		})
@@ -131,10 +131,10 @@ func TestHostDispatch(t *testing.T) {
 					return req.DueTime.Equal(dueTime) && len(req.LeaseImmediate) == 1 && req.LeaseImmediate[0] == host.hostID
 				}),
 			).
-			Return("job-id-closed", lease, nil).
+			Return("job-id-closed", true, lease, nil).
 			Once()
 
-		jobID, err := host.Dispatch(t.Context(), "T", "a1", "send", nil, actor.JobProperties{
+		jobID, _, err := host.Dispatch(t.Context(), "T", "a1", "send", nil, actor.JobProperties{
 			DueTime:        dueTime,
 			IdempotencyKey: jobRef.Name,
 		})
@@ -146,7 +146,7 @@ func TestHostDispatch(t *testing.T) {
 	t.Run("invalid properties are rejected before reaching the provider", func(t *testing.T) {
 		host, _ := newJobsTestHost(t, clock)
 
-		_, err := host.Dispatch(t.Context(), "T", "a1", "send", nil, actor.JobProperties{Interval: "PT1H", Cron: "* * * * *"})
+		_, _, err := host.Dispatch(t.Context(), "T", "a1", "send", nil, actor.JobProperties{Interval: "PT1H", Cron: "* * * * *"})
 		require.ErrorContains(t, err, "mutually exclusive")
 	})
 }
@@ -219,7 +219,7 @@ func TestHostDeleteJob(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		host, provider := newJobsTestHost(t, clock)
 		provider.
-			On("DeleteJob", mock.MatchedBy(testutil.MatchContextInterface), "T", "a1", "j1").
+			On("DeleteJob", mock.MatchedBy(testutil.MatchContextInterface), "T", "a1", "j1", components.DeleteJobReq{}).
 			Return(nil).
 			Once()
 
@@ -228,10 +228,23 @@ func TestHostDeleteJob(t *testing.T) {
 		provider.AssertExpectations(t)
 	})
 
+	// A cancellation asks for the live row alone, and the scope has to reach the provider, since that is the only place it can be applied atomically
+	t.Run("passes the live-only scope to the provider", func(t *testing.T) {
+		host, provider := newJobsTestHost(t, clock)
+		provider.
+			On("DeleteJob", mock.MatchedBy(testutil.MatchContextInterface), "T", "a1", "j1", components.DeleteJobReq{LiveOnly: true}).
+			Return(nil).
+			Once()
+
+		err := host.DeleteJob(t.Context(), "T", "a1", "j1", actor.WithLiveJobsOnly())
+		require.NoError(t, err)
+		provider.AssertExpectations(t)
+	})
+
 	t.Run("not found maps to ErrJobNotFound", func(t *testing.T) {
 		host, provider := newJobsTestHost(t, clock)
 		provider.
-			On("DeleteJob", mock.MatchedBy(testutil.MatchContextInterface), "T", "a1", "missing").
+			On("DeleteJob", mock.MatchedBy(testutil.MatchContextInterface), "T", "a1", "missing", components.DeleteJobReq{}).
 			Return(components.ErrNoJob).
 			Once()
 

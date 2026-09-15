@@ -7,9 +7,15 @@ import (
 	"time"
 )
 
-// maxAdvanceIterations bounds the fixed-point loop in advance
-// Each iteration settles or opens at least one step, so a graph can never need more passes than it has steps, and the bound only guards against a bug turning into a spin
-const maxAdvanceIterations = 1024
+// minAdvanceIterations is the floor the fixed-point loop's bound never goes below, so a graph of one or two steps still has room for the passes a turn genuinely needs
+const minAdvanceIterations = 16
+
+// advanceIterations bounds the fixed-point loop in advance, derived from the graph rather than fixed
+// Each iteration opens or settles at least one step, and a step is opened once and settled once going forward and again while unwinding, so four passes over the graph is more than the transitions a journal can make in one turn
+// A fixed bound would silently stop short on a graph longer than it, leaving pending steps with nothing left to open them: the instance would then run to its timeout rather than to its end
+func advanceIterations(def *definition) int {
+	return 4*len(def.steps) + minAdvanceIterations
+}
 
 // eventKind discriminates the things that drive a Workflow turn
 type eventKind string
@@ -174,9 +180,10 @@ func applyReport(st *instanceState, def *definition, p *reportPayload, now time.
 		p.Retryable = false
 	}
 
-	// Failure: the step's policy decides whether another attempt follows
+	// Failure: the policy of the step that ran the task decides whether another attempt follows, which for a group's task is the member rather than the group
+	member := memberDef(d, p.Index)
 	tr.LastError = p.Error
-	maxAttempts := effectiveMaxAttempts(d)
+	maxAttempts := effectiveMaxAttempts(member)
 	if !p.Retryable || tr.Attempts >= maxAttempts {
 		tr.Error = p.Error
 		tr.Done = true
@@ -189,7 +196,7 @@ func applyReport(st *instanceState, def *definition, p *reportPayload, now time.
 
 	// The next attempt's number is recorded before the job that runs it exists, so a lost dispatch is recoverable and a report can never arrive for an attempt the journal does not know about
 	tr.Attempts++
-	tr.RetryAt = now.Add(backoff(d.retryInitial, d.retryMax, defaultRetryInitial, defaultRetryMax, tr.Attempts-1))
+	tr.RetryAt = now.Add(backoff(member.retryInitial, member.retryMax, defaultRetryInitial, defaultRetryMax, tr.Attempts-1))
 	return false
 }
 
@@ -225,8 +232,10 @@ func applyCompReport(st *instanceState, def *definition, p *compReportPayload, n
 	}
 
 	// Failure: compensations get their own, more generous attempt policy, because a failed rollback leaves the system inconsistent
+	// It belongs to the step whose compensation ran, which for a group's task is the member rather than the group
+	member := memberDef(d, p.Index)
 	tr.Comp.LastError = p.Error
-	maxAttempts := effectiveCompMaxAttempts(d)
+	maxAttempts := effectiveCompMaxAttempts(member)
 	if !p.Retryable || tr.Comp.Attempts >= maxAttempts {
 		tr.Comp.Error = p.Error
 		tr.Comp.Done = true
@@ -234,7 +243,7 @@ func applyCompReport(st *instanceState, def *definition, p *compReportPayload, n
 	}
 
 	tr.Comp.Attempts++
-	tr.Comp.RetryAt = now.Add(backoff(d.compInitial, d.compMax, defaultCompInitial, defaultCompMax, tr.Comp.Attempts-1))
+	tr.Comp.RetryAt = now.Add(backoff(member.compInitial, member.compMax, defaultCompInitial, defaultCompMax, tr.Comp.Attempts-1))
 	return false
 }
 
@@ -464,7 +473,7 @@ func advance(st *instanceState, def *definition, instanceID string, now time.Tim
 	}
 
 	// Settling a step opens the next one, which may settle immediately (a skipped step, an empty fan-out), so this runs to a fixed point
-	for range maxAdvanceIterations {
+	for range advanceIterations(def) {
 		changed := settleSteps(st, def, now)
 
 		if st.Status == StatusCompensating {
@@ -639,6 +648,7 @@ func pushFrame(st *instanceState, sr *stepRecord, d *stepDef) {
 
 // compensableTasks returns the indexes into Tasks of the tasks of a settled step whose effects have to be undone
 // A task that succeeded is always one; a task that failed is one only when the step opted in with WithCompensateOnFailure, since the saga convention is that a step which did not complete did not take effect
+// A task that started a child instance and was abandoned is always one, whatever the step opted into: the child is a live instance of its own, and nothing but this frame will stop it
 func compensableTasks(sr *stepRecord, d *stepDef) []int {
 	var out []int
 	for i := range sr.Tasks {
@@ -652,6 +662,12 @@ func compensableTasks(sr *stepRecord, d *stepDef) []int {
 			if memberCompensable(d, tr.Index) {
 				out = append(out, i)
 			}
+			continue
+		}
+
+		// An abandoned task never reported, so a child it started may still be running and producing effects
+		if tr.Abandoned && tr.ChildID != "" && memberCompensable(d, tr.Index) {
+			out = append(out, i)
 			continue
 		}
 
@@ -931,6 +947,34 @@ func terminate(st *instanceState, def *definition, now time.Time) {
 	st.Compensation = CompensationNone
 	st.Output = instanceOutput(st, def)
 	st.CompletedAt = now
+}
+
+// alarmResolution is the resolution a provider stores an alarm's due time at, which is coarser than the nanoseconds the journal keeps
+const alarmResolution = time.Millisecond
+
+// deadlineTurnTime returns the instant a turn evaluates the journal at
+//
+// A deadline alarm fires because the provider reached the time the journal asked for, but the row holds that time truncated to the provider's own resolution, so the handler can run a fraction before the journal's own deadline
+// Treating that instant as reached is what stops a deadline turn from finding nothing elapsed: the alarm is a one-shot, so a turn that changes nothing leaves the instance with no timer at all
+// The tolerance is bounded to the alarm's resolution, so a deadline genuinely further out is never brought forward by an alarm that fired for something else
+func deadlineTurnTime(st *instanceState, ev *event, now time.Time) time.Time {
+	if ev.kind != evDeadline || st.DeadlineAt.IsZero() || !now.Before(st.DeadlineAt) {
+		return now
+	}
+	if st.DeadlineAt.Sub(now) > alarmResolution {
+		return now
+	}
+	return st.DeadlineAt
+}
+
+// unwindAbandonedCause annotates the cause that opened an unwind with the fact that the unwind itself did not finish
+// The original cause is kept, because why the instance started unwinding is still the first thing an operator asks
+func unwindAbandonedCause(cause string) string {
+	const abandoned = "unwind abandoned: instance timeout elapsed"
+	if cause == "" {
+		return abandoned
+	}
+	return cause + "; " + abandoned
 }
 
 // anyCompensated reports whether the unwind actually undid anything, which is what separates a clean rollback from an instance that had nothing on its stack

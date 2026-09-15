@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -814,6 +815,65 @@ func TestFingerprintChangesWithTheGraphButNotWithAHandler(t *testing.T) {
 	assert.NotEqual(t, base(noopRun).fingerprint, policyChanged.fingerprint)
 }
 
+func TestFingerprintCoversEverythingATurnReads(t *testing.T) {
+	// Two hosts agreeing on the graph but not on these would apply different transitions to one journal, which the registry exists to stop
+	steps := []StepSpec{
+		Step("a", WithRun(noopRun), WithCompensate(noopCompensate)),
+		ForEach("b", WithItemsFrom("a"), WithRun(noopRun)),
+	}
+	stepsWith := func(opts ...StepOption) []StepSpec {
+		return []StepSpec{
+			Step("a", append([]StepOption{WithRun(noopRun), WithCompensate(noopCompensate)}, opts...)...),
+			ForEach("b", WithItemsFrom("a"), WithRun(noopRun)),
+		}
+	}
+
+	baseline := testDefinition(t, "fp-wide", WithSteps(steps...)).fingerprint
+
+	tests := []struct {
+		name string
+		opts []Option
+	}{
+		{name: "the instance timeout", opts: []Option{WithTimeout(time.Minute), WithSteps(steps...)}},
+		{name: "the retention policy", opts: []Option{WithRetention(RetentionPolicy{Completed: time.Hour}), WithSteps(steps...)}},
+		{name: "the input cap", opts: []Option{WithMaxInputSize(128), WithSteps(steps...)}},
+		{name: "the output cap", opts: []Option{WithMaxOutputSize(128), WithSteps(steps...)}},
+		{name: "the journal cap", opts: []Option{WithMaxJournalSize(1 << 15), WithSteps(steps...)}},
+		{name: "the child depth limit", opts: []Option{WithMaxDepth(2), WithSteps(steps...)}},
+		{name: "the unknown-version policy", opts: []Option{WithUnknownVersionPolicy(FailUnknownVersion), WithSteps(steps...)}},
+		{name: "the compensation-failure policy", opts: []Option{WithCompensationFailurePolicy(AbortUnwinding), WithSteps(steps...)}},
+		{name: "a step's attempt budget", opts: []Option{WithSteps(stepsWith(WithMaxAttempts(7))...)}},
+		{name: "a step's retry backoff", opts: []Option{WithSteps(stepsWith(WithRetryBackoff(time.Second, time.Minute))...)}},
+		{name: "a step's compensation budget", opts: []Option{WithSteps(stepsWith(WithCompensateMaxAttempts(4))...)}},
+		{name: "a step's compensation backoff", opts: []Option{WithSteps(stepsWith(WithCompensateBackoff(time.Second, time.Minute))...)}},
+		{name: "a step's timeout", opts: []Option{WithSteps(stepsWith(WithStepTimeout(time.Minute))...)}},
+		{name: "compensating a step that failed", opts: []Option{WithSteps(stepsWith(WithCompensateOnFailure())...)}},
+		{
+			name: "a fan-out's window",
+			opts: []Option{WithSteps(
+				Step("a", WithRun(noopRun), WithCompensate(noopCompensate)),
+				ForEach("b", WithItemsFrom("a"), WithRun(noopRun), WithMaxParallel(2)),
+			)},
+		},
+		{
+			name: "a wait step's timeout",
+			opts: []Option{WithSteps(
+				Step("a", WithRun(noopRun), WithCompensate(noopCompensate)),
+				WaitForEvent("b", WithEventTimeout(time.Minute)),
+			)},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.NotEqual(t, baseline, testDefinition(t, "fp-wide", tt.opts...).fingerprint)
+		})
+	}
+
+	// The same definition built twice hashes the same, or no two hosts would ever agree
+	assert.Equal(t, baseline, testDefinition(t, "fp-wide", WithSteps(steps...)).fingerprint)
+}
+
 func TestBackoffDoublesAndStopsAtTheCap(t *testing.T) {
 	assert.Equal(t, 2*time.Second, backoff(2*time.Second, time.Minute, defaultRetryInitial, defaultRetryMax, 1))
 	assert.Equal(t, 4*time.Second, backoff(2*time.Second, time.Minute, defaultRetryInitial, defaultRetryMax, 2))
@@ -1159,4 +1219,41 @@ func TestAdvanceGivesUpOnACompensationThatKeepsFailing(t *testing.T) {
 	assert.Equal(t, StepCompensationFailed, stepStatus(t, st, "a"))
 	assert.Equal(t, StatusFailed, st.Status)
 	assert.Equal(t, CompensationPartial, st.Compensation, "the default policy carries on past a frame it could not undo, so the unwind is partial rather than stopped")
+}
+
+func TestAdvanceRunsToTheEndOfALongChainOfImmediateTransitions(t *testing.T) {
+	// A definition is not limited to any particular number of steps, and every one of these settles the moment it opens
+	// A fixed iteration bound would stop short partway along, leaving pending steps with no task or event left to open them and an instance that only ends at its timeout
+	const steps = 600
+
+	specs := make([]StepSpec, 0, steps+1)
+	specs = append(specs, Step("decide", WithRun(noopRun)))
+	for i := range steps {
+		specs = append(specs, Step(fmt.Sprintf("skipped-%d", i), WithRun(noopRun), WithSkipIf("decide", true)))
+	}
+
+	now := time.Now()
+	def := testDefinition(t, "long-chain", WithSteps(specs...))
+	require.Greater(t, len(def.steps), minAdvanceIterations, "the graph has to be longer than the loop's floor for this to prove anything")
+
+	st := startJournal(t, def, now)
+	reportSuccess(t, st, def, "decide", 0, true, now)
+	advance(st, def, "inst-1", now)
+
+	assert.Equal(t, StatusCompleted, st.Status)
+	for i := range steps {
+		assert.Equal(t, StepSkipped, stepStatus(t, st, fmt.Sprintf("skipped-%d", i)), "step %d should have settled", i)
+	}
+}
+
+func TestTheAdvanceBoundFollowsTheGraph(t *testing.T) {
+	small := testDefinition(t, "small", WithSteps(Step("a", WithRun(noopRun))))
+	assert.GreaterOrEqual(t, advanceIterations(small), minAdvanceIterations, "a tiny graph still gets the floor")
+
+	large := testDefinition(t, "large", WithSteps(
+		Step("a", WithRun(noopRun)),
+		Step("b", WithRun(noopRun)),
+		Step("c", WithRun(noopRun)),
+	))
+	assert.Greater(t, advanceIterations(large), advanceIterations(small), "a longer graph gets more room")
 }

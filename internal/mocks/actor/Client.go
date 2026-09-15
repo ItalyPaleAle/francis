@@ -98,16 +98,24 @@ func (_c *MockClient_DeleteAlarm_Call[T]) RunAndReturn(run func(ctx context.Cont
 }
 
 // DeleteJob provides a mock function for the type MockClient
-func (_mock *MockClient[T]) DeleteJob(ctx context.Context, jobID string) error {
-	ret := _mock.Called(ctx, jobID)
+func (_mock *MockClient[T]) DeleteJob(ctx context.Context, jobID string, opts ...actor.DeleteJobOption) error {
+	// actor.DeleteJobOption
+	_va := make([]any, len(opts))
+	for _i := range opts {
+		_va[_i] = opts[_i]
+	}
+	var _ca []any
+	_ca = append(_ca, ctx, jobID)
+	_ca = append(_ca, _va...)
+	ret := _mock.Called(_ca...)
 
 	if len(ret) == 0 {
 		panic("no return value specified for DeleteJob")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string) error); ok {
-		r0 = returnFunc(ctx, jobID)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, ...actor.DeleteJobOption) error); ok {
+		r0 = returnFunc(ctx, jobID, opts...)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -122,11 +130,13 @@ type MockClient_DeleteJob_Call[T any] struct {
 // DeleteJob is a helper method to define mock.On call
 //   - ctx context.Context
 //   - jobID string
-func (_e *MockClient_Expecter[T]) DeleteJob(ctx any, jobID any) *MockClient_DeleteJob_Call[T] {
-	return &MockClient_DeleteJob_Call[T]{Call: _e.mock.On("DeleteJob", ctx, jobID)}
+//   - opts ...actor.DeleteJobOption
+func (_e *MockClient_Expecter[T]) DeleteJob(ctx any, jobID any, opts ...any) *MockClient_DeleteJob_Call[T] {
+	return &MockClient_DeleteJob_Call[T]{Call: _e.mock.On("DeleteJob",
+		append([]any{ctx, jobID}, opts...)...)}
 }
 
-func (_c *MockClient_DeleteJob_Call[T]) Run(run func(ctx context.Context, jobID string)) *MockClient_DeleteJob_Call[T] {
+func (_c *MockClient_DeleteJob_Call[T]) Run(run func(ctx context.Context, jobID string, opts ...actor.DeleteJobOption)) *MockClient_DeleteJob_Call[T] {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -136,9 +146,18 @@ func (_c *MockClient_DeleteJob_Call[T]) Run(run func(ctx context.Context, jobID 
 		if args[1] != nil {
 			arg1 = args[1].(string)
 		}
+		var arg2 []actor.DeleteJobOption
+		variadicArgs := make([]actor.DeleteJobOption, len(args)-2)
+		for i, a := range args[2:] {
+			if a != nil {
+				variadicArgs[i] = a.(actor.DeleteJobOption)
+			}
+		}
+		arg2 = variadicArgs
 		run(
 			arg0,
 			arg1,
+			arg2...,
 		)
 	})
 	return _c
@@ -149,7 +168,7 @@ func (_c *MockClient_DeleteJob_Call[T]) Return(err error) *MockClient_DeleteJob_
 	return _c
 }
 
-func (_c *MockClient_DeleteJob_Call[T]) RunAndReturn(run func(ctx context.Context, jobID string) error) *MockClient_DeleteJob_Call[T] {
+func (_c *MockClient_DeleteJob_Call[T]) RunAndReturn(run func(ctx context.Context, jobID string, opts ...actor.DeleteJobOption) error) *MockClient_DeleteJob_Call[T] {
 	_c.Call.Return(run)
 	return _c
 }
@@ -292,6 +311,103 @@ func (_c *MockClient_Dispatch_Call[T]) Return(jobID string, err error) *MockClie
 }
 
 func (_c *MockClient_Dispatch_Call[T]) RunAndReturn(run func(ctx context.Context, method string, input any, opts ...actor.JobOption) (string, error)) *MockClient_Dispatch_Call[T] {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DispatchNew provides a mock function for the type MockClient
+func (_mock *MockClient[T]) DispatchNew(ctx context.Context, method string, input any, opts ...actor.JobOption) (string, bool, error) {
+	// actor.JobOption
+	_va := make([]any, len(opts))
+	for _i := range opts {
+		_va[_i] = opts[_i]
+	}
+	var _ca []any
+	_ca = append(_ca, ctx, method, input)
+	_ca = append(_ca, _va...)
+	ret := _mock.Called(_ca...)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DispatchNew")
+	}
+
+	var r0 string
+	var r1 bool
+	var r2 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, any, ...actor.JobOption) (string, bool, error)); ok {
+		return returnFunc(ctx, method, input, opts...)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, any, ...actor.JobOption) string); ok {
+		r0 = returnFunc(ctx, method, input, opts...)
+	} else {
+		r0 = ret.Get(0).(string)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, any, ...actor.JobOption) bool); ok {
+		r1 = returnFunc(ctx, method, input, opts...)
+	} else {
+		r1 = ret.Get(1).(bool)
+	}
+	if returnFunc, ok := ret.Get(2).(func(context.Context, string, any, ...actor.JobOption) error); ok {
+		r2 = returnFunc(ctx, method, input, opts...)
+	} else {
+		r2 = ret.Error(2)
+	}
+	return r0, r1, r2
+}
+
+// MockClient_DispatchNew_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DispatchNew'
+type MockClient_DispatchNew_Call[T any] struct {
+	*mock.Call
+}
+
+// DispatchNew is a helper method to define mock.On call
+//   - ctx context.Context
+//   - method string
+//   - input any
+//   - opts ...actor.JobOption
+func (_e *MockClient_Expecter[T]) DispatchNew(ctx any, method any, input any, opts ...any) *MockClient_DispatchNew_Call[T] {
+	return &MockClient_DispatchNew_Call[T]{Call: _e.mock.On("DispatchNew",
+		append([]any{ctx, method, input}, opts...)...)}
+}
+
+func (_c *MockClient_DispatchNew_Call[T]) Run(run func(ctx context.Context, method string, input any, opts ...actor.JobOption)) *MockClient_DispatchNew_Call[T] {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		var arg2 any
+		if args[2] != nil {
+			arg2 = args[2].(any)
+		}
+		var arg3 []actor.JobOption
+		variadicArgs := make([]actor.JobOption, len(args)-3)
+		for i, a := range args[3:] {
+			if a != nil {
+				variadicArgs[i] = a.(actor.JobOption)
+			}
+		}
+		arg3 = variadicArgs
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3...,
+		)
+	})
+	return _c
+}
+
+func (_c *MockClient_DispatchNew_Call[T]) Return(jobID string, created bool, err error) *MockClient_DispatchNew_Call[T] {
+	_c.Call.Return(jobID, created, err)
+	return _c
+}
+
+func (_c *MockClient_DispatchNew_Call[T]) RunAndReturn(run func(ctx context.Context, method string, input any, opts ...actor.JobOption) (string, bool, error)) *MockClient_DispatchNew_Call[T] {
 	_c.Call.Return(run)
 	return _c
 }

@@ -12,19 +12,20 @@ import (
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/types"
 	"github.com/italypaleale/francis/protocol"
 )
 
 // Dispatch sends a durable, fire-and-forget job to an actor through the runtime, returning the server-issued job ID.
-func (h *Host) Dispatch(ctx context.Context, actorType string, actorID string, method string, data any, properties actor.JobProperties) (string, error) {
+func (h *Host) Dispatch(ctx context.Context, actorType string, actorID string, method string, data any, properties actor.JobProperties) (string, bool, error) {
 	err := ref.ValidateComponents(actorType, actorID)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	err = properties.Validate()
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	// The idempotency key maps to the alarm name
@@ -33,7 +34,7 @@ func (h *Host) Dispatch(ctx context.Context, actorType string, actorID string, m
 	if name != "" {
 		err = ref.ValidateComponents(name)
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
 	} else {
 		name = uuid.NewV4().String()
@@ -41,7 +42,7 @@ func (h *Host) Dispatch(ctx context.Context, actorType string, actorID string, m
 
 	props, err := actorJobPropsToProtocol(properties, data, h.clock.Now())
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	reqCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
@@ -54,10 +55,10 @@ func (h *Host) Dispatch(ctx context.Context, actorType string, actorID string, m
 		JobProperties: props,
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to dispatch job: %w", err)
+		return "", false, fmt.Errorf("failed to dispatch job: %w", err)
 	}
 
-	return res.JobID, nil
+	return res.JobID, res.Created, nil
 }
 
 // GetJob returns a job by its ID, spanning both live and terminal jobs.
@@ -113,11 +114,16 @@ func (h *Host) RetryJob(ctx context.Context, jobID string) (string, error) {
 	return res.JobID, nil
 }
 
-// DeleteJob removes one of an actor's jobs, whatever state it is in.
-func (h *Host) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string) error {
+// DeleteJob removes one of an actor's jobs, in the states the caller's options ask for.
+func (h *Host) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string, opts ...actor.DeleteJobOption) error {
 	err := ref.ValidateComponents(actorType, actorID)
 	if err != nil {
 		return err
+	}
+
+	var o types.DeleteJobOpts
+	for _, opt := range opts {
+		opt(&o)
 	}
 
 	reqCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
@@ -126,6 +132,7 @@ func (h *Host) DeleteJob(ctx context.Context, actorType string, actorID string, 
 		ActorType: actorType,
 		ActorID:   actorID,
 		JobID:     jobID,
+		LiveOnly:  o.LiveOnly,
 	})
 	if isProtocolErrorCode(err, protocol.ErrCodeJobNotFound) {
 		return actor.ErrJobNotFound

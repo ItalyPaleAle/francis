@@ -111,16 +111,24 @@ func (_c *MockHost_DeleteAlarm_Call) RunAndReturn(run func(ctx context.Context, 
 }
 
 // DeleteJob provides a mock function for the type MockHost
-func (_mock *MockHost) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string) error {
-	ret := _mock.Called(ctx, actorType, actorID, jobID)
+func (_mock *MockHost) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string, opts ...actor.DeleteJobOption) error {
+	// actor.DeleteJobOption
+	_va := make([]any, len(opts))
+	for _i := range opts {
+		_va[_i] = opts[_i]
+	}
+	var _ca []any
+	_ca = append(_ca, ctx, actorType, actorID, jobID)
+	_ca = append(_ca, _va...)
+	ret := _mock.Called(_ca...)
 
 	if len(ret) == 0 {
 		panic("no return value specified for DeleteJob")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string) error); ok {
-		r0 = returnFunc(ctx, actorType, actorID, jobID)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string, ...actor.DeleteJobOption) error); ok {
+		r0 = returnFunc(ctx, actorType, actorID, jobID, opts...)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -137,11 +145,13 @@ type MockHost_DeleteJob_Call struct {
 //   - actorType string
 //   - actorID string
 //   - jobID string
-func (_e *MockHost_Expecter) DeleteJob(ctx any, actorType any, actorID any, jobID any) *MockHost_DeleteJob_Call {
-	return &MockHost_DeleteJob_Call{Call: _e.mock.On("DeleteJob", ctx, actorType, actorID, jobID)}
+//   - opts ...actor.DeleteJobOption
+func (_e *MockHost_Expecter) DeleteJob(ctx any, actorType any, actorID any, jobID any, opts ...any) *MockHost_DeleteJob_Call {
+	return &MockHost_DeleteJob_Call{Call: _e.mock.On("DeleteJob",
+		append([]any{ctx, actorType, actorID, jobID}, opts...)...)}
 }
 
-func (_c *MockHost_DeleteJob_Call) Run(run func(ctx context.Context, actorType string, actorID string, jobID string)) *MockHost_DeleteJob_Call {
+func (_c *MockHost_DeleteJob_Call) Run(run func(ctx context.Context, actorType string, actorID string, jobID string, opts ...actor.DeleteJobOption)) *MockHost_DeleteJob_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -159,11 +169,20 @@ func (_c *MockHost_DeleteJob_Call) Run(run func(ctx context.Context, actorType s
 		if args[3] != nil {
 			arg3 = args[3].(string)
 		}
+		var arg4 []actor.DeleteJobOption
+		variadicArgs := make([]actor.DeleteJobOption, len(args)-4)
+		for i, a := range args[4:] {
+			if a != nil {
+				variadicArgs[i] = a.(actor.DeleteJobOption)
+			}
+		}
+		arg4 = variadicArgs
 		run(
 			arg0,
 			arg1,
 			arg2,
 			arg3,
+			arg4...,
 		)
 	})
 	return _c
@@ -174,7 +193,7 @@ func (_c *MockHost_DeleteJob_Call) Return(err error) *MockHost_DeleteJob_Call {
 	return _c
 }
 
-func (_c *MockHost_DeleteJob_Call) RunAndReturn(run func(ctx context.Context, actorType string, actorID string, jobID string) error) *MockHost_DeleteJob_Call {
+func (_c *MockHost_DeleteJob_Call) RunAndReturn(run func(ctx context.Context, actorType string, actorID string, jobID string, opts ...actor.DeleteJobOption) error) *MockHost_DeleteJob_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -243,7 +262,7 @@ func (_c *MockHost_DeleteState_Call) RunAndReturn(run func(ctx context.Context, 
 }
 
 // Dispatch provides a mock function for the type MockHost
-func (_mock *MockHost) Dispatch(ctx context.Context, actorType string, actorID string, method string, data any, properties actor.JobProperties) (string, error) {
+func (_mock *MockHost) Dispatch(ctx context.Context, actorType string, actorID string, method string, data any, properties actor.JobProperties) (string, bool, error) {
 	ret := _mock.Called(ctx, actorType, actorID, method, data, properties)
 
 	if len(ret) == 0 {
@@ -251,8 +270,9 @@ func (_mock *MockHost) Dispatch(ctx context.Context, actorType string, actorID s
 	}
 
 	var r0 string
-	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string, any, actor.JobProperties) (string, error)); ok {
+	var r1 bool
+	var r2 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string, any, actor.JobProperties) (string, bool, error)); ok {
 		return returnFunc(ctx, actorType, actorID, method, data, properties)
 	}
 	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string, any, actor.JobProperties) string); ok {
@@ -260,12 +280,17 @@ func (_mock *MockHost) Dispatch(ctx context.Context, actorType string, actorID s
 	} else {
 		r0 = ret.Get(0).(string)
 	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, string, string, string, any, actor.JobProperties) error); ok {
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, string, string, any, actor.JobProperties) bool); ok {
 		r1 = returnFunc(ctx, actorType, actorID, method, data, properties)
 	} else {
-		r1 = ret.Error(1)
+		r1 = ret.Get(1).(bool)
 	}
-	return r0, r1
+	if returnFunc, ok := ret.Get(2).(func(context.Context, string, string, string, any, actor.JobProperties) error); ok {
+		r2 = returnFunc(ctx, actorType, actorID, method, data, properties)
+	} else {
+		r2 = ret.Error(2)
+	}
+	return r0, r1, r2
 }
 
 // MockHost_Dispatch_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Dispatch'
@@ -322,12 +347,12 @@ func (_c *MockHost_Dispatch_Call) Run(run func(ctx context.Context, actorType st
 	return _c
 }
 
-func (_c *MockHost_Dispatch_Call) Return(jobID string, err error) *MockHost_Dispatch_Call {
-	_c.Call.Return(jobID, err)
+func (_c *MockHost_Dispatch_Call) Return(jobID string, created bool, err error) *MockHost_Dispatch_Call {
+	_c.Call.Return(jobID, created, err)
 	return _c
 }
 
-func (_c *MockHost_Dispatch_Call) RunAndReturn(run func(ctx context.Context, actorType string, actorID string, method string, data any, properties actor.JobProperties) (string, error)) *MockHost_Dispatch_Call {
+func (_c *MockHost_Dispatch_Call) RunAndReturn(run func(ctx context.Context, actorType string, actorID string, method string, data any, properties actor.JobProperties) (string, bool, error)) *MockHost_Dispatch_Call {
 	_c.Call.Return(run)
 	return _c
 }

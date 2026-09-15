@@ -1976,7 +1976,7 @@ func TestPersistHook_Rollback_DispatchAndLeaseJob(t *testing.T) {
 
 	// The job, placement, and lease are submitted as one persistence operation
 	jobRef := ref.NewAlarmRef("myactor", "actor1", "job-key")
-	jobID, lease, err := p.DispatchJob(t.Context(), jobRef, components.SetAlarmReq{
+	jobID, _, lease, err := p.DispatchJob(t.Context(), jobRef, components.SetAlarmReq{
 		DueTime:        p.Clock.Now().Add(time.Second),
 		Kind:           components.AlarmKindJob,
 		JobMethod:      "process",
@@ -2004,7 +2004,7 @@ func TestPersistHook_Rollback_DispatchAndLeaseJob(t *testing.T) {
 	// Retrying after persistence recovers creates the complete mutation once
 	mock.Reset()
 	mock.ErrFunc = nil
-	jobID, lease, err = p.DispatchJob(t.Context(), jobRef, components.SetAlarmReq{
+	jobID, _, lease, err = p.DispatchJob(t.Context(), jobRef, components.SetAlarmReq{
 		DueTime:        p.Clock.Now().Add(time.Second),
 		Kind:           components.AlarmKindJob,
 		JobMethod:      "process",

@@ -10,7 +10,7 @@ import (
 	"github.com/italypaleale/francis/internal/ref"
 )
 
-func (p *Provider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) (string, *ref.AlarmLease, error) {
+func (p *Provider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) (string, bool, *ref.AlarmLease, error) {
 	// Trying to acquire a lease requires using the slower path
 	// Requests outside fetch-ahead stay on the storage-only path even when an idempotency conflict retains an earlier due time
 	if len(req.LeaseImmediate) > 0 && !req.DueTime.After(p.Clock.Now().Add(p.Cfg.AlarmsFetchAheadInterval)) {
@@ -32,7 +32,8 @@ func (p *Provider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req compo
 	p.Mu.RUnlock()
 
 	if exists {
-		return existingID, nil, nil
+		// The job that already holds this idempotency key is the one the caller gets back, and this call did not create it
+		return existingID, false, nil, nil
 	}
 
 	// Normalize empty data to nil
@@ -66,14 +67,14 @@ func (p *Provider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req compo
 		p.AlarmsByID[alarmID] = a
 	})
 	if err != nil {
-		return "", nil, err
+		return "", false, nil, err
 	}
 
-	return alarmID, nil, nil
+	return alarmID, true, nil, nil
 }
 
 // dispatchAndLeaseJob atomically persists a new idempotent job with any required actor placement and lease
-func (p *Provider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) (string, *ref.AlarmLease, error) {
+func (p *Provider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) (string, bool, *ref.AlarmLease, error) {
 	key := NewAlarmKey(aRef.ActorType, aRef.ActorID, aRef.Name)
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
@@ -92,7 +93,7 @@ func (p *Provider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, r
 		if job.DueTime.After(now.Add(p.Cfg.AlarmsFetchAheadInterval)) || hasLiveLease {
 			jobID := job.ID
 			p.Mu.RUnlock()
-			return jobID, nil, nil
+			return jobID, false, nil, nil
 		}
 	} else {
 		data := req.Data
@@ -159,7 +160,7 @@ func (p *Provider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, r
 	}
 	p.Mu.RUnlock()
 	if exists && !canLease {
-		return job.ID, nil, nil
+		return job.ID, false, nil, nil
 	}
 
 	// Expose the job and lease only after their complete durable change set succeeds
@@ -175,9 +176,9 @@ func (p *Provider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, r
 		}
 	})
 	if err != nil {
-		return "", nil, err
+		return "", false, nil, err
 	}
-	return job.ID, lease, nil
+	return job.ID, !exists, lease, nil
 }
 
 func (p *Provider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLease, req components.DeadLetterAlarmReq) error {
@@ -219,7 +220,7 @@ func (p *Provider) endJob(ctx context.Context, lease *ref.AlarmLease, req endJob
 
 	p.Mu.RLock()
 	a, ok := p.AlarmsByID[lease.Key()]
-	valid := ok && a.CanFinalize(lease.LeaseID(), now)
+	valid := ok && a.CanFinalize(lease.LeaseID(), lease.DueTime(), now)
 	var (
 		alarmKey    AlarmKey
 		jobID       string
@@ -381,7 +382,7 @@ func (p *Provider) ListJobs(ctx context.Context, actorType string, actorID strin
 	return res, nil
 }
 
-func (p *Provider) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string) error {
+func (p *Provider) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string, req components.DeleteJobReq) error {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 
@@ -400,6 +401,11 @@ func (p *Provider) DeleteJob(ctx context.Context, actorType string, actorID stri
 	d, terminal := p.TerminalJobs[jobID]
 	terminal = terminal && inScope(d.ActorType, d.ActorID)
 	p.Mu.RUnlock()
+
+	// A cancellation only removes the live row, and the write lock this call holds is what makes that atomic against a concurrent finalization
+	if req.LiveOnly {
+		terminal = false
+	}
 
 	if !live && !terminal {
 		return components.ErrNoJob
