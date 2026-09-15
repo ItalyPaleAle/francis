@@ -5896,9 +5896,10 @@ func (s Suite) TestJobs(t *testing.T) {
 		// The caller uses the same verb whether the job is still scheduled or has already ended
 		jobID := dispatch(t, ctx, "unified-actor", "u1", "process", ref.AlarmProperties{DueTime: s.p.Now()}, nil)
 		lease := leaseFor(t, ctx, jobID)
-		require.NoError(t, s.p.DeadLetterAlarm(ctx, lease, components.DeadLetterAlarmReq{Reason: "boom", Attempts: 3}))
+		err := s.p.DeadLetterAlarm(ctx, lease, components.DeadLetterAlarmReq{Reason: "boom", Attempts: 3})
+		require.NoError(t, err)
 
-		err := s.p.DeleteJob(ctx, "JOB", "unified-actor", jobID, components.DeleteJobReq{})
+		err = s.p.DeleteJob(ctx, "JOB", "unified-actor", jobID, components.DeleteJobReq{})
 		require.NoError(t, err)
 
 		_, err = s.p.GetJob(ctx, jobID)
@@ -5945,7 +5946,8 @@ func (s Suite) TestJobs(t *testing.T) {
 		require.ErrorIs(t, err, components.ErrNoJob)
 
 		// The same delete verb removes it
-		require.NoError(t, s.p.DeleteJob(ctx, "JOB", "done-actor", jobID, components.DeleteJobReq{}))
+		err = s.p.DeleteJob(ctx, "JOB", "done-actor", jobID, components.DeleteJobReq{})
+		require.NoError(t, err)
 		_, err = s.p.GetJob(ctx, jobID)
 		require.ErrorIs(t, err, components.ErrNoJob)
 	})
@@ -5957,10 +5959,11 @@ func (s Suite) TestJobs(t *testing.T) {
 		jobID := dispatch(t, ctx, "expire-actor", "e1", "process", ref.AlarmProperties{DueTime: s.p.Now()}, nil)
 		lease := leaseFor(t, ctx, jobID)
 
-		require.NoError(t, s.p.CompleteJob(ctx, lease, components.CompleteJobReq{Attempts: 1, Retention: time.Second}))
+		err := s.p.CompleteJob(ctx, lease, components.CompleteJobReq{Attempts: 1, Retention: time.Second})
+		require.NoError(t, err)
 
 		// It is readable while the retention holds
-		_, err := s.p.GetJob(ctx, jobID)
+		_, err = s.p.GetJob(ctx, jobID)
 		require.NoError(t, err)
 
 		// Past the retention it reads as gone, whether or not the collector has run yet
@@ -5977,7 +5980,8 @@ func (s Suite) TestJobs(t *testing.T) {
 		assert.Empty(t, jobs)
 
 		// The collector then removes it for good
-		require.NoError(t, s.p.CleanupExpired(ctx))
+		err = s.p.CleanupExpired(ctx)
+		require.NoError(t, err)
 		_, err = s.p.GetJob(ctx, jobID)
 		require.ErrorIs(t, err, components.ErrNoJob)
 	})
@@ -6106,8 +6110,9 @@ func (s Suite) TestJobs(t *testing.T) {
 
 		// A job that has not run yet is what a cancellation is for
 		pending := dispatch(t, ctx, "live-only", "p1", "process", ref.AlarmProperties{DueTime: s.p.Now().Add(time.Hour)}, nil)
-		require.NoError(t, s.p.DeleteJob(ctx, "JOB", "live-only", pending, components.DeleteJobReq{LiveOnly: true}))
-		_, err := s.p.GetJob(ctx, pending)
+		err := s.p.DeleteJob(ctx, "JOB", "live-only", pending, components.DeleteJobReq{LiveOnly: true})
+		require.NoError(t, err)
+		_, err = s.p.GetJob(ctx, pending)
 		require.ErrorIs(t, err, components.ErrNoJob)
 
 		// A job that has already completed is not the cancellation's to remove
@@ -6123,7 +6128,8 @@ func (s Suite) TestJobs(t *testing.T) {
 		assert.Equal(t, components.JobStatusCompleted, info.Status)
 
 		// Without the scope the same call removes the record, which is what an operator asking to delete a job means
-		require.NoError(t, s.p.DeleteJob(ctx, "JOB", "live-only", done, components.DeleteJobReq{}))
+		err = s.p.DeleteJob(ctx, "JOB", "live-only", done, components.DeleteJobReq{})
+		require.NoError(t, err)
 		_, err = s.p.GetJob(ctx, done)
 		require.ErrorIs(t, err, components.ErrNoJob)
 	})

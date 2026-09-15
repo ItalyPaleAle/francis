@@ -45,7 +45,6 @@ type Client[T any] interface {
 	// ListJobs returns all of the current actor's jobs: the live ones, and any terminal record still retained.
 	ListJobs(ctx context.Context) ([]JobInfo, error)
 	// DeleteJob removes one of the current actor's jobs, whatever state it is in.
-	// Pass WithLiveJobsOnly to cancel without removing the record an already-ended job left behind.
 	DeleteJob(ctx context.Context, jobID string, opts ...DeleteJobOption) error
 	// RetryJob re-dispatches a dead-lettered job and returns the new job ID.
 	RetryJob(ctx context.Context, jobID string) (newJobID string, err error)

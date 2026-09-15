@@ -312,7 +312,6 @@ func (s *Service) listJobs(ctx context.Context, actorType string, actorID string
 }
 
 // DeleteJob removes one of an actor's jobs, whatever state it is in: a job still scheduled is cancelled before it runs, and one that has ended has its record removed.
-// Pass WithLiveJobsOnly to cancel without removing the record an already-ended job left behind.
 // Returns ErrJobNotFound if the actor has no job with that ID.
 func (s *Service) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string, opts ...DeleteJobOption) error {
 	if ref.IsBuiltInActorType(actorType) {

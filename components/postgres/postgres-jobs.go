@@ -495,13 +495,13 @@ func (p *PostgresProvider) DeleteJob(ctx context.Context, actorType string, acto
 	// A cancellation only removes the live row, and the delete itself is what decides that: a job that finalizes concurrently simply is not there to delete
 	if req.LiveOnly {
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-		live, lErr := p.db.Exec(queryCtx, `
+		live, err := p.db.Exec(queryCtx, `
 			DELETE FROM `+p.tablePrefix+`alarms
 			WHERE alarm_id = $1 AND alarm_kind = 'job' AND actor_type = $2 AND actor_id = $3`,
 			id, actorType, actorID,
 		)
-		if lErr != nil {
-			return fmt.Errorf("error deleting live job: %w", lErr)
+		if err != nil {
+			return fmt.Errorf("error deleting live job: %w", err)
 		}
 		if live.RowsAffected() == 0 {
 			return components.ErrNoJob

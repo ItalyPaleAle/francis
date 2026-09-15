@@ -293,7 +293,7 @@ type DeleteJobRequest struct {
 	ActorType string `msgpack:"type"`
 	ActorID   string `msgpack:"id"`
 	JobID     string `msgpack:"jobId"`
-	// LiveOnly restricts the removal to a job that has not ended yet, so the record a completed or dead-lettered job left behind is kept
+	// LiveOnly restricts the removal to a job that has not ended yet
 	LiveOnly bool `msgpack:"liveOnly,omitempty"`
 }
 

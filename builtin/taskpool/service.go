@@ -167,9 +167,6 @@ func (s *TaskPoolService) GetTask(ctx context.Context, taskID string) (TaskInfo,
 
 // CancelTask cancels a live (pending or active) task
 // It returns actor.ErrJobNotFound if the task cannot be found among live tasks
-//
-// A task the pool has already finished keeps its record for as long as the retention says, and cancelling never removes one
-// The scope is part of the deletion rather than a status check before it, so a task that finishes between the lookup and the cancel is reported as missing rather than having its record destroyed
 func (s *TaskPoolService) CancelTask(ctx context.Context, taskID string) error {
 	// Look up the task's worker so the cancel can target it through a privileged client
 	info, err := s.svc.GetJob(ctx, taskID)
@@ -179,6 +176,7 @@ func (s *TaskPoolService) CancelTask(ctx context.Context, taskID string) error {
 
 	bareType := s.pool.bareTypeOf(info.ActorType)
 	client := builtinactor.NewClient[struct{}](bareType, info.ActorID, s.svc)
+	// A task the pool has already finished keeps its record for as long as the retention says, and cancelling never removes one
 	return client.DeleteJob(ctx, taskID, actor.WithLiveJobsOnly())
 }
 

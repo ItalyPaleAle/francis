@@ -35,8 +35,7 @@ func componentsActorTypesToProtocol(in []components.ActorHostType) []protocol.Ac
 	return out
 }
 
-// retentionToWireMs renders a retention window as the milliseconds the wire carries, without letting the truncation change what the window means
-// Zero is the one value that says "keep no record", so neither the negative sentinel for "never expires" nor a positive window shorter than a millisecond may land on it
+// retentionToWireMs returns a duration in ms, ensuring that a positive number is always at least 1ms
 func retentionToWireMs(d time.Duration) int64 {
 	switch {
 	case d < 0:
