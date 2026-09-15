@@ -15,6 +15,7 @@ package workflow
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -40,6 +41,11 @@ const (
 	eventuallyTick    = 100 * time.Millisecond
 	// settleWindow is how long a parked instance is watched to confirm it does not advance
 	settleWindow = 3 * time.Second
+	// fanOutHold is how long a fan-out task keeps its host's slot, so tasks on different hosts overlap long enough to be seen
+	// It stays short because the step's handler holds the host's only concurrency slot while it runs, so a long hold starves the host
+	fanOutHold = 300 * time.Millisecond
+	// fanOutAttempts is how many instances the distribution assertion will run before giving up on observing the overlap
+	fanOutAttempts = 3
 )
 
 // matrix runs the scenario across representative topology and provider combinations
@@ -266,7 +272,7 @@ func (s *builtinWorkflow) fanOutItem(ctx context.Context, t workflow.Task) (any,
 
 	// Holding the slot briefly makes concurrent tasks overlap long enough to observe
 	select {
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(fanOutHold):
 	case <-ctx.Done():
 	}
 
@@ -349,22 +355,34 @@ func (s *builtinWorkflow) Run(t *testing.T) {
 
 	// A fan-out's tasks are placed independently, so on a multi-host cluster they run in parallel
 	t.Run("distributes a fan-out across hosts", func(t *testing.T) {
-		s.maxRunning.Store(0)
+		// The peak is a sample of how much overlapped, and one run can miss it: if the hosts pick their first tasks up further apart than a task takes to run, every task runs alone
+		// A slow or loaded runner makes that likely, so the observation is retried on a fresh instance rather than decided by a single run
+		// Retrying the observation rather than lengthening the hold matters because the handler occupies the host's only concurrency slot while it runs, so a longer hold would starve the host and stall everything queued behind it
+		var peak int
+		for attempt := range fanOutAttempts {
+			s.maxRunning.Store(0)
 
-		// More items than hosts guarantees each host has work to pull, so the peak reveals how many ran at once
-		id, _, err := svc.Start(ctx, runInput{Items: s.hosts * 3}, workflow.WithInstanceID("fanout-1"))
-		require.NoError(t, err)
+			// More items than hosts guarantees each host has work to pull, so the peak reveals how many ran at once
+			id, _, err := svc.Start(ctx, runInput{Items: s.hosts * 3}, workflow.WithInstanceID(fmt.Sprintf("fanout-%d", attempt)))
+			require.NoError(t, err)
 
-		require.Eventually(t, func() bool {
-			status, sErr := svc.GetStatus(ctx, id)
-			return sErr == nil && status.CurrentStep == "proceed"
-		}, eventuallyTimeout, eventuallyTick, "the fan-out should complete and the instance park")
+			require.Eventually(t, func() bool {
+				status, sErr := svc.GetStatus(ctx, id)
+				return sErr == nil && status.CurrentStep == "proceed"
+			}, eventuallyTimeout, eventuallyTick, "the fan-out should complete and the instance park")
+
+			peak = int(s.maxRunning.Load())
+
+			require.NoError(t, svc.RaiseEvent(ctx, id, "proceed", nil))
+			s.awaitStatus(t, svc, id, workflow.StatusCompleted)
+
+			if peak >= s.hosts {
+				break
+			}
+		}
 
 		// Each host runs one task at a time, so the peak reaching the host count means they ran in parallel
-		assert.GreaterOrEqual(t, int(s.maxRunning.Load()), s.hosts, "the fan-out should run one task per host in parallel")
-
-		require.NoError(t, svc.RaiseEvent(ctx, id, "proceed", nil))
-		s.awaitStatus(t, svc, id, workflow.StatusCompleted)
+		assert.GreaterOrEqual(t, peak, s.hosts, "the fan-out should run one task per host in parallel")
 	})
 
 	// A retryable failure is retried per the step's own policy, and the attempts are counted in the journal

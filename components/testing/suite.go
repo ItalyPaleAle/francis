@@ -5962,7 +5962,8 @@ func (s Suite) TestJobs(t *testing.T) {
 		ctx := t.Context()
 		require.NoError(t, s.p.Seed(ctx, jobSeed()))
 
-		jobID := dispatch(t, ctx, "dead-actor", "d1", "process", ref.AlarmProperties{DueTime: s.p.Now()}, []byte("dead-payload"))
+		due := s.p.Now()
+		jobID := dispatch(t, ctx, "dead-actor", "d1", "process", ref.AlarmProperties{DueTime: due}, []byte("dead-payload"))
 		lease := leaseFor(t, ctx, jobID)
 
 		err := s.p.DeadLetterAlarm(ctx, lease, components.DeadLetterAlarmReq{Reason: "boom", Attempts: 3})
@@ -5978,9 +5979,18 @@ func (s Suite) TestJobs(t *testing.T) {
 		// The dead job carries its input so it can be replayed
 		dead, err := s.p.GetTerminalJob(ctx, jobID)
 		require.NoError(t, err)
+		assert.Equal(t, jobID, dead.JobID)
+		assert.Equal(t, "JOB", dead.ActorType)
+		assert.Equal(t, "dead-actor", dead.ActorID)
 		assert.Equal(t, "process", dead.Method)
 		assert.Equal(t, []byte("dead-payload"), dead.Data)
 		assert.Equal(t, components.JobStatusDeadLettered, dead.Status)
+		assert.Equal(t, 3, dead.Attempts)
+		assert.Equal(t, "boom", dead.LastError)
+		assert.False(t, dead.EndedAt.IsZero(), "a terminal record says when the job ended")
+
+		// The occurrence's own due time is kept, which is what tells an operator when the run that failed was meant to happen
+		assert.WithinDuration(t, due, dead.OriginalDue, time.Millisecond)
 
 		// The live alarm row is gone, so the lease no longer resolves
 		_, err = s.p.GetLeasedAlarm(ctx, lease)
@@ -6041,11 +6051,15 @@ func (s Suite) TestJobs(t *testing.T) {
 		// The failed occurrence is recorded alongside it, under an ID of its own
 		jobs, err := s.p.ListJobs(ctx, "JOB", "repeat-actor")
 		require.NoError(t, err)
-		var live, dead int
+		var (
+			live, dead   int
+			occurrenceID string
+		)
 		for _, j := range jobs {
 			switch j.Status {
 			case components.JobStatusDeadLettered:
 				dead++
+				occurrenceID = j.JobID
 				assert.NotEqual(t, jobID, j.JobID, "the ended occurrence must have an ID of its own")
 			default:
 				live++
@@ -6054,6 +6068,13 @@ func (s Suite) TestJobs(t *testing.T) {
 		}
 		assert.Equal(t, 1, live, "the recurrence should still have one live job")
 		assert.Equal(t, 1, dead, "the failed occurrence should be dead-lettered")
+
+		// The record keeps the schedule the occurrence belonged to, so a reader can tell a recurrence's occurrence from a one-shot after the fact
+		require.NotEmpty(t, occurrenceID)
+		occurrence, err := s.p.GetTerminalJob(ctx, occurrenceID)
+		require.NoError(t, err)
+		assert.Equal(t, "PT1H", occurrence.Interval)
+		assert.Empty(t, occurrence.Cron, "an interval schedule carries no cron expression")
 	})
 
 	t.Run("a completed repeating occurrence is recorded and the recurrence continues", func(t *testing.T) {
@@ -6148,6 +6169,98 @@ func (s Suite) TestJobs(t *testing.T) {
 				}
 				require.NoError(t, err)
 				assert.True(t, info.Status.IsTerminal(), "a finalized occurrence must not be live, got %q", info.Status)
+			})
+		}
+	})
+
+	// The lease predicate the three finalizers share accepts a lease the job's own actor released, which is the case above
+	// This pins what it must still reject, because a finalizer that ended an occurrence on a lease it does not hold would end work another host is running
+	t.Run("a finalizer rejects a lease it does not hold", func(t *testing.T) {
+		finalizers := []struct {
+			name     string
+			finalize func(ctx context.Context, lease *ref.AlarmLease) error
+		}{
+			{
+				name: "CompleteJob",
+				finalize: func(ctx context.Context, lease *ref.AlarmLease) error {
+					return s.p.CompleteJob(ctx, lease, components.CompleteJobReq{Attempts: 1, Retention: time.Hour})
+				},
+			},
+			{
+				name: "DeadLetterAlarm",
+				finalize: func(ctx context.Context, lease *ref.AlarmLease) error {
+					return s.p.DeadLetterAlarm(ctx, lease, components.DeadLetterAlarmReq{Reason: "boom", Attempts: 3})
+				},
+			},
+			{
+				name: "DeleteLeasedAlarm",
+				finalize: func(ctx context.Context, lease *ref.AlarmLease) error {
+					return s.p.DeleteLeasedAlarm(ctx, lease)
+				},
+			},
+		}
+
+		cases := []struct {
+			name string
+			// lease returns the lease to attempt the finalization with, given the one the row actually holds
+			lease func(t *testing.T, ctx context.Context, held *ref.AlarmLease) *ref.AlarmLease
+			// stillLive says whether the occurrence should survive the rejected attempt, which it does unless the case removed it
+			stillLive bool
+		}{
+			{
+				name: "a lease ID another host holds",
+				lease: func(t *testing.T, ctx context.Context, held *ref.AlarmLease) *ref.AlarmLease {
+					return ref.NewAlarmLease(held.AlarmRef(), held.Key(), held.DueTime(), "e731a719-0c1c-4c41-9c92-a44e0e8ef681")
+				},
+				stillLive: true,
+			},
+			{
+				name: "a lease that has expired",
+				lease: func(t *testing.T, ctx context.Context, held *ref.AlarmLease) *ref.AlarmLease {
+					// Past the lease duration the occurrence is another host's to take, so this execution may no longer end it
+					_ = s.p.AdvanceClock(2 * time.Minute) //nolint:errcheck
+					return held
+				},
+				stillLive: true,
+			},
+			{
+				name: "an alarm that is already gone",
+				lease: func(t *testing.T, ctx context.Context, held *ref.AlarmLease) *ref.AlarmLease {
+					require.NoError(t, s.p.DeleteLeasedAlarm(ctx, held))
+					return held
+				},
+				stillLive: false,
+			},
+		}
+
+		for _, f := range finalizers {
+			t.Run(f.name, func(t *testing.T) {
+				for i, tc := range cases {
+					t.Run(tc.name, func(t *testing.T) {
+						ctx := t.Context()
+						require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+						actorID := fmt.Sprintf("reject-%s-%d", f.name, i)
+						jobID := dispatch(t, ctx, actorID, "r1", "process", ref.AlarmProperties{DueTime: s.p.Now()}, []byte("payload"))
+						held := leaseFor(t, ctx, jobID)
+
+						err := f.finalize(ctx, tc.lease(t, ctx, held))
+						require.ErrorIs(t, err, components.ErrNoAlarm)
+
+						info, err := s.p.GetJob(ctx, jobID)
+						if !tc.stillLive {
+							require.ErrorIs(t, err, components.ErrNoJob)
+							return
+						}
+
+						// The rejected attempt must leave the occurrence exactly as it was: still live, and with nothing recorded as having ended
+						require.NoError(t, err)
+						assert.False(t, info.Status.IsTerminal(), "a rejected finalization must leave the occurrence live, got %q", info.Status)
+
+						_, err = s.p.GetTerminalJob(ctx, jobID)
+						require.ErrorIs(t, err, components.ErrNoJob, "a rejected finalization must not record a terminal job")
+					})
+				}
 			})
 		}
 	})

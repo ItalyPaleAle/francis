@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
@@ -92,6 +93,9 @@ type runtimeClientConfig struct {
 type runtimeClient struct {
 	cfg       runtimeClientConfig
 	transport *webtransport.Transport
+	// transportDialed records that the transport has dialed at least once, which is what makes it safe to close
+	// The WebTransport dialer initializes its cancel function on its first dial, and its Close calls that function without checking, so closing one that never dialed dereferences a nil
+	transportDialed atomic.Bool
 
 	mu        sync.RWMutex
 	session   *webtransport.Session
@@ -141,7 +145,13 @@ func (rc *runtimeClient) HostID() string {
 
 // Run connects to a runtime and keeps the session alive, reconnecting on failure until the context is canceled
 func (rc *runtimeClient) Run(ctx context.Context) error {
-	defer func() { _ = rc.transport.Close() }()
+	// Only a transport that dialed can be closed, for the reason on transportDialed
+	// Run returns below without dialing whenever its context is already canceled, which is what a host that is shut down as soon as it starts does
+	defer func() {
+		if rc.transportDialed.Load() {
+			_ = rc.transport.Close()
+		}
+	}()
 
 	// Start at a random address so replicas spread the initial connections
 	// #nosec G404 -- not security-sensitive
@@ -279,6 +289,9 @@ func (rc *runtimeClient) connectAndServe(ctx context.Context, addr string) (bool
 // dial establishes a WebTransport session with the runtime at addr
 func (rc *runtimeClient) dial(ctx context.Context, addr string) (*webtransport.Session, error) {
 	url := "https://" + addr + protocol.RuntimeConnectPath
+
+	// Recorded before the call rather than after, since the dial initializes the transport before it can fail
+	rc.transportDialed.Store(true)
 	rsp, session, err := rc.transport.Dial(ctx, url, nil)
 	if err != nil {
 		return nil, err
