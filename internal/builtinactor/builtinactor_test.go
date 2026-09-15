@@ -17,15 +17,23 @@ type fakeBuiltIn struct {
 	opts actorcore.RegisterActorOptions
 }
 
-func (f *fakeBuiltIn) ActorType() string { return "fake" }
-
-func (f *fakeBuiltIn) Factory() actor.Factory {
-	return func(actorID string, svc *actor.Service) actor.Actor { return nil }
+func (f *fakeBuiltIn) ActorType() string {
+	return "fake"
 }
 
-func (f *fakeBuiltIn) RegisterOptions() actorcore.RegisterActorOptions { return f.opts }
+func (f *fakeBuiltIn) Factory() actor.Factory {
+	return func(actorID string, svc *actor.Service) actor.Actor {
+		return nil
+	}
+}
 
-func (f *fakeBuiltIn) Singleton() bool { return false }
+func (f *fakeBuiltIn) RegisterOptions() actorcore.RegisterActorOptions {
+	return f.opts
+}
+
+func (f *fakeBuiltIn) Singleton() bool {
+	return false
+}
 
 // fakeMultiBuiltIn registers more than one type, which takes the other branch of RegistrationsFor
 type fakeMultiBuiltIn struct {
@@ -36,9 +44,6 @@ type fakeMultiBuiltIn struct {
 
 func (f *fakeMultiBuiltIn) Registrations() []BuiltInActorRegistration { return f.regs }
 
-// TestRegistrationsForAppliesJobRetentionDefault covers the one funnel every host registers a built-in through
-//
-// A built-in runs work on a caller's behalf without the caller holding a handle to it, so the record of a run that succeeded is the only way to see it happened
 func TestRegistrationsForAppliesJobRetentionDefault(t *testing.T) {
 	t.Run("a single-type built-in that names none gets the default", func(t *testing.T) {
 		regs := RegistrationsFor(&fakeBuiltIn{})

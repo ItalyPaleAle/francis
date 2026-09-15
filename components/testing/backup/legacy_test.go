@@ -16,7 +16,6 @@ import (
 )
 
 // The record shapes below are what Francis wrote when the store held only dead-lettered jobs, before it was widened to record completed ones too.
-// They are spelled out here rather than taken from the backup package so the test pins the bytes an older Francis actually produced: a change to the current types cannot quietly move the goalposts.
 type (
 	legacyHeader struct {
 		Format    string    `msgpack:"format"`
@@ -67,28 +66,34 @@ func TestRestoreOfAPreRenameBackup(t *testing.T) {
 
 		var buf bytes.Buffer
 		enc := msgpack.NewEncoder(&buf)
-		require.NoError(t, enc.Encode(&legacyHeader{Format: backup.Format, Version: 1, CreatedAt: failedAt}))
+		err := enc.Encode(&legacyHeader{Format: backup.Format, Version: 1, CreatedAt: failedAt})
+		require.NoError(t, err)
 
-		require.NoError(t, enc.Encode(&legacyRecord{
+		err = enc.Encode(&legacyRecord{
 			Type:  "state",
 			State: &legacyStateRecord{ActorType: "OLD", ActorID: "actor-1", Data: []byte("state-data")},
-		}))
-		require.NoError(t, enc.Encode(&legacyRecord{
+		})
+		require.NoError(t, err)
+
+		err = enc.Encode(&legacyRecord{
 			Type: "deadjob",
 			DeadJob: &legacyDeadJobRecord{
 				JobID: "01a09d00-0000-7000-8000-00000000dead", ActorType: "OLD", ActorID: "actor-1",
 				Method: "process", Data: []byte("job-payload"), Attempts: 5, LastError: "boom",
 				FailedAt: failedAt, OriginalDue: originalDue,
 			},
-		}))
-		require.NoError(t, enc.Encode(&legacyRecord{
+		})
+		require.NoError(t, err)
+
+		err = enc.Encode(&legacyRecord{
 			Type: "deadjob",
 			DeadJob: &legacyDeadJobRecord{
 				JobID: "01a09d00-0000-7000-8000-00000000beef", ActorType: "OLD", ActorID: "actor-2",
 				Method: "sweep", Attempts: 3, LastError: "still boom",
 				FailedAt: failedAt, OriginalDue: originalDue, Interval: "PT1H",
 			},
-		}))
+		})
+		require.NoError(t, err)
 
 		return buf.Bytes()
 	}
@@ -98,7 +103,8 @@ func TestRestoreOfAPreRenameBackup(t *testing.T) {
 		t.Helper()
 		ctx := t.Context()
 
-		require.NoError(t, p.Restore(ctx, bytes.NewReader(legacy(t))))
+		err := p.Restore(ctx, bytes.NewReader(legacy(t)))
+		require.NoError(t, err)
 
 		// The provider serves them as terminal jobs, which is what an operator reads after a restore
 		dead, err := p.GetTerminalJob(ctx, "01a09d00-0000-7000-8000-00000000dead")
@@ -132,7 +138,8 @@ func TestRestoreOfAPreRenameBackup(t *testing.T) {
 
 		// And a backup taken now writes them in the current shape, so the old naming does not survive the round trip
 		var buf bytes.Buffer
-		require.NoError(t, p.Backup(ctx, &buf))
+		err = p.Backup(ctx, &buf)
+		require.NoError(t, err)
 
 		got := comptesting.DecodeBackup(t, buf.Bytes())
 		recurring, ok := got.TerminalJobs["01a09d00-0000-7000-8000-00000000beef"]

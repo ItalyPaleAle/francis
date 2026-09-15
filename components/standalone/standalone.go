@@ -11,8 +11,11 @@
 package standalone
 
 import (
+	"database/sql"
 	"fmt"
 	"strings"
+
+	"github.com/italypaleale/francis/components"
 )
 
 // DefaultTablePrefix is the prefix added to the name of every table (and other schema object) when none is configured.
@@ -47,4 +50,31 @@ func applyTablePrefix(tablePrefix string, query string) string {
 	// The only value interpolated here is the statically-derived table prefix, so there's no risk of SQL injection
 	// #nosec G201
 	return fmt.Sprintf(query, args...)
+}
+
+// encodeWorkflowLabels serializes an actor state's workflow labels for the backing store, returning nil when there are none so the column stays NULL
+func encodeWorkflowLabels(labels *components.WorkflowLabels) any {
+	if labels == nil {
+		return nil
+	}
+
+	// The struct is three plain fields and the encoding never fails for them, so an error here would be a programming error rather than a runtime condition
+	enc, err := labels.JSON()
+	if err != nil || enc == "" {
+		return nil
+	}
+	return enc
+}
+
+// decodeWorkflowLabels reads an actor state's workflow labels back from the backing store, treating a NULL or unparseable column as none
+func decodeWorkflowLabels(raw sql.NullString) *components.WorkflowLabels {
+	if !raw.Valid || raw.String == "" {
+		return nil
+	}
+
+	labels, err := components.DecodeWorkflowLabels([]byte(raw.String))
+	if err != nil {
+		return nil
+	}
+	return labels
 }

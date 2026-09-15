@@ -769,30 +769,3 @@ func (s *StandaloneSQLiteBacked) persistActorStateChanges(ctx context.Context, t
 
 	return nil
 }
-
-// encodeWorkflowLabels serializes an actor state's workflow labels for the backing store, returning nil when there are none so the column stays NULL
-func encodeWorkflowLabels(labels *components.WorkflowLabels) any {
-	if labels == nil {
-		return nil
-	}
-
-	// The struct is three plain fields and the encoding never fails for them, so an error here would be a programming error rather than a runtime condition
-	enc, err := labels.JSON()
-	if err != nil || enc == "" {
-		return nil
-	}
-	return enc
-}
-
-// decodeWorkflowLabels reads an actor state's workflow labels back from the backing store, treating a NULL or unparseable column as none
-func decodeWorkflowLabels(raw sql.NullString) *components.WorkflowLabels {
-	if !raw.Valid || raw.String == "" {
-		return nil
-	}
-
-	labels, err := components.DecodeWorkflowLabels([]byte(raw.String))
-	if err != nil {
-		return nil
-	}
-	return labels
-}

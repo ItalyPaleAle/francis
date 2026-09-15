@@ -60,7 +60,8 @@ type JobInfo struct {
 	Attempts  int
 	LastError string
 	CreatedAt time.Time
-	// EndedAt is when the job reached its terminal status, and is zero for a live job
+	// EndedAt is when the job reached its terminal status
+	// It's zero for a live job
 	EndedAt time.Time
 }
 

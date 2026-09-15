@@ -201,7 +201,6 @@ func (p *Provider) CompleteJob(ctx context.Context, lease *ref.AlarmLease, req c
 	})
 }
 
-// endJobReq is the shared shape of the two ways a job ends, since completing and dead-lettering differ only in what they record
 type endJobReq struct {
 	status      components.JobStatus
 	reason      string

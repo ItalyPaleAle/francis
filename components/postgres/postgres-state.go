@@ -45,14 +45,14 @@ func (p *PostgresProvider) SetState(ctx context.Context, ref ref.ActorRef, data 
 		exp = &opts.TTL
 	}
 
-	var labels *string
+	var wfLabels *string
 	if opts.WorkflowLabels != nil {
-		labelsJSON, err := opts.WorkflowLabels.JSON()
+		j, err := opts.WorkflowLabels.JSON()
 		if err != nil {
 			return err
 		}
-		if labelsJSON != "" {
-			labels = &labelsJSON
+		if j != "" {
+			wfLabels = &j
 		}
 	}
 
@@ -70,7 +70,7 @@ func (p *PostgresProvider) SetState(ctx context.Context, ref ref.ActorRef, data 
 			actor_state_data = EXCLUDED.actor_state_data,
 			actor_state_expiration_time = EXCLUDED.actor_state_expiration_time,
 			workflow_labels = EXCLUDED.workflow_labels`,
-		ref.ActorType, ref.ActorID, data, exp, labels,
+		ref.ActorType, ref.ActorID, data, exp, wfLabels,
 	)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)

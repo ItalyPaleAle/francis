@@ -42,14 +42,14 @@ func (s *SQLiteProvider) SetState(ctx context.Context, ref ref.ActorRef, data []
 		exp = new(s.clock.Now().Add(opts.TTL).UnixMilli())
 	}
 
-	var labels *string
+	var wfLabels *string
 	if opts.WorkflowLabels != nil {
-		labelsJSON, jErr := opts.WorkflowLabels.JSON()
+		j, jErr := opts.WorkflowLabels.JSON()
 		if jErr != nil {
 			return jErr
 		}
-		if labelsJSON != "" {
-			labels = &labelsJSON
+		if j != "" {
+			wfLabels = &j
 		}
 	}
 
@@ -62,7 +62,7 @@ func (s *SQLiteProvider) SetState(ctx context.Context, ref ref.ActorRef, data []
 		`REPLACE INTO `+s.tablePrefix+`actor_state
 			(actor_type, actor_id, actor_state_data, actor_state_expiration_time, workflow_labels)
 		VALUES (?, ?, ?, ?, ?)`,
-		ref.ActorType, ref.ActorID, data, exp, labels,
+		ref.ActorType, ref.ActorID, data, exp, wfLabels,
 	)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)
@@ -86,21 +86,20 @@ func (s *SQLiteProvider) ListStates(ctx context.Context, req components.ListStat
 	limit := req.EffectiveLimit()
 
 	// Each requested label field is matched as the same json_extract expression its index was built on, which is required to use the index
-	var labelFields map[string]string
+	var wfLabelFields map[string]string
 	if req.WorkflowLabels != nil {
-		labelFields = req.WorkflowLabels.Fields()
+		wfLabelFields = req.WorkflowLabels.Fields()
 	}
 
-	// The size is known up front: the three fixed arguments, one per label field, and the limit
-	args := make([]any, 0, 4+len(labelFields))
+	args := make([]any, 0, 4+len(wfLabelFields))
 	args = append(args, req.ActorType, req.After, s.clock.Now().UnixMilli())
 
 	var labelClauses strings.Builder
-	if len(labelFields) > 0 {
+	if len(wfLabelFields) > 0 {
 		// json_extract needs well-formed JSON, so a row with no labels at all is excluded before it is reached
 		labelClauses.WriteString(` AND workflow_labels IS NOT NULL `)
 	}
-	for field, v := range labelFields {
+	for field, v := range wfLabelFields {
 		// #nosec G202 -- the only concatenated value is one of the closed set of label field names, not user input
 		fieldLabel := workflowLabelExtract(field)
 		labelClauses.Grow(10 + len(fieldLabel))

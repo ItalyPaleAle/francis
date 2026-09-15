@@ -13,7 +13,7 @@ type Host struct {
 	LastHealthCheck time.Time
 }
 
-// Clone creates a deep copy of the Host.
+// Clone creates a deep copy of the Host
 func (h *Host) Clone() *Host {
 	return &Host{
 		ID:              h.ID,
@@ -29,7 +29,7 @@ type HostActorType struct {
 	ConcurrencyLimit int32
 }
 
-// Clone creates a deep copy of the HostActorType.
+// Clone creates a deep copy of the HostActorType
 func (h *HostActorType) Clone() *HostActorType {
 	return &HostActorType{
 		HostID:           h.HostID,
@@ -59,7 +59,7 @@ type ActiveActor struct {
 	Activation  time.Time
 }
 
-// Clone creates a deep copy of the ActiveActor.
+// Clone creates a deep copy of the ActiveActor
 func (a *ActiveActor) Clone() *ActiveActor {
 	return &ActiveActor{
 		ActorType:   a.ActorType,
@@ -126,15 +126,12 @@ func (a *Alarm) EqualProperties(b AlarmProperties) bool {
 		((a.Data == nil && b.Data == nil) || (a.Data != nil && b.Data != nil && slices.Equal(a.Data, b.Data)))
 }
 
-// HasValidLease returns true if the alarm has a valid lease matching the given lease ID.
+// HasValidLease returns true if the alarm has a valid lease matching the given lease ID
 func (a *Alarm) HasValidLease(leaseID any, now time.Time) bool {
 	return a.LeaseID != nil && *a.LeaseID == leaseID && a.LeaseExpiration != nil && !a.LeaseExpiration.Before(now)
 }
 
-// CanFinalize reports whether an execution holding this lease may finalize the occurrence, by completing, dead-lettering, or deleting it.
-// A job handler that halts its own actor is the common case for a worker, and deactivating an actor drops the leases of its alarms so another host can pick them up.
-// For the occurrence being finalized right now that release must not undo the finalization, so a lease this execution owns and a lease that was released both count.
-// A lease that merely expired keeps its id, and one another replica took holds its own id, so neither is accepted here.
+// CanFinalize reports whether an execution holding this lease may finalize the occurrence, by completing, dead-lettering, or deleting it
 func (a *Alarm) CanFinalize(leaseID any, now time.Time) bool {
 	return a.HasValidLease(leaseID, now) || a.LeaseID == nil
 }
@@ -168,8 +165,8 @@ func (a *Alarm) Clone() *Alarm {
 	return clone
 }
 
-// TerminalJob is a job that ended, either by completing or by exhausting its retries.
-// Expiration is nil when the record is kept until something removes it.
+// TerminalJob is a job that ended, either by completing or by exhausting its retries
+// Expiration is nil when the record is kept until something removes it
 type TerminalJob struct {
 	JobID       string
 	ActorType   string
@@ -186,7 +183,7 @@ type TerminalJob struct {
 	Expiration  *time.Time
 }
 
-// HasExpired reports whether the record's retention has elapsed, so it reads as gone even before the collector removes it.
+// HasExpired reports whether the record's retention has elapsed, so it reads as gone even before the collector removes it
 func (d *TerminalJob) HasExpired(now time.Time) bool {
 	return d.Expiration != nil && d.Expiration.Before(now)
 }

@@ -124,7 +124,6 @@ func (p *PostgresProvider) CompleteJob(ctx context.Context, lease *ref.AlarmLeas
 	})
 }
 
-// endJobReq is the shared shape of the two ways a job ends, since completing and dead-lettering differ only in what they record
 type endJobReq struct {
 	status      components.JobStatus
 	reason      string
@@ -151,8 +150,6 @@ func (p *PostgresProvider) endJob(ctx context.Context, lease *ref.AlarmLease, re
 	}
 
 	// Only a dead job keeps its input, since that is what a replay needs and a completed one is never replayed
-	// A wide fan-out's retained records stay small this way, since the payload dwarfs the metadata around it
-	//
 	// A dead-lettered job records the error that ended it, while a completed one has none
 	var reason *string
 	if req.reason != "" {
@@ -164,15 +161,16 @@ func (p *PostgresProvider) endJob(ctx context.Context, lease *ref.AlarmLease, re
 	// A missing or invalid lease deletes nothing, so the insert affects no rows and we report it as not found
 	// The insert is an upsert because a repeating job's occurrence can end twice under the same ID
 	if !req.reschedule {
+		// Notes on the query:
+		// A job handler that halts its own actor is the common case for a worker, and deactivating an actor drops the leases of its alarms so another host can pick them up
+		// For the occurrence being finalized right now that release must not undo the finalization, so a lease this execution owns and a lease that was released both count
+		// A lease that merely expired keeps its id, and one another replica took holds its own id, so neither is matched here
 		// #nosec G202 -- the only concatenated values are static table prefixes, not user input
-		res, execErr := p.db.Exec(queryCtx, `
+		res, err := p.db.Exec(queryCtx, `
 			WITH deleted AS (
 				DELETE FROM `+p.tablePrefix+`alarms
 				WHERE
 					alarm_id = $1
-			-- A job handler that halts its own actor is the common case for a worker, and deactivating an actor drops the leases of its alarms so another host can pick them up
-			-- For the occurrence being finalized right now that release must not undo the finalization, so a lease this execution owns and a lease that was released both count
-			-- A lease that merely expired keeps its id, and one another replica took holds its own id, so neither is matched here
 					AND (
 						(
 							alarm_lease_id = $2
@@ -201,8 +199,8 @@ func (p *PostgresProvider) endJob(ctx context.Context, lease *ref.AlarmLease, re
 				expiration_time = EXCLUDED.expiration_time`,
 			jobID, lease.LeaseID(), string(req.status), req.attempts, reason, retention,
 		)
-		if execErr != nil {
-			return fmt.Errorf("error ending job: %w", execErr)
+		if err != nil {
+			return fmt.Errorf("error ending job: %w", err)
 		}
 		if res.RowsAffected() == 0 {
 			return components.ErrNoAlarm
@@ -234,16 +232,18 @@ func (p *PostgresProvider) endJob(ctx context.Context, lease *ref.AlarmLease, re
 		interval, cron                *string
 		ttl                           *time.Time
 	)
+
 	// #nosec G202 -- the only concatenated values are static table prefixes, not user input
 	err = tx.
+		// Notes on the query:
+		// A job handler that halts its own actor is the common case for a worker, and deactivating an actor drops the leases of its alarms so another host can pick them up
+		// For the occurrence being finalized right now that release must not undo the finalization, so a lease this execution owns and a lease that was released both count
+		// A lease that merely expired keeps its id, and one another replica took holds its own id, so neither is matched here
 		QueryRow(queryCtx, `
 			WITH deleted AS (
 				DELETE FROM `+p.tablePrefix+`alarms
 				WHERE
 					alarm_id = $1
-			-- A job handler that halts its own actor is the common case for a worker, and deactivating an actor drops the leases of its alarms so another host can pick them up
-			-- For the occurrence being finalized right now that release must not undo the finalization, so a lease this execution owns and a lease that was released both count
-			-- A lease that merely expired keeps its id, and one another replica took holds its own id, so neither is matched here
 					AND (
 						(
 							alarm_lease_id = $2
@@ -421,8 +421,8 @@ func (p *PostgresProvider) ListJobs(ctx context.Context, actorType string, actor
 		FROM `+p.tablePrefix+`alarms
 		WHERE actor_type = $1 AND actor_id = $2 AND alarm_kind = 'job'
 		UNION ALL
-		SELECT job_id, job_method, original_due, job_interval, job_cron,
-			job_status, attempts, last_error, ended_at
+		SELECT
+			job_id, job_method, original_due, job_interval, job_cron, job_status, attempts, last_error, ended_at
 		FROM `+p.tablePrefix+`terminal_jobs
 		WHERE actor_type = $1 AND actor_id = $2 AND (expiration_time IS NULL OR expiration_time > (now() AT TIME ZONE 'utc'))`,
 		actorType, actorID,

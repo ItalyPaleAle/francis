@@ -351,7 +351,9 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		// Handing the lease back has the next poll re-resolve and re-activate, which costs one poll interval instead of a full retry backoff and does not spend an attempt
 		// A workflow instance halts its activation the moment it terminates, so a job that arrives for it in that window (a parent unwinding a completed child, say) takes this path
 		switch {
-		case errors.Is(err, actor.ErrActorHalted), errors.Is(err, actor.ErrActorNotActive), errors.Is(err, actor.ErrActorNotHosted):
+		case errors.Is(err, actor.ErrActorHalted),
+			errors.Is(err, actor.ErrActorNotActive),
+			errors.Is(err, actor.ErrActorNotHosted):
 			status = executeAlarmStatusReleased
 		default:
 			status = executeAlarmStatusRetryable
@@ -622,7 +624,8 @@ func (h *Host) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, l
 		log.Error("Failed to compute next execution time for alarm; alarm will be kept", slog.Any("error", err))
 		return false, nil
 	}
-	// A job whose actor type asked for retention leaves a record behind rather than vanishing, so a successful run is visible afterwards
+
+	// A job whose actor type asked for retention leaves a record behind, so a successful run is visible afterwards
 	retention := time.Duration(0)
 	if alarm.Kind == components.AlarmKindJob {
 		retention = h.jobRetention(lease.ActorRef().ActorType)

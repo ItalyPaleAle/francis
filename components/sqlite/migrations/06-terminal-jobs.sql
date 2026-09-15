@@ -30,6 +30,7 @@ CREATE TABLE %sterminal_jobs (
     expiration_time integer
 ) WITHOUT ROWID, STRICT;
 
+-- Copy the data
 -- Every row that existed before this migration was dead-lettered
 INSERT INTO %sterminal_jobs
     (job_id, actor_type, actor_id, job_method, job_data, job_status, attempts, last_error, ended_at, original_due, job_interval, job_cron, expiration_time)

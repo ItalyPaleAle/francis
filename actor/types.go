@@ -46,19 +46,18 @@ type SetStateOpts struct {
 	// Optional TTL for the state
 	TTL time.Duration
 
-	// workflowLabels are the workflow engine's indexed labels for this write
-	// They are not part of the public surface: the set is closed, each field is indexed by a provider migration, and only Francis' own workflow engine writes them, through SetWorkflowLabels
+	// Labels for the workflow engine
+	// These are not part of the public API contract
 	workflowLabels *components.WorkflowLabels
 }
 
 // SetWorkflowLabels attaches the workflow engine's labels to this write, replacing whatever the row had.
-// It is reserved for Francis' own built-in actors: the key argument is a type no code outside this module can name, let alone construct.
+// It is reserved for Francis' own built-in actors (the key argument is a private type)
 func (o *SetStateOpts) SetWorkflowLabels(_ builtinkey.Key, labels components.WorkflowLabels) {
 	o.workflowLabels = &labels
 }
 
 // WorkflowLabels returns the labels attached with SetWorkflowLabels, or nil when none were.
-// Reading them is open to anyone, since it reveals nothing a listing does not already.
 func (o *SetStateOpts) WorkflowLabels() *components.WorkflowLabels {
 	if o == nil {
 		return nil
@@ -77,12 +76,12 @@ type ListStatesOpts struct {
 	Limit int
 
 	// workflowLabels restricts the listing to rows whose workflow labels match every field it sets
-	// As with SetStateOpts, this is not part of the public surface: only Francis' own workflow engine filters on them, through SetWorkflowLabels
+	// As with SetStateOpts, this is not part of the public surface
 	workflowLabels *components.WorkflowLabels
 }
 
 // SetWorkflowLabels restricts the listing to rows whose workflow labels match every field of labels that is set.
-// It is reserved for Francis' own built-in actors, for the reason given on SetStateOpts.SetWorkflowLabels.
+// It is reserved for Francis' own built-in actors.
 func (o *ListStatesOpts) SetWorkflowLabels(_ builtinkey.Key, labels components.WorkflowLabels) {
 	o.workflowLabels = &labels
 }

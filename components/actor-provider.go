@@ -78,17 +78,15 @@ type ActorProvider interface {
 	// When req carries an alarm name (an idempotency key), a job with the same (actor_type, actor_id, name) is kept and its existing job ID is returned, so re-dispatching with the same key is idempotent (first-write-wins)
 	DispatchJob(ctx context.Context, ref ref.AlarmRef, req SetAlarmReq) (jobID string, lease *ref.AlarmLease, err error)
 
-	// DeadLetterAlarm atomically moves a leased job from the alarms table to the terminal-job store, recording it as dead-lettered.
+	// DeadLetterAlarm moves a leased job from the alarms table to the terminal-job store, recording it as dead-lettered.
 	// It accepts a lease the job's own actor released by deactivating, for the reason given on DeleteLeasedAlarm.
 	// When req.Reschedule is set, the recurrence is re-created for its next occurrence in the same transaction, so a repeating job survives the dead-lettering of one occurrence.
-	// The recurrence keeps the job ID and the dead-lettered occurrence is recorded under one of its own, because a job ID identifies a schedule for as long as it exists.
 	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
 	DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLease, req DeadLetterAlarmReq) error
 
-	// CompleteJob atomically moves a leased job from the alarms table to the terminal-job store, recording it as completed.
+	// CompleteJob moves a leased job from the alarms table to the terminal-job store, recording it as completed.
 	// It accepts a lease the job's own actor released by deactivating, for the reason given on DeleteLeasedAlarm.
-	// It is the successful counterpart of DeadLetterAlarm, and is only called for a job whose actor type asked for its completed occurrences to be retained; otherwise the occurrence is simply deleted.
-	// When req.Reschedule is set, the recurrence is re-created for its next occurrence in the same transaction, so a repeating job keeps running while each occurrence leaves a record.
+	// When req.Reschedule is set, the recurrence is re-created for its next occurrence atomically, so a repeating job keeps running while each occurrence leaves a record.
 	// The recurrence keeps the job ID and the completed occurrence is recorded under one of its own, because a job ID identifies a schedule for as long as it exists.
 	// Returns ErrNoAlarm if the alarm doesn't exist or the lease is not valid.
 	CompleteJob(ctx context.Context, lease *ref.AlarmLease, req CompleteJobReq) error
@@ -101,7 +99,6 @@ type ActorProvider interface {
 	ListJobs(ctx context.Context, actorType string, actorID string) ([]JobInfo, error)
 
 	// DeleteJob removes one of an actor's jobs by its ID, whatever state it is in: live (scheduled or leased) or terminal (completed or dead-lettered).
-	// The removal is scoped to the actor, so a caller holding a job ID can only remove it from the actor it belongs to.
 	// Returns ErrNoJob if that actor has no job with that ID.
 	DeleteJob(ctx context.Context, actorType string, actorID string, jobID string) error
 
@@ -134,7 +131,8 @@ type ActorProvider interface {
 	UpdateLeasedAlarm(ctx context.Context, lease *ref.AlarmLease, req UpdateLeasedAlarmReq) error
 
 	// DeleteLeasedAlarm deletes an alarm using an alarm lease object, finalizing the occurrence the lease's holder just executed.
-	// A lease whose actor released it by deactivating is accepted, because an actor that halts itself from its own handler drops the leases of its own alarms, and the occurrence being finalized must not be left behind to be delivered again. Replacing an alarm by name mints a new alarm ID, so a lease can never name a row its holder did not execute.
+	// A lease whose actor released it by deactivating is accepted, because an actor that halts itself from its own handler drops the leases of its own alarms, and the occurrence being finalized must not be left behind to be delivered again.
+	// Replacing an alarm by name mints a new alarm ID, so a lease can never name a row its holder did not execute.
 	// Returns ErrNoAlarm if the alarm doesn't exist, or the lease expired or belongs to someone else.
 	DeleteLeasedAlarm(ctx context.Context, lease *ref.AlarmLease) error
 
@@ -387,37 +385,33 @@ func (r ListStatesReq) EffectiveLimit() int {
 	}
 }
 
-// Names of the workflow label fields, as they are stored in the JSON object and as the indexes created by the providers' migrations extract them.
-// A provider that matches a label per field, rather than matching the whole object at once, must use these names so its query lines up with its indexes.
+// Names of the workflow label fields, as they are stored in the JSON object and as the indexes created by the providers' migrations extract them
 const (
 	WorkflowLabelStatus  = "status"
 	WorkflowLabelVersion = "version"
 	WorkflowLabelParent  = "parent"
 )
 
-// WorkflowLabels is the small, fixed set of fields the workflow engine stores alongside an instance's journal so that instances can be listed without reading every journal.
-// It is deliberately not a general-purpose facility: the set is closed, each field is indexed by a migration, and only Francis' own workflow engine writes it.
-// As a filter on ListStates, a field left at its zero value is not matched on, so the zero value matches every row that has labels at all.
-//
-// Every field is stored as a JSON string, Version included, because labels are only ever compared for equality: nothing asks a range question of them.
-// That keeps the two SQL providers symmetric, since SQLite's json_extract and Postgres' ->> then both yield text, which is what their indexes are built on and what Fields binds against.
-// A JSON number would compare unequal to that bound text on SQLite, silently matching nothing.
+// WorkflowLabels is the fixed set of fields the workflow engine stores alongside an instance's journal so that instances can be listed without reading every journal
+// This list is fixed and not meant for general purpose labeling (editing fields requires updating migrations that include indexes)
+// As a filter on ListStates, a field left at its zero value is not matched on, so the zero value matches every row that has labels at all
 type WorkflowLabels struct {
 	// Status is the instance's status
 	Status string `json:"status,omitempty"`
 	// Version is the version of the definition the instance is running, which is always positive for a stored instance
+	// Note this is stored as string
 	Version int `json:"version,string,omitempty"`
 	// Parent is the instance ID of the parent instance, empty for a top-level instance
 	Parent string `json:"parent,omitempty"`
 }
 
-// IsZero reports whether no field is set.
+// IsZero reports whether no field is set
 func (l WorkflowLabels) IsZero() bool {
 	return l.Status == "" && l.Version == 0 && l.Parent == ""
 }
 
-// JSON encodes the labels as the JSON object a provider stores in the row's label column.
-// It returns an empty string when no field is set, so the column is left NULL rather than holding an empty object.
+// JSON encodes the labels as the JSON object a provider stores in the row's label column
+// It returns an empty string when no field is set
 func (l WorkflowLabels) JSON() (string, error) {
 	if l.IsZero() {
 		return "", nil
@@ -427,11 +421,12 @@ func (l WorkflowLabels) JSON() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to encode the workflow labels: %w", err)
 	}
+
 	return string(res), nil
 }
 
-// Fields returns the label fields that are set, keyed by the names above, with every value rendered as the string the stored JSON holds.
-// A provider that filters per field iterates this rather than reaching for the struct fields one at a time.
+// Fields returns the label fields that are set, keyed by the names above, with every value rendered as the string the stored JSON holds
+// A provider that filters per field iterates this rather than reaching for the struct fields one at a time
 func (l WorkflowLabels) Fields() map[string]string {
 	res := make(map[string]string, 3)
 	if l.Status != "" {
@@ -490,7 +485,7 @@ const (
 	JobStatusDeadLettered JobStatus = "dead"
 )
 
-// IsTerminal reports whether the status is one a job ends in, and therefore one held in the terminal-job store rather than among the live jobs.
+// IsTerminal reports whether the status is one a job ends in, and therefore one held in the terminal-job store rather than among the live jobs
 func (s JobStatus) IsTerminal() bool {
 	return s == JobStatusCompleted || s == JobStatusDeadLettered
 }

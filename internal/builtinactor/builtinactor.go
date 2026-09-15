@@ -65,13 +65,15 @@ const DefaultJobRetention = 24 * time.Hour
 
 // RegistrationsFor returns the actor-type registrations a host must create for a built-in actor
 // It returns every type from a MultiBuiltInActor, or the single type of a plain BuiltInActor, so hosts have one code path for both
-// A registration that names no job retention is given the built-in default, so every built-in is observable without each having to remember to ask
 func RegistrationsFor(b BuiltInActor) []BuiltInActorRegistration {
 	multi, ok := b.(MultiBuiltInActor)
 	if ok {
 		regs := multi.Registrations()
 		for i := range regs {
-			applyJobRetentionDefault(&regs[i].RegisterOptions)
+			if regs[i].RegisterOptions.JobRetention == 0 {
+				// Enforce the default job retention if unset
+				regs[i].RegisterOptions.JobRetention = DefaultJobRetention
+			}
 		}
 		return regs
 	}
@@ -82,15 +84,11 @@ func RegistrationsFor(b BuiltInActor) []BuiltInActorRegistration {
 		RegisterOptions: b.RegisterOptions(),
 		Singleton:       b.Singleton(),
 	}
-	applyJobRetentionDefault(&reg.RegisterOptions)
-	return []BuiltInActorRegistration{reg}
-}
-
-// applyJobRetentionDefault fills in the built-in job retention for a registration that named none
-func applyJobRetentionDefault(opts *actorcore.RegisterActorOptions) {
-	if opts.JobRetention == 0 {
-		opts.JobRetention = DefaultJobRetention
+	if reg.RegisterOptions.JobRetention == 0 {
+		// Enforce the default job retention if unset
+		reg.RegisterOptions.JobRetention = DefaultJobRetention
 	}
+	return []BuiltInActorRegistration{reg}
 }
 
 // FullActorType returns the reserved actor type a built-in actor is registered under, by prefixing its bare type
@@ -123,7 +121,7 @@ func InvokeActor(ctx context.Context, svc *actor.Service, bareActorType string, 
 
 // Peek performs a read-only invocation of a specific instance of a built-in actor through the privileged client, returning the response envelope
 // It is the read-side counterpart of InvokeActor: concurrent peeks of the same actor run at the same time, and only ever queue behind a write turn
-// bareActorType is the actor's bare type (without the reserved prefix), and payload is optional: pass nil when the method carries no request data
+// bareActorType is the actor's bare type, without the reserved prefix
 func Peek(ctx context.Context, svc *actor.Service, bareActorType string, actorID string, method string, payload any) (actor.Envelope, error) {
 	fullType := FullActorType(bareActorType)
 	client := actor.NewBuiltInActorClient[any](builtinkey.Key{}, fullType, actorID, svc)

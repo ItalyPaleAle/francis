@@ -172,7 +172,6 @@ func (s *SQLiteProvider) CompleteJob(ctx context.Context, lease *ref.AlarmLease,
 	})
 }
 
-// endJobReq is the shared shape of the two ways a job ends, since completing and dead-lettering differ only in what they record
 type endJobReq struct {
 	status      components.JobStatus
 	reason      string
@@ -210,13 +209,14 @@ func (s *SQLiteProvider) endJob(ctx context.Context, lease *ref.AlarmLease, req 
 		)
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		txErr := tx.
+			// Notes on the query:
+			// A job handler that halts its own actor is the common case for a worker, and deactivating an actor drops the leases of its alarms so another host can pick them up
+			// For the occurrence being finalized right now that release must not undo the finalization, so a lease this execution owns and a lease that was released both count
+			// A lease that merely expired keeps its id, and one another replica took holds its own id, so neither is matched here
 			QueryRowContext(ctx, `
 				DELETE FROM `+s.tablePrefix+`alarms
 				WHERE
 					alarm_id = ?
-			-- A job handler that halts its own actor is the common case for a worker, and deactivating an actor drops the leases of its alarms so another host can pick them up
-			-- For the occurrence being finalized right now that release must not undo the finalization, so a lease this execution owns and a lease that was released both count
-			-- A lease that merely expired keeps its id, and one another replica took holds its own id, so neither is matched here
 					AND (
 						(
 							alarm_lease_id = ?
@@ -403,8 +403,8 @@ func (s *SQLiteProvider) ListJobs(ctx context.Context, actorType string, actorID
 		FROM `+s.tablePrefix+`alarms
 		WHERE actor_type = ? AND actor_id = ? AND alarm_kind = 'job'
 		UNION ALL
-		SELECT job_id, job_method, original_due, job_interval, job_cron,
-			job_status, attempts, last_error, ended_at
+		SELECT
+			job_id, job_method, original_due, job_interval, job_cron, job_status, attempts, last_error, ended_at
 		FROM `+s.tablePrefix+`terminal_jobs
 		WHERE actor_type = ? AND actor_id = ? AND (expiration_time IS NULL OR expiration_time > ?)`,
 		now, actorType, actorID, actorType, actorID, now,
