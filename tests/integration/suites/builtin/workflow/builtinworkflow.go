@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -50,8 +51,9 @@ const (
 	// fanOutAttempts is how many instances the distribution assertion will run before giving up on observing the overlap
 	fanOutAttempts = 3
 	// sweepRetention is how long the sweeper workflow keeps a terminated instance, which the purge test then waits out
-	// A terminated journal is written with a TTL of twice its retention, so the window in which the test can still read an instance is twice this, and the wait below has to leave room inside it
-	sweepRetention = 5 * time.Second
+	// A terminated journal is written with a TTL of twice its retention, so an instance is sweepable between one and two retentions after it completes
+	// The value is what decides how far apart two instances may complete and still share that window, which on a loaded cluster is the whole difficulty
+	sweepRetention = 10 * time.Second
 )
 
 // matrix runs the scenario across representative topology and provider combinations
@@ -673,32 +675,43 @@ func (s *builtinWorkflow) Run(t *testing.T) {
 	t.Run("purges terminated instances", func(t *testing.T) {
 		sweepSvc := s.sweeper.Service(s.cluster.Service(0))
 
-		// Both instances are started before either is awaited, so the first one's journal spends as little of its retention as possible waiting on the second
+		// Both instances are started before either is awaited, so neither spends its retention waiting on the other
 		ids := []string{"sweep-1", "sweep-2"}
 		for _, id := range ids {
 			_, _, err := sweepSvc.Start(ctx, nil, workflow.WithInstanceID(id))
 			require.NoError(t, err)
 		}
+
+		completedAt := make([]time.Time, 0, len(ids))
 		for _, id := range ids {
-			s.awaitStatus(t, sweepSvc, id, workflow.StatusCompleted)
+			status := s.awaitStatus(t, sweepSvc, id, workflow.StatusCompleted)
+			require.False(t, status.CompletedAt.IsZero(), "a completed instance records when it completed")
+			completedAt = append(completedAt, status.CompletedAt)
 		}
+		slices.SortFunc(completedAt, func(a time.Time, b time.Time) int { return a.Compare(b) })
 
-		// Both instances are past their retention by now, and still well inside the TTL that keeps their journals readable
-		time.Sleep(sweepRetention + 500*time.Millisecond)
+		// An instance is sweepable from one retention after it completes until its journal's own TTL removes it at two
+		// Sweeping once inside each instance's own window means the two never have to have completed close together, which on a loaded cluster they may not have
+		// Whichever sweep catches which instance then depends on the spread, so what is asserted is the total they removed between them
+		removed := 0
+		for _, at := range completedAt {
+			time.Sleep(time.Until(at.Add(sweepRetention + 500*time.Millisecond)))
 
-		removed, err := sweepSvc.PurgeTerminated(ctx)
-		require.NoError(t, err)
-		assert.Equal(t, len(ids), removed, "the sweep should remove every terminated instance past its retention")
+			n, err := sweepSvc.PurgeTerminated(ctx)
+			require.NoError(t, err)
+			removed += n
+		}
+		assert.Equal(t, len(ids), removed, "the sweeps should remove every terminated instance past its retention")
 
 		for _, id := range ids {
-			_, err = sweepSvc.GetStatus(ctx, id)
+			_, err := sweepSvc.GetStatus(ctx, id)
 			require.ErrorIs(t, err, workflow.ErrInstanceNotFound, "instance %s should be gone", id)
 		}
 
 		// Sweeping again finds nothing left, so it is safe to run on a schedule
-		removed, err = sweepSvc.PurgeTerminated(ctx)
+		n, err := sweepSvc.PurgeTerminated(ctx)
 		require.NoError(t, err)
-		assert.Zero(t, removed)
+		assert.Zero(t, n)
 	})
 
 	// Clients cannot target a built-in actor through the public Service, on any host
