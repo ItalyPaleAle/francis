@@ -11,6 +11,9 @@ const (
 	defaultActorDeactivationTimeout = 5 * time.Second
 	defaultAlarmMaxAttempts         = 3
 	defaultAlarmInitialRetryDelay   = 2 * time.Second
+	// defaultDeadLetteredJobRetention is how long a dead-lettered job's record is kept when the actor type does not say
+	// A failure is worth keeping long enough for someone to notice it and replay it, and long enough that a weekly process catches it, without growing without bound
+	defaultDeadLetteredJobRetention = 30 * 24 * time.Hour
 )
 
 // LockMode selects how the framework serializes the invocations of an actor type
@@ -54,10 +57,14 @@ type RegisterActorOptions struct {
 	// Initial retry delay after failed invocation attempts
 	// Defaults to 2s
 	InitialRetryDelay time.Duration
-	// JobRetention is how long a job dispatched to this actor type keeps a record after it ends
-	// When set, a job that completes or is dead-lettered leaves a record that ListJobs and GetJob report until the retention elapses
-	// Defaults to 0, which keeps no record of a completed job
-	JobRetention time.Duration
+	// CompletedJobRetention is how long a job dispatched to this actor type keeps a record after it completes successfully
+	// When set, a completed job leaves a record that ListJobs and GetJob report until the retention elapses
+	// Defaults to 0, which keeps no record of a completed job, and a negative value keeps one that never expires
+	CompletedJobRetention time.Duration
+	// DeadLetteredJobRetention is how long a job dispatched to this actor type keeps its record after it is dead-lettered
+	// A dead-lettered job is always recorded, so this only decides for how long
+	// Defaults to 30 days, and a negative value keeps the record until something removes it
+	DeadLetteredJobRetention time.Duration
 	// CapacityGroup, when set, places this actor type into a named host-local capacity group
 	// Every actor type registered on this host with the same group name shares a single strict concurrency budget, enforced in-process when their jobs execute
 	// It is the exact per-host guarantee that complements the best-effort, cluster-wide ConcurrencyLimit placement hint
@@ -107,11 +114,19 @@ func WithMaxAttempts(n int) RegisterActorOption {
 	}
 }
 
-// WithJobRetention sets how long a job dispatched to this actor type keeps a record after it ends
-// A completed job leaves no record at all unless this is set
-func WithJobRetention(d time.Duration) RegisterActorOption {
+// WithCompletedJobRetention sets how long a job dispatched to this actor type keeps a record after it completes successfully
+// A completed job leaves no record at all unless this is set, and a negative duration keeps one that never expires
+func WithCompletedJobRetention(d time.Duration) RegisterActorOption {
 	return func(o *RegisterActorOptions) {
-		o.JobRetention = d
+		o.CompletedJobRetention = d
+	}
+}
+
+// WithDeadLetteredJobRetention sets how long a job dispatched to this actor type keeps its record after it is dead-lettered
+// A dead-lettered job is always recorded, so this only decides for how long: it defaults to 30 days, and a negative duration keeps the record until something removes it
+func WithDeadLetteredJobRetention(d time.Duration) RegisterActorOption {
+	return func(o *RegisterActorOptions) {
+		o.DeadLetteredJobRetention = d
 	}
 }
 
@@ -168,6 +183,20 @@ func (o *RegisterActorOptions) Validate() error {
 
 	if o.InitialRetryDelay <= 0 {
 		o.InitialRetryDelay = defaultAlarmInitialRetryDelay
+	}
+
+	// A dead-lettered job is always recorded, so an unset retention takes the default rather than meaning "keep nothing"
+	// A negative value is the way to ask for a record that never expires, and is normalized so every negative spelling behaves the same
+	switch {
+	case o.DeadLetteredJobRetention == 0:
+		o.DeadLetteredJobRetention = defaultDeadLetteredJobRetention
+	case o.DeadLetteredJobRetention < 0:
+		o.DeadLetteredJobRetention = -1
+	}
+
+	// A completed job is recorded only when asked for, so zero stays zero, and a negative value is normalized the same way
+	if o.CompletedJobRetention < 0 {
+		o.CompletedJobRetention = -1
 	}
 
 	// A capacity group is meaningless without a positive limit to enforce

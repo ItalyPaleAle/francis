@@ -495,7 +495,7 @@ func (h *Host) deadLetterJob(ctx context.Context, lease *ref.AlarmLease, props r
 	req := components.DeadLetterAlarmReq{
 		Reason:    jobErr.Error(),
 		Attempts:  lease.Attempts(),
-		Retention: h.core.ActorsConfig[lease.ActorRef().ActorType].JobRetention,
+		Retention: h.core.ActorsConfig[lease.ActorRef().ActorType].DeadLetteredJobRecordRetention(),
 	}
 
 	// Keep a repeating job's recurrence alive by rescheduling its next occurrence as part of the dead-letter move
@@ -625,17 +625,20 @@ func (h *Host) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, l
 		return false, nil
 	}
 
-	// A job whose actor type asked for retention leaves a record behind, so a successful run is visible afterwards
-	retention := time.Duration(0)
+	// A job whose actor type asked to keep its successes leaves a record behind, so a successful run is visible afterwards
+	var (
+		record    bool
+		retention time.Duration
+	)
 	if alarm.Kind == components.AlarmKindJob {
-		retention = h.core.ActorsConfig[lease.ActorRef().ActorType].JobRetention
+		record, retention = h.core.ActorsConfig[lease.ActorRef().ActorType].CompletedJobRecord()
 	}
 
 	if next.IsZero() {
 		ctx, cancel = context.WithTimeout(parentCtx, h.providerRequestTimeout)
 		defer cancel()
 
-		if retention > 0 {
+		if record {
 			log.Debug("Recording completed job")
 			err = h.actorProvider.CompleteJob(ctx, lease, components.CompleteJobReq{
 				Attempts:  lease.Attempts() + 1,
@@ -663,7 +666,7 @@ func (h *Host) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, l
 
 	// A repeating job that is retained records this occurrence and re-creates the recurrence in one transaction, rather than updating the row in place
 	// That costs the lease it might otherwise have kept for a near occurrence, which the next poll picks up instead
-	if retention > 0 {
+	if record {
 		log.Debug("Recording completed job occurrence and rescheduling", slog.Any("due", next))
 		ctx, cancel = context.WithTimeout(parentCtx, h.providerRequestTimeout)
 		defer cancel()

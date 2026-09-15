@@ -96,7 +96,7 @@ func (s *jobs) Setup(t *testing.T) []framework.Option {
 					actorcore.WithIdleTimeout(time.Minute),
 					actorcore.WithMaxAttempts(maxAttempts),
 					actorcore.WithInitialRetryDelay(initialRetryDelay),
-					actorcore.WithJobRetention(jobRetention),
+					actorcore.WithCompletedJobRetention(jobRetention),
 				},
 			},
 		},

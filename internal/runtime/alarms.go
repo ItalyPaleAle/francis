@@ -375,8 +375,11 @@ type jobExecInfo struct {
 	method string
 	data   []byte
 	props  ref.AlarmProperties
-	// retention is how long the actor type asked for the job's record to be kept once it ends, and is zero when it asked for none
-	retention time.Duration
+	// recordCompleted says the actor type asked for a record of a successful run, and completedRetention is how long that record is kept, where zero never expires
+	recordCompleted    bool
+	completedRetention time.Duration
+	// deadLetteredRetention is how long a dead-lettered record of this type is kept, where zero never expires
+	deadLetteredRetention time.Duration
 }
 
 // dispatchAlarm resolves the owning host, rechecks the lease, sends ExecuteAlarm, and classifies the response
@@ -425,10 +428,16 @@ func (rt *Runtime) dispatchAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 		jobInfo.data = alarm.Data
 		jobInfo.props = alarm.AlarmProperties
 
-		// The retention is a property of the actor type, read from the host that serves it, exactly as the retry budget is
+		// The retentions are a property of the actor type, read from the host that serves it, exactly as the retry budget is
+		// The two are independent: a type can keep its failures without keeping its successes, which is the common case
 		at, hasConfig := conn.actorTypeConfig(aRef.ActorType)
-		if hasConfig && at.JobRetentionMs > 0 {
-			jobInfo.retention = time.Duration(at.JobRetentionMs) * time.Millisecond
+		if hasConfig {
+			cfg := components.ActorHostType{
+				CompletedJobRetention:    time.Duration(at.CompletedJobRetentionMs) * time.Millisecond,
+				DeadLetteredJobRetention: time.Duration(at.DeadLetteredJobRetentionMs) * time.Millisecond,
+			}
+			jobInfo.recordCompleted, jobInfo.completedRetention = cfg.CompletedJobRecord()
+			jobInfo.deadLetteredRetention = cfg.DeadLetteredJobRecordRetention()
 		}
 	}
 
@@ -503,7 +512,7 @@ func (rt *Runtime) deadLetterJob(parentCtx context.Context, lease *ref.AlarmLeas
 	req := components.DeadLetterAlarmReq{
 		Reason:    jobErr.Error(),
 		Attempts:  lease.Attempts(),
-		Retention: info.retention,
+		Retention: info.deadLetteredRetention,
 	}
 
 	// Keep a repeating job's recurrence alive by rescheduling its next occurrence as part of the dead-letter move
@@ -652,11 +661,11 @@ func (rt *Runtime) completeAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 		defer cancel()
 
 		// A retained job moves to the terminal-job store rather than being deleted, so the run it just made is still visible afterwards
-		if jobInfo.isJob && jobInfo.retention > 0 {
+		if jobInfo.isJob && jobInfo.recordCompleted {
 			log.Debug("Recording completed job")
 			err = rt.provider.CompleteJob(ctx, lease, components.CompleteJobReq{
 				Attempts:  lease.Attempts() + 1,
-				Retention: jobInfo.retention,
+				Retention: jobInfo.completedRetention,
 			})
 			if err != nil && !errors.Is(err, components.ErrNoAlarm) {
 				return false, fmt.Errorf("error recording completed job in provider: %w", err)
@@ -673,13 +682,13 @@ func (rt *Runtime) completeAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 	}
 
 	// A repeating job that is retained records this occurrence and re-creates the recurrence in one transaction, rather than updating the row in place
-	if jobInfo.isJob && jobInfo.retention > 0 {
+	if jobInfo.isJob && jobInfo.recordCompleted {
 		log.Debug("Recording completed job occurrence and rescheduling", slog.Any("due", next))
 		ctx, cancel = context.WithTimeout(parentCtx, rt.providerRequestTimeout)
 		defer cancel()
 		err = rt.provider.CompleteJob(ctx, lease, components.CompleteJobReq{
 			Attempts:    lease.Attempts() + 1,
-			Retention:   jobInfo.retention,
+			Retention:   jobInfo.completedRetention,
 			Reschedule:  true,
 			NextDueTime: next,
 		})

@@ -287,7 +287,7 @@ func TestCompleteAlarmRetainsAJobWhoseTypeAsksForIt(t *testing.T) {
 	}
 	lease.SetExecutionTime(time.Now())
 
-	reEnqueue, err := rt.completeAlarm(t.Context(), lease, jobExecInfo{isJob: true, method: "Process", retention: time.Hour}, slog.New(slog.DiscardHandler))
+	reEnqueue, err := rt.completeAlarm(t.Context(), lease, jobExecInfo{isJob: true, method: "Process", recordCompleted: true, completedRetention: time.Hour}, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	assert.False(t, reEnqueue)
 

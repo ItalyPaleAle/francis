@@ -26,7 +26,7 @@ func TestNew(t *testing.T) {
 		assert.Equal(t, cronJobActorTypePrefix+"nightly", b.ActorType())
 		assert.NotNil(t, b.Factory())
 		assert.Equal(t, cronJobIdleTimeout, b.RegisterOptions().IdleTimeout)
-		assert.Equal(t, 7*24*time.Hour, b.RegisterOptions().JobRetention)
+		assert.Equal(t, 7*24*time.Hour, b.RegisterOptions().CompletedJobRetention)
 	})
 
 	t.Run("valid period", func(t *testing.T) {

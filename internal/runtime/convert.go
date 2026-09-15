@@ -18,13 +18,14 @@ func protocolActorTypesToComponents(in []protocol.ActorHostType) []components.Ac
 	out := make([]components.ActorHostType, len(in))
 	for i, t := range in {
 		out[i] = components.ActorHostType{
-			ActorType:           t.ActorType,
-			IdleTimeout:         time.Duration(t.IdleTimeoutMs) * time.Millisecond,
-			ConcurrencyLimit:    t.ConcurrencyLimit,
-			DeactivationTimeout: time.Duration(t.DeactivationTimeoutMs) * time.Millisecond,
-			MaxAttempts:         t.MaxAttempts,
-			InitialRetryDelay:   time.Duration(t.InitialRetryDelayMs) * time.Millisecond,
-			JobRetention:        time.Duration(t.JobRetentionMs) * time.Millisecond,
+			ActorType:                t.ActorType,
+			IdleTimeout:              time.Duration(t.IdleTimeoutMs) * time.Millisecond,
+			ConcurrencyLimit:         t.ConcurrencyLimit,
+			DeactivationTimeout:      time.Duration(t.DeactivationTimeoutMs) * time.Millisecond,
+			MaxAttempts:              t.MaxAttempts,
+			InitialRetryDelay:        time.Duration(t.InitialRetryDelayMs) * time.Millisecond,
+			CompletedJobRetention:    time.Duration(t.CompletedJobRetentionMs) * time.Millisecond,
+			DeadLetteredJobRetention: time.Duration(t.DeadLetteredJobRetentionMs) * time.Millisecond,
 		}
 	}
 	return out

@@ -62,8 +62,9 @@ const (
 	// cronJobIdleTimeout keeps the singleton from lingering between occurrences
 	cronJobIdleTimeout = time.Minute
 
-	// cronJobRetention keeps a week of occurrence records, for auditing
-	cronJobRetention = 7 * 24 * time.Hour
+	// cronCompletedJobRetention keeps a week of records of the occurrences that ran, for auditing
+	// A dead-lettered occurrence takes the framework's own default, which is longer, since a failure is worth keeping longer than a success
+	cronCompletedJobRetention = 7 * 24 * time.Hour
 )
 
 // New builds a cron job built-in actor identified by name
@@ -167,8 +168,8 @@ func New(name string, opts ...Option) (*CronJob, error) {
 			}
 		},
 		regOpts: actorcore.RegisterActorOptions{
-			IdleTimeout:  cronJobIdleTimeout,
-			JobRetention: cronJobRetention,
+			IdleTimeout:           cronJobIdleTimeout,
+			CompletedJobRetention: cronCompletedJobRetention,
 		},
 	}, nil
 }

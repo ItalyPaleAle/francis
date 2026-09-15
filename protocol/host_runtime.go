@@ -47,9 +47,12 @@ type ActorHostType struct {
 	DeactivationTimeoutMs int64 `msgpack:"deact,omitempty"`
 	// MaxAttempts is the maximum number of attempts when invoking the actor or executing alarms
 	MaxAttempts int `msgpack:"maxAttempts,omitempty"`
-	// JobRetentionMs is how long a job of this actor type keeps a record after it ends, in milliseconds
-	// Zero means a completed job leaves no record and a dead-lettered one is kept until something removes it
-	JobRetentionMs int64 `msgpack:"jobRetention,omitempty"`
+	// CompletedJobRetentionMs is how long a job of this actor type keeps a record after it completes successfully, in milliseconds
+	// Zero keeps no record at all, and a negative value keeps one that never expires
+	CompletedJobRetentionMs int64 `msgpack:"completedJobRetention,omitempty"`
+	// DeadLetteredJobRetentionMs is how long a job of this actor type keeps its record after it is dead-lettered, in milliseconds
+	// A dead-lettered job is always recorded, so this only decides for how long, and a negative value keeps the record until something removes it
+	DeadLetteredJobRetentionMs int64 `msgpack:"deadLetteredJobRetention,omitempty"`
 	// InitialRetryDelayMs is the initial retry delay after a failed attempt, in milliseconds
 	InitialRetryDelayMs int64 `msgpack:"retryDelay,omitempty"`
 }

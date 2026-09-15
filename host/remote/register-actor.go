@@ -42,10 +42,16 @@ func WithMaxAttempts(n int) RegisterActorOption {
 	return actorcore.WithMaxAttempts(n)
 }
 
-// WithJobRetention sets how long a job dispatched to this actor type keeps a record after it ends
-// A completed job leaves no record at all unless this is set, and setting it also limits how long a dead-lettered job's record is kept
-func WithJobRetention(d time.Duration) RegisterActorOption {
-	return actorcore.WithJobRetention(d)
+// WithCompletedJobRetention sets how long a job dispatched to this actor type keeps a record after it completes successfully
+// A completed job leaves no record at all unless this is set, and a negative duration keeps one that never expires
+func WithCompletedJobRetention(d time.Duration) RegisterActorOption {
+	return actorcore.WithCompletedJobRetention(d)
+}
+
+// WithDeadLetteredJobRetention sets how long a job dispatched to this actor type keeps its record after it is dead-lettered
+// A dead-lettered job is always recorded, so this only decides for how long: it defaults to 30 days, and a negative duration keeps the record until something removes it
+func WithDeadLetteredJobRetention(d time.Duration) RegisterActorOption {
+	return actorcore.WithDeadLetteredJobRetention(d)
 }
 
 // WithInitialRetryDelay sets the initial retry delay after failed invocation attempts

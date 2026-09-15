@@ -58,10 +58,10 @@ type MultiBuiltInActor interface {
 	Registrations() []BuiltInActorRegistration
 }
 
-// DefaultJobRetention is how long a built-in actor's jobs keep a record once they end, unless the built-in asks for a different window
+// DefaultCompletedJobRetention is how long a built-in actor's jobs keep a record of a successful run, unless the built-in asks for a different window
 // Built-ins run work on a caller's behalf without the caller holding a handle to it, so the record of a run that succeeded is the only way to see that it happened at all
-// An application actor still defaults to keeping none
-const DefaultJobRetention = 24 * time.Hour
+// An application actor still defaults to keeping none, and a dead-lettered job takes the framework's own default either way
+const DefaultCompletedJobRetention = 24 * time.Hour
 
 // RegistrationsFor returns the actor-type registrations a host must create for a built-in actor
 // It returns every type from a MultiBuiltInActor, or the single type of a plain BuiltInActor, so hosts have one code path for both
@@ -70,10 +70,7 @@ func RegistrationsFor(b BuiltInActor) []BuiltInActorRegistration {
 	if ok {
 		regs := multi.Registrations()
 		for i := range regs {
-			if regs[i].RegisterOptions.JobRetention == 0 {
-				// Enforce the default job retention if unset
-				regs[i].RegisterOptions.JobRetention = DefaultJobRetention
-			}
+			applyCompletedJobRetentionDefault(&regs[i].RegisterOptions)
 		}
 		return regs
 	}
@@ -84,11 +81,16 @@ func RegistrationsFor(b BuiltInActor) []BuiltInActorRegistration {
 		RegisterOptions: b.RegisterOptions(),
 		Singleton:       b.Singleton(),
 	}
-	if reg.RegisterOptions.JobRetention == 0 {
-		// Enforce the default job retention if unset
-		reg.RegisterOptions.JobRetention = DefaultJobRetention
-	}
+	applyCompletedJobRetentionDefault(&reg.RegisterOptions)
 	return []BuiltInActorRegistration{reg}
+}
+
+// applyCompletedJobRetentionDefault gives a built-in actor that did not ask for one the default window for keeping its successful runs
+// A built-in that set its own is left alone, including one that deliberately asked for no record with a negative value
+func applyCompletedJobRetentionDefault(opts *actorcore.RegisterActorOptions) {
+	if opts.CompletedJobRetention == 0 {
+		opts.CompletedJobRetention = DefaultCompletedJobRetention
+	}
 }
 
 // FullActorType returns the reserved actor type a built-in actor is registered under, by prefixing its bare type

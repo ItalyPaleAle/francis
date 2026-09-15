@@ -479,7 +479,9 @@ func (w *Workflow) buildRegistrations(o *options) error {
 			IdleTimeout:       orchestratorIdleTimeout,
 			MaxAttempts:       orchestratorMaxAttempts,
 			InitialRetryDelay: orchestratorRetryDelay,
-			JobRetention:      w.def.jobRetention(),
+
+			CompletedJobRetention:    w.def.jobRetention(),
+			DeadLetteredJobRetention: w.def.jobRetention(),
 		},
 	})
 
@@ -566,7 +568,9 @@ func (w *Workflow) workerRegistration(suffix string, capName string, group strin
 			MaxAttempts:        workerMaxAttempts,
 			CapacityGroup:      group,
 			CapacityGroupLimit: limit,
-			JobRetention:       w.def.jobRetention(),
+
+			CompletedJobRetention:    w.def.jobRetention(),
+			DeadLetteredJobRetention: w.def.jobRetention(),
 		},
 	}
 }

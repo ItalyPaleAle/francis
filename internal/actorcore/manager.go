@@ -132,13 +132,14 @@ func (m *Manager) RegisterActor(actorType string, factory actor.Factory, opts Re
 	concurrencyLimit := int32(opts.ConcurrencyLimit)
 
 	m.ActorsConfig[actorType] = components.ActorHostType{
-		ActorType:           actorType,
-		IdleTimeout:         opts.IdleTimeout,
-		ConcurrencyLimit:    concurrencyLimit,
-		DeactivationTimeout: opts.DeactivationTimeout,
-		MaxAttempts:         opts.MaxAttempts,
-		InitialRetryDelay:   opts.InitialRetryDelay,
-		JobRetention:        opts.JobRetention,
+		ActorType:                actorType,
+		IdleTimeout:              opts.IdleTimeout,
+		ConcurrencyLimit:         concurrencyLimit,
+		DeactivationTimeout:      opts.DeactivationTimeout,
+		MaxAttempts:              opts.MaxAttempts,
+		InitialRetryDelay:        opts.InitialRetryDelay,
+		CompletedJobRetention:    opts.CompletedJobRetention,
+		DeadLetteredJobRetention: opts.DeadLetteredJobRetention,
 	}
 	m.ActorFactories[actorType] = factory
 	m.actorTypeLockMode[actorType] = opts.LockMode

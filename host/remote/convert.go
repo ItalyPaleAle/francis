@@ -22,13 +22,14 @@ func componentsActorTypesToProtocol(in []components.ActorHostType) []protocol.Ac
 	out := make([]protocol.ActorHostType, len(in))
 	for i, t := range in {
 		out[i] = protocol.ActorHostType{
-			ActorType:             t.ActorType,
-			IdleTimeoutMs:         t.IdleTimeout.Milliseconds(),
-			ConcurrencyLimit:      t.ConcurrencyLimit,
-			DeactivationTimeoutMs: t.DeactivationTimeout.Milliseconds(),
-			MaxAttempts:           t.MaxAttempts,
-			InitialRetryDelayMs:   t.InitialRetryDelay.Milliseconds(),
-			JobRetentionMs:        t.JobRetention.Milliseconds(),
+			ActorType:                  t.ActorType,
+			IdleTimeoutMs:              t.IdleTimeout.Milliseconds(),
+			ConcurrencyLimit:           t.ConcurrencyLimit,
+			DeactivationTimeoutMs:      t.DeactivationTimeout.Milliseconds(),
+			MaxAttempts:                t.MaxAttempts,
+			InitialRetryDelayMs:        t.InitialRetryDelay.Milliseconds(),
+			CompletedJobRetentionMs:    t.CompletedJobRetention.Milliseconds(),
+			DeadLetteredJobRetentionMs: t.DeadLetteredJobRetention.Milliseconds(),
 		}
 	}
 	return out

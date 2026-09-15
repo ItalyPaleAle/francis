@@ -164,7 +164,8 @@ Actor registration uses functional options:
 | `WithConcurrencyLimit` | `0` (unlimited) | Maximum number of actors of this type active on a single host|
 | `WithMaxAttempts` | `3` | Maximum attempts when invoking the actor or running an alarm|
 | `WithInitialRetryDelay` | `2s` | Initial delay before retrying a failed invocation, with backoff|
-| `WithJobRetention` | `0` (no record) | How long a job dispatched to this actor type keeps a record after it ends. Without it a completed job leaves nothing behind, and a dead-lettered one is kept until something removes it|
+| `WithCompletedJobRetention` | `0` (no record) | How long a job dispatched to this actor type keeps a record after it completes successfully. Without it a completed job leaves nothing behind. A negative value keeps the record with no expiry|
+| `WithDeadLetteredJobRetention` | `30d` | How long a job dispatched to this actor type keeps its record after it is dead-lettered. A dead-lettered job is always recorded, so this only decides for how long. A negative value keeps the record with no expiry|
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -173,7 +174,8 @@ Actor registration uses functional options:
 | `ConcurrencyLimit` | `0` (unlimited) | Maximum number of actors of this type active on a single host. |
 | `MaxAttempts` | `3` | Maximum attempts when invoking the actor or running an alarm. |
 | `InitialRetryDelay` | `2s` | Initial delay before retrying a failed invocation, with backoff. |
-| `JobRetention` | `0` (no record) | How long a job dispatched to this actor type keeps a record after it ends. |
+| `CompletedJobRetention` | `0` (no record) | How long a job dispatched to this actor type keeps a record after it completes successfully. |
+| `DeadLetteredJobRetention` | `30d` | How long a job dispatched to this actor type keeps its record after it is dead-lettered. |
 
 ## Singleton actors
 
