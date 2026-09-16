@@ -132,7 +132,7 @@ type reasonPayload struct {
 	CompAttempt int `msgpack:"compAttempt,omitempty"`
 }
 
-// stepOutput returns what later steps see as a step's output, which depends on its kind (§5.3)
+// stepOutput returns what later steps see as a step's output, which depends on its kind
 // A skipped step has no output at all, so DecodeOutput can report ErrStepSkipped
 func stepOutput(sr *stepRecord, d *stepDef) json.RawMessage {
 	if sr == nil || sr.Status == StepSkipped || sr.Status == StepPending {

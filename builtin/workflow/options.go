@@ -34,7 +34,7 @@ const (
 	defaultMaxInputSize = 64 << 10
 	// defaultMaxOutputSize caps a single task's output, as a ceiling against a misbehaving task rather than a per-task budget
 	defaultMaxOutputSize = 16 << 10
-	// defaultMaxJournalSize caps the encoded journal, because every report rewrites the whole document (§12.2)
+	// defaultMaxJournalSize caps the encoded journal, because every report rewrites the whole document
 	defaultMaxJournalSize = 1 << 20
 
 	// defaultRetention is how long a terminated instance is kept when WithRetention names no duration for its status

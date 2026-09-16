@@ -22,7 +22,7 @@ import (
 
 // orchestrator is the Workflow actor: one instance per workflow instance, holding the journal and deciding what happens next
 //
-// It orchestrates and performs nothing (§4): it reads and writes its own state, arms and drops its timers, and dispatches jobs
+// It orchestrates and performs nothing: it reads and writes its own state, arms and drops its timers, and dispatches jobs
 // No user code runs here at all, because the definition exposes no hook that does, so the orchestration boundary is enforced by the code rather than left to each application to keep
 type orchestrator struct {
 	wf         *Workflow
@@ -85,7 +85,7 @@ func (o *orchestrator) Alarm(ctx context.Context, name string, _ actor.Envelope)
 	}
 
 	// The alarm is delivered to this actor on whatever host holds it, so a host without the instance's version cannot simply decline it forever
-	// It works from the journal alone instead, which carries the full step list for exactly this reason (§14.4)
+	// It works from the journal alone instead, which carries the full step list for exactly this reason
 	ok, err := o.wf.serveVersion(ctx, o.svc, o.def.version)
 	if err != nil {
 		return err
@@ -202,7 +202,7 @@ func (o *orchestrator) decodeEvent(method string, data actor.Envelope) (*event, 
 	}
 }
 
-// turn is the instance's single write path, and every event runs the same four phases (§7.2)
+// turn is the instance's single write path, and every event runs the same four phases
 func (o *orchestrator) turn(ctx context.Context, ev *event) (err error) {
 	ctx, span := tracing.Start(ctx, "workflow.turn", trace.WithAttributes(
 		attribute.String("francis.workflow.name", o.def.name),

@@ -31,7 +31,7 @@ type engineMetrics struct {
 	// instancesPurged counts instances removed by an explicit purge or the sweep
 	instancesPurged metric.Int64Counter
 	// turnDuration records how long a Workflow turn took, in seconds
-	// It should sit in single-digit milliseconds, and a regression is the signal that something has been inlined onto the orchestrator that should be a step (§13.4)
+	// It should sit in single-digit milliseconds, and a regression is the signal that something has been inlined onto the orchestrator that should be a step
 	turnDuration metric.Float64Histogram
 	// duplicateEvents counts turns that re-applied an already-recorded event, which is the direct measure of how often ordering invariant 2 is doing its job
 	duplicateEvents metric.Int64Counter

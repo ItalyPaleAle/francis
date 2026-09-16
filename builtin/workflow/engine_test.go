@@ -397,7 +397,7 @@ func readJournal(t *testing.T, host *fakeHost, wf *Workflow, instanceID string) 
 
 // TestWorkflowTurnStaysWithinTheOrchestrationBoundary drives a Workflow actor against a transport that panics on anything but state, alarm, and job operations
 //
-// The one call the engine is allowed to make from a turn is the cached definition-registry check, and nothing else may reach past the boundary (§4.3)
+// The one call the engine is allowed to make from a turn is the cached definition-registry check, and nothing else may reach past the boundary
 func TestWorkflowTurnStaysWithinTheOrchestrationBoundary(t *testing.T) {
 	host := newFakeHost()
 	host.panicOnInvoke = true
@@ -426,8 +426,6 @@ func TestWorkflowTurnStaysWithinTheOrchestrationBoundary(t *testing.T) {
 }
 
 // TestTurnConvergesAfterAFaultBetweenTheStateWriteAndTheDispatch injects a failure between SetState and reconcile, and asserts the retried turn converges without double-counting
-//
-// This is ordering invariant 2 (§7.3): a turn that records nothing still schedules, because the guard is whether the outcome is already recorded and never whether this delivery has been seen before
 func TestTurnConvergesAfterAFaultBetweenTheStateWriteAndTheDispatch(t *testing.T) {
 	host := newFakeHost()
 

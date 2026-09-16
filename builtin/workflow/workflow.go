@@ -45,10 +45,11 @@ const (
 	// registryTypeSuffix names the cluster-wide singleton that records each version's definition fingerprint
 	registryTypeSuffix = ".registry"
 
-	// idDelimiter joins the components of a worker's actor ID, which is why step names and instance IDs may not contain it
+	// idDelimiter joins the components of a worker's actor ID
 	idDelimiter = "|"
 
-	// orchestratorMaxAttempts and orchestratorRetryDelay are far above the framework defaults, because a Workflow turn is idempotent and a generous policy stops a database blip from dead-lettering a report or deleting a deadline
+	// orchestratorMaxAttempts and orchestratorRetryDelay are higher than the framework defaults
+	// We trust that because each workflow is idempotent and we strive for workflows to complete
 	orchestratorMaxAttempts = 20
 	orchestratorRetryDelay  = 5 * time.Second
 	// workerMaxAttempts covers the one case a worker returns an error to Francis: the report dispatch itself failed
@@ -58,7 +59,7 @@ const (
 )
 
 // Workflow is a built-in workflow actor, returned by New and registered on a host with RegisterBuiltInActor
-// It registers the orchestrator type, the worker and undo types (a base queue each, plus one per advertised capability), the definition registry singleton, and, when WithAutoPurge is set, a cron job that sweeps terminated instances
+// It registers the orchestrator type, the worker and undo types , the definition registry singleton, and, when WithAutoPurge is set, a cron job that sweeps terminated instances
 type Workflow struct {
 	name string
 	// baseType is the bare actor type of the orchestrator, and the prefix of every other type this workflow registers
@@ -423,7 +424,7 @@ func requireEarlierStep(def *definition, stepName string, index int, referenced 
 
 // fingerprint hashes everything about a definition that the engine reads while running an instance, so two hosts cannot serve the same version and then apply different transitions to one journal
 // That is wider than the graph: the caps, the deadlines, the attempt policies, and the unknown-version and compensation-failure choices all decide what a turn does, so a host that disagrees about any of them needs a new version
-// Handler bodies are the one deliberate exception: changing one needs no new version, which is the direct consequence of not replaying code (§14.3)
+// Handler bodies are the one deliberate exception: changing one needs no new version, which is the direct consequence of not replaying code
 func fingerprint(def *definition) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "workflow=%s;version=%d;output=%s\n", def.name, def.version, def.outputStep)
@@ -444,6 +445,7 @@ func fingerprint(def *definition) string {
 
 // writeStepFingerprint writes one step's behavior-affecting options into the running hash
 func writeStepFingerprint(w io.Writer, d *stepDef) {
+	// We don't use JSON and rather rely on something that's more deterministic
 	fmt.Fprintf(w, "step=%s;kind=%s;inputFrom=%s;itemsFrom=%s;skipOnFailure=%s;optional=%t;policy=%s;compensable=%t;capability=%s;event=%s",
 		d.name, d.kind,
 		strings.Join(d.inputFrom, ","),
@@ -578,7 +580,6 @@ func (w *Workflow) workerRegistration(suffix string, capName string, group strin
 			return newWorker(w, bareType, actorID, svc, undo)
 		},
 		RegisterOptions: actorcore.RegisterActorOptions{
-			// The coarse, cluster-wide placement hint mirrors the strict limit so hosts are rarely handed more work than they can run
 			ConcurrencyLimit: limit,
 			// A worker only returns an error to Francis when its report dispatch failed, and this covers that case alone
 			MaxAttempts:              workerMaxAttempts,

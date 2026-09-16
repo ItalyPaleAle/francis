@@ -43,7 +43,7 @@ const (
 	AbortUnwinding CompensationFailurePolicy = "abort"
 )
 
-// UnknownVersionPolicy decides what the deadline alarm does when it fires on a host that does not have the instance's version (§14.4)
+// UnknownVersionPolicy decides what the deadline alarm does when it fires on a host that does not have the instance's version
 type UnknownVersionPolicy string
 
 const (
@@ -67,7 +67,7 @@ type stepDef struct {
 	name string
 	kind Kind
 
-	// run and compensate are the only places user code appears, and both are invoked exclusively by a worker (§4.3)
+	// run and compensate are the only places user code appears, and both are invoked exclusively by a worker
 	run        RunFunc
 	compensate CompensateFunc
 
@@ -97,7 +97,7 @@ type stepDef struct {
 	optional bool
 	// skipOnFailure names the steps that are pointless without this one
 	skipOnFailure []string
-	// skipIfStep and skipIfValue skip this step when the named step's output equals the value, which is how a condition stays a recorded output rather than a hidden predicate (§7.9)
+	// skipIfStep and skipIfValue skip this step when the named step's output equals the value, which is how a condition stays a recorded output rather than a hidden predicate
 	skipIfStep  string
 	skipIfValue bool
 	hasSkipIf   bool
@@ -271,7 +271,7 @@ func WithSkipOnFailure(steps ...string) StepOption {
 }
 
 // WithSkipIf skips this step when the named upstream step's output equals value
-// A condition is a step that returns a boolean rather than a predicate the orchestrator evaluates, so the decision is a recorded output rather than a hidden evaluation (§7.9)
+// A condition is a step that returns a boolean rather than a predicate the orchestrator evaluates, so the decision is a recorded output rather than a hidden evaluation
 func WithSkipIf(step string, value bool) StepOption {
 	return func(d *stepDef) {
 		d.skipIfStep = step

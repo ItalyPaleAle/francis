@@ -73,7 +73,7 @@ const (
 )
 
 // instanceState is the journal: the Workflow actor's durable state and the single source of truth for an instance
-// Every transition rewrites the whole document in one state write, so a step transition is atomic (§12.2)
+// Every transition rewrites the whole document in one state write, so a step transition is atomic
 type instanceState struct {
 	Workflow     string              `msgpack:"workflow"`
 	Version      int                 `msgpack:"version"`
@@ -145,7 +145,7 @@ type taskRecord struct {
 	CompletedAt time.Time   `msgpack:"completedAt,omitzero"`
 }
 
-// compRecord is a task's compensation, which gets its own attempts because a failed rollback is worth trying harder than the forward work was (§9.3)
+// compRecord is a task's compensation, which gets its own attempts because a failed rollback is worth trying harder than the forward work was
 type compRecord struct {
 	Attempts  int       `msgpack:"attempts"`
 	RetryAt   time.Time `msgpack:"retryAt,omitzero"`

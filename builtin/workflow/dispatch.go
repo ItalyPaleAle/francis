@@ -5,7 +5,7 @@ import (
 )
 
 // buildRunPayload assembles what one task needs to run, from the journal, in memory
-// Building a payload is orchestration; performing the work it describes is a step, and the engine never ships the whole journal to a worker, so a step's data dependencies stay explicit and auditable from the definition alone (§5.3)
+// Building a payload is orchestration; performing the work it describes is a step, and the engine never ships the whole journal to a worker, so a step's data dependencies stay explicit and auditable from the definition alone
 func (o *orchestrator) buildRunPayload(st *instanceState, sr *stepRecord, d *stepDef, member *stepDef, tr *taskRecord) runPayload {
 	outputs, skipped := o.upstreamOutputs(st, sr, d, member)
 

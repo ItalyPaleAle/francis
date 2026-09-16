@@ -187,7 +187,7 @@ type versionCheck struct {
 
 // serveVersion reports whether this host may serve a version, asking the registry the first time and caching the answer
 //
-// This is the one place the engine makes a synchronous call to another actor from a turn (§4.2): a single cached Invoke, bounded to milliseconds, at most once per version for the life of the process
+// This is the one place the engine makes a synchronous call to another actor from a turn: a single cached Invoke, bounded to milliseconds, at most once per version for the life of the process
 // A host cannot learn the answer from Bootstrap, because the framework drives that hook for singletons and only logs its error, so the check is made where the engine can act on it
 func (w *Workflow) serveVersion(ctx context.Context, svc *actor.Service, version int) (bool, error) {
 	w.checksMu.Lock()
