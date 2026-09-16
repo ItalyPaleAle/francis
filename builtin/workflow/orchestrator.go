@@ -1048,25 +1048,25 @@ func (o *orchestrator) applyElapsedDeadlines(st *instanceState, now time.Time) {
 			return
 		}
 
-		beginUnwind(st, o.def, "instance timeout elapsed", StatusFailed, now)
+		st.beginUnwind(o.def, "instance timeout elapsed", StatusFailed, now)
 		// Compensation receives a fresh instance-sized budget because the forward budget has already elapsed
 		st.StartedAt = now
 		return
 	}
 
-	sr, d := currentRunningStep(st, o.def)
+	sr, d := st.currentRunningStep(o.def)
 	if sr == nil || d == nil || sr.Status != StepRunning {
 		return
 	}
 
-	stepDue := stepDeadline(sr, d)
+	stepDue := d.stepDeadline(sr)
 	if stepDue.IsZero() || now.Before(stepDue) {
 		return
 	}
 
 	// A wait step that never got its event is the one case where the step's timeout ends the run rather than failing a task
 	if d.kind == KindWait {
-		beginUnwind(st, o.def, fmt.Sprintf("event %q timed out", d.effectiveEventName()), StatusFailed, now)
+		st.beginUnwind(o.def, fmt.Sprintf("event %q timed out", d.effectiveEventName()), StatusFailed, now)
 		return
 	}
 

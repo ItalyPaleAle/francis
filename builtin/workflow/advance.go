@@ -57,19 +57,19 @@ func apply(st *instanceState, def *definition, ev *event, now time.Time) (duplic
 
 	switch ev.kind {
 	case evStart:
-		return applyStart(st, def, ev.start, now)
+		return st.applyStart(def, ev.start, now)
 	case evDone:
-		return applyReport(st, def, ev.report, now)
+		return st.applyReport(def, ev.report, now)
 	case evCompensated:
-		return applyCompReport(st, def, ev.comp, now)
+		return st.applyCompReport(def, ev.comp, now)
 	case evRaise:
-		return applyRaisedEvent(st, def, ev.raise, now)
+		return st.applyRaisedEvent(def, ev.raise, now)
 	case evCancel:
-		return applyCancel(st, def, ev, now)
+		return st.applyCancel(def, ev, now)
 	case evUnwind:
-		return applyUnwind(st, def, ev, now)
+		return st.applyUnwind(def, ev, now)
 	case evSuspend:
-		return applySuspend(st, def, ev.reason, now)
+		return st.applySuspend(def, ev.reason, now)
 	case evResume:
 		return st.applyResume(def, now)
 	case evDeadline:
@@ -81,7 +81,7 @@ func apply(st *instanceState, def *definition, ev *event, now time.Time) (duplic
 }
 
 // applyStart initializes the journal of a new instance, recording every step of the definition so status and the unknown-version path are answerable from the journal alone
-func applyStart(st *instanceState, def *definition, p *startPayload, now time.Time) bool {
+func (st *instanceState) applyStart(def *definition, p *startPayload, now time.Time) bool {
 	// A repeated start finds the instance already here, so the second call's input is discarded rather than overwriting the first's
 	if st.Status != "" {
 		return true
@@ -153,7 +153,7 @@ func applyStart(st *instanceState, def *definition, p *startPayload, now time.Ti
 }
 
 // applyReport folds a worker's (or a child's) outcome for one task into the journal
-func applyReport(st *instanceState, def *definition, p *reportPayload, now time.Time) bool {
+func (st *instanceState) applyReport(def *definition, p *reportPayload, now time.Time) bool {
 	sr := st.step(p.Step)
 	if sr == nil {
 		return true
@@ -257,7 +257,7 @@ func applyReport(st *instanceState, def *definition, p *reportPayload, now time.
 }
 
 // applyCompReport folds an undo worker's outcome for one task's compensation into the journal
-func applyCompReport(st *instanceState, def *definition, p *compReportPayload, now time.Time) bool {
+func (st *instanceState) applyCompReport(def *definition, p *compReportPayload, now time.Time) bool {
 	sr := st.step(p.Step)
 	if sr == nil {
 		return true
@@ -318,7 +318,7 @@ func applyCompReport(st *instanceState, def *definition, p *compReportPayload, n
 
 // applyRaisedEvent records an external event against the WaitForEvent step listening for it
 // An event is accepted while suspended, and the step completes on resume
-func applyRaisedEvent(st *instanceState, def *definition, p *eventPayload, now time.Time) bool {
+func (st *instanceState) applyRaisedEvent(def *definition, p *eventPayload, now time.Time) bool {
 	for i := range st.Steps {
 		sr := &st.Steps[i]
 		if sr.Kind != KindWait {
@@ -348,7 +348,7 @@ func applyRaisedEvent(st *instanceState, def *definition, p *eventPayload, now t
 }
 
 // applyCancel asks a running or suspended instance to stop and unwind
-func applyCancel(st *instanceState, def *definition, ev *event, now time.Time) bool {
+func (st *instanceState) applyCancel(def *definition, ev *event, now time.Time) bool {
 	// Cancel takes precedence over a suspension, so it resumes the instance straight into the unwind
 	if st.Status == StatusCompensating {
 		return true
@@ -360,13 +360,13 @@ func applyCancel(st *instanceState, def *definition, ev *event, now time.Time) b
 	}
 	st.Suspended = nil
 	st.recordUnwoundBy(ev)
-	beginUnwind(st, def, reason, StatusCancelled, now)
+	st.beginUnwind(def, reason, StatusCancelled, now)
 	return false
 }
 
 // applyUnwind moves a completed child back into compensating at its parent's request, which is the one verb only a parent may send
 // A completed child is kept rather than purged for as long as its parent is running for precisely this reason
-func applyUnwind(st *instanceState, def *definition, ev *event, now time.Time) bool {
+func (st *instanceState) applyUnwind(def *definition, ev *event, now time.Time) bool {
 	if st.Status == StatusCompensating {
 		// A parent joining an existing rollback still needs its newest compensation attempt acknowledged
 		return !st.recordUnwoundBy(ev)
@@ -404,7 +404,7 @@ func applyUnwind(st *instanceState, def *definition, ev *event, now time.Time) b
 	st.StartedAt = now
 
 	st.recordUnwoundBy(ev)
-	beginUnwind(st, def, reason, StatusCancelled, now)
+	st.beginUnwind(def, reason, StatusCancelled, now)
 	return false
 }
 
@@ -440,7 +440,7 @@ func currentCompensationFailure(st *instanceState, def *definition) Compensation
 }
 
 // applySuspend pauses an instance, recording what is left of each deadline so resuming does not eat the remainder
-func applySuspend(st *instanceState, def *definition, reason string, now time.Time) bool {
+func (st *instanceState) applySuspend(def *definition, reason string, now time.Time) bool {
 	if st.Status == StatusSuspended {
 		return true
 	}
@@ -453,9 +453,9 @@ func applySuspend(st *instanceState, def *definition, reason string, now time.Ti
 	}
 
 	// The current step's own deadline is paused alongside the instance's, so a long suspension does not consume a short step timeout either
-	sr, d := currentRunningStep(st, def)
+	sr, d := st.currentRunningStep(def)
 	if sr != nil && d != nil && sr.Status == StepRunning {
-		stepDue := stepDeadline(sr, d)
+		stepDue := d.stepDeadline(sr)
 		if !stepDue.IsZero() {
 			rec.RemainingStepTimeout = until(stepDue, now)
 		}
@@ -481,9 +481,9 @@ func (st *instanceState) applyResume(def *definition, now time.Time) bool {
 
 	st.StartedAt = now.Add(rec.RemainingTimeout - def.timeout)
 
-	sr, d := currentRunningStep(st, def)
+	sr, d := st.currentRunningStep(def)
 	if sr != nil && d != nil && rec.RemainingStepTimeout > 0 {
-		budget := stepBudget(d)
+		budget := d.stepBudget()
 		if budget > 0 {
 			sr.StartedAt = now.Add(rec.RemainingStepTimeout - budget)
 		}
@@ -494,7 +494,7 @@ func (st *instanceState) applyResume(def *definition, now time.Time) bool {
 }
 
 // beginUnwind opens the compensation phase, recording the cause every compensation receives and the status the unwind terminates into
-func beginUnwind(st *instanceState, def *definition, cause string, terminal Status, now time.Time) {
+func (st *instanceState) beginUnwind(def *definition, cause string, terminal Status, now time.Time) {
 	st.Cause = cause
 	st.TerminalStatus = terminal
 	st.Status = StatusCompensating
@@ -616,9 +616,9 @@ func nextDeadline(st *instanceState, def *definition) time.Time {
 	due := instanceDeadline(st, def)
 
 	// A frame being compensated must not keep rearming its expired forward step budget
-	sr, d := currentRunningStep(st, def)
+	sr, d := st.currentRunningStep(def)
 	if sr != nil && d != nil && sr.Status == StepRunning {
-		stepDue := stepDeadline(sr, d)
+		stepDue := d.stepDeadline(sr)
 		if !stepDue.IsZero() && (due.IsZero() || stepDue.Before(due)) {
 			due = stepDue
 		}
@@ -737,7 +737,7 @@ func failStep(st *instanceState, def *definition, sr *stepRecord, d *stepDef, er
 	}
 
 	cause := fmt.Sprintf("step %q failed: %s", sr.Name, errMsg)
-	beginUnwind(st, def, cause, StatusFailed, now)
+	st.beginUnwind(def, cause, StatusFailed, now)
 }
 
 // pushFrame adds a settled step to the compensation stack when it is compensable and holds at least one task whose effect has to be undone
@@ -1191,7 +1191,7 @@ func deriveCursor(st *instanceState) string {
 }
 
 // currentRunningStep returns the step currently in flight and its definition, or nil when nothing is
-func currentRunningStep(st *instanceState, def *definition) (*stepRecord, *stepDef) {
+func (st *instanceState) currentRunningStep(def *definition) (*stepRecord, *stepDef) {
 	for i := range st.Steps {
 		sr := &st.Steps[i]
 		if sr.Status != StepRunning && sr.Status != StepCompensating {
@@ -1277,7 +1277,7 @@ func instanceDeadline(st *instanceState, def *definition) time.Time {
 }
 
 // stepBudget returns how long a step is allowed to take, which for a wait step is how long it waits for its event
-func stepBudget(d *stepDef) time.Duration {
+func (d *stepDef) stepBudget() time.Duration {
 	if d.kind == KindWait {
 		return d.eventTimeout
 	}
@@ -1285,8 +1285,8 @@ func stepBudget(d *stepDef) time.Duration {
 }
 
 // stepDeadline returns when a running step's own timeout elapses, or the zero time when it declared none
-func stepDeadline(sr *stepRecord, d *stepDef) time.Time {
-	budget := stepBudget(d)
+func (d *stepDef) stepDeadline(sr *stepRecord) time.Time {
+	budget := d.stepBudget()
 	if budget <= 0 || sr.StartedAt.IsZero() {
 		return time.Time{}
 	}
