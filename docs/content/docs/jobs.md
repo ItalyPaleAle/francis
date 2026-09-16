@@ -152,7 +152,8 @@ info, err := service.GetJob(ctx, jobID)
 jobs, err := service.ListJobs(ctx, "worker", "worker-7")
 
 // Remove a job, whatever state it is in
-// One still scheduled is cancelled before it runs; one that has ended has its record removed
+// One still scheduled is cancelled before it runs
+// One that has ended has its record removed
 err = service.DeleteJob(ctx, "worker", "worker-7", jobID)
 
 // Re-dispatch a dead-lettered job (runs as soon as possible) and remove the dead record

@@ -54,6 +54,8 @@ type fakeHost struct {
 	registryResponse registerResponse
 	// registryErr makes the registry's consistency check fail, which is how a lookup that could not reach it is injected
 	registryErr error
+	// registryPeekErr fails only the concurrent registry read path so rolling-deployment fallback can be exercised
+	registryPeekErr error
 }
 
 func newFakeHost() *fakeHost {
@@ -65,7 +67,7 @@ func newFakeHost() *fakeHost {
 		jobs:             map[string]actor.JobInfo{},
 		jobPayloads:      map[string]any{},
 		liveKeys:         map[string]string{},
-		registryResponse: registerResponse{OK: true},
+		registryResponse: registerResponse{Found: true, OK: true},
 	}
 }
 
@@ -82,7 +84,7 @@ func (f *fakeHost) Invoke(ctx context.Context, actorType string, actorID string,
 	respErr := f.registryErr
 	f.mu.Unlock()
 
-	// The engine makes exactly one synchronous call from a turn: the cached definition-registry check
+	// The engine makes exactly one kind of synchronous call from a turn: the definition-registry check
 	if method == methodRegister {
 		if respErr != nil {
 			return nil, respErr
@@ -100,7 +102,20 @@ func (f *fakeHost) Peek(ctx context.Context, actorType string, actorID string, m
 	f.mu.Lock()
 	f.invokes = append(f.invokes, actorType+"/"+method)
 	panicOnInvoke := f.panicOnInvoke
+	resp := f.registryResponse
+	respErr := f.registryErr
+	peekErr := f.registryPeekErr
 	f.mu.Unlock()
+
+	if method == methodCheck {
+		if peekErr != nil {
+			return nil, peekErr
+		}
+		if respErr != nil {
+			return nil, respErr
+		}
+		return &fakeEnvelope{value: resp}, nil
+	}
 
 	if panicOnInvoke {
 		panic("the Workflow actor reached past the orchestration boundary: peek " + actorType + "/" + method)
@@ -397,7 +412,7 @@ func readJournal(t *testing.T, host *fakeHost, wf *Workflow, instanceID string) 
 
 // TestWorkflowTurnStaysWithinTheOrchestrationBoundary drives a Workflow actor against a transport that panics on anything but state, alarm, and job operations
 //
-// The one call the engine is allowed to make from a turn is the cached definition-registry check, and nothing else may reach past the boundary
+// The one call the engine is allowed to make from a turn is the definition-registry check, and nothing else may reach past the boundary
 func TestWorkflowTurnStaysWithinTheOrchestrationBoundary(t *testing.T) {
 	host := newFakeHost()
 	host.panicOnInvoke = true
@@ -418,11 +433,13 @@ func TestWorkflowTurnStaysWithinTheOrchestrationBoundary(t *testing.T) {
 	st := readJournal(t, host, wf, "inst-1")
 	assert.Equal(t, StatusCompleted, st.Status)
 
-	// The registry check is the only invocation, and it happens at most once per version for the life of the process
+	// Each of the three turns checks the registry so a reset takes effect while hosts remain online
 	host.mu.Lock()
 	defer host.mu.Unlock()
-	require.Len(t, host.invokes, 1)
-	assert.Contains(t, host.invokes[0], methodRegister)
+	require.Len(t, host.invokes, 3)
+	for _, invocation := range host.invokes {
+		assert.Contains(t, invocation, methodCheck)
+	}
 }
 
 // TestTurnConvergesAfterAFaultBetweenTheStateWriteAndTheDispatch injects a failure between SetState and reconcile, and asserts the retried turn converges without double-counting
@@ -638,7 +655,7 @@ func TestAHostWithoutTheInstanceVersionDeclinesTheJob(t *testing.T) {
 // TestAConflictingDefinitionDeclinesEveryJobOfTheVersion verifies a host whose graph disagrees with the registered one hands its work to hosts whose code matches
 func TestAConflictingDefinitionDeclinesEveryJobOfTheVersion(t *testing.T) {
 	host := newFakeHost()
-	host.registryResponse = registerResponse{OK: false, Fingerprint: "someone-else's-graph", FirstSeenAt: time.Now()}
+	host.registryResponse = registerResponse{Found: true, OK: false, Fingerprint: "someone-else's-graph", FirstSeenAt: time.Now()}
 
 	wf, err := New("conflicting", WithSteps(Step("a", WithRun(noopRun))))
 	require.NoError(t, err)
@@ -782,7 +799,7 @@ func TestWirePayloadsSurviveAGenericDecode(t *testing.T) {
 		},
 		{
 			name:  "compensation report",
-			value: compReportPayload{Step: "s", Index: 1, Attempt: 3, Error: "e", Retryable: true, Transport: true, TraceParent: "tp"},
+			value: compReportPayload{Step: "s", Index: 1, Attempt: 3, Error: "e", ChildStatus: StatusCancelled, ChildCompensation: CompensationPartial, Retryable: true, Transport: true, TraceParent: "tp"},
 			into:  func() any { return &compReportPayload{} },
 		},
 		{
@@ -802,7 +819,7 @@ func TestWirePayloadsSurviveAGenericDecode(t *testing.T) {
 		},
 		{
 			name:  "registry response",
-			value: registerResponse{OK: true, Fingerprint: "abc", FirstSeenAt: now},
+			value: registerResponse{Found: true, OK: true, Fingerprint: "abc", FirstSeenAt: now},
 			into:  func() any { return &registerResponse{} },
 		},
 		{

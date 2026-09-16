@@ -44,7 +44,8 @@ provisionStorage, err := workflow.New("provision-storage",
 onboarding, err := workflow.New("tenant-onboarding",
 	workflow.WithTimeout(7*24*time.Hour),
 	workflow.WithSteps(
-		// Opens the review ticket; its compensation closes it with the reason
+		// Opens the review ticket
+		// Its compensation closes it with the reason
 		workflow.Step("request-review",
 			workflow.WithRun(openReviewTicket),
 			workflow.WithCompensate(closeReviewTicket),
@@ -55,7 +56,7 @@ onboarding, err := workflow.New("tenant-onboarding",
 			workflow.WithEventTimeout(72*time.Hour),
 		),
 
-		// The approval payload says whether it was approved; a rejection is a boolean, not a failure
+		// The approval payload says whether it was approved
 		workflow.Step("approved", workflow.WithRun(readApproval)),
 
 		// Three subsystems at once, two of them workflows in their own right

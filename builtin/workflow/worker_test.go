@@ -95,7 +95,7 @@ func TestWorkerDeclinesAVersionItDoesNotServe(t *testing.T) {
 
 func TestWorkerDeclinesAVersionTheRegistryRefuses(t *testing.T) {
 	host := newFakeHost()
-	host.registryResponse = registerResponse{OK: false}
+	host.registryResponse = registerResponse{Found: true, OK: false}
 
 	wf, err := New("conflict", WithSteps(Step("a", WithRun(noopRun))))
 	require.NoError(t, err)
@@ -321,7 +321,7 @@ func TestWorkerJobFailedReportsADeadLetteredAttempt(t *testing.T) {
 		host := newFakeHost()
 		w := newTestWorker(t, wf, host, false)
 
-		// A dead-lettered job takes its payload with it, so this report is the only thing that can get the attempt back into the journal
+		// A dead-lettered worker result is not journaled, so this report is the only thing that can get the attempt back into the workflow
 		err := w.JobFailed(t.Context(), "job-1", methodRun, &payloadEnvelope{value: runPayloadFor(wf, "a")}, errors.New("no host accepted it"))
 		require.NoError(t, err)
 

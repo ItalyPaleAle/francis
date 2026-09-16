@@ -25,7 +25,8 @@ thumbnails, err := workflow.New("thumbnails",
 		// Normalizes the request into one item per thumbnail to produce
 		workflow.Step("plan", workflow.WithRun(planThumbnails)),
 
-		// One task per thumbnail; one that cannot be encoded is recorded and does not stop the run
+		// One task per thumbnail
+		// A task that cannot be encoded is recorded and does not stop the run
 		workflow.ForEach("generate",
 			workflow.WithItemsFrom("plan"),
 			workflow.WithRun(generateThumbnail),
@@ -33,7 +34,8 @@ thumbnails, err := workflow.New("thumbnails",
 			workflow.WithFailurePolicy(workflow.TolerateFailures),
 		),
 
-		// The manifest is the durable record of the run; without it there is nothing to notify about
+		// The manifest is the durable record of the run
+		// Without it there is nothing to notify about
 		workflow.Step("manifest",
 			workflow.WithRun(writeManifest),
 			workflow.WithMaxAttempts(5),

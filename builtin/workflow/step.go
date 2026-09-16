@@ -55,7 +55,9 @@ const (
 
 // RunFunc performs one attempt of a task and returns the output recorded in the journal
 // It runs on a WorkflowWorker, never on the Workflow actor
-// Returning an error records a failed attempt, retried per the step's policy; returning actor.ErrJobPermanentFailure fails the task without further attempts; returning actor.ErrJobRejected declines it so another host runs it, without counting an attempt
+// Returning an error records a failed attempt, retried per the step's policy
+// Returning actor.ErrJobPermanentFailure fails the task without further attempts
+// Returning actor.ErrJobRejected declines it so another host runs it, without counting an attempt
 type RunFunc func(ctx context.Context, t Task) (output any, err error)
 
 // CompensateFunc undoes the effect of one task that had completed successfully
@@ -125,10 +127,26 @@ type StepSpec struct {
 //		Step("sms", WithRun(sms)),
 //	).With(WithFailurePolicy(TolerateFailures))
 func (s StepSpec) With(opts ...StepOption) StepSpec {
+	s.d = s.d.clone()
 	for _, opt := range opts {
 		opt(s.d)
 	}
 	return s
+}
+
+// clone copies a declaration recursively so validated definitions and reused specifications never share mutable graph nodes
+func (d *stepDef) clone() *stepDef {
+	if d == nil {
+		return nil
+	}
+	out := *d
+	out.inputFrom = append([]string(nil), d.inputFrom...)
+	out.skipOnFailure = append([]string(nil), d.skipOnFailure...)
+	out.members = make([]*stepDef, len(d.members))
+	for i := range d.members {
+		out.members[i] = d.members[i].clone()
+	}
+	return &out
 }
 
 // StepOption configures a step built by one of the step constructors
@@ -186,7 +204,8 @@ func newStepSpec(name string, kind Kind, opts []StepOption) StepSpec {
 }
 
 // WithRun sets the function that performs one attempt of the step's task
-// It runs on a worker, so it may call the clock, do I/O, use randomness, and start goroutines; the only contract is idempotency, because at-least-once delivery means it can run twice
+// It runs on a worker, so it may call the clock, do I/O, use randomness, and start goroutines
+// The only requirement is idempotency, because at-least-once delivery means it could be invoked twice
 func WithRun(fn RunFunc) StepOption {
 	return func(d *stepDef) {
 		d.run = fn

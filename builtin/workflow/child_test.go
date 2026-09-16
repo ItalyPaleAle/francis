@@ -179,7 +179,7 @@ func TestAStuckUnwindEndsAtTheInstanceDeadline(t *testing.T) {
 	backdateStart(t, host, wf, "inst-1", 2*time.Minute)
 
 	// The deadline is served by a fresh activation, which is also how it arrives in practice: an orchestrator holds its journal for the life of one activation, and this one has been sitting on the unwind
-	// One instance timeout covers the whole run, the unwind included, so a compensation nobody is going to finish is abandoned rather than left running forever
+	// Compensation gets a fresh instance-sized timeout, so a compensation nobody is going to finish is abandoned when that second budget elapses rather than left running forever
 	stale := newTestOrchestrator(t, wf, host, "inst-1")
 	require.NoError(t, stale.Alarm(t.Context(), alarmDeadline, nil))
 

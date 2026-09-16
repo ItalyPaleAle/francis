@@ -4,7 +4,8 @@
 // A workflow is a declared graph of named steps plus plain Go handler functions, and the engine is a state machine over a durable journal: there is no code-as-workflow SDK, no replay, and therefore no determinism constraints on user code
 //
 // The central rule is the orchestration boundary: the Workflow actor orchestrates and performs nothing
-// It reads and writes its own journal, arms and drops its timers, and dispatches jobs; every unit of work, without exception, runs on a worker actor, which is where WithRun and WithCompensate are invoked
+// It reads and writes its own journal, arms and drops its timers, and dispatches jobs
+// Every unit of work, without exception, runs on a worker actor, which is where WithRun and WithCompensate are invoked
 // That is enforced by the code rather than by convention: the definition exposes no hook that runs on the Workflow actor, advance is a pure function of the journal and the definition, and a fan-out's size and a step's condition are both outputs of steps rather than callbacks the orchestrator runs
 //
 // The engine owns its own failure handling: attempts, dead-letter recovery, and the deadline are recorded in the journal and driven by the same reconcile loop, rather than delegated to per-actor-type settings the engine cannot observe
@@ -21,7 +22,6 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -71,11 +71,6 @@ type Workflow struct {
 	registrations []builtinactor.BuiltInActorRegistration
 	// purgeCron is the auto-purge cron job, when WithAutoPurge was set
 	purgeCron *cronjob.CronJob
-
-	// checksMu guards checks
-	checksMu sync.Mutex
-	// checks caches this host's registry answer per version, for the life of the process, so the consistency check costs at most one Invoke per version
-	checks map[int]*versionCheck
 
 	// boundService is the actor.Service the host handed to this workflow's factories, which is what the auto-purge cron job's handler runs against
 	boundService atomic.Pointer[actor.Service]
@@ -253,7 +248,7 @@ func (o *options) newDefinition(name string) (*definition, error) {
 	// Index every step and member by name, which is also where duplicate names and duplicate event names are caught
 	eventNames := map[string]string{}
 	for i, spec := range o.steps {
-		d := spec.d
+		d := spec.d.clone()
 		def.steps[i] = d
 		def.order[d.name] = i
 
@@ -449,17 +444,17 @@ func (def *definition) setFingerprint() {
 
 // writeStepFingerprint writes one step's behavior-affecting options into the running hash
 func (def *stepDef) writeStepFingerprint(w io.Writer) {
-	// We don't use JSON and rather rely on something that's more deterministic
+	// Plain values keep the established fingerprint while delimiter-bearing values are quoted so two different graphs cannot serialize identically
 	fmt.Fprintf(w, "step=%s;kind=%s;inputFrom=%s;itemsFrom=%s;skipOnFailure=%s;optional=%t;policy=%s;compensable=%t;capability=%s;event=%s",
-		def.name, def.kind,
-		strings.Join(def.inputFrom, ","),
-		def.itemsFrom,
-		strings.Join(def.skipOnFailure, ","),
+		fingerprintValue(def.name), def.kind,
+		fingerprintList(def.inputFrom),
+		fingerprintValue(def.itemsFrom),
+		fingerprintList(def.skipOnFailure),
 		def.optional,
 		def.failurePolicy,
 		def.compensate != nil,
-		def.capability,
-		def.eventName,
+		fingerprintValue(def.capability),
+		fingerprintValue(def.eventName),
 	)
 
 	// The attempt and deadline policies decide how a failure or a timeout is folded into the journal, so a host that disagrees about them would advance the same journal differently
@@ -469,10 +464,10 @@ func (def *stepDef) writeStepFingerprint(w io.Writer) {
 		def.stepTimeout, def.eventTimeout, def.maxParallel, def.compensateOnFailure,
 	)
 	if def.hasSkipIf {
-		fmt.Fprintf(w, ";skipIf=%s=%t", def.skipIfStep, def.skipIfValue)
+		fmt.Fprintf(w, ";skipIf=%s=%t", fingerprintValue(def.skipIfStep), def.skipIfValue)
 	}
 	if def.child != nil {
-		fmt.Fprintf(w, ";child=%s@%d", def.child.def.name, def.child.def.version)
+		fmt.Fprintf(w, ";child=%s@%d", fingerprintValue(def.child.def.name), def.child.def.version)
 	}
 	fmt.Fprint(w, "\n")
 
@@ -480,6 +475,23 @@ func (def *stepDef) writeStepFingerprint(w io.Writer) {
 		fmt.Fprint(w, "  ")
 		m.writeStepFingerprint(w)
 	}
+}
+
+// fingerprintList renders a list unambiguously while preserving the previous encoding for ordinary names
+func fingerprintList(values []string) string {
+	encoded := make([]string, len(values))
+	for i := range values {
+		encoded[i] = fingerprintValue(values[i])
+	}
+	return strings.Join(encoded, ",")
+}
+
+// fingerprintValue quotes values that could otherwise inject field or list separators into the fingerprint source
+func fingerprintValue(value string) string {
+	if !strings.ContainsAny(value, ",;=\n\r\"\\") {
+		return value
+	}
+	return strconv.Quote(value)
 }
 
 // buildRegistrations creates every reserved actor type the workflow registers on a host

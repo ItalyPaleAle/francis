@@ -33,7 +33,8 @@ checkout, err := workflow.New("checkout",
 			workflow.WithCompensateBackoff(10*time.Second, 10*time.Minute),
 		),
 
-		// The carrier is slow and flaky; give it room to be, and undo it if a later step fails
+		// The carrier is slow and flaky
+		// Give it room to be, and undo it if a later step fails
 		workflow.Step("create-shipment",
 			workflow.WithRun(createShipment),
 			workflow.WithCompensate(cancelShipment),

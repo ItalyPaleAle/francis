@@ -39,17 +39,24 @@ func (o *orchestrator) purge(ctx context.Context) (any, error) {
 	// Children go first, recursively, so a child is never left orphaned by its parent's removal
 	for i := range st.Steps {
 		for j := range st.Steps[i].Tasks {
-			childID := st.Steps[i].Tasks[j].ChildID
+			tr := &st.Steps[i].Tasks[j]
+			childID := tr.ChildID
 			if childID == "" {
 				continue
 			}
 
-			child := o.childDefinitionFor(st.Steps[i].Name, st.Steps[i].Tasks[j].Index)
-			if child == nil {
+			childType := tr.ChildType
+			if childType == "" {
+				child := o.childDefinitionFor(st.Steps[i].Name, tr.Index)
+				if child != nil {
+					childType = child.baseType
+				}
+			}
+			if childType == "" {
 				continue
 			}
 
-			cErr := child.Service(o.svc).Purge(ctx, childID)
+			cErr := o.purgeChild(ctx, childType, childID)
 			if cErr != nil && !errors.Is(cErr, ErrInstanceNotFound) {
 				return nil, fmt.Errorf("failed to purge child %s: %w", childID, cErr)
 			}
@@ -57,7 +64,7 @@ func (o *orchestrator) purge(ctx context.Context) (any, error) {
 	}
 
 	// The instance's own jobs are a bounded set, since each one belongs to a journal entry
-	err = o.purgeJobs(ctx)
+	err = o.purgeJobs(ctx, &st)
 	if err != nil {
 		return nil, err
 	}
@@ -91,17 +98,79 @@ func (o *orchestrator) parentStillRunning(ctx context.Context, parent *parentRef
 }
 
 // purgeJobs removes every job the instance still has, whether it is still scheduled or has already ended
-func (o *orchestrator) purgeJobs(ctx context.Context) error {
-	jobs, err := o.client.ListJobs(ctx)
+func (o *orchestrator) purgeJobs(ctx context.Context, st *instanceState) error {
+	err := deleteActorJobs(ctx, o.client)
 	if err != nil {
-		return fmt.Errorf("failed to list the instance's jobs: %w", err)
+		return fmt.Errorf("failed to remove the instance's jobs: %w", err)
 	}
 
-	for _, j := range jobs {
-		err = o.client.DeleteJob(ctx, j.JobID)
-		if err != nil && !errors.Is(err, actor.ErrJobNotFound) {
-			return fmt.Errorf("failed to remove job %s: %w", j.JobID, err)
+	for i := range st.Steps {
+		sr := &st.Steps[i]
+		d := o.def.byName[sr.Name]
+		for j := range sr.Tasks {
+			tr := &sr.Tasks[j]
+			workerType := tr.WorkerType
+			undoType := tr.UndoType
+			if d != nil {
+				member := memberDef(d, tr.Index)
+				if workerType == "" {
+					workerType = o.wf.workerType(member.capability)
+				}
+				if undoType == "" {
+					undoType = o.wf.undoType(member.capability)
+				}
+			}
+
+			actorID := workerActorID(o.instanceID, sr.Name, tr.Index)
+			for _, actorType := range []string{workerType, undoType} {
+				if actorType == "" {
+					continue
+				}
+				client := builtinactor.NewClient[struct{}](actorType, actorID, o.svc)
+				err = deleteActorJobs(ctx, client)
+				if err != nil {
+					return fmt.Errorf("failed to remove jobs for %s/%s: %w", actorType, actorID, err)
+				}
+			}
 		}
+	}
+	return nil
+}
+
+// deleteActorJobs removes every retained or live job owned by one actor
+func deleteActorJobs[T any](ctx context.Context, client actor.Client[T]) error {
+	jobs, err := client.ListJobs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		err = client.DeleteJob(ctx, job.JobID)
+		if err != nil && !errors.Is(err, actor.ErrJobNotFound) {
+			return fmt.Errorf("failed to remove job %s: %w", job.JobID, err)
+		}
+	}
+	return nil
+}
+
+// purgeChild invokes a journaled child type directly so cleanup does not depend on the current parent's graph
+func (o *orchestrator) purgeChild(ctx context.Context, childType string, childID string) error {
+	env, err := retryWhilePlacementMoves(ctx, func(ctx context.Context) (actor.Envelope, error) {
+		return builtinactor.InvokeActor(ctx, o.svc, childType, childID, methodPurge, nil)
+	})
+	if err != nil {
+		return err
+	}
+
+	var res purgeResult
+	err = env.Decode(&res)
+	if err != nil {
+		return fmt.Errorf("failed to decode the child purge result: %w", err)
+	}
+	if !res.Found {
+		return ErrInstanceNotFound
+	}
+	if res.Active {
+		return ErrInstanceActive
 	}
 	return nil
 }
@@ -139,8 +208,8 @@ func (o *orchestrator) status(ctx context.Context) (any, error) {
 
 // reportToParent dispatches a terminated child's outcome to the instance that started it, which is the only thing that crosses between their journals
 // A child asked to undo itself reports a compensation; any other termination reports a result, which the parent's step policy then decides what to make of
-func (o *orchestrator) reportToParent(ctx context.Context, st *instanceState) error {
-	if st.Parent == nil || st.Reported {
+func (o *orchestrator) reportToParent(ctx context.Context, st *instanceState, force bool) error {
+	if st.Parent == nil || (st.Reported && !force) {
 		return nil
 	}
 
@@ -155,11 +224,13 @@ func (o *orchestrator) reportToParent(ctx context.Context, st *instanceState) er
 
 		key := fmt.Sprintf("comp%s%s%s%d%s%d", idDelimiter, st.Parent.Step, idDelimiter, st.Parent.Index, idDelimiter, st.Parent.UnwoundBy)
 		_, _, err := client.Dispatch(ctx, methodCompensated, compReportPayload{
-			Step:        st.Parent.Step,
-			Index:       st.Parent.Index,
-			Attempt:     st.Parent.UnwoundBy,
-			Error:       errMsg,
-			TraceParent: st.TraceParent,
+			Step:              st.Parent.Step,
+			Index:             st.Parent.Index,
+			Attempt:           st.Parent.UnwoundBy,
+			Error:             errMsg,
+			ChildStatus:       st.Status,
+			ChildCompensation: st.Compensation,
+			TraceParent:       st.TraceParent,
 		}, actor.WithIdempotencyKey(key))
 		if err != nil {
 			return fmt.Errorf("failed to report the unwind to the parent: %w", err)

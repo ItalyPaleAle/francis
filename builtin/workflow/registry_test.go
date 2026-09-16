@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/internal/actorcore"
 )
 
 // newTestRegistry builds the registry singleton over the fake host, which is what every registry test drives
@@ -50,6 +51,7 @@ func TestTheRegistryRecordsTheFirstGraphItSeesForAVersion(t *testing.T) {
 	r := newTestRegistry(t, host)
 
 	first := registerWith(t, r, 1, "fingerprint-a")
+	assert.True(t, first.Found)
 	assert.True(t, first.OK)
 	assert.Equal(t, "fingerprint-a", first.Fingerprint)
 	assert.NotZero(t, first.FirstSeenAt)
@@ -69,6 +71,26 @@ func TestTheRegistryRecordsTheFirstGraphItSeesForAVersion(t *testing.T) {
 	next := registerWith(t, r, 2, "fingerprint-b")
 	assert.True(t, next.OK)
 	assert.Len(t, recordedVersions(t, r), 2)
+}
+
+func TestTheRegistryChecksKnownVersionsWithoutCreatingUnknownOnes(t *testing.T) {
+	host := newFakeHost()
+	r := newTestRegistry(t, host)
+
+	res, err := r.Peek(t.Context(), methodCheck, &payloadEnvelope{value: registerRequest{Version: 1, Fingerprint: "fingerprint-a"}})
+	require.NoError(t, err)
+	unknown, ok := res.(registerResponse)
+	require.True(t, ok)
+	assert.False(t, unknown.Found)
+	assert.Empty(t, recordedVersions(t, r))
+
+	registerWith(t, r, 1, "fingerprint-a")
+	res, err = r.Peek(t.Context(), methodCheck, &payloadEnvelope{value: registerRequest{Version: 1, Fingerprint: "fingerprint-a"}})
+	require.NoError(t, err)
+	known, ok := res.(registerResponse)
+	require.True(t, ok)
+	assert.True(t, known.Found)
+	assert.True(t, known.OK)
 }
 
 func TestTheRegistryForgetsOnlyTheVersionItIsAskedTo(t *testing.T) {
@@ -102,11 +124,18 @@ func TestTheRegistryRejectsWhatItCannotAnswer(t *testing.T) {
 		_, err := r.Invoke(t.Context(), "whatever", nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "unknown workflow registry method")
+
+		_, err = r.Peek(t.Context(), "whatever", nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown workflow registry peek method")
 	})
 
 	t.Run("a payload it cannot decode", func(t *testing.T) {
 		// A payload that cannot be decoded fails the same way on every attempt, so retrying it would only waste attempts
 		_, err := r.Invoke(t.Context(), methodRegister, &payloadEnvelope{value: json.RawMessage(`"not a request"`)})
+		require.ErrorIs(t, err, actor.ErrJobPermanentFailure)
+
+		_, err = r.Peek(t.Context(), methodCheck, &payloadEnvelope{value: json.RawMessage(`"not a request"`)})
 		require.ErrorIs(t, err, actor.ErrJobPermanentFailure)
 
 		_, err = r.Invoke(t.Context(), methodForget, &payloadEnvelope{value: json.RawMessage(`"not a request"`)})
@@ -118,14 +147,14 @@ func TestTheRegistryRejectsWhatItCannotAnswer(t *testing.T) {
 	})
 }
 
-func TestAHostAsksTheRegistryAtMostOncePerVersion(t *testing.T) {
+func TestAHostChecksTheRegistryBeforeServingEachJob(t *testing.T) {
 	host := newFakeHost()
 	wf, err := New("cached-check", WithSteps(Step("a", WithRun(noopRun))))
 	require.NoError(t, err)
 
 	svc := actor.NewService(host)
 
-	// The check is the one synchronous call the engine makes from a turn, so it is cached for the life of the process
+	// Each check observes a possible ForgetVersion reset, so live hosts cannot keep conflicting authority after another graph claims the version
 	for range 3 {
 		ok, sErr := wf.serveVersion(t.Context(), svc, wf.def.version)
 		require.NoError(t, sErr)
@@ -134,7 +163,7 @@ func TestAHostAsksTheRegistryAtMostOncePerVersion(t *testing.T) {
 
 	host.mu.Lock()
 	defer host.mu.Unlock()
-	assert.Len(t, host.invokes, 1)
+	assert.Len(t, host.invokes, 3)
 }
 
 func TestAHostDeclinesAVersionItsOwnCodeDoesNotDefine(t *testing.T) {
@@ -154,7 +183,7 @@ func TestAHostDeclinesAVersionItsOwnCodeDoesNotDefine(t *testing.T) {
 	assert.Empty(t, host.invokes, "a version mismatch is decided locally")
 }
 
-func TestARegistryLookupThatFailedIsNotCached(t *testing.T) {
+func TestARegistryLookupRecoversAfterATransientFailure(t *testing.T) {
 	host := newFakeHost()
 	host.registryErr = errors.New("the registry is unreachable")
 
@@ -172,26 +201,43 @@ func TestARegistryLookupThatFailedIsNotCached(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, served, "the version is servable once the registry answers")
 
-	// The answer it did get is cached, so the retry costs one extra call and no more
+	// A later job checks again because registry resets must take effect without restarting this host
 	served, err = wf.serveVersion(t.Context(), svc, wf.def.version)
 	require.NoError(t, err)
 	assert.True(t, served)
 
 	host.mu.Lock()
 	defer host.mu.Unlock()
-	assert.Len(t, host.invokes, 2, "the failed lookup is retried once and the answer is then cached")
+	assert.Len(t, host.invokes, 3)
 }
 
-func TestADeclineIsCachedLikeAnyOtherAnswer(t *testing.T) {
+func TestARegistryCheckFallsBackDuringARollingDeployment(t *testing.T) {
 	host := newFakeHost()
-	host.registryResponse = registerResponse{OK: false, Fingerprint: "someone-elses-graph"}
+	host.registryPeekErr = actorcore.ErrActorMethodUnsupported
+	wf, err := New("rolling-check", WithSteps(Step("a", WithRun(noopRun))))
+	require.NoError(t, err)
+
+	served, err := wf.serveVersion(t.Context(), actor.NewService(host), wf.def.version)
+	require.NoError(t, err)
+	assert.True(t, served)
+
+	host.mu.Lock()
+	defer host.mu.Unlock()
+	require.Len(t, host.invokes, 2)
+	assert.Contains(t, host.invokes[0], methodCheck)
+	assert.Contains(t, host.invokes[1], methodRegister)
+}
+
+func TestAHostRechecksARegistryDecline(t *testing.T) {
+	host := newFakeHost()
+	host.registryResponse = registerResponse{Found: true, OK: false, Fingerprint: "someone-elses-graph"}
 
 	wf, err := New("cached-decline", WithSteps(Step("a", WithRun(noopRun))))
 	require.NoError(t, err)
 
 	svc := actor.NewService(host)
 
-	// A conflict is an answer the registry gave, so it is cached: the graph this host runs cannot change without restarting it
+	// A conflict is checked again because an operator may reset the erroneous registry entry while this host remains online
 	for range 3 {
 		served, sErr := wf.serveVersion(t.Context(), svc, wf.def.version)
 		require.NoError(t, sErr)
@@ -200,5 +246,5 @@ func TestADeclineIsCachedLikeAnyOtherAnswer(t *testing.T) {
 
 	host.mu.Lock()
 	defer host.mu.Unlock()
-	assert.Len(t, host.invokes, 1)
+	assert.Len(t, host.invokes, 3)
 }

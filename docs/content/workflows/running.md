@@ -37,6 +37,8 @@ if errors.Is(err, workflow.ErrInstanceNotFound) {
 }
 ```
 
+For child steps, `StepStatusView.Children` pairs each child instance ID with the terminal status and compensation outcome it reported. The outcome stays in the parent journal after the child is purged, so an optional or tolerated child failure does not hide a partial rollback.
+
 `GetStatus` is a read-only peek, so status reads run concurrently with each other and never queue behind one another — only behind a write turn, which the orchestration boundary keeps short. It reads through the provider rather than an activation's cache, so an active actor cannot serve a journal past its retention.
 
 ```go
@@ -47,7 +49,7 @@ type InstanceStatus struct {
 	Status       Status
 	Compensation CompensationOutcome
 	CurrentStep  string
-	Steps        []StepStatusView // every step: status, task counts, attempts, timings, error, child IDs
+	Steps        []StepStatusView // every step: status, task counts, attempts, timings, error, and child outcomes
 	Cause        string
 	Output       json.RawMessage  // what the run produced, once it has completed
 	Suspended    *SuspendView     // when suspended: since when, why, and what it was
@@ -83,7 +85,7 @@ The statuses are:
 
 ```go
 page, err := svc.List(ctx, &workflow.ListOptions{
-	Status:  workflow.StatusRunning, // or any status; empty means all
+	Status:  workflow.StatusRunning, // or any status - empty means all
 	Version: 3,                      // optional
 	Parent:  parentID,               // optional: the children of one instance
 	Limit:   50,

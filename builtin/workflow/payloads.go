@@ -30,6 +30,8 @@ const (
 	methodPurge = "purge"
 	// methodStatus reads the journal through a Peek, so status reads never queue behind each other
 	methodStatus = "status"
+	// methodCheck reads an existing registry decision without serializing known-version checks
+	methodCheck = "check"
 	// methodRegister answers the registry's consistency check
 	methodRegister = "register"
 	// methodDefinitions lists what the registry holds
@@ -108,13 +110,16 @@ type reportPayload struct {
 
 // compReportPayload carries one compensation's outcome back to the orchestrator
 type compReportPayload struct {
-	Step        string `msgpack:"step"`
-	Index       int    `msgpack:"index"`
-	Attempt     int    `msgpack:"attempt"`
-	Error       string `msgpack:"error,omitempty"`
-	Retryable   bool   `msgpack:"retryable,omitempty"`
-	Transport   bool   `msgpack:"transport,omitempty"`
-	TraceParent string `msgpack:"traceParent,omitempty"`
+	Step    string `msgpack:"step"`
+	Index   int    `msgpack:"index"`
+	Attempt int    `msgpack:"attempt"`
+	Error   string `msgpack:"error,omitempty"`
+	// ChildStatus and ChildCompensation are set when a child instance reports its parent-driven unwind
+	ChildStatus       Status              `msgpack:"childStatus,omitempty"`
+	ChildCompensation CompensationOutcome `msgpack:"childCompensation,omitempty"`
+	Retryable         bool                `msgpack:"retryable,omitempty"`
+	Transport         bool                `msgpack:"transport,omitempty"`
+	TraceParent       string              `msgpack:"traceParent,omitempty"`
 }
 
 // eventPayload delivers an external event to a WaitForEvent step

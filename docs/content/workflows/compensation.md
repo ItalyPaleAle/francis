@@ -123,7 +123,7 @@ Either way the outcome is explicit in the status, which is what an alert should 
 ```go
 status, err := svc.GetStatus(ctx, id)
 if status.Compensation == workflow.CompensationPartial {
-	// Money may be stranded; the charge ID is in the journal for the operator
+	// Money may be stranded, the charge ID is in the journal for the operator
 }
 ```
 

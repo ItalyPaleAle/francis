@@ -164,7 +164,7 @@ func TestTheDeadlineParksOnAHostWithoutTheInstanceVersion(t *testing.T) {
 
 	declining, err := New("parked", WithSteps(Step("a", WithRun(noopRun))))
 	require.NoError(t, err)
-	host.registryResponse = registerResponse{OK: false}
+	host.registryResponse = registerResponse{Found: true, OK: false}
 
 	before := time.Now()
 	stale := newTestOrchestrator(t, declining, host, "inst-1")
@@ -194,7 +194,7 @@ func TestTheDeadlineFailsAnInstanceNoHostCanServe(t *testing.T) {
 		WithSteps(Step("a", WithRun(noopRun))),
 	)
 	require.NoError(t, err)
-	host.registryResponse = registerResponse{OK: false}
+	host.registryResponse = registerResponse{Found: true, OK: false}
 	backdateStart(t, host, declining, "inst-1", 2*time.Minute)
 
 	stale := newTestOrchestrator(t, declining, host, "inst-1")
@@ -216,7 +216,7 @@ func TestADeadLetteredInstanceJobIsIgnoredOnATerminatedInstance(t *testing.T) {
 
 	declining, err := New("terminal-park", WithSteps(Step("a", WithRun(noopRun))))
 	require.NoError(t, err)
-	host.registryResponse = registerResponse{OK: false}
+	host.registryResponse = registerResponse{Found: true, OK: false}
 
 	// There is no journal at all here, which is what the alarm sees for an instance whose retention has passed
 	stale := newTestOrchestrator(t, declining, host, "inst-1")

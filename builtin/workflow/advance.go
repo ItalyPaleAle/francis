@@ -50,8 +50,8 @@ type event struct {
 // The returned value reports whether the event changed nothing, so the turn can count how often ordering invariant 2 is doing its job
 func apply(st *instanceState, def *definition, ev *event, now time.Time) (duplicate bool) {
 	// A terminated instance ignores everything, so a late report or a repeated cancel cannot revive it
-	// The one exception is unwind, the verb only a parent may send, which exists precisely to move a completed child back into compensating
-	if st.Status.IsTerminal() && ev.kind != evUnwind {
+	// An unwind may reopen a completed child, and a late report may reveal an abandoned task whose effect still needs compensation
+	if st.Status.IsTerminal() && ev.kind != evUnwind && !isLateAbandonedSuccess(st, ev) {
 		return true
 	}
 
@@ -154,6 +154,21 @@ func applyReport(st *instanceState, def *definition, p *reportPayload, now time.
 		tr.LastError = ""
 		tr.Output = p.Output
 		tr.CompletedAt = now
+		recordChildOutcome(tr, p)
+
+		// A frame that had already closed must be eligible to open again for the newly discovered effect
+		if sr.Status == StepCompensated || sr.Status == StepCompensationFailed {
+			sr.Status = StepCompleted
+		}
+
+		// A terminal instance reopens only when it has a way to undo the effect it just learned about
+		if st.Status.IsTerminal() && memberCompensable(d, p.Index) {
+			st.TerminalStatus = st.Status
+			st.Status = StatusCompensating
+			st.CompletedAt = time.Time{}
+			st.Reported = false
+			st.Reopened = true
+		}
 		return false
 	}
 
@@ -165,6 +180,7 @@ func applyReport(st *instanceState, def *definition, p *reportPayload, now time.
 	// Success: record the output and close the task
 	if p.Error == "" {
 		tr.Output = p.Output
+		recordChildOutcome(tr, p)
 		tr.Done = true
 		tr.CompletedAt = now
 		tr.LastError = ""
@@ -177,6 +193,7 @@ func applyReport(st *instanceState, def *definition, p *reportPayload, now time.
 
 	// A child that terminated failed or cancelled fails the parent's task, and restarting it would only find the instance that already terminated
 	if p.ChildStatus != "" && p.ChildStatus != StatusCompleted {
+		recordChildOutcome(tr, p)
 		p.Retryable = false
 	}
 
@@ -220,6 +237,10 @@ func applyCompReport(st *instanceState, def *definition, p *compReportPayload, n
 	}
 	if p.Attempt < tr.Comp.Attempts && p.Error != "" {
 		return true
+	}
+	if p.ChildStatus != "" {
+		tr.ChildStatus = p.ChildStatus
+		tr.ChildCompensation = p.ChildCompensation
 	}
 
 	// Success: the effect is undone
@@ -307,7 +328,17 @@ func applyUnwind(st *instanceState, def *definition, ev *event, now time.Time) b
 		reason = "unwound by parent"
 	}
 
+	// A child that already finished an unwind reports its recorded outcome to the parent without relabeling a failed rollback as successful
+	if st.Status.IsTerminal() && st.Status != StatusCompleted && st.Compensation != "" {
+		recordUnwoundBy(st, ev)
+		st.Reported = false
+		return false
+	}
+
 	// A completed instance is reopened: its terminal outcome is cleared so the unwind can run and report a compensation of its own
+	if st.Status.IsTerminal() {
+		st.Reopened = true
+	}
 	st.CompletedAt = time.Time{}
 	st.Compensation = ""
 	st.Reported = false
@@ -467,6 +498,10 @@ func advance(st *instanceState, def *definition, instanceID string, now time.Tim
 	// Its deadlines are paused, which is what the empty DeadlineAt says: reconcile drops the alarm and resume puts the remainders back
 	if st.Status == StatusSuspended {
 		settleSteps(st, def, now)
+		if st.Status != StatusSuspended && st.Suspended != nil {
+			st.Suspended.ResumeTo = st.Status
+			st.Status = StatusSuspended
+		}
 		st.DeadlineAt = time.Time{}
 		st.Cursor = deriveCursor(st)
 		return
@@ -647,7 +682,8 @@ func pushFrame(st *instanceState, sr *stepRecord, d *stepDef) {
 }
 
 // compensableTasks returns the indexes into Tasks of the tasks of a settled step whose effects have to be undone
-// A task that succeeded is always one; a task that failed is one only when the step opted in with WithCompensateOnFailure, since the saga convention is that a step which did not complete did not take effect
+// A task that succeeded is always one
+// A task that failed is one only when the step opted in with WithCompensateOnFailure, since the saga convention is that a step which did not complete did not take effect
 // A task that started a child instance and was abandoned is always one, whatever the step opted into: the child is a live instance of its own, and nothing but this frame will stop it
 func compensableTasks(sr *stepRecord, d *stepDef) []int {
 	var out []int
@@ -671,7 +707,8 @@ func compensableTasks(sr *stepRecord, d *stepDef) []int {
 			continue
 		}
 
-		if d.compensateOnFailure && memberCompensable(d, tr.Index) {
+		member := memberDef(d, tr.Index)
+		if member.compensateOnFailure && memberCompensable(d, tr.Index) {
 			out = append(out, i)
 		}
 	}
@@ -730,21 +767,17 @@ func openStep(st *instanceState, def *definition, sr *stepRecord, instanceID str
 	switch d.kind {
 	case KindStep, KindChild:
 		sr.Tasks = []taskRecord{newTask(0, nil)}
-		if d.kind == KindChild {
-			sr.Tasks[0].ChildID = workerActorID(instanceID, sr.Name, 0)
-		}
+		def.configureTaskActors(d, &sr.Tasks[0], instanceID, sr.Name)
 		sr.Remaining = 1
 	case KindParallel:
 		sr.Tasks = make([]taskRecord, len(d.members))
-		for i, m := range d.members {
+		for i := range d.members {
 			sr.Tasks[i] = newTask(i, nil)
-			if m.kind == KindChild {
-				sr.Tasks[i].ChildID = workerActorID(instanceID, sr.Name, i)
-			}
+			def.configureTaskActors(d, &sr.Tasks[i], instanceID, sr.Name)
 		}
 		sr.Remaining = len(sr.Tasks)
 	case KindForEach:
-		items, err := fanOutItems(st, def, d)
+		items, err := def.fanOutItems(st, d)
 		if err != nil {
 			// The list is the fan-out's own input, so a list that cannot be read is the step failing rather than the instance crashing
 			sr.Tasks = nil
@@ -756,9 +789,7 @@ func openStep(st *instanceState, def *definition, sr *stepRecord, instanceID str
 		sr.Tasks = make([]taskRecord, len(items))
 		for i, item := range items {
 			sr.Tasks[i] = newTask(i, item)
-			if d.child != nil {
-				sr.Tasks[i].ChildID = workerActorID(instanceID, sr.Name, i)
-			}
+			def.configureTaskActors(d, &sr.Tasks[i], instanceID, sr.Name)
 		}
 		sr.Remaining = len(sr.Tasks)
 	case KindWait:
@@ -801,7 +832,7 @@ func conditionMatches(st *instanceState, def *definition, d *stepDef) bool {
 
 // fanOutItems reads the elements a fan-out iterates from the output of the step named by WithItemsFrom
 // The size is decided once, when the upstream step reports, and is then journaled, so a retried turn re-reads the recorded items rather than re-deriving them
-func fanOutItems(st *instanceState, def *definition, d *stepDef) ([]json.RawMessage, error) {
+func (def *definition) fanOutItems(st *instanceState, d *stepDef) ([]json.RawMessage, error) {
 	sr := st.step(d.itemsFrom)
 	if sr == nil {
 		return nil, fmt.Errorf("fan-out %q reads its items from step %q, which the journal does not have", d.name, d.itemsFrom)
@@ -864,8 +895,24 @@ func unwindNextFrame(st *instanceState, def *definition, now time.Time) bool {
 	if sr.Status != StepCompensating {
 		sr.Status = StepCompensating
 		for _, i := range compensableTasks(sr, d) {
+			if sr.Tasks[i].Comp != nil {
+				continue
+			}
 			sr.Tasks[i].Comp = &compRecord{Attempts: 1}
 		}
+		return true
+	}
+
+	// A late success can add an effect after the frame opened, so each pass allocates any compensation the journal learned it now owes
+	var added bool
+	for _, i := range compensableTasks(sr, d) {
+		if sr.Tasks[i].Comp != nil {
+			continue
+		}
+		sr.Tasks[i].Comp = &compRecord{Attempts: 1}
+		added = true
+	}
+	if added {
 		return true
 	}
 
@@ -902,6 +949,46 @@ func unwindNextFrame(st *instanceState, def *definition, now time.Time) bool {
 	sr.Status = StepCompensated
 	st.Stack = st.Stack[:len(st.Stack)-1]
 	return true
+}
+
+// isLateAbandonedSuccess reports whether a terminal journal still needs to account for work that cancellation or a timeout could not interrupt
+func isLateAbandonedSuccess(st *instanceState, ev *event) bool {
+	if ev.kind != evDone || ev.report == nil || ev.report.Error != "" {
+		return false
+	}
+	sr := st.step(ev.report.Step)
+	if sr == nil {
+		return false
+	}
+	tr := sr.task(ev.report.Index)
+	return tr != nil && tr.Done && tr.Abandoned
+}
+
+// recordChildOutcome keeps the child's terminal details beside the task so they remain visible after the child journal is purged
+func recordChildOutcome(tr *taskRecord, p *reportPayload) {
+	if p.ChildStatus == "" {
+		return
+	}
+	tr.ChildStatus = p.ChildStatus
+	tr.ChildCompensation = p.ChildCompensation
+}
+
+// configureTaskActors records every durable actor reference the task can create so later cleanup is independent of the deployed definition
+func (def *definition) configureTaskActors(d *stepDef, tr *taskRecord, instanceID string, stepName string) {
+	member := memberDef(d, tr.Index)
+	baseType := workflowActorTypePrefix + def.name
+	tr.WorkerType = queueType(baseType+workerTypeSuffix, member.capability)
+	tr.UndoType = queueType(baseType+undoTypeSuffix, member.capability)
+
+	child := member.child
+	if child == nil {
+		child = d.child
+	}
+	if child == nil {
+		return
+	}
+	tr.ChildID = workerActorID(instanceID, stepName, tr.Index)
+	tr.ChildType = child.baseType
 }
 
 // terminate closes the instance, deciding its terminal status and its output

@@ -155,7 +155,7 @@ func (s *WorkflowService) Cancel(ctx context.Context, instanceID string, reason 
 }
 
 // Suspend pauses an instance without losing its place, and pauses its deadlines with it
-// Work already dispatched runs to completion and its report is recorded; nothing new is started until Resume
+// Work already dispatched runs to completion and its report is recorded, nothing new is started until Resume
 func (s *WorkflowService) Suspend(ctx context.Context, instanceID string, reason string) error {
 	return s.dispatchControl(ctx, instanceID, methodSuspend, reasonPayload{Reason: reason})
 }
@@ -200,7 +200,7 @@ func (s *WorkflowService) Purge(ctx context.Context, instanceID string) error {
 	}
 }
 
-// PurgeTerminated removes every terminated instance whose retention has elapsed, skipping any that still has a parent, and returns how many it removed
+// PurgeTerminated removes every terminated instance whose retention has elapsed, preserving children whose parent is still active, and returns how many it removed
 // It pages, so a backlog of a million terminated instances is a long call rather than a large one
 func (s *WorkflowService) PurgeTerminated(ctx context.Context) (int, error) {
 	var (
@@ -219,15 +219,12 @@ func (s *WorkflowService) PurgeTerminated(ctx context.Context) (int, error) {
 			}
 
 			for _, inst := range page.Instances {
-				// A child is never purged from under a parent that might still unwind it, so the parent's own purge is what reaches it
-				if inst.Parent != nil {
-					continue
-				}
 				// The cutoff is a range, and a label filter is an equality, so the retention check is made here on the decoded journal rather than server-side
 				if inst.CompletedAt.IsZero() || inst.CompletedAt.After(cutoff) {
 					continue
 				}
 
+				// Purge itself checks the parent's live journal, which preserves active children while allowing orphans to be collected
 				pErr := s.Purge(ctx, inst.InstanceID)
 				if pErr != nil && !errors.Is(pErr, ErrInstanceNotFound) && !errors.Is(pErr, ErrInstanceActive) {
 					return removed, fmt.Errorf("failed to purge instance %s: %w", inst.InstanceID, pErr)
@@ -420,9 +417,18 @@ type StepStatusView struct {
 	// Error is the reason the step failed, once it has
 	Error string
 	// ChildIDs are the instance IDs of the children a child step or a child fan-out started
-	ChildIDs    []string
+	ChildIDs []string
+	// Children retains the terminal status and compensation outcome each child reported
+	Children    []ChildStatusView
 	StartedAt   time.Time
 	CompletedAt time.Time
+}
+
+// ChildStatusView is the outcome a child task recorded in its parent's journal
+type ChildStatusView struct {
+	InstanceID   string
+	Status       Status
+	Compensation CompensationOutcome
 }
 
 // SuspendView says since when an instance has been paused, why, and what it goes back to
@@ -511,6 +517,11 @@ func stepStatusView(sr *stepRecord) StepStatusView {
 		}
 		if tr.ChildID != "" {
 			view.ChildIDs = append(view.ChildIDs, tr.ChildID)
+			view.Children = append(view.Children, ChildStatusView{
+				InstanceID:   tr.ChildID,
+				Status:       tr.ChildStatus,
+				Compensation: tr.ChildCompensation,
+			})
 		}
 	}
 	return view

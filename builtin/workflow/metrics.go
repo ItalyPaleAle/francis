@@ -9,7 +9,7 @@ import (
 type engineMetrics struct {
 	// instancesStarted counts instances that began running
 	instancesStarted metric.Int64Counter
-	// instancesTerminated counts instances that reached a terminal status, tagged by that status
+	// instancesTerminated counts instances that reached a terminal status for the first time, tagged by that status
 	instancesTerminated metric.Int64Counter
 	// instancesRunning tracks how many instances are currently running on this host's view
 	instancesRunning metric.Int64UpDownCounter

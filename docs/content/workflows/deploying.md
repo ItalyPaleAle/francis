@@ -16,7 +16,7 @@ Handler **bodies** are not fingerprinted.
 
 The registry answers one question: is this the graph recorded for this version? If the version is unknown, it records it and answers yes. If it is known with the same fingerprint, yes. Otherwise, **conflict**, with the recorded fingerprint and when it was first seen. It never overwrites, so the first deployment of a version defines it.
 
-The check is made **lazily, once per host per version, and cached for the life of the process**. The first time a host's orchestrator, worker, or undo actor handles a job for a version, it asks; from then on it knows. Only an answer the registry actually gave is cached: a lookup that could not reach it is retried, so a timeout does not take the version out of service on that host until it restarts.
+The check is made before a host's orchestrator, worker, or undo actor handles a job. A host asks again for each delivery so `ForgetVersion` takes effect across hosts that remain online; otherwise an old host could keep serving a fingerprint that the registry no longer authorizes. Known versions use concurrent read-only checks, while the first caller for an unknown version registers it in an exclusive turn. A lookup failure returns the job for retry rather than letting it run without a consistency decision.
 
 ## When a host conflicts
 
@@ -36,6 +36,8 @@ err = svc.ForgetVersion(ctx, 3)
 ```
 
 `ForgetVersion` refuses a version that still has instances with `ErrVersionInUse`, since forgetting one under a running instance would let a different graph claim its number.
+
+Live hosts observe the reset on their next delivery. This lets a corrected definition claim the version without leaving an earlier host's approval cached.
 
 ## What needs a new version
 

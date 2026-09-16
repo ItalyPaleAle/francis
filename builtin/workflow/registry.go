@@ -2,15 +2,16 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
-	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/builtinactor"
 )
 
@@ -46,6 +47,7 @@ type registerRequest struct {
 
 // registerResponse answers the consistency check, carrying what was recorded so a conflict can name both fingerprints
 type registerResponse struct {
+	Found       bool      `msgpack:"found"`
 	OK          bool      `msgpack:"ok"`
 	Fingerprint string    `msgpack:"fingerprint,omitempty"`
 	FirstSeenAt time.Time `msgpack:"firstSeenAt,omitzero"`
@@ -99,6 +101,40 @@ func (r *registryActor) Invoke(ctx context.Context, method string, data actor.En
 	}
 }
 
+// Peek checks a known version under the registry's shared read lock so established workflows do not serialize every delivery
+func (r *registryActor) Peek(ctx context.Context, method string, data actor.Envelope) (any, error) {
+	if method != methodCheck {
+		return nil, fmt.Errorf("unknown workflow registry peek method %q", method)
+	}
+	return r.check(ctx, data)
+}
+
+// check returns the recorded decision without creating one, leaving an unknown version for register's exclusive turn
+func (r *registryActor) check(ctx context.Context, data actor.Envelope) (any, error) {
+	var req registerRequest
+	err := decodePayload(data, &req)
+	if err != nil {
+		return nil, err
+	}
+
+	st, err := r.client.GetState(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read the registry state: %w", err)
+	}
+
+	existing := st.find(req.Version)
+	if existing == nil {
+		return registerResponse{}, nil
+	}
+
+	return registerResponse{
+		Found:       true,
+		OK:          existing.Fingerprint == req.Fingerprint,
+		Fingerprint: existing.Fingerprint,
+		FirstSeenAt: existing.FirstSeenAt,
+	}, nil
+}
+
 // register records a version's fingerprint the first time it is seen, and otherwise answers whether the caller's matches
 // It never overwrites, so the first deployment of a version defines it and every later disagreement is reported as a conflict
 func (r *registryActor) register(ctx context.Context, data actor.Envelope) (any, error) {
@@ -116,6 +152,7 @@ func (r *registryActor) register(ctx context.Context, data actor.Envelope) (any,
 	existing := st.find(req.Version)
 	if existing != nil {
 		return registerResponse{
+			Found:       true,
 			OK:          existing.Fingerprint == req.Fingerprint,
 			Fingerprint: existing.Fingerprint,
 			FirstSeenAt: existing.FirstSeenAt,
@@ -134,7 +171,7 @@ func (r *registryActor) register(ctx context.Context, data actor.Envelope) (any,
 		return nil, fmt.Errorf("failed to record the definition: %w", err)
 	}
 
-	return registerResponse{OK: true, Fingerprint: entry.Fingerprint, FirstSeenAt: entry.FirstSeenAt}, nil
+	return registerResponse{Found: true, OK: true, Fingerprint: entry.Fingerprint, FirstSeenAt: entry.FirstSeenAt}, nil
 }
 
 // definitions returns every version the registry holds, which is the operator's view of what has been deployed
@@ -177,46 +214,12 @@ func (r *registryActor) forget(ctx context.Context, data actor.Envelope) error {
 	return nil
 }
 
-// versionCheck caches this host's answer for one version, for the life of the process
-// Only an answer the registry actually gave is cached: a lookup that could not reach it is retried, since caching a timeout would take the version out of service on this host until it restarts
-type versionCheck struct {
-	mu     sync.Mutex
-	asked  bool
-	served bool
-}
-
-// serveVersion reports whether this host may serve a version, asking the registry the first time and caching the answer
+// serveVersion reports whether this host may serve a version, consulting the registry so an operator reset takes effect on every live host
 func (w *Workflow) serveVersion(ctx context.Context, svc *actor.Service, version int) (bool, error) {
-	w.checksMu.Lock()
-	check, ok := w.checks[version]
-	if !ok {
-		check = &versionCheck{}
-		if w.checks == nil {
-			w.checks = map[int]*versionCheck{}
-		}
-		w.checks[version] = check
-	}
-	w.checksMu.Unlock()
-
-	// The lock is held across the lookup, so concurrent first-time callers for one version ask once between them rather than each making the call
-	check.mu.Lock()
-	defer check.mu.Unlock()
-
-	if check.asked {
-		return check.served, nil
-	}
-
-	served, err := w.askRegistry(ctx, svc, version)
-	if err != nil {
-		return false, err
-	}
-
-	check.asked = true
-	check.served = served
-	return served, nil
+	return w.askRegistry(ctx, svc, version)
 }
 
-// askRegistry performs the one consistency check, and turns a conflict into a decline rather than an error so the work re-routes to hosts whose code matches
+// askRegistry checks known versions concurrently, registering an unknown one under the registry's exclusive turn
 func (w *Workflow) askRegistry(ctx context.Context, svc *actor.Service, version int) (bool, error) {
 	// Only the version this host's code defines can be checked against this host's fingerprint
 	// An instance stamped with another version is declined by the caller on the version mismatch itself, without consulting the registry
@@ -224,10 +227,17 @@ func (w *Workflow) askRegistry(ctx context.Context, svc *actor.Service, version 
 		return false, nil
 	}
 
-	res, err := builtinactor.Invoke(ctx, svc, w.registryType(), methodRegister, registerRequest{
+	req := registerRequest{
 		Version:     version,
 		Fingerprint: w.def.fingerprint,
-	})
+	}
+	res, err := builtinactor.Peek(ctx, svc, w.registryType(), actor.SingletonActorID, methodCheck, req)
+	registered := false
+	if errors.Is(err, actorcore.ErrActorMethodUnsupported) {
+		// A rolling deployment may place the singleton on an older host that does not implement the read path yet
+		res, err = builtinactor.Invoke(ctx, svc, w.registryType(), methodRegister, req)
+		registered = true
+	}
 	if err != nil {
 		return false, fmt.Errorf("failed to check the workflow definition registry: %w", err)
 	}
@@ -236,6 +246,20 @@ func (w *Workflow) askRegistry(ctx context.Context, svc *actor.Service, version 
 	err = res.Decode(&resp)
 	if err != nil {
 		return false, fmt.Errorf("failed to decode the registry response: %w", err)
+	}
+	if registered {
+		resp.Found = true
+	}
+
+	if !resp.Found {
+		res, err = builtinactor.Invoke(ctx, svc, w.registryType(), methodRegister, req)
+		if err != nil {
+			return false, fmt.Errorf("failed to register the workflow definition: %w", err)
+		}
+		err = res.Decode(&resp)
+		if err != nil {
+			return false, fmt.Errorf("failed to decode the registry response: %w", err)
+		}
 	}
 
 	if resp.OK {

@@ -85,6 +85,9 @@ func (o *orchestrator) Alarm(ctx context.Context, name string, _ actor.Envelope)
 		return nil
 	}
 
+	// A delivered one-shot alarm no longer exists after this handler returns unless the turn replaces it
+	o.armedDeadline = time.Time{}
+
 	// The alarm is delivered to this actor on whatever host holds it, so a host without the instance's version cannot simply decline it forever
 	// It works from the journal alone instead, which carries the full step list for exactly this reason
 	ok, err := o.wf.serveVersion(ctx, o.svc, o.def.version)
@@ -125,7 +128,7 @@ func (o *orchestrator) Peek(ctx context.Context, method string, _ actor.Envelope
 }
 
 // JobFailed reacts to one of the instance's own jobs being dead-lettered, which means a report or an event could not be delivered
-// The payload it carried is gone, so this cannot reconstruct it; what it can do is force a turn, whose reconcile re-dispatches everything the journal still says is outstanding
+// It forces a turn whose reconcile re-dispatches everything the journal still says is outstanding, including asking a terminal child to replay its retained result
 func (o *orchestrator) JobFailed(ctx context.Context, jobID string, method string, _ actor.Envelope, jobErr error) error {
 	o.wf.metrics.transportFailures.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("workflow", o.def.name),
@@ -141,6 +144,7 @@ func (o *orchestrator) JobFailed(ctx context.Context, jobID string, method strin
 	if err != nil {
 		return fmt.Errorf("failed to arm the deadline after a dead-letter: %w", err)
 	}
+	o.armedDeadline = time.Time{}
 	return nil
 }
 
@@ -223,6 +227,7 @@ func (o *orchestrator) turn(ctx context.Context, ev *event) (err error) {
 	if err != nil {
 		return fmt.Errorf("failed to read the workflow journal: %w", err)
 	}
+	st = st.clone()
 
 	run, err := o.admits(&st, ev)
 	if err != nil || !run {
@@ -230,6 +235,7 @@ func (o *orchestrator) turn(ctx context.Context, ev *event) (err error) {
 	}
 
 	now := st.deadlineTurnTime(ev, time.Now())
+	statusBefore := st.Status
 
 	// Phase 2: fold the event into the journal
 	// A duplicate, or a report for a task the journal already has an outcome for, records nothing here, including this very turn being retried after its SetState succeeded and its reconcile failed
@@ -255,6 +261,14 @@ func (o *orchestrator) turn(ctx context.Context, ev *event) (err error) {
 	// Phase 3: advance the cursor as far as the journal allows, which is a pure function of the journal and the definition
 	advance(&st, o.def, o.instanceID, now)
 
+	// A terminal status is not published until queued forward work has been removed, so a cleanup failure leaves the triggering event retryable against the prior journal
+	if st.Status.IsTerminal() {
+		err = o.cancelAllOutstanding(ctx, &st)
+		if err != nil {
+			return err
+		}
+	}
+
 	// Phase 4a: the journal is durable before anything is scheduled, so a lost dispatch is always recoverable and an orphan result never is
 	// The workflow labels are written in the same operation as the state, so the listing index can never disagree with the journal
 	err = o.persist(ctx, &st, now)
@@ -262,11 +276,12 @@ func (o *orchestrator) turn(ctx context.Context, ev *event) (err error) {
 		return err
 	}
 
-	o.recordTransitions(ctx, &st, ev, before)
+	o.recordTransitions(ctx, &st, ev, statusBefore, before)
 
 	// Phase 4b: everything the journal says should be running is dispatched, idempotently
 	// This runs on every turn, including the ones that recorded nothing, so a turn that persisted a result and then failed to dispatch cannot stall the instance forever
-	err = o.reconcile(ctx, &st, now)
+	forceParentReport := ev.kind == evStart && st.Status.IsTerminal() && st.Parent != nil
+	err = o.reconcile(ctx, &st, now, forceParentReport)
 	if err != nil {
 		return err
 	}
@@ -280,7 +295,10 @@ func (o *orchestrator) admits(st *instanceState, ev *event) (bool, error) {
 	// A terminated instance ignores everything but the unwind a parent sends, which is what moves a completed child back into compensating
 	// The exception is a child that still owes its parent a report: nothing else will drive that journal again, so the delivery being retried is the only thing left that can get the report out
 	if st.Status.IsTerminal() && ev.kind != evUnwind {
-		return st.Parent != nil && !st.Reported, nil
+		if isLateAbandonedSuccess(st, ev) {
+			return true, nil
+		}
+		return st.Parent != nil && (!st.Reported || ev.kind == evStart), nil
 	}
 
 	// The journal is created by the start job alone, so a control job that raced ahead of it waits rather than inventing an instance out of nothing
@@ -335,6 +353,10 @@ func (o *orchestrator) persist(ctx context.Context, st *instanceState, now time.
 	}
 	if size > o.def.maxJournalSize {
 		failForOversizedJournal(st, size, o.def.maxJournalSize, now)
+		err = o.cancelAllOutstanding(ctx, st)
+		if err != nil {
+			return err
+		}
 		opts.SetWorkflowLabels(builtinkey.Key{}, o.labels(st))
 		opts.TTL = o.terminalStateTTL(st)
 	}
@@ -359,7 +381,7 @@ func (o *orchestrator) labels(st *instanceState) components.WorkflowLabels {
 }
 
 // recordTransitions emits the instrument updates a turn's outcome calls for, after the journal that justifies them is durable
-func (o *orchestrator) recordTransitions(ctx context.Context, st *instanceState, ev *event, before map[string]StepStatus) {
+func (o *orchestrator) recordTransitions(ctx context.Context, st *instanceState, ev *event, statusBefore Status, before map[string]StepStatus) {
 	attrs := metric.WithAttributes(attribute.String("workflow", o.def.name))
 
 	// A step that settled during this turn is timed once, from the records that now carry both of its timestamps
@@ -390,21 +412,26 @@ func (o *orchestrator) recordTransitions(ctx context.Context, st *instanceState,
 	if ev.kind == evSuspend && st.Status == StatusSuspended {
 		o.wf.metrics.instancesSuspended.Add(ctx, 1, attrs)
 	}
+	if statusBefore.IsTerminal() && !st.Status.IsTerminal() {
+		o.wf.metrics.instancesRunning.Add(ctx, 1, attrs)
+	}
 
-	if !st.Status.IsTerminal() || st.CompletedAt.IsZero() {
+	if !st.Status.IsTerminal() || statusBefore.IsTerminal() || st.CompletedAt.IsZero() {
 		return
 	}
 
 	o.wf.metrics.instancesRunning.Add(ctx, -1, attrs)
-	o.wf.metrics.instancesTerminated.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("workflow", o.def.name),
-		attribute.String("status", string(st.Status)),
-	))
-	if !st.StartedAt.IsZero() {
-		o.wf.metrics.instanceDuration.Record(ctx, st.CompletedAt.Sub(st.StartedAt).Seconds(), metric.WithAttributes(
+	if !st.Reopened {
+		o.wf.metrics.instancesTerminated.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("workflow", o.def.name),
 			attribute.String("status", string(st.Status)),
 		))
+		if !st.StartedAt.IsZero() {
+			o.wf.metrics.instanceDuration.Record(ctx, st.CompletedAt.Sub(st.StartedAt).Seconds(), metric.WithAttributes(
+				attribute.String("workflow", o.def.name),
+				attribute.String("status", string(st.Status)),
+			))
+		}
 	}
 
 	if o.log != nil {
@@ -418,10 +445,10 @@ func (o *orchestrator) recordTransitions(ctx context.Context, st *instanceState,
 
 // reconcile derives the set of tasks that should be in flight from the journal and dispatches each one with a stable idempotency key
 // It is the only thing that schedules work, it is safe to run at any time, and it is a no-op while the instance is suspended
-func (o *orchestrator) reconcile(ctx context.Context, st *instanceState, now time.Time) error {
+func (o *orchestrator) reconcile(ctx context.Context, st *instanceState, now time.Time, forceParentReport bool) error {
 	// A terminated instance reports to its parent, drops its timers, and lets go of its activation, so a wide fan-out does not hold one per instance after it is done
 	if st.Status.IsTerminal() {
-		err := o.reportToParent(ctx, st)
+		err := o.reportToParent(ctx, st, forceParentReport)
 		if err != nil {
 			return err
 		}
@@ -452,8 +479,10 @@ func (o *orchestrator) reconcile(ctx context.Context, st *instanceState, now tim
 			err = o.dispatchCompensations(ctx, st, sr, d, now)
 		default:
 			// A step that settled while tasks were still outstanding leaves pending jobs behind, which are cancelled so the work that has not started never does
-			// Cancelling is best-effort: an abandoned task costs one slot at worst, which is not worth failing a turn over
-			o.cancelOutstanding(ctx, sr, d)
+			err = o.cancelOutstanding(ctx, sr, d)
+			if err != nil {
+				return err
+			}
 			continue
 		}
 		if err != nil {
@@ -508,7 +537,11 @@ func (o *orchestrator) dispatchTask(ctx context.Context, st *instanceState, sr *
 		opts = append(opts, actor.WithJobDueTime(tr.RetryAt))
 	}
 
-	client := builtinactor.NewClient[struct{}](o.wf.workerType(member.capability), workerActorID(o.instanceID, sr.Name, tr.Index), o.svc)
+	workerType := tr.WorkerType
+	if workerType == "" {
+		workerType = o.wf.workerType(member.capability)
+	}
+	client := builtinactor.NewClient[struct{}](workerType, workerActorID(o.instanceID, sr.Name, tr.Index), o.svc)
 	_, _, err := client.Dispatch(ctx, methodRun, payload, opts...)
 	if err != nil {
 		return fmt.Errorf("failed to dispatch task %s[%d]: %w", sr.Name, tr.Index, err)
@@ -591,7 +624,11 @@ func (o *orchestrator) dispatchCompensations(ctx context.Context, st *instanceSt
 		}
 
 		// The compensation runs on the undo queue of the same capability the forward task had, since the undo almost always needs the placement the forward task ran on
-		client := builtinactor.NewClient[struct{}](o.wf.undoType(member.capability), workerActorID(o.instanceID, sr.Name, tr.Index), o.svc)
+		undoType := tr.UndoType
+		if undoType == "" {
+			undoType = o.wf.undoType(member.capability)
+		}
+		client := builtinactor.NewClient[struct{}](undoType, workerActorID(o.instanceID, sr.Name, tr.Index), o.svc)
 		_, _, err := client.Dispatch(ctx, methodCompensate, payload, opts...)
 		if err != nil {
 			return fmt.Errorf("failed to dispatch compensation %s[%d]: %w", sr.Name, tr.Index, err)
@@ -642,9 +679,22 @@ func (o *orchestrator) childDefinitionFor(stepName string, index int) *Workflow 
 	return d.child
 }
 
+// cancelAllOutstanding removes queued forward work from every settled step before a terminal journal becomes visible
+func (o *orchestrator) cancelAllOutstanding(ctx context.Context, st *instanceState) error {
+	for i := range st.Steps {
+		sr := &st.Steps[i]
+		d := o.def.byName[sr.Name]
+		err := o.cancelOutstanding(ctx, sr, d)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // cancelOutstanding removes the pending jobs of a step that settled while some of its tasks had not reported
 // A job that is already executing is not interrupted, so a task that was running finishes and its late report is recorded like any other result
-func (o *orchestrator) cancelOutstanding(ctx context.Context, sr *stepRecord, d *stepDef) {
+func (o *orchestrator) cancelOutstanding(ctx context.Context, sr *stepRecord, d *stepDef) error {
 	for i := range sr.Tasks {
 		tr := &sr.Tasks[i]
 
@@ -654,20 +704,30 @@ func (o *orchestrator) cancelOutstanding(ctx context.Context, sr *stepRecord, d 
 		}
 
 		member := memberDef(d, tr.Index)
-		client := builtinactor.NewClient[struct{}](o.wf.workerType(member.capability), workerActorID(o.instanceID, sr.Name, tr.Index), o.svc)
+		workerType := tr.WorkerType
+		if workerType == "" && member != nil {
+			workerType = o.wf.workerType(member.capability)
+		}
+		if workerType == "" {
+			continue
+		}
+		client := builtinactor.NewClient[struct{}](workerType, workerActorID(o.instanceID, sr.Name, tr.Index), o.svc)
 		jobs, err := client.ListJobs(ctx)
 		if err != nil {
-			// A listing that fails is not worth failing the turn over, since the abandoned task costs one slot at worst
-			continue
+			return fmt.Errorf("failed to list pending jobs for %s[%d]: %w", sr.Name, tr.Index, err)
 		}
 
 		for _, j := range jobs {
 			if j.Status.IsTerminal() {
 				continue
 			}
-			_ = client.DeleteJob(ctx, j.JobID)
+			err = client.DeleteJob(ctx, j.JobID)
+			if err != nil && !errors.Is(err, actor.ErrJobNotFound) {
+				return fmt.Errorf("failed to cancel pending job %s for %s[%d]: %w", j.JobID, sr.Name, tr.Index, err)
+			}
 		}
 	}
+	return nil
 }
 
 // finish drops the instance's timers and lets go of its activation, once it has terminated
@@ -718,7 +778,7 @@ func (o *orchestrator) applyElapsedDeadlines(st *instanceState, now time.Time) {
 	// The instance timeout ends the run, whatever it was doing
 	instanceDue := instanceDeadline(st, o.def)
 	if !instanceDue.IsZero() && !now.Before(instanceDue) {
-		// One instance timeout covers the whole run, the unwind included, so a compensation still outstanding when it elapses is abandoned rather than left to run forever
+		// The compensation phase has its own instance-sized budget, so a second expiration abandons work that still has not unwound
 		// The frames left on the stack are what name the effects nothing undid, which is what an operator needs to finish by hand
 		if st.Status == StatusCompensating {
 			st.Cause = unwindAbandonedCause(st.Cause)
@@ -728,6 +788,8 @@ func (o *orchestrator) applyElapsedDeadlines(st *instanceState, now time.Time) {
 		}
 
 		beginUnwind(st, o.def, "instance timeout elapsed", StatusFailed, now)
+		// Compensation receives a fresh instance-sized budget because the forward budget has already elapsed
+		st.StartedAt = now
 		return
 	}
 
@@ -756,6 +818,7 @@ func (o *orchestrator) applyElapsedDeadlines(st *instanceState, now time.Time) {
 		tr.Error = fmt.Sprintf("step %q timed out", sr.Name)
 		tr.LastError = tr.Error
 		tr.Done = true
+		tr.Abandoned = true
 		tr.CompletedAt = now
 		if sr.Remaining > 0 {
 			sr.Remaining--
@@ -769,6 +832,7 @@ func (o *orchestrator) handleUnknownVersionDeadline(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to read the workflow journal: %w", err)
 	}
+	st = st.clone()
 	if st.Status == "" || st.Status.IsTerminal() {
 		return nil
 	}
@@ -788,6 +852,10 @@ func (o *orchestrator) handleUnknownVersionDeadline(ctx context.Context) error {
 				st.Steps[i].Status = StepSkipped
 			}
 		}
+		err = o.cancelAllOutstanding(ctx, &st)
+		if err != nil {
+			return err
+		}
 		err = o.persist(ctx, &st, now)
 		if err != nil {
 			return err
@@ -805,6 +873,9 @@ func (o *orchestrator) handleUnknownVersionDeadline(ctx context.Context) error {
 
 // memberDef resolves the definition that governs one task of a step, which for a parallel group is the member that runs it
 func memberDef(d *stepDef, index int) *stepDef {
+	if d == nil {
+		return nil
+	}
 	if d.kind == KindParallel && index >= 0 && index < len(d.members) {
 		return d.members[index]
 	}

@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"bytes"
 	"encoding/json"
 	"time"
 )
@@ -99,7 +100,9 @@ type instanceState struct {
 	Suspended   *suspendRecord `msgpack:"suspended,omitempty"`
 	Parent      *parentRef     `msgpack:"parent,omitempty"`
 	// Reported records that this instance's terminal outcome has been dispatched to its parent, so a retried turn does not report it twice
-	Reported    bool      `msgpack:"reported,omitempty"`
+	Reported bool `msgpack:"reported,omitempty"`
+	// Reopened records that this instance became active after its first termination so lifecycle instruments do not count it as a second instance
+	Reopened    bool      `msgpack:"reopened,omitempty"`
 	CreatedAt   time.Time `msgpack:"createdAt"`
 	StartedAt   time.Time `msgpack:"startedAt"`
 	CompletedAt time.Time `msgpack:"completedAt,omitzero"`
@@ -126,8 +129,15 @@ type taskRecord struct {
 	Index int `msgpack:"index"`
 	// Item is this task's fan-out element
 	Item json.RawMessage `msgpack:"item,omitempty"`
-	// ChildID is the instance ID of the child a child task runs
-	ChildID string `msgpack:"childId,omitempty"`
+	// WorkerType and UndoType persist the queues this task used so purge does not depend on the definition that happens to be deployed later
+	WorkerType string `msgpack:"workerType,omitempty"`
+	UndoType   string `msgpack:"undoType,omitempty"`
+	// ChildID and ChildType identify the child independently of the definition that happens to be deployed when the parent is purged
+	ChildID   string `msgpack:"childId,omitempty"`
+	ChildType string `msgpack:"childType,omitempty"`
+	// ChildStatus and ChildCompensation retain the child's terminal outcome in the parent journal
+	ChildStatus       Status              `msgpack:"childStatus,omitempty"`
+	ChildCompensation CompensationOutcome `msgpack:"childCompensation,omitempty"`
 	// Attempts is the number of the attempt currently scheduled or in flight, recorded before that attempt is dispatched
 	Attempts int `msgpack:"attempts"`
 	// RetryAt is the earliest the next attempt may run
@@ -200,4 +210,54 @@ func (sr *stepRecord) task(index int) *taskRecord {
 		}
 	}
 	return nil
+}
+
+// clone returns an independent journal so a failed write cannot mutate the activation's cached committed snapshot through shared slices or pointers
+func (st *instanceState) clone() instanceState {
+	out := *st
+	out.Input = cloneRawMessage(st.Input)
+	out.Output = cloneRawMessage(st.Output)
+	out.Stack = append([]string(nil), st.Stack...)
+	if st.Suspended != nil {
+		rec := *st.Suspended
+		out.Suspended = &rec
+	}
+	if st.Parent != nil {
+		parent := *st.Parent
+		out.Parent = &parent
+	}
+
+	out.Steps = make([]stepRecord, len(st.Steps))
+	for i := range st.Steps {
+		out.Steps[i] = st.Steps[i].clone()
+	}
+	return out
+}
+
+// clone returns an independent step record including every task and encoded value it owns
+func (sr *stepRecord) clone() stepRecord {
+	out := *sr
+	out.Event = cloneRawMessage(sr.Event)
+	out.Tasks = make([]taskRecord, len(sr.Tasks))
+	for i := range sr.Tasks {
+		out.Tasks[i] = sr.Tasks[i].clone()
+	}
+	return out
+}
+
+// clone returns an independent task record including its compensation bookkeeping
+func (tr *taskRecord) clone() taskRecord {
+	out := *tr
+	out.Item = cloneRawMessage(tr.Item)
+	out.Output = cloneRawMessage(tr.Output)
+	if tr.Comp != nil {
+		comp := *tr.Comp
+		out.Comp = &comp
+	}
+	return out
+}
+
+// cloneRawMessage preserves the distinction between a nil value and an empty non-nil value while breaking ownership of its backing array
+func cloneRawMessage(value json.RawMessage) json.RawMessage {
+	return bytes.Clone(value)
 }
