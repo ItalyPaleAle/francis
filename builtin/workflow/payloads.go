@@ -134,7 +134,7 @@ type reasonPayload struct {
 
 // stepOutput returns what later steps see as a step's output, which depends on its kind
 // A skipped step has no output at all, so DecodeOutput can report ErrStepSkipped
-func stepOutput(sr *stepRecord, d *stepDef) json.RawMessage {
+func (d *stepDef) stepOutput(sr *stepRecord) json.RawMessage {
 	if sr == nil || sr.Status == StepSkipped || sr.Status == StepPending {
 		return nil
 	}
@@ -147,11 +147,11 @@ func stepOutput(sr *stepRecord, d *stepDef) json.RawMessage {
 		// A group's output is an object keyed by member name, so a later step reads one member without knowing its position
 		obj := map[string]json.RawMessage{}
 		for i := range sr.Tasks {
-			name := memberName(d, sr.Tasks[i].Index)
+			name := d.memberName(sr.Tasks[i].Index)
 			if name == "" {
 				continue
 			}
-			obj[name] = taskOutput(&sr.Tasks[i])
+			obj[name] = sr.Tasks[i].taskOutput()
 		}
 		enc, err := json.Marshal(obj)
 		if err != nil {
@@ -163,7 +163,7 @@ func stepOutput(sr *stepRecord, d *stepDef) json.RawMessage {
 		// A fan-out's output is an array ordered by item index, with the failed slots carrying their error so the next step can decide what to do about them
 		arr := make([]json.RawMessage, len(sr.Tasks))
 		for i := range sr.Tasks {
-			arr[i] = taskOutput(&sr.Tasks[i])
+			arr[i] = sr.Tasks[i].taskOutput()
 		}
 		enc, err := json.Marshal(arr)
 		if err != nil {
@@ -175,12 +175,12 @@ func stepOutput(sr *stepRecord, d *stepDef) json.RawMessage {
 		if len(sr.Tasks) == 0 {
 			return nil
 		}
-		return taskOutput(&sr.Tasks[0])
+		return sr.Tasks[0].taskOutput()
 	}
 }
 
 // taskOutput returns one task's contribution to its step's output, standing a failure in for the value it never produced
-func taskOutput(tr *taskRecord) json.RawMessage {
+func (tr *taskRecord) taskOutput() json.RawMessage {
 	if tr.Error != "" {
 		enc, err := json.Marshal(map[string]string{"error": tr.Error})
 		if err != nil {
@@ -195,7 +195,7 @@ func taskOutput(tr *taskRecord) json.RawMessage {
 }
 
 // memberName returns the name of the member of a parallel group that ran the task at an index
-func memberName(d *stepDef, index int) string {
+func (d *stepDef) memberName(index int) string {
 	if d == nil || d.kind != KindParallel {
 		return ""
 	}

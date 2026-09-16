@@ -18,6 +18,7 @@ import (
 	"github.com/italypaleale/francis/internal/builtinactor"
 	"github.com/italypaleale/francis/internal/builtinkey"
 	"github.com/italypaleale/francis/internal/tracing"
+	"github.com/italypaleale/go-kit/utils"
 )
 
 // orchestrator is the Workflow actor: one instance per workflow instance, holding the journal and deciding what happens next
@@ -375,7 +376,7 @@ func (o *orchestrator) recordTransitions(ctx context.Context, st *instanceState,
 				attribute.String("outcome", string(sr.Status)),
 			))
 		case StepCompensated, StepCompensationFailed:
-			o.wf.metrics.compensationsFailed.Add(ctx, boolToInt(sr.Status == StepCompensationFailed), metric.WithAttributes(
+			o.wf.metrics.compensationsFailed.Add(ctx, utils.BoolToInt64(sr.Status == StepCompensationFailed), metric.WithAttributes(
 				attribute.String("workflow", o.def.name),
 				attribute.String("step", sr.Name),
 			))
@@ -854,13 +855,4 @@ func (st *instanceState) stepStatuses() map[string]StepStatus {
 		out[st.Steps[i].Name] = st.Steps[i].Status
 	}
 	return out
-}
-
-func boolToInt(b bool) int64 {
-	var i int64
-	if b {
-		i = 1
-	}
-	i = 0
-	return i
 }

@@ -394,7 +394,7 @@ func TestAdvanceFanOutIsSizedFromTheUpstreamOutput(t *testing.T) {
 
 	// Tolerating a failure leaves it visible in the step's output, and it is the next step's business what to do about it
 	assert.Equal(t, StepCompleted, stepStatus(t, st, "work"))
-	assert.JSONEq(t, `[1,{"error":"unlucky"},3]`, string(stepOutput(st.step("work"), def.byName["work"])))
+	assert.JSONEq(t, `[1,{"error":"unlucky"},3]`, string(def.byName["work"].stepOutput(st.step("work"))))
 }
 
 func TestAdvanceFanOutFailFastDecidesOnTheFirstFailure(t *testing.T) {
@@ -495,7 +495,7 @@ func TestAdvanceWaitStepCompletesOnItsEvent(t *testing.T) {
 
 	assert.Equal(t, StepCompleted, stepStatus(t, st, "approval"))
 	assert.Equal(t, StepRunning, stepStatus(t, st, "after"))
-	assert.JSONEq(t, `{"by":"ops"}`, string(stepOutput(st.step("approval"), def.byName["approval"])))
+	assert.JSONEq(t, `{"by":"ops"}`, string(def.byName["approval"].stepOutput(st.step("approval"))))
 }
 
 func TestAdvanceSuspendPausesTheDeadlinesAndStartsNothing(t *testing.T) {
@@ -622,7 +622,7 @@ func TestAdvanceParallelGroupOutputIsKeyedByMemberName(t *testing.T) {
 	advance(st, def, "inst-1", now)
 
 	assert.Equal(t, StatusCompleted, st.Status)
-	assert.JSONEq(t, `{"email":"email-ok","sms":"sms-ok"}`, string(stepOutput(st.step("notify"), def.byName["notify"])))
+	assert.JSONEq(t, `{"email":"email-ok","sms":"sms-ok"}`, string(def.byName["notify"].stepOutput(st.step("notify"))))
 }
 
 func TestNewRejectsAnInvalidGraph(t *testing.T) {
@@ -1013,7 +1013,7 @@ func TestAdvanceAcceptsAnEventWhileSuspended(t *testing.T) {
 	apply(st, def, &event{kind: evResume}, now)
 	advance(st, def, "inst-1", now)
 	assert.Equal(t, StepRunning, stepStatus(t, st, "after"))
-	assert.JSONEq(t, `{"by":"ops"}`, string(stepOutput(st.step("approval"), def.byName["approval"])))
+	assert.JSONEq(t, `{"by":"ops"}`, string(def.byName["approval"].stepOutput(st.step("approval"))))
 }
 
 func TestAdvanceFailsAFanOutWhoseItemsAreNotAList(t *testing.T) {

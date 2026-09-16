@@ -786,7 +786,7 @@ func conditionMatches(st *instanceState, def *definition, d *stepDef) bool {
 		return false
 	}
 
-	out := stepOutput(sr, def.byName[sr.Name])
+	out := def.byName[sr.Name].stepOutput(sr)
 	if len(out) == 0 {
 		return false
 	}
@@ -812,7 +812,7 @@ func fanOutItems(st *instanceState, def *definition, d *stepDef) ([]json.RawMess
 	}
 
 	var items []json.RawMessage
-	err := json.Unmarshal(stepOutput(sr, def.byName[sr.Name]), &items)
+	err := json.Unmarshal(def.byName[sr.Name].stepOutput(sr), &items)
 	if err != nil {
 		return nil, fmt.Errorf("fan-out %q requires step %q to output a JSON array: %w", d.name, d.itemsFrom, err)
 	}
@@ -995,7 +995,7 @@ func instanceOutput(st *instanceState, def *definition) json.RawMessage {
 		if sr == nil {
 			return nil
 		}
-		return stepOutput(sr, def.byName[sr.Name])
+		return def.byName[sr.Name].stepOutput(sr)
 	}
 
 	for i := len(st.Steps) - 1; i >= 0; i-- {
@@ -1003,7 +1003,7 @@ func instanceOutput(st *instanceState, def *definition) json.RawMessage {
 		if sr.Status != StepCompleted {
 			continue
 		}
-		out := stepOutput(sr, def.byName[sr.Name])
+		out := def.byName[sr.Name].stepOutput(sr)
 		if out != nil {
 			return out
 		}

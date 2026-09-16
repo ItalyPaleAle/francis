@@ -15,7 +15,7 @@ func (o *orchestrator) buildRunPayload(st *instanceState, sr *stepRecord, d *ste
 		Version:          st.Version,
 		Step:             sr.Name,
 		Index:            tr.Index,
-		Positional:       isPositional(d),
+		Positional:       d.isPositional(),
 		Attempt:          tr.Attempts,
 		Input:            st.Input,
 		Item:             tr.Item,
@@ -56,7 +56,7 @@ func (o *orchestrator) upstreamOutputs(st *instanceState, sr *stepRecord, d *ste
 			outputs[name] = nil
 			return
 		}
-		outputs[name] = stepOutput(other, o.def.byName[name])
+		outputs[name] = o.def.byName[name].stepOutput(other)
 	}
 
 	prev := o.precedingStepName(sr.Name)
@@ -98,7 +98,7 @@ func (o *orchestrator) childInput(st *instanceState, sr *stepRecord, d *stepDef,
 	if prev != "" {
 		other := st.step(prev)
 		if other != nil && other.Status != StepSkipped {
-			out := stepOutput(other, o.def.byName[prev])
+			out := o.def.byName[prev].stepOutput(other)
 			if len(out) > 0 {
 				return out
 			}
@@ -109,7 +109,7 @@ func (o *orchestrator) childInput(st *instanceState, sr *stepRecord, d *stepDef,
 }
 
 // isPositional reports whether a step's tasks have siblings to be positioned among, so an index means something to a handler
-func isPositional(d *stepDef) bool {
+func (d *stepDef) isPositional() bool {
 	switch d.kind {
 	case KindParallel, KindForEach:
 		return true
