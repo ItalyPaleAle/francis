@@ -17,9 +17,12 @@ import (
 
 // TestPurgeTerminatedSweepsPastRetention verifies the sweep removes terminated instances whose retention has elapsed and leaves the rest alone
 func TestPurgeTerminatedSweepsPastRetention(t *testing.T) {
+	// A journal only outlives its retention by twice it, so the sweep has to land inside that window for every instance, the one that finished first included
+	const sweepRetention = 3 * time.Second
+
 	wf, err := workflow.New("sweepable",
-		// A short retention is what lets the sweep have something to do, while staying comfortably inside the journal's own TTL backstop of twice that
-		workflow.WithRetention(workflow.RetentionPolicy{Completed: time.Second}),
+		// A short retention is what lets the sweep have something to do rather than waiting out a default
+		workflow.WithRetention(workflow.RetentionPolicy{Completed: sweepRetention}),
 		workflow.WithSteps(
 			workflow.Step("done", workflow.WithRun(func(ctx context.Context, tk workflow.Task) (any, error) {
 				return "ok", nil
@@ -31,13 +34,30 @@ func TestPurgeTerminatedSweepsPastRetention(t *testing.T) {
 	host := startHost(t, wf)
 	svc := wf.Service(host.Service())
 
-	for range 3 {
-		id, _, sErr := svc.Start(t.Context(), nil)
-		require.NoError(t, sErr)
-		awaitStatus(t, svc, id, workflow.StatusCompleted)
+	// The instances are started together so they terminate close to each other, which is what keeps the whole set inside one retention window on a slow host
+	ids := make([]string, 3)
+	var wg sync.WaitGroup
+	for i := range ids {
+		wg.Go(func() {
+			id, _, sErr := svc.Start(t.Context(), nil)
+			assert.NoError(t, sErr)
+			ids[i] = id
+		})
+	}
+	wg.Wait()
+
+	var last time.Time
+	for _, id := range ids {
+		require.NotEmpty(t, id)
+		status := awaitStatus(t, svc, id, workflow.StatusCompleted)
+		require.False(t, status.CompletedAt.IsZero(), "a completed instance records when it completed")
+		if status.CompletedAt.After(last) {
+			last = status.CompletedAt
+		}
 	}
 
-	time.Sleep(1100 * time.Millisecond)
+	// Waiting from the last termination is what makes every instance eligible, however far apart the host got to them
+	time.Sleep(time.Until(last.Add(sweepRetention + 250*time.Millisecond)))
 
 	removed, err := svc.PurgeTerminated(t.Context())
 	require.NoError(t, err)
