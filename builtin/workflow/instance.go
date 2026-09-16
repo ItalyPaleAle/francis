@@ -181,9 +181,7 @@ func (o *orchestrator) deleteJobTargets(ctx context.Context, targets []jobCleanu
 	errCh := make(chan error, len(targets))
 	var wg sync.WaitGroup
 	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for target := range targetCh {
 				client := builtinactor.NewClient[struct{}](target.actorType, target.actorID, o.svc)
 				err := deleteActorJobs(ctx, client)
@@ -191,7 +189,7 @@ func (o *orchestrator) deleteJobTargets(ctx context.Context, targets []jobCleanu
 					errCh <- fmt.Errorf("failed to remove jobs for %s/%s: %w", target.actorType, target.actorID, err)
 				}
 			}
-		}()
+		})
 	}
 
 	// Feed every target before collecting failures because the error channel is sized for the whole batch
@@ -221,9 +219,7 @@ func (o *orchestrator) cancelJobTargets(ctx context.Context, targets []jobCleanu
 	errCh := make(chan error, len(targets))
 	var wg sync.WaitGroup
 	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for target := range targetCh {
 				client := builtinactor.NewClient[struct{}](target.actorType, target.actorID, o.svc)
 				err := cancelLiveActorJobs(ctx, client)
@@ -231,7 +227,7 @@ func (o *orchestrator) cancelJobTargets(ctx context.Context, targets []jobCleanu
 					errCh <- fmt.Errorf("failed to cancel jobs for %s/%s: %w", target.actorType, target.actorID, err)
 				}
 			}
-		}()
+		})
 	}
 
 	for _, target := range targets {
@@ -323,12 +319,12 @@ func (o *orchestrator) bindLegacyCleanupDefinition(ctx context.Context, st *inst
 	request := registerRequest{Version: st.Version, Fingerprint: o.def.fingerprint}
 	envelope, err := builtinactor.Peek(ctx, o.svc, o.wf.registryType(), actor.SingletonActorID, methodCheck, request)
 	if err != nil {
-		return fmt.Errorf("%w: failed to verify the legacy definition: %v", ErrJournalIncompatible, err)
+		return fmt.Errorf("%w: failed to verify the legacy definition: %s", ErrJournalIncompatible, err.Error())
 	}
 	var response registerResponse
 	err = envelope.Decode(&response)
 	if err != nil {
-		return fmt.Errorf("%w: failed to decode the legacy definition check: %v", ErrJournalIncompatible, err)
+		return fmt.Errorf("%w: failed to decode the legacy definition check: %s", ErrJournalIncompatible, err.Error())
 	}
 	if !response.Found || !response.OK {
 		return fmt.Errorf("%w: registry does not confirm workflow version %d", ErrJournalIncompatible, st.Version)

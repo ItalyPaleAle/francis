@@ -127,11 +127,11 @@ type instanceState struct {
 type instanceStateWire instanceState
 
 // MarshalMsgpack lets persistence reuse the exact wire encoding already produced by the journal size check
-func (st instanceState) MarshalMsgpack() ([]byte, error) {
+func (st *instanceState) MarshalMsgpack() ([]byte, error) {
 	if st.encoded != nil {
 		return st.encoded, nil
 	}
-	return msgpack.Marshal(instanceStateWire(st))
+	return msgpack.Marshal(instanceStateWire(*st))
 }
 
 // stepRecord is one step of the definition as the journal sees it

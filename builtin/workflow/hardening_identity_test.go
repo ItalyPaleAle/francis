@@ -17,6 +17,7 @@ import (
 // identityHost models the registry actor's exclusive invocation lock and can pause the first workflow journal write
 type identityHost struct {
 	*reviewAPIHost
+
 	registryMu   sync.RWMutex
 	writeOnce    sync.Once
 	workflowType string
@@ -166,7 +167,7 @@ func TestHardeningRegistryGenerationsNeverReclaimForgottenAuthorization(t *testi
 	require.Greater(t, replacement.Generation, identity.Generation, "even reinstalling the same graph cannot revive an old start")
 	res, err := r.register(t.Context(), &payloadEnvelope{value: registerRequest{Version: 1, Fingerprint: "old", Generation: identity.Generation}})
 	require.NoError(t, err)
-	assert.False(t, res.(registerResponse).OK)
+	assert.False(t, res.(registerResponse).OK) //nolint:forcetypeassert
 }
 
 func TestHardeningStartConfirmationRetriesBeforeDispatch(t *testing.T) {

@@ -16,6 +16,7 @@ import (
 
 type performanceHost struct {
 	*fakeHost
+
 	dispatchCalls map[string]int
 	failAck       bool
 }

@@ -14,6 +14,7 @@ import (
 
 type hardeningConcurrentCleanupHost struct {
 	*fakeHost
+
 	workerType string
 	entered    chan struct{}
 	release    chan struct{}

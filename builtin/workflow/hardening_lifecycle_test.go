@@ -96,6 +96,7 @@ func TestHardeningPurgeRefusesCyclicAncestry(t *testing.T) {
 
 type hardeningDeleteStateHost struct {
 	*fakeHost
+
 	deleteErr error
 }
 
@@ -132,6 +133,7 @@ func TestHardeningPurgeRetriesAFailedStateDeletion(t *testing.T) {
 
 type hardeningUndoCleanupHost struct {
 	*fakeHost
+
 	failActorType string
 }
 
@@ -190,6 +192,7 @@ func TestHardeningCompensationTimeoutRemovesQueuedUndo(t *testing.T) {
 
 type hardeningRecoveryHost struct {
 	*fakeHost
+
 	failAlarm bool
 	failRead  bool
 	failState bool

@@ -182,7 +182,7 @@ func TestHardeningLegacyEventValidationRequiresTheMatchingVersion(t *testing.T) 
 	assert.Equal(t, wf.def.maxOutputSize, limit)
 	_, err = svc.eventLimit(&instanceState{Version: 1}, "approval")
 	require.ErrorContains(t, err, "use a service with that definition version")
-	assert.NotErrorIs(t, err, ErrNoSuchEvent, "an unavailable legacy contract does not establish that the event is invalid")
+	require.NotErrorIs(t, err, ErrNoSuchEvent, "an unavailable legacy contract does not establish that the event is invalid")
 
 	// A recorded empty contract must not acquire an event merely because the newer host declares one
 	_, err = svc.eventLimit(&instanceState{Version: 1, MaxEventSize: 128}, "approval")
