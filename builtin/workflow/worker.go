@@ -81,13 +81,23 @@ func (w *worker) Job(ctx context.Context, method string, data actor.Envelope) er
 		return err
 	}
 
-	// A host whose code does not match the graph registered for the version declines the task, so it runs where the handlers match
-	ok, err := w.wf.serveVersion(ctx, w.svc, p.Version)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return actor.ErrJobRejected
+	// New task payloads carry the immutable graph identity confirmed before dispatch, so a worker can reject mismatches locally
+	if p.DefinitionFingerprint != "" {
+		if p.Version != w.def.version || p.DefinitionFingerprint != w.def.fingerprint {
+			if p.Version == w.def.version {
+				w.wf.recordDefinitionConflict(ctx, p.Version, w.def.fingerprint, registerResponse{Fingerprint: p.DefinitionFingerprint})
+			}
+			return actor.ErrJobRejected
+		}
+	} else {
+		// Legacy tasks need the registry check because their numeric version alone cannot distinguish conflicting deployments
+		ok, checkErr := w.wf.serveVersion(ctx, w.svc, p.Version)
+		if checkErr != nil {
+			return checkErr
+		}
+		if !ok {
+			return actor.ErrJobRejected
+		}
 	}
 
 	res := w.runAttempt(ctx, method, &p)

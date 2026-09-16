@@ -2,6 +2,8 @@ package workflow
 
 import (
 	"context"
+	"fmt"
+	"slices"
 	"time"
 )
 
@@ -128,10 +130,69 @@ type StepSpec struct {
 //	).With(WithFailurePolicy(TolerateFailures))
 func (s StepSpec) With(opts ...StepOption) StepSpec {
 	s.d = s.d.clone()
+	if s.d == nil {
+		return s
+	}
 	for _, opt := range opts {
 		opt(s.d)
 	}
 	return s
+}
+
+// validateOptions keeps option applicability in one place so an accepted declaration cannot silently discard configured behavior
+func (d *stepDef) validateOptions(member bool) error {
+	// Group members are single tasks, so conditions and policies that govern a whole step must be declared on the group
+	workerKinds := []Kind{KindStep, KindForEach}
+	taskKinds := []Kind{KindStep, KindForEach, KindChild}
+	stepKinds := []Kind{KindStep, KindForEach, KindChild, KindParallel}
+	allKinds := []Kind{KindStep, KindForEach, KindChild, KindParallel, KindWait}
+	rules := []struct {
+		name       string
+		configured bool
+		kinds      []Kind
+		member     bool
+	}{
+		{"WithRun", d.run != nil, workerKinds, true},
+		{"WithCompensate", d.compensate != nil, workerKinds, true},
+		{"WithMaxAttempts", d.maxAttempts != 0, taskKinds, true},
+		{"WithRetryBackoff", d.retryInitial != 0 || d.retryMax != 0, taskKinds, true},
+		{"WithCompensateMaxAttempts", d.compMaxAttempt != 0, taskKinds, true},
+		{"WithCompensateBackoff", d.compInitial != 0 || d.compMax != 0, taskKinds, true},
+		{"WithStepTimeout", d.stepTimeout != 0, stepKinds, false},
+		{"WithEventTimeout", d.eventTimeout != 0, []Kind{KindWait}, false},
+		{"WithEventName", d.eventName != "", []Kind{KindWait}, false},
+		{"WithOptional", d.optional, stepKinds, false},
+		{"WithSkipOnFailure", len(d.skipOnFailure) != 0, stepKinds, false},
+		{"WithSkipIf", d.hasSkipIf, allKinds, false},
+		{"WithInputFrom", len(d.inputFrom) != 0, []Kind{KindStep, KindForEach, KindParallel}, true},
+		{"WithItemsFrom", d.itemsFrom != "", []Kind{KindForEach}, false},
+		{"WithDefinition or WithChild", d.child != nil, []Kind{KindChild, KindForEach}, true},
+		{"WithFailurePolicy", d.failurePolicy != "", []Kind{KindParallel, KindForEach}, false},
+		{"WithMaxParallel", d.maxParallel != 0, []Kind{KindForEach}, false},
+		{"WithCompensateOnFailure", d.compensateOnFailure, taskKinds, true},
+		{"WithRequiredCapability", d.capability != "", workerKinds, true},
+	}
+	for _, rule := range rules {
+		if !rule.configured {
+			continue
+		}
+		if !slices.Contains(rule.kinds, d.kind) {
+			return fmt.Errorf("step %q cannot use %s on a %s node", d.name, rule.name, d.kind)
+		}
+		if member && !rule.member {
+			return fmt.Errorf("parallel member %q cannot use %s; declare it on the group", d.name, rule.name)
+		}
+	}
+
+	// A child fan-out never runs a parent worker, so worker-only settings cannot affect its tasks
+	if d.kind == KindForEach && d.child != nil && (d.compensate != nil || len(d.inputFrom) != 0 || d.capability != "") {
+		return fmt.Errorf("child fan-out %q cannot use WithCompensate, WithInputFrom, or WithRequiredCapability", d.name)
+	}
+	// Failure policies are closed sets even though the exported string types can be populated from configuration
+	if d.failurePolicy != "" && d.failurePolicy != FailFast && d.failurePolicy != CollectFailures && d.failurePolicy != TolerateFailures {
+		return fmt.Errorf("step %q has unknown failure policy %q", d.name, d.failurePolicy)
+	}
+	return nil
 }
 
 // clone copies a declaration recursively so validated definitions and reused specifications never share mutable graph nodes
@@ -150,6 +211,7 @@ func (d *stepDef) clone() *stepDef {
 }
 
 // StepOption configures a step built by one of the step constructors
+// New rejects options that the node's execution path does not support instead of silently ignoring them
 type StepOption func(*stepDef)
 
 // Step declares a plain step: one task, running the handler set with WithRun
@@ -179,6 +241,7 @@ func WaitForEvent(name string, opts ...StepOption) StepSpec {
 // The group completes when every member has reported, and no member can read another's output, since WithInputFrom only ever names a top-level step that ran before the group
 // Options that apply to the group as a whole, such as WithFailurePolicy, are set with the returned spec's With method, since the members take the variadic slot
 // Each member carries its own attempt, backoff, compensation, and WithInputFrom options, which the engine applies to that member's task alone
+// Conditions, optionality, skip-on-failure rules, and step timeouts belong on the group and are rejected on individual members
 func Parallel(name string, steps ...StepSpec) StepSpec {
 	d := &stepDef{
 		name:    name,

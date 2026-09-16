@@ -71,7 +71,7 @@ func apply(st *instanceState, def *definition, ev *event, now time.Time) (duplic
 	case evSuspend:
 		return applySuspend(st, def, ev.reason, now)
 	case evResume:
-		return applyResume(st, def, now)
+		return st.applyResume(def, now)
 	case evDeadline:
 		// A deadline is resolved against the journal by the orchestrator, which folds the outcome as a failure rather than as its own event
 		return true
@@ -89,8 +89,16 @@ func applyStart(st *instanceState, def *definition, p *startPayload, now time.Ti
 
 	st.Workflow = def.name
 	st.Version = p.Version
+	st.DefinitionFingerprint = p.DefinitionFingerprint
+	if st.DefinitionFingerprint == "" {
+		st.DefinitionFingerprint = def.fingerprint
+	}
+	st.RegistryGeneration = p.RegistryGeneration
 	st.Status = StatusRunning
 	st.Input = p.Input
+	st.Timeout = def.timeout
+	st.UnknownVersion = def.unknownVersion
+	st.MaxEventSize = def.maxOutputSize
 	st.TraceParent = p.TraceParent
 	st.Parent = p.Parent
 	if st.Parent != nil && p.Attempt > 0 {
@@ -102,6 +110,8 @@ func applyStart(st *instanceState, def *definition, p *startPayload, now time.Ti
 	}
 	st.StartedAt = now
 
+	// Persist the event contract so callers with a newer graph can still drive this instance
+	st.EventNames = nil
 	st.Steps = make([]stepRecord, len(def.steps))
 	for i, d := range def.steps {
 		st.Steps[i] = stepRecord{
@@ -109,14 +119,29 @@ func applyStart(st *instanceState, def *definition, p *startPayload, now time.Ti
 			Kind:   d.kind,
 			Status: StepPending,
 		}
+		if d.kind == KindWait {
+			st.EventNames = append(st.EventNames, d.effectiveEventName())
+		}
 	}
 
 	// A start whose parent chain is deeper than the definition allows is refused here, which is the only thing that stops a definition referencing itself
 	// Refusing it as a terminated instance rather than as an error is what gets the failure reported back to the parent, whose step policy then decides what it costs
+	var failure string
 	if st.Parent != nil && st.Parent.Depth > def.maxDepth {
+		failure = fmt.Sprintf("%s: depth %d exceeds the limit of %d", ErrMaxDepthExceeded.Error(), st.Parent.Depth, def.maxDepth)
+	}
+
+	// Child starts bypass the public service encoder, so enforce the receiving definition's bound before any task can run
+	if len(p.Input) > def.maxInputSize {
+		failure = fmt.Sprintf("%s: %d bytes exceeds the %d byte limit", ErrInputTooLarge.Error(), len(p.Input), def.maxInputSize)
+		st.Input = nil
+	}
+
+	// Rejected starts keep a small terminal journal that can reliably report the failure to their parent
+	if failure != "" {
 		st.Status = StatusFailed
 		st.Compensation = CompensationNone
-		st.Cause = fmt.Sprintf("%s: depth %d exceeds the limit of %d", ErrMaxDepthExceeded.Error(), st.Parent.Depth, def.maxDepth)
+		st.Cause = failure
 		st.CompletedAt = now
 		for i := range st.Steps {
 			st.Steps[i].Status = StepSkipped
@@ -156,18 +181,32 @@ func applyReport(st *instanceState, def *definition, p *reportPayload, now time.
 		tr.CompletedAt = now
 		recordChildOutcome(tr, p)
 
+		// An undo dispatched before this success cannot cover an effect the forward attempt may have produced afterward
+		if tr.Comp != nil {
+			attempt := tr.Comp.Attempts + 1
+			tr.Comp = &compRecord{Attempts: attempt, GenerationStart: attempt}
+			tr.Compensated = false
+		}
+
 		// A frame that had already closed must be eligible to open again for the newly discovered effect
 		if sr.Status == StepCompensated || sr.Status == StepCompensationFailed {
 			sr.Status = StepCompleted
 		}
 
-		// A terminal instance reopens only when it has a way to undo the effect it just learned about
+		// Forward completion retains the effect for a possible parent unwind without rolling back committed optional work
+		if st.TerminalStatus == "" {
+			pushFrame(st, sr, d)
+			return false
+		}
+
+		// Only a journal that actually began unwinding resumes rollback when an abandoned task reports late
 		if st.Status.IsTerminal() && memberCompensable(d, p.Index) {
-			st.TerminalStatus = st.Status
 			st.Status = StatusCompensating
 			st.CompletedAt = time.Time{}
 			st.Reported = false
 			st.Reopened = true
+			st.StartedAt = now
+			st.Compensation = currentCompensationFailure(st, def)
 		}
 		return false
 	}
@@ -235,6 +274,11 @@ func applyCompReport(st *instanceState, def *definition, p *compReportPayload, n
 	if tr.Comp.Done {
 		return true
 	}
+
+	// Reports from a prior effect generation cannot satisfy compensation of a later forward success
+	if p.Attempt < tr.Comp.GenerationStart {
+		return true
+	}
 	if p.Attempt < tr.Comp.Attempts && p.Error != "" {
 		return true
 	}
@@ -257,14 +301,18 @@ func applyCompReport(st *instanceState, def *definition, p *compReportPayload, n
 	member := memberDef(d, p.Index)
 	tr.Comp.LastError = p.Error
 	maxAttempts := effectiveCompMaxAttempts(member)
-	if !p.Retryable || tr.Comp.Attempts >= maxAttempts {
+	attempts := tr.Comp.Attempts
+	if tr.Comp.GenerationStart > 0 {
+		attempts -= tr.Comp.GenerationStart - 1
+	}
+	if !p.Retryable || attempts >= maxAttempts {
 		tr.Comp.Error = p.Error
 		tr.Comp.Done = true
 		return false
 	}
 
 	tr.Comp.Attempts++
-	tr.Comp.RetryAt = now.Add(backoff(member.compInitial, member.compMax, defaultCompInitial, defaultCompMax, tr.Comp.Attempts-1))
+	tr.Comp.RetryAt = now.Add(backoff(member.compInitial, member.compMax, defaultCompInitial, defaultCompMax, attempts))
 	return false
 }
 
@@ -311,7 +359,7 @@ func applyCancel(st *instanceState, def *definition, ev *event, now time.Time) b
 		reason = "cancelled"
 	}
 	st.Suspended = nil
-	recordUnwoundBy(st, ev)
+	st.recordUnwoundBy(ev)
 	beginUnwind(st, def, reason, StatusCancelled, now)
 	return false
 }
@@ -320,7 +368,15 @@ func applyCancel(st *instanceState, def *definition, ev *event, now time.Time) b
 // A completed child is kept rather than purged for as long as its parent is running for precisely this reason
 func applyUnwind(st *instanceState, def *definition, ev *event, now time.Time) bool {
 	if st.Status == StatusCompensating {
-		return true
+		// A parent joining an existing rollback still needs its newest compensation attempt acknowledged
+		return !st.recordUnwoundBy(ev)
+	}
+	if st.Status == StatusSuspended && st.Suspended != nil && st.Suspended.ResumeTo == StatusCompensating {
+		// A parent waiting on this rollback resumes it without erasing failures already recorded by earlier frames
+		st.applyResume(def, now)
+		st.recordUnwoundBy(ev)
+		st.Reported = false
+		return false
 	}
 
 	reason := ev.reason
@@ -329,8 +385,8 @@ func applyUnwind(st *instanceState, def *definition, ev *event, now time.Time) b
 	}
 
 	// A child that already finished an unwind reports its recorded outcome to the parent without relabeling a failed rollback as successful
-	if st.Status.IsTerminal() && st.Status != StatusCompleted && st.Compensation != "" {
-		recordUnwoundBy(st, ev)
+	if st.Status.IsTerminal() && st.TerminalStatus != "" {
+		st.recordUnwoundBy(ev)
 		st.Reported = false
 		return false
 	}
@@ -347,20 +403,40 @@ func applyUnwind(st *instanceState, def *definition, ev *event, now time.Time) b
 	// The unwind gets the instance timeout as its own budget, since the forward run's is long since spent
 	st.StartedAt = now
 
-	recordUnwoundBy(st, ev)
+	st.recordUnwoundBy(ev)
 	beginUnwind(st, def, reason, StatusCancelled, now)
 	return false
 }
 
-// recordUnwoundBy notes that a parent asked this instance to undo itself, and with which compensation attempt, so its termination reports a compensation rather than a result
-func recordUnwoundBy(st *instanceState, ev *event) {
+// recordUnwoundBy retains the highest parent compensation attempt so an older request cannot redirect the eventual acknowledgement
+// It reports whether the parent attribution changed
+func (st *instanceState) recordUnwoundBy(ev *event) bool {
 	if !ev.fromParent || st.Parent == nil {
-		return
+		return false
 	}
-	st.Parent.UnwoundBy = ev.compAttempt
-	if st.Parent.UnwoundBy <= 0 {
-		st.Parent.UnwoundBy = 1
+	attempt := max(ev.compAttempt, 1)
+	if attempt <= st.Parent.UnwoundBy {
+		return false
 	}
+	st.Parent.UnwoundBy = attempt
+	return true
+}
+
+// currentCompensationFailure derives the aggregate failure from current effect generations after a late effect replaces an obsolete undo record
+func currentCompensationFailure(st *instanceState, def *definition) CompensationOutcome {
+	for i := range st.Steps {
+		for j := range st.Steps[i].Tasks {
+			comp := st.Steps[i].Tasks[j].Comp
+			if comp == nil || comp.Error == "" {
+				continue
+			}
+			if def.compensationFailurePolicy == AbortUnwinding {
+				return CompensationFailed
+			}
+			return CompensationPartial
+		}
+	}
+	return ""
 }
 
 // applySuspend pauses an instance, recording what is left of each deadline so resuming does not eat the remainder
@@ -378,7 +454,7 @@ func applySuspend(st *instanceState, def *definition, reason string, now time.Ti
 
 	// The current step's own deadline is paused alongside the instance's, so a long suspension does not consume a short step timeout either
 	sr, d := currentRunningStep(st, def)
-	if sr != nil && d != nil {
+	if sr != nil && d != nil && sr.Status == StepRunning {
 		stepDue := stepDeadline(sr, d)
 		if !stepDue.IsZero() {
 			rec.RemainingStepTimeout = until(stepDue, now)
@@ -392,7 +468,7 @@ func applySuspend(st *instanceState, def *definition, reason string, now time.Ti
 
 // applyResume continues a suspended instance, putting the deadlines back where the suspension found them
 // The remainders are restored by shifting the recorded start times forward, so every deadline recomputes from the journal exactly as it did before
-func applyResume(st *instanceState, def *definition, now time.Time) bool {
+func (st *instanceState) applyResume(def *definition, now time.Time) bool {
 	if st.Status != StatusSuspended || st.Suspended == nil {
 		return true
 	}
@@ -539,8 +615,9 @@ func nextDeadline(st *instanceState, def *definition) time.Time {
 
 	due := instanceDeadline(st, def)
 
+	// A frame being compensated must not keep rearming its expired forward step budget
 	sr, d := currentRunningStep(st, def)
-	if sr != nil && d != nil {
+	if sr != nil && d != nil && sr.Status == StepRunning {
 		stepDue := stepDeadline(sr, d)
 		if !stepDue.IsZero() && (due.IsZero() || stepDue.Before(due)) {
 			due = stepDue
@@ -976,19 +1053,22 @@ func recordChildOutcome(tr *taskRecord, p *reportPayload) {
 // configureTaskActors records every durable actor reference the task can create so later cleanup is independent of the deployed definition
 func (def *definition) configureTaskActors(d *stepDef, tr *taskRecord, instanceID string, stepName string) {
 	member := memberDef(d, tr.Index)
-	baseType := workflowActorTypePrefix + def.name
-	tr.WorkerType = queueType(baseType+workerTypeSuffix, member.capability)
-	tr.UndoType = queueType(baseType+undoTypeSuffix, member.capability)
 
 	child := member.child
 	if child == nil {
 		child = d.child
 	}
-	if child == nil {
+	if child != nil {
+		tr.ChildID = workerActorID(instanceID, stepName, tr.Index)
+		tr.ChildType = child.baseType
 		return
 	}
-	tr.ChildID = workerActorID(instanceID, stepName, tr.Index)
-	tr.ChildType = child.baseType
+
+	baseType := workflowActorTypePrefix + def.name
+	tr.WorkerType = queueType(baseType+workerTypeSuffix, member.capability)
+	if member.isCompensable() {
+		tr.UndoType = queueType(baseType+undoTypeSuffix, member.capability)
+	}
 }
 
 // terminate closes the instance, deciding its terminal status and its output
@@ -1189,7 +1269,11 @@ func instanceDeadline(st *instanceState, def *definition) time.Time {
 	if start.IsZero() {
 		return time.Time{}
 	}
-	return start.Add(def.timeout)
+	timeout := st.Timeout
+	if timeout <= 0 {
+		timeout = def.timeout
+	}
+	return start.Add(timeout)
 }
 
 // stepBudget returns how long a step is allowed to take, which for a wait step is how long it waits for its event

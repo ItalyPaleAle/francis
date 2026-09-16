@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -90,12 +91,18 @@ func (s *WorkflowService) Start(ctx context.Context, input any, opts ...StartOpt
 	if existing.Status != "" {
 		return instanceID, false, nil
 	}
+	identity, err := s.wf.authorizeDefinition(ctx, s.svc)
+	if err != nil {
+		return "", false, err
+	}
 
 	payload := startPayload{
-		Input:       encoded,
-		Version:     s.wf.def.version,
-		TraceParent: traceParentFromContext(ctx),
-		CreatedAt:   time.Now(),
+		Input:                 encoded,
+		Version:               s.wf.def.version,
+		DefinitionFingerprint: identity.Fingerprint,
+		RegistryGeneration:    identity.Generation,
+		TraceParent:           traceParentFromContext(ctx),
+		CreatedAt:             time.Now(),
 	}
 
 	// The insertion is what says who started the instance, since the journal read above finds nothing until the start job has run
@@ -129,24 +136,49 @@ func (s *WorkflowService) GetStatus(ctx context.Context, instanceID string) (Ins
 }
 
 // RaiseEvent delivers an external event to a WaitForEvent step of an instance
-// It returns ErrNoSuchEvent when the definition has no step listening for the name, and is accepted while the instance is suspended, in which case the step completes on resume
+// It returns ErrNoSuchEvent when the instance's definition has no step listening for the name, and is accepted while the instance is suspended, in which case the step completes on resume
 func (s *WorkflowService) RaiseEvent(ctx context.Context, instanceID string, name string, payload any) error {
-	if !s.wf.hasEvent(name) {
-		return fmt.Errorf("%w: %q", ErrNoSuchEvent, name)
+	// Read the target's event contract so a newer deployment can still drive instances created by an older definition
+	client := builtinactor.NewClient[instanceState](s.wf.baseType, instanceID, s.svc)
+	st, err := client.GetState(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to read the workflow event contract: %w", err)
 	}
-
-	encoded, err := encodeInput(payload, s.wf.def.maxOutputSize)
+	limit, err := s.eventLimit(&st, name)
+	if err != nil {
+		return err
+	}
+	encoded, err := encodeInput(payload, limit)
 	if err != nil {
 		return err
 	}
 
-	client := builtinactor.NewClient[struct{}](s.wf.baseType, instanceID, s.svc)
+	// The compatible orchestrator receives the durable event and records it against the open wait
 	_, _, err = client.Dispatch(ctx, methodEvent, eventPayload{Name: name, Payload: encoded},
 		actor.WithIdempotencyKey(methodEvent+idDelimiter+name))
 	if err != nil {
 		return fmt.Errorf("failed to raise the event: %w", err)
 	}
 	return nil
+}
+
+// eventLimit validates an event against its journaled contract, with a matching-definition fallback for legacy journals
+func (s *WorkflowService) eventLimit(st *instanceState, name string) (int, error) {
+	if st.MaxEventSize > 0 {
+		if !slices.Contains(st.EventNames, name) {
+			return 0, fmt.Errorf("%w: %q", ErrNoSuchEvent, name)
+		}
+		return st.MaxEventSize, nil
+	}
+
+	// A legacy journal has no event contract, and another version's graph cannot reconstruct renamed event names safely
+	if st.Version > 0 && st.Version != s.wf.def.version {
+		return 0, fmt.Errorf("event metadata for workflow version %d is unavailable; use a service with that definition version", st.Version)
+	}
+	if !s.wf.hasEvent(name) {
+		return 0, fmt.Errorf("%w: %q", ErrNoSuchEvent, name)
+	}
+	return s.wf.def.maxOutputSize, nil
 }
 
 // Cancel asks a running or suspended instance to stop and unwind, recording the reason as the cause every compensation receives
@@ -346,6 +378,7 @@ func (s *WorkflowService) Definitions(ctx context.Context) ([]DefinitionInfo, er
 
 // ForgetVersion removes a version from the registry, which is the operator's reset for one that was registered wrongly
 // It refuses a version that still has instances with ErrVersionInUse, since forgetting one under a running instance would let a different graph claim its number
+// Resetting this host's own version atomically installs its fingerprint with a new generation so an older deployment cannot reclaim it between removal and registration
 func (s *WorkflowService) ForgetVersion(ctx context.Context, version int) error {
 	page, err := s.List(ctx, &ListOptions{Version: version, Limit: 1})
 	if err != nil {
@@ -355,7 +388,11 @@ func (s *WorkflowService) ForgetVersion(ctx context.Context, version int) error 
 		return fmt.Errorf("%w: version %d", ErrVersionInUse, version)
 	}
 
-	_, err = builtinactor.Invoke(ctx, s.svc, s.wf.registryType(), methodForget, forgetRequest{Version: version})
+	req := forgetRequest{Version: version}
+	if version == s.wf.def.version {
+		req.ReplacementFingerprint = s.wf.def.fingerprint
+	}
+	_, err = builtinactor.Invoke(ctx, s.svc, s.wf.registryType(), methodForget, req)
 	if err != nil {
 		return fmt.Errorf("failed to forget the definition: %w", err)
 	}

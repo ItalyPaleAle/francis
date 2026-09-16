@@ -122,6 +122,10 @@ func New(name string, opts ...Option) (*Workflow, error) {
 
 	// Apply the defaults before validating, so validation sees the values the engine will actually run with
 	o.applyDefaults()
+	err = o.validatePolicies()
+	if err != nil {
+		return nil, err
+	}
 
 	// Validate the advertised capabilities up front, rejecting empties and duplicates
 	err = o.validateCapabilities()
@@ -222,6 +226,17 @@ func (o *options) validateCapabilities() error {
 	return nil
 }
 
+// validatePolicies rejects misspelled policies instead of silently selecting a different failure behavior
+func (o *options) validatePolicies() error {
+	if o.unknownVersion != ParkUnknownVersion && o.unknownVersion != FailUnknownVersion {
+		return fmt.Errorf("unknown workflow version policy %q", o.unknownVersion)
+	}
+	if o.compensationFailurePolicy != ContinueUnwinding && o.compensationFailurePolicy != AbortUnwinding {
+		return fmt.Errorf("unknown compensation failure policy %q", o.compensationFailurePolicy)
+	}
+	return nil
+}
+
 // newDefinition assembles the graph and validates every rule a definition has to satisfy before it can run
 func (o *options) newDefinition(name string) (*definition, error) {
 	if len(o.steps) == 0 {
@@ -249,6 +264,9 @@ func (o *options) newDefinition(name string) (*definition, error) {
 	eventNames := map[string]string{}
 	for i, spec := range o.steps {
 		d := spec.d.clone()
+		if d == nil {
+			return nil, fmt.Errorf("step at index %d is uninitialized", i)
+		}
 		def.steps[i] = d
 		def.order[d.name] = i
 
@@ -282,6 +300,9 @@ func (o *options) newDefinition(name string) (*definition, error) {
 
 // indexStep records a step and, for a group, its members, rejecting a name or an event name that is already taken
 func (def *definition) indexStep(d *stepDef, eventNames map[string]string) error {
+	if d == nil {
+		return errors.New("parallel member is uninitialized")
+	}
 	if d.name == "" {
 		return errors.New("step name is required")
 	}
@@ -342,6 +363,10 @@ func (def *definition) validateStep(d *stepDef, index int) error {
 			if err != nil {
 				return err
 			}
+			err = m.validateOptions(true)
+			if err != nil {
+				return err
+			}
 		}
 	case KindForEach:
 		if d.itemsFrom == "" {
@@ -367,6 +392,15 @@ func (def *definition) validateStep(d *stepDef, index int) error {
 		}
 	default:
 		return fmt.Errorf("step %q has unknown kind %q", d.name, d.kind)
+	}
+
+	// Validate the shared option surface against the node's execution path before checking graph references
+	err := d.validateOptions(false)
+	if err != nil {
+		return err
+	}
+	if d.child != nil && (d.child.def == nil || d.child.baseType == "" || len(d.child.def.steps) == 0) {
+		return fmt.Errorf("step %q references an uninitialized child workflow", d.name)
 	}
 
 	// A step can only read the output of a step that has already produced one

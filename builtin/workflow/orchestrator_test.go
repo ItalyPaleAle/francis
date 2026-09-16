@@ -162,7 +162,7 @@ func TestTheDeadlineParksOnAHostWithoutTheInstanceVersion(t *testing.T) {
 	o := newTestOrchestrator(t, serving, host, "inst-1")
 	require.NoError(t, o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}}))
 
-	declining, err := New("parked", WithSteps(Step("a", WithRun(noopRun))))
+	declining, err := New("parked", WithSteps(Step("replacement", WithRun(noopRun))))
 	require.NoError(t, err)
 	host.registryResponse = registerResponse{Found: true, OK: false}
 
@@ -182,15 +182,14 @@ func TestTheDeadlineParksOnAHostWithoutTheInstanceVersion(t *testing.T) {
 func TestTheDeadlineFailsAnInstanceNoHostCanServe(t *testing.T) {
 	host := newFakeHost()
 
-	serving, err := New("abandoned", WithSteps(Step("a", WithRun(noopRun))))
+	serving, err := New("abandoned", WithTimeout(time.Minute), WithUnknownVersionPolicy(FailUnknownVersion), WithSteps(Step("a", WithRun(noopRun))))
 	require.NoError(t, err)
 	o := newTestOrchestrator(t, serving, host, "inst-1")
 	require.NoError(t, o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}}))
 
-	// The declining host is the one configured to give up, and it only does so once the instance's own timeout has elapsed
+	// The declining host follows the journal's original policy even though its own timeout and default policy differ
 	declining, err := New("abandoned",
-		WithTimeout(time.Minute),
-		WithUnknownVersionPolicy(FailUnknownVersion),
+		WithVersion(2),
 		WithSteps(Step("a", WithRun(noopRun))),
 	)
 	require.NoError(t, err)
@@ -341,10 +340,10 @@ func TestAStartForAnotherVersionIsDeclined(t *testing.T) {
 
 func TestADeadlineOnAJournalOfAnotherVersionFollowsThePolicy(t *testing.T) {
 	// The journal is written by the host that serves its version, and the deadline then fires on one that has moved on
-	seedJournal := func(t *testing.T, host *fakeHost) {
+	seedJournal := func(t *testing.T, host *fakeHost, policy UnknownVersionPolicy) {
 		t.Helper()
 
-		old, err := New("version-drift", WithSteps(Step("a", WithRun(noopRun))))
+		old, err := New("version-drift", WithTimeout(time.Minute), WithUnknownVersionPolicy(policy), WithSteps(Step("a", WithRun(noopRun))))
 		require.NoError(t, err)
 		o := newTestOrchestrator(t, old, host, "inst-1")
 		require.NoError(t, o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}}))
@@ -353,7 +352,7 @@ func TestADeadlineOnAJournalOfAnotherVersionFollowsThePolicy(t *testing.T) {
 
 	t.Run("parking waits for a host that can serve the version", func(t *testing.T) {
 		host := newFakeHost()
-		seedJournal(t, host)
+		seedJournal(t, host, ParkUnknownVersion)
 
 		upgraded, err := New("version-drift", WithVersion(2), WithSteps(Step("a", WithRun(noopRun))))
 		require.NoError(t, err)
@@ -372,7 +371,7 @@ func TestADeadlineOnAJournalOfAnotherVersionFollowsThePolicy(t *testing.T) {
 
 	t.Run("failing ends an instance no host can serve", func(t *testing.T) {
 		host := newFakeHost()
-		seedJournal(t, host)
+		seedJournal(t, host, FailUnknownVersion)
 
 		upgraded, err := New("version-drift",
 			WithVersion(2),

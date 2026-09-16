@@ -16,11 +16,13 @@ Handler **bodies** are not fingerprinted.
 
 The registry answers one question: is this the graph recorded for this version? If the version is unknown, it records it and answers yes. If it is known with the same fingerprint, yes. Otherwise, **conflict**, with the recorded fingerprint and when it was first seen. It never overwrites, so the first deployment of a version defines it.
 
-The check is made before a host's orchestrator, worker, or undo actor handles a job. A host asks again for each delivery so `ForgetVersion` takes effect across hosts that remain online; otherwise an old host could keep serving a fingerprint that the registry no longer authorizes. Known versions use concurrent read-only checks, while the first caller for an unknown version registers it in an exclusive turn. A lookup failure returns the job for retry rather than letting it run without a consistency decision.
+Every new start obtains a fingerprint and a monotonically increasing registry generation. The orchestrator writes that identity into its journal, confirms it with the registry, and persists the confirmation before dispatching work. Registry confirmation and version resets run under the same exclusive actor turn. If a reset wins before the journal appears, the old start fails without running a task; if the journal appears first, the reset is refused.
+
+Later orchestrator deliveries compare the journal's version and fingerprint with the local definition. Worker and undo jobs carry the same identity and check it locally, so established deliveries do not require a registry request. Legacy jobs without an identity still consult the registry, and matching legacy journals acquire an identity on their next active turn. A registry lookup failure leaves authorization incomplete and retryable.
 
 ## When a host conflicts
 
-A host whose graph disagrees with the recorded one **declines every job of that version**, so the work re-routes to hosts whose code matches. It emits `francis.workflow.definition.conflicts` with the version and both fingerprints, and logs at error level. It does not stop the host: other workflows and other versions are unaffected.
+A host whose graph disagrees with a job's recorded version or fingerprint declines it, so the work re-routes to matching hosts. Registry authorization conflicts also cause `Start` to return `ErrDefinitionConflict`. Same-version fingerprint conflicts increment `francis.workflow.definition.conflicts` with the workflow and version, and log both fingerprints at error level. Other workflows and other versions are unaffected.
 
 The failure mode is loud by design. If someone changes the graph and forgets to bump the version, the first host to deploy registers the new fingerprint under the old number and every host still running the old code starts conflicting — or, if old hosts got there first, every new host conflicts and the deploy drains no work at all. Either way the metric fires within one turn, **nothing corrupts**, and the fix is a version bump.
 
@@ -37,7 +39,7 @@ err = svc.ForgetVersion(ctx, 3)
 
 `ForgetVersion` refuses a version that still has instances with `ErrVersionInUse`, since forgetting one under a running instance would let a different graph claim its number.
 
-Live hosts observe the reset on their next delivery. This lets a corrected definition claim the version without leaving an earlier host's approval cached.
+When resetting the service's own version, `ForgetVersion` atomically replaces the entry with that service's fingerprint and a fresh generation. It remains visible in `Definitions`; an older host cannot reclaim the version between removal and registration. Resetting another version removes its entry. Starts already authorized under a removed generation cannot dispatch work, even when the replacement has the same fingerprint.
 
 ## What needs a new version
 
@@ -51,7 +53,7 @@ Treat a materially different handler the way you would any other live code swap:
 
 ## Rolling deployments
 
-1. **`WithVersion(n)` is stamped on the journal** when the instance starts.
+1. **The version, fingerprint, and registry generation are stamped on the journal** when the instance starts.
 2. **A host without the instance's version declines to advance it.** The `Workflow` actor returns a rejection, which halts the actor to clear its placement and re-routes the occurrence to another host — **without counting an attempt and without dead-lettering it**. Old instances drain onto the hosts still running the old code; new instances start on the new one. The same rule applies on the worker and undo types, so a task is never run by a handler set from another version.
 3. **The drain is correct but not fast.** A re-route costs a jittered one to two alarm poll intervals. With `k` old-version hosts among `N`, each turn of an old instance expects about `N/k` re-routes before it lands; at a 30-second poll interval, a 20-turn instance on a four-host cluster with one old host takes on the order of an hour to drain.
 
@@ -65,7 +67,7 @@ drained := len(page.Instances) == 0
 
 ## When no host has the version
 
-The deadline alarm is delivered to the instance's actor on whatever host holds it, so a version-mismatched host cannot simply decline it forever. When the alarm fires there, the handler works **from the journal alone** — the full step list is recorded at `Start` for exactly this reason — and applies `WithUnknownVersionPolicy`:
+The deadline alarm is delivered to the instance's actor on whatever host holds it, so a version-mismatched host cannot simply decline it forever. Once start authorization is confirmed, recovery uses the journal's original timeout and `WithUnknownVersionPolicy`, not the settings on the current host:
 
 | Policy | Behavior |
 |--------|----------|
@@ -74,9 +76,11 @@ The deadline alarm is delivered to the instance's actor on whatever host holds i
 
 `Definitions` tells you which versions are registered, and `List(Version: v)` which instances are parked on one.
 
+Suspended instances stay paused. Legacy journals missing the timeout or policy park conservatively on a mismatched host; a matching host can fill those fields from its definition.
+
 ## A deployment checklist
 
 - Changing only a handler? Deploy. Nothing else to do, unless the new behavior is materially different — then bump anyway.
 - Changing the graph? Bump `WithVersion`, deploy, and watch `francis.workflow.definition.conflicts` stay at zero.
 - Watch `List(Version: old)` fall to empty before removing the old-version hosts.
-- A version you registered by mistake, with no instances left, clears with `ForgetVersion`.
+- Reset a version registered by mistake with `ForgetVersion` once no instances remain; resetting the service's own version installs its corrected graph atomically.

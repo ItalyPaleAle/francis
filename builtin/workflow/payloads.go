@@ -46,10 +46,17 @@ const (
 	alarmDeadline = "deadline"
 )
 
+// deadlinePayload distinguishes recurring workflow deadlines from legacy one-shot alarms during rolling upgrades
+type deadlinePayload struct {
+	Recurring bool `msgpack:"recurring"`
+}
+
 // startPayload begins an instance
 type startPayload struct {
-	Input   json.RawMessage `msgpack:"input,omitempty"`
-	Version int             `msgpack:"version"`
+	Input                 json.RawMessage `msgpack:"input,omitempty"`
+	Version               int             `msgpack:"version"`
+	DefinitionFingerprint string          `msgpack:"definitionFingerprint,omitempty"`
+	RegistryGeneration    uint64          `msgpack:"registryGeneration,omitempty"`
 	// Parent identifies the instance this one is a child of, and is nil for a top-level instance
 	Parent      *parentRef `msgpack:"parent,omitempty"`
 	TraceParent string     `msgpack:"traceParent,omitempty"`
@@ -61,10 +68,12 @@ type startPayload struct {
 // runPayload carries one attempt of a task to the worker that performs it
 // It holds only what the step declared it needs, so the engine never ships the whole journal to a worker
 type runPayload struct {
-	InstanceID string `msgpack:"instanceId"`
-	Workflow   string `msgpack:"workflow"`
-	Version    int    `msgpack:"version"`
-	Step       string `msgpack:"step"`
+	InstanceID            string `msgpack:"instanceId"`
+	Workflow              string `msgpack:"workflow"`
+	Version               int    `msgpack:"version"`
+	DefinitionFingerprint string `msgpack:"definitionFingerprint,omitempty"`
+	RegistryGeneration    uint64 `msgpack:"registryGeneration,omitempty"`
+	Step                  string `msgpack:"step"`
 	// Index is the task's index in the journal, which is what every report is keyed by
 	Index   int `msgpack:"index"`
 	Attempt int `msgpack:"attempt"`

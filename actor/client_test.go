@@ -111,6 +111,57 @@ func (f *fakeHost) GetState(_ context.Context, _ string, _ string, dest any) err
 
 func (f *fakeHost) DeleteState(context.Context, string, string) error { return nil }
 
+type failingDeleteStateHost struct {
+	*fakeHost
+	deleteErr   error
+	deleteCalls int
+}
+
+func (h *failingDeleteStateHost) DeleteState(context.Context, string, string) error {
+	h.deleteCalls++
+	return h.deleteErr
+}
+
+func TestClientDeleteStatePreservesCacheUntilDeletionIsConfirmed(t *testing.T) {
+	host := &failingDeleteStateHost{fakeHost: &fakeHost{getStateValue: 42}, deleteErr: errors.New("provider unavailable")}
+	c := NewActorClient[int]("test", "instance", NewService(host))
+
+	// Load the committed value before a transient deletion failure
+	value, err := c.GetState(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 42, value)
+	err = c.DeleteState(t.Context())
+	require.ErrorIs(t, err, host.deleteErr)
+	value, err = c.GetState(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 42, value)
+	require.EqualValues(t, 1, host.getStateCalls.Load())
+
+	// A successful retry publishes absence without requiring another provider read
+	host.deleteErr = nil
+	err = c.DeleteState(t.Context())
+	require.NoError(t, err)
+	value, err = c.GetState(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, value)
+	require.Equal(t, 2, host.deleteCalls)
+	require.EqualValues(t, 1, host.getStateCalls.Load())
+}
+
+func TestClientDeleteStateClearsCacheWhenProviderConfirmsNotFound(t *testing.T) {
+	host := &failingDeleteStateHost{fakeHost: &fakeHost{getStateValue: 42}, deleteErr: ErrStateNotFound}
+	c := NewActorClient[int]("test", "instance", NewService(host))
+	_, err := c.GetState(t.Context())
+	require.NoError(t, err)
+
+	// A missing provider record is authoritative even when the activation had cached an older value
+	err = c.DeleteState(t.Context())
+	require.ErrorIs(t, err, ErrStateNotFound)
+	value, err := c.GetState(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, value)
+}
+
 func (f *fakeHost) ListStates(_ context.Context, actorType string, opts *ListStatesOpts) (StateList, error) {
 	f.listStatesType = actorType
 	f.listStatesOpts = opts

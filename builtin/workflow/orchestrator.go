@@ -2,13 +2,14 @@ package workflow
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
+	msgpack "github.com/vmihailenco/msgpack/v5"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
@@ -57,50 +58,149 @@ func newOrchestrator(wf *Workflow, instanceID string, svc *actor.Service) actor.
 
 // Job handles every durable job delivered to the instance, which is everything that drives it forward
 func (o *orchestrator) Job(ctx context.Context, method string, data actor.Envelope) error {
-	// A host whose code does not match the graph registered for the version declines the job so it re-routes, rather than advancing an instance against a definition it does not have
-	ok, err := o.wf.serveVersion(ctx, o.svc, o.def.version)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return actor.ErrJobRejected
-	}
-
+	// Starts carry registry authorization while later deliveries are fenced against the immutable identity in the journal
 	ev, err := o.decodeEvent(method, data)
 	if err != nil {
 		return err
 	}
+	if ev.kind == evStart {
+		err = o.authorizeStart(ctx, ev.start)
+		if errors.Is(err, errVersionNotServed) || errors.Is(err, ErrDefinitionConflict) {
+			return actor.ErrJobRejected
+		}
+		if err != nil {
+			return err
+		}
+	}
 
 	// A job for a version this host does not serve goes back to Francis to be re-routed, without counting an attempt
 	err = o.turn(ctx, ev)
-	if errors.Is(err, errVersionNotServed) {
+	if errors.Is(err, errVersionNotServed) || errors.Is(err, ErrDefinitionConflict) {
 		return actor.ErrJobRejected
 	}
 	return err
 }
 
-// Alarm handles the instance's single deadline alarm, which is the backstop that guarantees an instance terminates
-func (o *orchestrator) Alarm(ctx context.Context, name string, _ actor.Envelope) error {
+// authorizeStart upgrades legacy start payloads while preserving the identity captured by a new dispatch
+func (o *orchestrator) authorizeStart(ctx context.Context, p *startPayload) error {
+	if p.Version > 0 && p.Version != o.def.version {
+		return errVersionNotServed
+	}
+	if p.DefinitionFingerprint != "" && p.DefinitionFingerprint != o.def.fingerprint {
+		o.wf.recordDefinitionConflict(ctx, o.def.version, o.def.fingerprint, registerResponse{Fingerprint: p.DefinitionFingerprint})
+		return errVersionNotServed
+	}
+	if p.DefinitionFingerprint != "" && p.RegistryGeneration > 0 {
+		return nil
+	}
+
+	// A retried legacy start must retain a journal identity granted before a possible registry reset
+	st, err := o.client.GetState(ctx)
+	if err != nil {
+		return err
+	}
+	if st.DefinitionFingerprint != "" && st.RegistryGeneration > 0 {
+		p.DefinitionFingerprint = st.DefinitionFingerprint
+		p.RegistryGeneration = st.RegistryGeneration
+		return nil
+	}
+	identity, err := o.wf.authorizeDefinition(ctx, o.svc)
+	if err != nil {
+		return err
+	}
+	p.Version = o.def.version
+	p.DefinitionFingerprint = identity.Fingerprint
+	p.RegistryGeneration = identity.Generation
+	return nil
+}
+
+// Alarm handles the instance's deadline and retains its recurrence when a transient failure prevents the turn from finishing
+func (o *orchestrator) Alarm(ctx context.Context, name string, data actor.Envelope) error {
 	if name != alarmDeadline {
 		return nil
 	}
 
-	// A delivered one-shot alarm no longer exists after this handler returns unless the turn replaces it
+	// A delivered occurrence must be replaced even when its journal deadline has not changed
 	o.armedDeadline = time.Time{}
 
-	// The alarm is delivered to this actor on whatever host holds it, so a host without the instance's version cannot simply decline it forever
-	// It works from the journal alone instead, which carries the full step list for exactly this reason
-	ok, err := o.wf.serveVersion(ctx, o.svc, o.def.version)
+	// Legacy one-shot alarms acquire a durable fallback before reaching registry or journal operations that may fail
+	var p deadlinePayload
+	err := decodePayload(data, &p)
 	if err != nil {
 		return err
 	}
-	if !ok {
-		return o.handleUnknownVersionDeadline(ctx)
+	if !p.Recurring {
+		err = o.client.SetAlarm(ctx, alarmDeadline, deadlineAlarmProperties(time.Now().Add(orchestratorRetryDelay)))
+		if err != nil {
+			return fmt.Errorf("failed to migrate the workflow deadline to a recurring alarm: %w", err)
+		}
+	}
+
+	// A failed turn leaves the recurring row intact, so runtime completion schedules its next occurrence without consuming a finite retry budget
+	err = o.runDeadline(ctx)
+	if err != nil && o.log != nil {
+		o.log.WarnContext(ctx, "Workflow deadline turn failed; its recurring alarm will retry", slog.Any("error", err))
+	}
+	return nil
+}
+
+// runDeadline repairs durable event delivery before evaluating timeouts so recovery retains the original request payloads
+func (o *orchestrator) runDeadline(ctx context.Context) error {
+	// The dead-letter store survives a failed best-effort callback, including a start that has not created its journal yet
+	jobs, err := o.client.ListJobs(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to inspect workflow deliveries: %w", err)
+	}
+	var recovered, pendingStart bool
+	for _, job := range jobs {
+		pendingStart = pendingStart || (job.Method == methodStart && !job.Status.IsTerminal())
+		if job.Status != actor.JobStatusDeadLettered || !retryWorkflowDelivery(job.Method, job.LastError) {
+			continue
+		}
+		_, err = o.client.RetryJob(ctx, job.JobID)
+		if errors.Is(err, actor.ErrJobNotFound) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("failed to recover workflow delivery %s: %w", job.JobID, err)
+		}
+		recovered = true
+	}
+	if recovered {
+		return o.client.SetAlarm(ctx, alarmDeadline, deadlineAlarmProperties(time.Now().Add(orchestratorRetryDelay)))
+	}
+
+	// Completed, missing, and suspended journals must explicitly stop the fallback recurrence
+	st, err := o.client.GetState(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to read the workflow journal: %w", err)
+	}
+	if st.Status == "" {
+		if pendingStart {
+			return nil
+		}
+		return o.dropDeadline(ctx)
+	}
+	if st.Status.IsTerminal() {
+		st = st.clone()
+		// A start may have become terminal in its first write, but its parent must not see an outcome before the registry decision is durable
+		err = o.confirmStart(ctx, &st, time.Now())
+		if err != nil {
+			return err
+		}
+		err = o.reportToParent(ctx, &st, false)
+		if err != nil {
+			return err
+		}
+		return o.finish(ctx)
+	}
+	if st.Status == StatusSuspended {
+		return o.dropDeadline(ctx)
 	}
 
 	// The journal may be stamped with a version this host does not serve even when this host's own version is fine, and the deadline follows the configured policy rather than being declined forever
 	err = o.turn(ctx, &event{kind: evDeadline})
-	if errors.Is(err, errVersionNotServed) {
+	if errors.Is(err, errVersionNotServed) || errors.Is(err, ErrDefinitionConflict) {
 		return o.handleUnknownVersionDeadline(ctx)
 	}
 	return err
@@ -127,8 +227,7 @@ func (o *orchestrator) Peek(ctx context.Context, method string, _ actor.Envelope
 	}
 }
 
-// JobFailed reacts to one of the instance's own jobs being dead-lettered, which means a report or an event could not be delivered
-// It forces a turn whose reconcile re-dispatches everything the journal still says is outstanding, including asking a terminal child to replay its retained result
+// JobFailed restores an exhausted delivery from its durable record so starts, control requests, external events, and reports retain their original payloads
 func (o *orchestrator) JobFailed(ctx context.Context, jobID string, method string, _ actor.Envelope, jobErr error) error {
 	o.wf.metrics.transportFailures.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("workflow", o.def.name),
@@ -139,13 +238,39 @@ func (o *orchestrator) JobFailed(ctx context.Context, jobID string, method strin
 		o.log.WarnContext(ctx, "Workflow job was dead-lettered", slog.String("jobID", jobID), slog.String("method", method), slog.Any("error", jobErr))
 	}
 
-	// Arming the deadline for now runs a turn without adding a second timer
-	err := o.client.SetAlarm(ctx, alarmDeadline, actor.AlarmProperties{DueTime: time.Now()})
+	// Preserve a recurring repair path before trying the best-effort replay itself
+	err := o.client.SetAlarm(ctx, alarmDeadline, deadlineAlarmProperties(time.Now()))
 	if err != nil {
 		return fmt.Errorf("failed to arm the deadline after a dead-letter: %w", err)
 	}
 	o.armedDeadline = time.Time{}
+
+	// Permanent payload failures remain inspectable while transient delivery failures replay atomically with their original bytes
+	lastError := ""
+	if jobErr != nil {
+		lastError = jobErr.Error()
+	}
+	if !retryWorkflowDelivery(method, lastError) {
+		return nil
+	}
+	_, err = o.client.RetryJob(ctx, jobID)
+	if err != nil && !errors.Is(err, actor.ErrJobNotFound) {
+		return fmt.Errorf("failed to recover workflow delivery %s: %w", jobID, err)
+	}
 	return nil
+}
+
+// retryWorkflowDelivery excludes malformed or unknown requests while preserving engine-owned transient failures
+func retryWorkflowDelivery(method string, lastError string) bool {
+	if strings.Contains(lastError, actor.ErrJobPermanentFailure.Error()) {
+		return false
+	}
+	switch method {
+	case methodStart, methodDone, methodCompensated, methodEvent, methodCancel, methodUnwind, methodSuspend, methodResume:
+		return true
+	default:
+		return false
+	}
 }
 
 // decodeEvent turns a delivered job into the event the turn folds into the journal
@@ -229,9 +354,31 @@ func (o *orchestrator) turn(ctx context.Context, ev *event) (err error) {
 	}
 	st = st.clone()
 
+	if st.Version == o.def.version && st.DefinitionFingerprint != "" && st.DefinitionFingerprint != o.def.fingerprint {
+		o.wf.recordDefinitionConflict(ctx, o.def.version, o.def.fingerprint, registerResponse{Fingerprint: st.DefinitionFingerprint})
+	}
 	run, err := o.admits(&st, ev)
 	if err != nil || !run {
 		return err
+	}
+	if st.Status != "" && st.DefinitionFingerprint == "" {
+		// A legacy journal can bind once to its registered graph because Forget checks journal existence under the same registry lock
+		identity, authErr := o.wf.authorizeDefinition(ctx, o.svc)
+		if authErr != nil {
+			return authErr
+		}
+		st.DefinitionFingerprint = identity.Fingerprint
+		st.RegistryGeneration = identity.Generation
+		st.RegistryConfirmed = true
+	}
+	if st.Status != "" {
+		// Matching code can fill missing legacy policies once, while mismatched hosts must never invent them
+		if st.Timeout <= 0 {
+			st.Timeout = o.def.timeout
+		}
+		if st.UnknownVersion == "" {
+			st.UnknownVersion = o.def.unknownVersion
+		}
 	}
 
 	now := st.deadlineTurnTime(ev, time.Now())
@@ -276,6 +423,12 @@ func (o *orchestrator) turn(ctx context.Context, ev *event) (err error) {
 		return err
 	}
 
+	// Confirmation is ordered after the first journal write and before any work dispatch, closing the reset race without cross-actor transactions
+	err = o.confirmStart(ctx, &st, now)
+	if err != nil {
+		return err
+	}
+
 	o.recordTransitions(ctx, &st, ev, statusBefore, before)
 
 	// Phase 4b: everything the journal says should be running is dispatched, idempotently
@@ -292,9 +445,31 @@ func (o *orchestrator) turn(ctx context.Context, ev *event) (err error) {
 // admits reports whether this turn should run at all, given what the journal says about the instance
 // It returns false with no error for an event there is simply nothing to do about, and an error for one this host should not be the one to handle
 func (o *orchestrator) admits(st *instanceState, ev *event) (bool, error) {
+	// Identity fences precede terminal shortcuts because a late result can reopen a journal and dispatch compensations
+	if st.Version > 0 && st.Version != o.def.version {
+		return false, errVersionNotServed
+	}
+	if st.DefinitionFingerprint != "" && st.DefinitionFingerprint != o.def.fingerprint {
+		return false, errVersionNotServed
+	}
+	if ev.kind == evStart && ev.start != nil {
+		if ev.start.Version > 0 && ev.start.Version != o.def.version {
+			return false, errVersionNotServed
+		}
+		if ev.start.DefinitionFingerprint != "" && ev.start.DefinitionFingerprint != o.def.fingerprint {
+			return false, errVersionNotServed
+		}
+		if st.RegistryGeneration > 0 && ev.start.RegistryGeneration > 0 && st.RegistryGeneration != ev.start.RegistryGeneration {
+			return false, errVersionNotServed
+		}
+	}
+
 	// A terminated instance ignores everything but the unwind a parent sends, which is what moves a completed child back into compensating
 	// The exception is a child that still owes its parent a report: nothing else will drive that journal again, so the delivery being retried is the only thing left that can get the report out
 	if st.Status.IsTerminal() && ev.kind != evUnwind {
+		if st.RegistryGeneration > 0 && !st.RegistryConfirmed && !st.RegistryRejected {
+			return true, nil
+		}
 		if isLateAbandonedSuccess(st, ev) {
 			return true, nil
 		}
@@ -307,16 +482,44 @@ func (o *orchestrator) admits(st *instanceState, ev *event) (bool, error) {
 		return false, errWaitingForStart
 	}
 
-	// An instance whose version this host cannot serve is left for a host that can, which is what drains old instances onto old hosts
-	// A start is checked against the version its own payload carries, since there is no journal yet to read it from: applying this host's graph to a journal stamped with another version would populate it from a definition it does not describe
-	if st.Version > 0 && st.Version != o.def.version {
-		return false, errVersionNotServed
+	return true, nil
+}
+
+// confirmStart records the registry's decision for a newly published journal before any forward work or child result is dispatched
+func (o *orchestrator) confirmStart(ctx context.Context, st *instanceState, now time.Time) error {
+	if st.RegistryGeneration == 0 || st.RegistryConfirmed || st.RegistryRejected {
+		return nil
 	}
-	if ev.kind == evStart && ev.start != nil && ev.start.Version > 0 && ev.start.Version != o.def.version {
-		return false, errVersionNotServed
+	_, err := o.wf.confirmDefinition(ctx, o.svc, registerRequest{
+		Version: st.Version, Fingerprint: st.DefinitionFingerprint, Generation: st.RegistryGeneration,
+	})
+	if err != nil && !errors.Is(err, ErrDefinitionConflict) {
+		return err
 	}
 
-	return true, nil
+	// The first persistence owns the cached snapshot, so the confirmation outcome must mutate an independent journal
+	*st = st.clone()
+	if err == nil {
+		st.RegistryConfirmed = true
+	} else {
+		// No task was dispatched before this check, so a revoked start fails without compensation and leaves a durable parent outcome
+		st.RegistryRejected = true
+		st.Status = StatusFailed
+		st.Compensation = CompensationNone
+		st.Cause = "workflow definition authorization was revoked before the instance started"
+		st.CompletedAt = now
+		st.Output = nil
+		st.Stack = nil
+		st.Cursor = ""
+		st.DeadlineAt = time.Time{}
+		for i := range st.Steps {
+			st.Steps[i].Status = StepSkipped
+			st.Steps[i].CompletedAt = now
+			st.Steps[i].Remaining = 0
+			st.Steps[i].Tasks = nil
+		}
+	}
+	return o.persist(ctx, st, now)
 }
 
 // recover is the part of a turn only the deadline drives: resolving an elapsed deadline against the journal
@@ -345,6 +548,7 @@ func (o *orchestrator) persist(ctx context.Context, st *instanceState, now time.
 	opts := &actor.SetStateOpts{}
 	opts.SetWorkflowLabels(builtinkey.Key{}, o.labels(st))
 	opts.TTL = o.terminalStateTTL(st)
+	st.encoded = nil
 
 	// The size is checked before the write, because an instance that can no longer persist can no longer progress, and failing it is a much better outcome
 	size, err := journalSize(st)
@@ -359,6 +563,11 @@ func (o *orchestrator) persist(ctx context.Context, st *instanceState, now time.
 		}
 		opts.SetWorkflowLabels(builtinkey.Key{}, o.labels(st))
 		opts.TTL = o.terminalStateTTL(st)
+		st.encoded = nil
+		_, err = journalSize(st)
+		if err != nil {
+			return fmt.Errorf("failed to encode the terminal workflow journal: %w", err)
+		}
 	}
 
 	err = o.client.SetState(ctx, *st, opts)
@@ -465,6 +674,9 @@ func (o *orchestrator) reconcile(ctx context.Context, st *instanceState, now tim
 		return err
 	}
 
+	// Dispatch acknowledgements are written afterward, so they must not mutate the state client's last durable snapshot
+	*st = st.clone()
+	var changed bool
 	for i := range st.Steps {
 		sr := &st.Steps[i]
 		d := o.def.byName[sr.Name]
@@ -472,14 +684,15 @@ func (o *orchestrator) reconcile(ctx context.Context, st *instanceState, now tim
 			continue
 		}
 
+		var dispatched bool
 		switch sr.Status {
 		case StepRunning:
-			err = o.dispatchForward(ctx, st, sr, d, now)
+			dispatched, err = o.dispatchForward(ctx, st, sr, d, now)
 		case StepCompensating:
-			err = o.dispatchCompensations(ctx, st, sr, d, now)
+			dispatched, err = o.dispatchCompensations(ctx, st, sr, d, now)
 		default:
 			// A step that settled while tasks were still outstanding leaves pending jobs behind, which are cancelled so the work that has not started never does
-			err = o.cancelOutstanding(ctx, sr, d)
+			err = o.cancelOutstanding(ctx, st, sr)
 			if err != nil {
 				return err
 			}
@@ -488,22 +701,38 @@ func (o *orchestrator) reconcile(ctx context.Context, st *instanceState, now tim
 		if err != nil {
 			return err
 		}
+		changed = changed || dispatched
+	}
+
+	// An accepted attempt stays acknowledged across activations while a failed acknowledgement write safely repeats its idempotent dispatch
+	if changed {
+		statusBefore := st.Status
+		before := st.stepStatuses()
+		err = o.persist(ctx, st, now)
+		if err != nil {
+			return err
+		}
+		if st.Status.IsTerminal() {
+			o.recordTransitions(ctx, st, &event{}, statusBefore, before)
+			return o.reconcile(ctx, st, now, forceParentReport)
+		}
 	}
 
 	return nil
 }
 
 // dispatchForward dispatches every forward task the journal says should be running, within the fan-out's sliding window
-func (o *orchestrator) dispatchForward(ctx context.Context, st *instanceState, sr *stepRecord, d *stepDef, now time.Time) error {
+func (o *orchestrator) dispatchForward(ctx context.Context, st *instanceState, sr *stepRecord, d *stepDef, now time.Time) (bool, error) {
 	// A wait step has no task to dispatch: it is completed by RaiseEvent or failed by its own timeout
 	if d.kind == KindWait {
-		return nil
+		return false, nil
 	}
 
 	// The window admits the first tasks in index order that are not yet done, and slides as results arrive
-	// A redispatch of a task that is already pending or running coalesces on its key, so no in-flight flag is needed and none is kept
+	// Acknowledged jobs still occupy the window but require no further provider calls until their attempt changes
 	window := d.maxParallel
 	var admitted int
+	var changed bool
 	for i := range sr.Tasks {
 		tr := &sr.Tasks[i]
 		if tr.Done {
@@ -513,13 +742,18 @@ func (o *orchestrator) dispatchForward(ctx context.Context, st *instanceState, s
 			break
 		}
 		admitted++
+		if tr.DispatchedAttempt >= tr.Attempts {
+			continue
+		}
 
 		err := o.dispatchTask(ctx, st, sr, d, tr, now)
 		if err != nil {
-			return err
+			return changed, err
 		}
+		tr.DispatchedAttempt = tr.Attempts
+		changed = true
 	}
-	return nil
+	return changed, nil
 }
 
 // dispatchTask dispatches one attempt of one task, which is a job to a worker or the start of a child instance
@@ -558,6 +792,10 @@ func (o *orchestrator) startChild(ctx context.Context, st *instanceState, sr *st
 	if child == nil {
 		return fmt.Errorf("step %q is a child step with no definition", sr.Name)
 	}
+	identity, err := child.authorizeDefinition(ctx, o.svc)
+	if err != nil {
+		return err
+	}
 
 	// The depth travels with the start, and the child refuses it if its own definition says the chain is too deep
 	depth := 1
@@ -567,8 +805,10 @@ func (o *orchestrator) startChild(ctx context.Context, st *instanceState, sr *st
 
 	// The child's input is what this task would have received, so a child step reads its parent's data exactly as a plain step does
 	payload := startPayload{
-		Input:   o.childInput(st, sr, d, tr),
-		Version: child.def.version,
+		Input:                 o.childInput(st, sr, d, tr),
+		Version:               child.def.version,
+		DefinitionFingerprint: identity.Fingerprint,
+		RegistryGeneration:    identity.Generation,
 		Parent: &parentRef{
 			InstanceID: o.instanceID,
 			Workflow:   o.def.name,
@@ -582,7 +822,7 @@ func (o *orchestrator) startChild(ctx context.Context, st *instanceState, sr *st
 	}
 
 	client := builtinactor.NewClient[struct{}](child.baseType, tr.ChildID, o.svc)
-	_, _, err := client.Dispatch(ctx, methodStart, payload, actor.WithIdempotencyKey(methodStart))
+	_, _, err = client.Dispatch(ctx, methodStart, payload, actor.WithIdempotencyKey(methodStart))
 	if err != nil {
 		return fmt.Errorf("failed to start child %s for %s[%d]: %w", child.name, sr.Name, tr.Index, err)
 	}
@@ -595,10 +835,11 @@ func (o *orchestrator) startChild(ctx context.Context, st *instanceState, sr *st
 }
 
 // dispatchCompensations dispatches every compensation of the frame being unwound, which run concurrently because the tasks had no order between them going forward
-func (o *orchestrator) dispatchCompensations(ctx context.Context, st *instanceState, sr *stepRecord, d *stepDef, now time.Time) error {
+func (o *orchestrator) dispatchCompensations(ctx context.Context, st *instanceState, sr *stepRecord, d *stepDef, now time.Time) (bool, error) {
+	var changed bool
 	for i := range sr.Tasks {
 		tr := &sr.Tasks[i]
-		if tr.Comp == nil || tr.Comp.Done {
+		if tr.Comp == nil || tr.Comp.Done || tr.Comp.DispatchedAttempt >= tr.Comp.Attempts {
 			continue
 		}
 
@@ -608,8 +849,10 @@ func (o *orchestrator) dispatchCompensations(ctx context.Context, st *instanceSt
 		if member.kind == KindChild || (d.kind == KindForEach && d.child != nil) {
 			err := o.unwindChild(ctx, st, sr.Name, tr)
 			if err != nil {
-				return err
+				return changed, err
 			}
+			tr.Comp.DispatchedAttempt = tr.Comp.Attempts
+			changed = true
 			continue
 		}
 
@@ -631,15 +874,17 @@ func (o *orchestrator) dispatchCompensations(ctx context.Context, st *instanceSt
 		client := builtinactor.NewClient[struct{}](undoType, workerActorID(o.instanceID, sr.Name, tr.Index), o.svc)
 		_, _, err := client.Dispatch(ctx, methodCompensate, payload, opts...)
 		if err != nil {
-			return fmt.Errorf("failed to dispatch compensation %s[%d]: %w", sr.Name, tr.Index, err)
+			return changed, fmt.Errorf("failed to dispatch compensation %s[%d]: %w", sr.Name, tr.Index, err)
 		}
+		tr.Comp.DispatchedAttempt = tr.Comp.Attempts
+		changed = true
 
 		o.wf.metrics.compensationsRun.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("workflow", o.def.name),
 			attribute.String("step", sr.Name),
 		))
 	}
-	return nil
+	return changed, nil
 }
 
 // unwindChild asks a child instance to undo itself, which cancels one that is still running and reopens one that already completed
@@ -679,55 +924,71 @@ func (o *orchestrator) childDefinitionFor(stepName string, index int) *Workflow 
 	return d.child
 }
 
-// cancelAllOutstanding removes queued forward work from every settled step before a terminal journal becomes visible
+// cancelAllOutstanding removes queued forward and compensation work before a terminal journal becomes visible
 func (o *orchestrator) cancelAllOutstanding(ctx context.Context, st *instanceState) error {
+	targets := make([]jobCleanupTarget, 0)
 	for i := range st.Steps {
 		sr := &st.Steps[i]
-		d := o.def.byName[sr.Name]
-		err := o.cancelOutstanding(ctx, sr, d)
+		stepTargets, err := o.outstandingJobTargets(st, sr)
 		if err != nil {
 			return err
 		}
+		targets = append(targets, stepTargets...)
 	}
-	return nil
+	return o.cancelJobTargets(ctx, targets)
 }
 
 // cancelOutstanding removes the pending jobs of a step that settled while some of its tasks had not reported
 // A job that is already executing is not interrupted, so a task that was running finishes and its late report is recorded like any other result
-func (o *orchestrator) cancelOutstanding(ctx context.Context, sr *stepRecord, d *stepDef) error {
+func (o *orchestrator) cancelOutstanding(ctx context.Context, st *instanceState, sr *stepRecord) error {
+	targets, err := o.outstandingJobTargets(st, sr)
+	if err != nil {
+		return err
+	}
+	return o.cancelJobTargets(ctx, targets)
+}
+
+// outstandingJobTargets resolves the live forward and compensation actors a settled step can still have
+func (o *orchestrator) outstandingJobTargets(st *instanceState, sr *stepRecord) ([]jobCleanupTarget, error) {
+	targets := make([]jobCleanupTarget, 0)
 	for i := range sr.Tasks {
 		tr := &sr.Tasks[i]
+		if tr.ChildID != "" {
+			continue
+		}
 
 		// A task an unwind abandoned is done as far as the journal is concerned, but its job may still be waiting to run, and there is no reason to let it
-		if tr.Done && !tr.Abandoned {
-			continue
+		if !tr.Done || tr.Abandoned {
+			workerType := tr.WorkerType
+			if workerType == "" {
+				var err error
+				workerType, err = o.legacyTaskActorType(st, sr.Name, tr.Index, false)
+				if err != nil {
+					return nil, err
+				}
+			}
+			targets = append(targets, jobCleanupTarget{
+				actorType: workerType,
+				actorID:   workerActorID(o.instanceID, sr.Name, tr.Index),
+			})
 		}
 
-		member := memberDef(d, tr.Index)
-		workerType := tr.WorkerType
-		if workerType == "" && member != nil {
-			workerType = o.wf.workerType(member.capability)
-		}
-		if workerType == "" {
-			continue
-		}
-		client := builtinactor.NewClient[struct{}](workerType, workerActorID(o.instanceID, sr.Name, tr.Index), o.svc)
-		jobs, err := client.ListJobs(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to list pending jobs for %s[%d]: %w", sr.Name, tr.Index, err)
-		}
-
-		for _, j := range jobs {
-			if j.Status.IsTerminal() {
-				continue
+		if tr.Comp != nil && !tr.Comp.Done {
+			undoType := tr.UndoType
+			if undoType == "" {
+				var err error
+				undoType, err = o.legacyTaskActorType(st, sr.Name, tr.Index, true)
+				if err != nil {
+					return nil, err
+				}
 			}
-			err = client.DeleteJob(ctx, j.JobID)
-			if err != nil && !errors.Is(err, actor.ErrJobNotFound) {
-				return fmt.Errorf("failed to cancel pending job %s for %s[%d]: %w", j.JobID, sr.Name, tr.Index, err)
-			}
+			targets = append(targets, jobCleanupTarget{
+				actorType: undoType,
+				actorID:   workerActorID(o.instanceID, sr.Name, tr.Index),
+			})
 		}
 	}
-	return nil
+	return targets, nil
 }
 
 // finish drops the instance's timers and lets go of its activation, once it has terminated
@@ -753,7 +1014,7 @@ func (o *orchestrator) armDeadline(ctx context.Context, st *instanceState) error
 		return nil
 	}
 
-	err := o.client.SetAlarm(ctx, alarmDeadline, actor.AlarmProperties{DueTime: due})
+	err := o.client.SetAlarm(ctx, alarmDeadline, deadlineAlarmProperties(due))
 	if err != nil {
 		return fmt.Errorf("failed to arm the deadline: %w", err)
 	}
@@ -837,12 +1098,24 @@ func (o *orchestrator) handleUnknownVersionDeadline(ctx context.Context) error {
 		return nil
 	}
 
+	// An alarm on another version must settle the start's registry decision before publishing any terminal child outcome
 	now := time.Now()
+	err = o.confirmStart(ctx, &st, now)
+	if err != nil {
+		return err
+	}
+	if st.Status.IsTerminal() {
+		return o.reconcile(ctx, &st, now, false)
+	}
+	if st.Status == StatusSuspended {
+		return o.dropDeadline(ctx)
+	}
+
 	instanceDue := instanceDeadline(&st, o.def)
-	timedOut := !instanceDue.IsZero() && !now.Before(instanceDue)
+	timedOut := st.Timeout > 0 && !instanceDue.IsZero() && !now.Before(instanceDue)
 
 	// Failing an instance no host can serve is only worth doing once its own timeout has elapsed, and it is done without compensation, since no host can run the compensations either
-	if o.def.unknownVersion == FailUnknownVersion && timedOut {
+	if st.UnknownVersion == FailUnknownVersion && timedOut {
 		st.Status = StatusFailed
 		st.Compensation = CompensationNone
 		st.Cause = fmt.Sprintf("unknown version %d", st.Version)
@@ -860,7 +1133,7 @@ func (o *orchestrator) handleUnknownVersionDeadline(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		return o.finish(ctx)
+		return o.reconcile(ctx, &st, now, false)
 	}
 
 	// Parking re-arms the alarm and waits for a host that can serve the version, which is what List(Version: v) shows an operator
@@ -868,7 +1141,12 @@ func (o *orchestrator) handleUnknownVersionDeadline(ctx context.Context) error {
 		o.log.WarnContext(ctx, "Workflow deadline fired on a host without the instance's version; parking",
 			slog.Int("instanceVersion", st.Version), slog.Int("hostVersion", o.def.version))
 	}
-	return o.client.SetAlarm(ctx, alarmDeadline, actor.AlarmProperties{DueTime: now.Add(defaultParkInterval)})
+	return o.client.SetAlarm(ctx, alarmDeadline, deadlineAlarmProperties(now.Add(defaultParkInterval)))
+}
+
+// deadlineAlarmProperties keeps the exact first deadline and supplies a short recurrence only when its turn cannot replace or remove it
+func deadlineAlarmProperties(due time.Time) actor.AlarmProperties {
+	return actor.AlarmProperties{DueTime: due, Interval: "PT5S", Data: deadlinePayload{Recurring: true}}
 }
 
 // memberDef resolves the definition that governs one task of a step, which for a parallel group is the member that runs it
@@ -898,10 +1176,11 @@ func decodePayload(data actor.Envelope, into any) error {
 
 // journalSize returns the encoded size of a journal, which is what the cap is measured against
 func journalSize(st *instanceState) (int, error) {
-	enc, err := json.Marshal(st)
+	enc, err := msgpack.Marshal(instanceStateWire(*st))
 	if err != nil {
 		return 0, err
 	}
+	st.encoded = enc
 	return len(enc), nil
 }
 

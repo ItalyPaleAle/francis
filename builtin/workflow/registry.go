@@ -5,14 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/builtinactor"
+	"github.com/italypaleale/francis/internal/builtinkey"
 )
 
 // registryState is what the definition registry holds: the fingerprint first recorded for each version of the graph
@@ -20,6 +23,8 @@ type registryState struct {
 	// Versions holds one entry per recorded version, and an entry is never overwritten, so the first deployment of a version defines it
 	// It is a slice rather than a map keyed by version because a map with integer keys cannot survive the generic decode a cross-host response goes through
 	Versions []registryEntry `msgpack:"versions,omitempty"`
+	// NextGeneration is retained across resets so a revoked start identity can never become current again
+	NextGeneration uint64 `msgpack:"nextGeneration,omitempty"`
 }
 
 // registryEntry is one version's recorded definition
@@ -27,6 +32,7 @@ type registryEntry struct {
 	Version     int       `msgpack:"version"`
 	Fingerprint string    `msgpack:"fingerprint"`
 	FirstSeenAt time.Time `msgpack:"firstSeenAt"`
+	Generation  uint64    `msgpack:"generation,omitempty"`
 }
 
 // find returns the entry recorded for a version, or nil when the version is unknown
@@ -43,6 +49,8 @@ func (st *registryState) find(version int) *registryEntry {
 type registerRequest struct {
 	Version     int    `msgpack:"version"`
 	Fingerprint string `msgpack:"fingerprint"`
+	// Generation makes this a confirmation of an already authorized start instead of a registration
+	Generation uint64 `msgpack:"generation,omitempty"`
 }
 
 // registerResponse answers the consistency check, carrying what was recorded so a conflict can name both fingerprints
@@ -51,11 +59,13 @@ type registerResponse struct {
 	OK          bool      `msgpack:"ok"`
 	Fingerprint string    `msgpack:"fingerprint,omitempty"`
 	FirstSeenAt time.Time `msgpack:"firstSeenAt,omitzero"`
+	Generation  uint64    `msgpack:"generation,omitempty"`
 }
 
 // forgetRequest removes a version that was registered wrongly and has no instances left
 type forgetRequest struct {
-	Version int `msgpack:"version"`
+	Version                int    `msgpack:"version"`
+	ReplacementFingerprint string `msgpack:"replacementFingerprint,omitempty"`
 }
 
 // DefinitionInfo describes one version the registry holds, as returned by Definitions
@@ -77,13 +87,17 @@ type definitionsResponse struct {
 
 // registryActor is the cluster-wide singleton that records each version's definition fingerprint, so two hosts cannot serve different graphs under the same version
 type registryActor struct {
-	client actor.Client[registryState]
+	client       actor.Client[registryState]
+	workflowType string
+	svc          *actor.Service
 }
 
 // newRegistryActor builds the registry singleton
 func newRegistryActor(bareType string, actorID string, svc *actor.Service) actor.Actor {
 	return &registryActor{
-		client: builtinactor.NewClient[registryState](bareType, actorID, svc),
+		client:       builtinactor.NewClient[registryState](bareType, actorID, svc),
+		workflowType: strings.TrimSuffix(bareType, registryTypeSuffix),
+		svc:          svc,
 	}
 }
 
@@ -132,6 +146,7 @@ func (r *registryActor) check(ctx context.Context, data actor.Envelope) (any, er
 		OK:          existing.Fingerprint == req.Fingerprint,
 		Fingerprint: existing.Fingerprint,
 		FirstSeenAt: existing.FirstSeenAt,
+		Generation:  existing.Generation,
 	}, nil
 }
 
@@ -150,28 +165,52 @@ func (r *registryActor) register(ctx context.Context, data actor.Envelope) (any,
 	}
 
 	existing := st.find(req.Version)
+	// Confirm only the exact identity granted before the journal write, without ever reclaiming a forgotten generation
+	if req.Generation > 0 {
+		if existing == nil {
+			return registerResponse{}, nil
+		}
+		return registerResponse{
+			Found: true, OK: existing.Fingerprint == req.Fingerprint && existing.Generation == req.Generation,
+			Fingerprint: existing.Fingerprint, FirstSeenAt: existing.FirstSeenAt, Generation: existing.Generation,
+		}, nil
+	}
 	if existing != nil {
+		// Upgrade a legacy entry before handing out an identity that can be confirmed after persistence
+		if existing.Fingerprint == req.Fingerprint && existing.Generation == 0 {
+			st.Versions = append([]registryEntry(nil), st.Versions...)
+			existing = st.find(req.Version)
+			st.NextGeneration++
+			existing.Generation = st.NextGeneration
+			err = r.client.SetState(ctx, st, nil)
+			if err != nil {
+				return nil, fmt.Errorf("failed to upgrade the definition identity: %w", err)
+			}
+		}
 		return registerResponse{
 			Found:       true,
 			OK:          existing.Fingerprint == req.Fingerprint,
 			Fingerprint: existing.Fingerprint,
 			FirstSeenAt: existing.FirstSeenAt,
+			Generation:  existing.Generation,
 		}, nil
 	}
 
+	st.NextGeneration++
 	entry := registryEntry{
 		Version:     req.Version,
 		Fingerprint: req.Fingerprint,
 		FirstSeenAt: time.Now(),
+		Generation:  st.NextGeneration,
 	}
-	st.Versions = append(st.Versions, entry)
+	st.Versions = append(append([]registryEntry(nil), st.Versions...), entry)
 
 	err = r.client.SetState(ctx, st, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to record the definition: %w", err)
 	}
 
-	return registerResponse{Found: true, OK: true, Fingerprint: entry.Fingerprint, FirstSeenAt: entry.FirstSeenAt}, nil
+	return registerResponse{Found: true, OK: true, Fingerprint: entry.Fingerprint, FirstSeenAt: entry.FirstSeenAt, Generation: entry.Generation}, nil
 }
 
 // definitions returns every version the registry holds, which is the operator's view of what has been deployed
@@ -190,6 +229,22 @@ func (r *registryActor) forget(ctx context.Context, data actor.Envelope) error {
 	if err != nil {
 		return err
 	}
+	if req.Version <= 0 {
+		return errors.New("definition version must be positive")
+	}
+
+	// This listing and the registry update share the registry's exclusive turn with start confirmations
+	// A start that persists after this listing must confirm after the reset and cannot dispatch under its revoked identity
+	opts := &actor.ListStatesOpts{Limit: 1}
+	opts.SetWorkflowLabels(builtinkey.Key{}, components.WorkflowLabels{Version: req.Version})
+	instances := builtinactor.NewClient[instanceState](r.workflowType, "", r.svc)
+	page, err := instances.ListStates(ctx, opts)
+	if err != nil {
+		return fmt.Errorf("failed to check instances before forgetting the definition: %w", err)
+	}
+	if len(page.States) > 0 {
+		return fmt.Errorf("%w: version %d", ErrVersionInUse, req.Version)
+	}
 
 	st, err := r.client.GetState(ctx)
 	if err != nil {
@@ -202,8 +257,15 @@ func (r *registryActor) forget(ctx context.Context, data actor.Envelope) error {
 			kept = append(kept, entry)
 		}
 	}
-	if len(kept) == len(st.Versions) {
+	if len(kept) == len(st.Versions) && req.ReplacementFingerprint == "" {
 		return nil
+	}
+	if req.ReplacementFingerprint != "" {
+		st.NextGeneration++
+		kept = append(kept, registryEntry{
+			Version: req.Version, Fingerprint: req.ReplacementFingerprint,
+			FirstSeenAt: time.Now(), Generation: st.NextGeneration,
+		})
 	}
 
 	st.Versions = kept
@@ -212,6 +274,32 @@ func (r *registryActor) forget(ctx context.Context, data actor.Envelope) error {
 		return fmt.Errorf("failed to forget the definition: %w", err)
 	}
 	return nil
+}
+
+// authorizeDefinition grants a durable identity to a start before its journal exists
+func (w *Workflow) authorizeDefinition(ctx context.Context, svc *actor.Service) (registerResponse, error) {
+	return w.confirmDefinition(ctx, svc, registerRequest{Version: w.def.version, Fingerprint: w.def.fingerprint})
+}
+
+// confirmDefinition serializes start authorization and post-persist confirmation with registry resets
+func (w *Workflow) confirmDefinition(ctx context.Context, svc *actor.Service, req registerRequest) (registerResponse, error) {
+	env, err := builtinactor.Invoke(ctx, svc, w.registryType(), methodRegister, req)
+	if err != nil {
+		return registerResponse{}, fmt.Errorf("failed to authorize the workflow definition: %w", err)
+	}
+	var resp registerResponse
+	err = env.Decode(&resp)
+	if err != nil {
+		return registerResponse{}, fmt.Errorf("failed to decode the definition authorization: %w", err)
+	}
+	if !resp.OK {
+		w.recordDefinitionConflict(ctx, req.Version, req.Fingerprint, resp)
+		return resp, ErrDefinitionConflict
+	}
+	if resp.Generation == 0 {
+		return resp, errRegistryGenerationUnavailable
+	}
+	return resp, nil
 }
 
 // serveVersion reports whether this host may serve a version, consulting the registry so an operator reset takes effect on every live host
@@ -266,7 +354,12 @@ func (w *Workflow) askRegistry(ctx context.Context, svc *actor.Service, version 
 		return true, nil
 	}
 
-	// The failure mode is loud by design: whichever side deployed second conflicts, the metric fires within one turn, nothing corrupts, and the fix is a version bump
+	w.recordDefinitionConflict(ctx, version, w.def.fingerprint, resp)
+	return false, nil
+}
+
+// recordDefinitionConflict preserves deployment diagnostics for both registry decisions and local graph fences
+func (w *Workflow) recordDefinitionConflict(ctx context.Context, version int, localFingerprint string, resp registerResponse) {
 	w.metrics.definitionConflicts.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("workflow", w.name),
 		attribute.Int("version", version),
@@ -275,9 +368,8 @@ func (w *Workflow) askRegistry(ctx context.Context, svc *actor.Service, version 
 		w.log.ErrorContext(ctx, "Workflow definition conflicts with the one registered for this version; declining its jobs",
 			slog.Int("version", version),
 			slog.String("registeredFingerprint", resp.Fingerprint),
-			slog.String("localFingerprint", w.def.fingerprint),
+			slog.String("localFingerprint", localFingerprint),
 			slog.Time("firstSeenAt", resp.FirstSeenAt),
 		)
 	}
-	return false, nil
 }

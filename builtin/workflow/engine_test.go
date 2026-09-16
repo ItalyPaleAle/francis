@@ -67,7 +67,7 @@ func newFakeHost() *fakeHost {
 		jobs:             map[string]actor.JobInfo{},
 		jobPayloads:      map[string]any{},
 		liveKeys:         map[string]string{},
-		registryResponse: registerResponse{Found: true, OK: true},
+		registryResponse: registerResponse{Found: true, OK: true, Generation: 1},
 	}
 }
 
@@ -88,6 +88,11 @@ func (f *fakeHost) Invoke(ctx context.Context, actorType string, actorID string,
 	if method == methodRegister {
 		if respErr != nil {
 			return nil, respErr
+		}
+		// A successful fake registration echoes the requested graph identity like the real registry
+		req, ok := data.(registerRequest)
+		if ok && resp.OK && resp.Fingerprint == "" {
+			resp.Fingerprint = req.Fingerprint
 		}
 		return &fakeEnvelope{value: resp}, nil
 	}
@@ -233,12 +238,16 @@ func (f *fakeHost) RetryJob(ctx context.Context, jobID string) (string, error) {
 		return "", actor.ErrJobNotFound
 	}
 
+	payload := f.jobPayloads[jobID]
 	f.removeJobLocked(jobID)
 	f.nextID++
 	newID := fmt.Sprintf("job-%d", f.nextID)
 	j.JobID = newID
 	j.Status = actor.JobStatusPending
+	j.Attempts = 0
+	j.LastError = ""
 	f.jobs[newID] = j
+	f.jobPayloads[newID] = payload
 	return newID, nil
 }
 
@@ -433,12 +442,12 @@ func TestWorkflowTurnStaysWithinTheOrchestrationBoundary(t *testing.T) {
 	st := readJournal(t, host, wf, "inst-1")
 	assert.Equal(t, StatusCompleted, st.Status)
 
-	// Each of the three turns checks the registry so a reset takes effect while hosts remain online
+	// Start authorization and confirmation share the registry lock, while subsequent turns fence locally against the immutable journal identity
 	host.mu.Lock()
 	defer host.mu.Unlock()
-	require.Len(t, host.invokes, 3)
+	require.Len(t, host.invokes, 2)
 	for _, invocation := range host.invokes {
-		assert.Contains(t, invocation, methodCheck)
+		assert.Contains(t, invocation, methodRegister)
 	}
 }
 

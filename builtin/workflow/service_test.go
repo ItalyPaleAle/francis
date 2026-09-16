@@ -94,7 +94,7 @@ func TestForgetVersionRefusesAVersionThatStillHasInstances(t *testing.T) {
 	err = svc.ForgetVersion(t.Context(), 3)
 	require.ErrorIs(t, err, workflow.ErrVersionInUse)
 
-	// Once the instance is gone the version is free, which is the operator's reset for one registered wrongly
+	// Once the instance is gone the reset atomically installs this host's graph with a fresh authorization generation
 	require.NoError(t, svc.RaiseEvent(t.Context(), id, "approval", nil))
 	awaitStatus(t, svc, id, workflow.StatusCompleted)
 	require.NoError(t, svc.Purge(t.Context(), id))
@@ -102,7 +102,9 @@ func TestForgetVersionRefusesAVersionThatStillHasInstances(t *testing.T) {
 
 	defs, err = svc.Definitions(t.Context())
 	require.NoError(t, err)
-	assert.Empty(t, defs)
+	require.Len(t, defs, 1)
+	assert.Equal(t, 3, defs[0].Version)
+	assert.False(t, defs[0].Conflicts)
 }
 
 // TestListPagesThroughInstances verifies a page carries a cursor that visits every instance exactly once, which is what makes a backlog a long call rather than a large one

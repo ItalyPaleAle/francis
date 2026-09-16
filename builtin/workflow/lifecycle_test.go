@@ -372,7 +372,9 @@ func TestDefinitionsAndForgetVersion(t *testing.T) {
 
 	defs, err = svc.Definitions(t.Context())
 	require.NoError(t, err)
-	assert.Empty(t, defs)
+	require.Len(t, defs, 1)
+	assert.Equal(t, 7, defs[0].Version)
+	assert.False(t, defs[0].Conflicts, "resetting this host's own version installs its graph atomically")
 }
 
 // TestOutputSizeCapFailsTheAttemptPermanently verifies the cap is enforced on the worker, before the orchestrator ever has to serialize the value

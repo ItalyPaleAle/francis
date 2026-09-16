@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"time"
+
+	msgpack "github.com/vmihailenco/msgpack/v5"
 )
 
 // Status is the lifecycle stage of a workflow instance
@@ -76,11 +78,22 @@ const (
 // instanceState is the journal: the Workflow actor's durable state and the single source of truth for an instance
 // Every transition rewrites the whole document in one state write, so a step transition is atomic
 type instanceState struct {
-	Workflow     string              `msgpack:"workflow"`
-	Version      int                 `msgpack:"version"`
-	Status       Status              `msgpack:"status"`
-	Compensation CompensationOutcome `msgpack:"compensation,omitempty"`
-	Input        json.RawMessage     `msgpack:"input,omitempty"`
+	Workflow              string `msgpack:"workflow"`
+	Version               int    `msgpack:"version"`
+	DefinitionFingerprint string `msgpack:"definitionFingerprint,omitempty"`
+	RegistryGeneration    uint64 `msgpack:"registryGeneration,omitempty"`
+	// RegistryConfirmed and RegistryRejected record the durable decision reached after publishing a generation-bound start
+	RegistryConfirmed bool                `msgpack:"registryConfirmed,omitempty"`
+	RegistryRejected  bool                `msgpack:"registryRejected,omitempty"`
+	Status            Status              `msgpack:"status"`
+	Compensation      CompensationOutcome `msgpack:"compensation,omitempty"`
+	Input             json.RawMessage     `msgpack:"input,omitempty"`
+	// Timeout and UnknownVersion preserve the policies needed when no host has this journal's definition
+	Timeout        time.Duration        `msgpack:"timeout,omitempty"`
+	UnknownVersion UnknownVersionPolicy `msgpack:"unknownVersion,omitempty"`
+	// EventNames and MaxEventSize let callers validate events against the target journal during rolling deployments
+	EventNames   []string `msgpack:"eventNames,omitempty"`
+	MaxEventSize int      `msgpack:"maxEventSize,omitempty"`
 	// Output is set at completion, from the last step or the one named with WithOutput
 	Output json.RawMessage `msgpack:"output,omitempty"`
 	// Cursor is derived by advance for display and is never read by it
@@ -106,6 +119,19 @@ type instanceState struct {
 	CreatedAt   time.Time `msgpack:"createdAt"`
 	StartedAt   time.Time `msgpack:"startedAt"`
 	CompletedAt time.Time `msgpack:"completedAt,omitzero"`
+	// encoded reuses the exact size-check encoding when the provider serializes this state immediately afterward
+	encoded []byte
+}
+
+// instanceStateWire avoids recursively calling MarshalMsgpack while encoding the journal fields
+type instanceStateWire instanceState
+
+// MarshalMsgpack lets persistence reuse the exact wire encoding already produced by the journal size check
+func (st instanceState) MarshalMsgpack() ([]byte, error) {
+	if st.encoded != nil {
+		return st.encoded, nil
+	}
+	return msgpack.Marshal(instanceStateWire(st))
 }
 
 // stepRecord is one step of the definition as the journal sees it
@@ -127,6 +153,8 @@ type stepRecord struct {
 // taskRecord is one execution unit of a step: one worker actor, one durable job, and the attempts it took
 type taskRecord struct {
 	Index int `msgpack:"index"`
+	// DispatchedAttempt records the latest forward attempt whose job was durably accepted
+	DispatchedAttempt int `msgpack:"dispatchedAttempt,omitempty"`
 	// Item is this task's fan-out element
 	Item json.RawMessage `msgpack:"item,omitempty"`
 	// WorkerType and UndoType persist the queues this task used so purge does not depend on the definition that happens to be deployed later
@@ -157,9 +185,13 @@ type taskRecord struct {
 
 // compRecord is a task's compensation, which gets its own attempts because a failed rollback is worth trying harder than the forward work was
 type compRecord struct {
-	Attempts  int       `msgpack:"attempts"`
-	RetryAt   time.Time `msgpack:"retryAt,omitzero"`
-	LastError string    `msgpack:"lastError,omitempty"`
+	// GenerationStart fences reports from undo attempts dispatched before the latest forward outcome was recorded
+	GenerationStart int `msgpack:"generationStart,omitempty"`
+	// DispatchedAttempt records the latest compensation attempt whose job was durably accepted
+	DispatchedAttempt int       `msgpack:"dispatchedAttempt,omitempty"`
+	Attempts          int       `msgpack:"attempts"`
+	RetryAt           time.Time `msgpack:"retryAt,omitzero"`
+	LastError         string    `msgpack:"lastError,omitempty"`
 	// Error is set once the compensation has failed for good
 	Error string `msgpack:"error,omitempty"`
 	Done  bool   `msgpack:"done"`
@@ -215,8 +247,10 @@ func (sr *stepRecord) task(index int) *taskRecord {
 // clone returns an independent journal so a failed write cannot mutate the activation's cached committed snapshot through shared slices or pointers
 func (st *instanceState) clone() instanceState {
 	out := *st
+	out.encoded = nil
 	out.Input = cloneRawMessage(st.Input)
 	out.Output = cloneRawMessage(st.Output)
+	out.EventNames = append([]string(nil), st.EventNames...)
 	out.Stack = append([]string(nil), st.Stack...)
 	if st.Suspended != nil {
 		rec := *st.Suspended

@@ -10,20 +10,22 @@ func (o *orchestrator) buildRunPayload(st *instanceState, sr *stepRecord, d *ste
 	outputs, skipped := o.upstreamOutputs(st, sr, d, member)
 
 	p := runPayload{
-		InstanceID:       o.instanceID,
-		Workflow:         o.def.name,
-		Version:          st.Version,
-		Step:             sr.Name,
-		Index:            tr.Index,
-		Positional:       d.isPositional(),
-		Attempt:          tr.Attempts,
-		Input:            st.Input,
-		Item:             tr.Item,
-		Outputs:          outputs,
-		Skipped:          skipped,
-		OrchestratorType: o.wf.baseType,
-		MaxOutputSize:    o.def.maxOutputSize,
-		TraceParent:      st.TraceParent,
+		InstanceID:            o.instanceID,
+		Workflow:              o.def.name,
+		Version:               st.Version,
+		DefinitionFingerprint: st.DefinitionFingerprint,
+		RegistryGeneration:    st.RegistryGeneration,
+		Step:                  sr.Name,
+		Index:                 tr.Index,
+		Positional:            d.isPositional(),
+		Attempt:               tr.Attempts,
+		Input:                 st.Input,
+		Item:                  tr.Item,
+		Outputs:               outputs,
+		Skipped:               skipped,
+		OrchestratorType:      o.wf.baseType,
+		MaxOutputSize:         o.def.maxOutputSize,
+		TraceParent:           st.TraceParent,
 	}
 
 	// A member of a parallel group runs its own handler, so the worker is told which one rather than inferring it from the position
@@ -60,7 +62,8 @@ func (o *orchestrator) upstreamOutputs(st *instanceState, sr *stepRecord, d *ste
 	}
 
 	prev := o.precedingStepName(sr.Name)
-	if prev != "" {
+	// Fan-out tasks already receive their individual item, so shipping the source array implicitly would multiply its size by the fan-out width
+	if prev != "" && (d.kind != KindForEach || prev != d.itemsFrom) {
 		add(prev)
 	}
 	for _, name := range d.inputFrom {

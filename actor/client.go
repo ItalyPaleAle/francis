@@ -171,15 +171,20 @@ func (c *client[T]) DeleteState(ctx context.Context) error {
 		return ErrReadOnly
 	}
 
-	// We set "hasState" to indicate we have the cached state
-	// We need a lock for correctness, but it should not be possible for this method to be called concurrently
+	// Delete the state from the service first
+	err := c.service.deleteState(ctx, c.actorType, c.actorID)
+	if err != nil && !errors.Is(err, ErrStateNotFound) {
+		return err
+	}
+
+	// Publish the confirmed absence so subsequent reads do not serve deleted state
 	var zero T
 	c.stateMu.Lock()
 	c.hasState = true
 	c.state = zero
 	c.stateMu.Unlock()
 
-	return c.service.deleteState(ctx, c.actorType, c.actorID)
+	return err
 }
 
 // ListStates returns the actors of the current actor's type that have state stored.

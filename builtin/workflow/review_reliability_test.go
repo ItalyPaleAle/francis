@@ -210,17 +210,13 @@ func TestReviewDeadLetteredChildReportCanBeRecovered(t *testing.T) {
 	require.NoError(t, parent.JobFailed(t.Context(), reportJob, methodDone, nil, errors.New("delivery failed")))
 	require.NoError(t, parent.Alarm(t.Context(), alarmDeadline, nil))
 
-	// Parent reconciliation restarts the same child, which must be able to resend its retained result
-	startJob = host.jobIDFor(builtinActorType(kid.baseType), childID, methodStart)
-	require.NotEmpty(t, startJob)
-	require.NoError(t, child.Job(t.Context(), methodStart, &payloadEnvelope{value: host.jobPayloads[startJob]}))
-	jobs, err := host.ListJobs(t.Context(), builtinActorType(parentWF.baseType), "parent")
+	// The durable report is replayed directly without executing or restarting the completed child
+	recoveredJob := host.jobIDFor(builtinActorType(parentWF.baseType), "parent", methodDone)
+	require.NotEmpty(t, recoveredJob)
+	require.NotEqual(t, reportJob, recoveredJob)
+	err = parent.Job(t.Context(), methodDone, &payloadEnvelope{value: host.jobPayloads[recoveredJob]})
 	require.NoError(t, err)
-	var liveReport bool
-	for _, job := range jobs {
-		liveReport = liveReport || (job.Method == methodDone && !job.Status.IsTerminal())
-	}
-	require.True(t, liveReport, "the child retained its result, but recovery never resends the dead-lettered report")
+	require.Equal(t, StatusCompleted, readJournal(t, host, parentWF, "parent").Status)
 }
 
 func TestLateSuccessReopeningKeepsLifecycleMetricsBalanced(t *testing.T) {

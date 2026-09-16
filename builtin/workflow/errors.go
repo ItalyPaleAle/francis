@@ -19,6 +19,8 @@ var (
 	ErrOutputTooLarge = errors.New("task output is too large")
 	// ErrJournalTooLarge is the cause recorded when an instance is failed because its journal outgrew WithMaxJournalSize
 	ErrJournalTooLarge = errors.New("workflow journal is too large")
+	// ErrJournalIncompatible is returned when cleanup cannot safely resolve actor references omitted by an older journal
+	ErrJournalIncompatible = errors.New("workflow journal is incompatible with the serving definition")
 	// ErrMaxDepthExceeded is returned when starting a child whose parent chain is deeper than WithMaxDepth
 	ErrMaxDepthExceeded = errors.New("workflow child depth limit exceeded")
 	// ErrNoSuchEvent is returned by RaiseEvent when the definition has no WaitForEvent step listening for the event
@@ -33,4 +35,6 @@ var (
 	// errVersionNotServed is returned by a turn whose durable input names a version this host does not serve
 	// It never reaches a caller: a job is re-routed with actor.ErrJobRejected, and a deadline follows the definition's unknown-version policy instead
 	errVersionNotServed = errors.New("workflow instance version is not served by this host")
+	// errRegistryGenerationUnavailable keeps a start retryable while a legacy registry host cannot confirm its fenced identity
+	errRegistryGenerationUnavailable = errors.New("workflow definition registry does not support generation confirmation")
 )
