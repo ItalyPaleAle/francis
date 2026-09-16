@@ -228,7 +228,7 @@ func (o *orchestrator) turn(ctx context.Context, ev *event) (err error) {
 		return err
 	}
 
-	now := deadlineTurnTime(&st, ev, time.Now())
+	now := st.deadlineTurnTime(ev, time.Now())
 
 	// Phase 2: fold the event into the journal
 	// A duplicate, or a report for a task the journal already has an outcome for, records nothing here, including this very turn being retried after its SetState succeeded and its reconcile failed
@@ -249,7 +249,7 @@ func (o *orchestrator) turn(ctx context.Context, ev *event) (err error) {
 	o.recover(&st, ev, now)
 
 	// The step statuses are snapshotted before advance so the turn can tell which steps it settled, which is what the step-duration histogram measures
-	before := stepStatuses(&st)
+	before := st.stepStatuses()
 
 	// Phase 3: advance the cursor as far as the journal allows, which is a pure function of the journal and the definition
 	advance(&st, o.def, o.instanceID, now)
@@ -265,7 +265,12 @@ func (o *orchestrator) turn(ctx context.Context, ev *event) (err error) {
 
 	// Phase 4b: everything the journal says should be running is dispatched, idempotently
 	// This runs on every turn, including the ones that recorded nothing, so a turn that persisted a result and then failed to dispatch cannot stall the instance forever
-	return o.reconcile(ctx, &st, now)
+	err = o.reconcile(ctx, &st, now)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // admits reports whether this turn should run at all, given what the journal says about the instance
@@ -843,7 +848,7 @@ func failForOversizedJournal(st *instanceState, size int, limit int, now time.Ti
 }
 
 // stepStatuses snapshots the status of every step, so a turn can tell which steps it settled
-func stepStatuses(st *instanceState) map[string]StepStatus {
+func (st *instanceState) stepStatuses() map[string]StepStatus {
 	out := make(map[string]StepStatus, len(st.Steps))
 	for i := range st.Steps {
 		out[st.Steps[i].Name] = st.Steps[i].Status
@@ -851,10 +856,11 @@ func stepStatuses(st *instanceState) map[string]StepStatus {
 	return out
 }
 
-// boolToInt renders a condition as the counter increment it stands for, which keeps a conditional Add to one line
 func boolToInt(b bool) int64 {
+	var i int64
 	if b {
-		return 1
+		i = 1
 	}
-	return 0
+	i = 0
+	return i
 }

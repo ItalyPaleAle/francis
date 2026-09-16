@@ -201,17 +201,17 @@ func TestADeadlineDeliveredAFractionEarlyStillResolves(t *testing.T) {
 	deadline := &event{kind: evDeadline}
 
 	now := time.Now()
-	assert.Equal(t, st.DeadlineAt, deadlineTurnTime(st, deadline, now), "the instant the alarm was armed for counts as reached")
+	assert.Equal(t, st.DeadlineAt, st.deadlineTurnTime(deadline, now), "the instant the alarm was armed for counts as reached")
 
 	// The tolerance is bounded to the alarm's resolution, so a deadline genuinely further out is never brought forward
 	far := &instanceState{DeadlineAt: now.Add(time.Hour)}
-	assert.Equal(t, now, deadlineTurnTime(far, deadline, now))
+	assert.Equal(t, now, far.deadlineTurnTime(deadline, now))
 
 	// Every other event reads the wall clock, whatever the journal's deadline says
-	assert.Equal(t, now, deadlineTurnTime(st, &event{kind: evDone}, now))
+	assert.Equal(t, now, st.deadlineTurnTime(&event{kind: evDone}, now))
 
 	// A journal with no deadline has nothing to bring forward
-	assert.Equal(t, now, deadlineTurnTime(&instanceState{}, deadline, now))
+	assert.Equal(t, now, (&instanceState{}).deadlineTurnTime(deadline, now))
 }
 
 func TestTheUnwindAbandonedCauseKeepsTheOriginalOne(t *testing.T) {

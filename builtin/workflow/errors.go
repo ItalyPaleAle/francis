@@ -27,11 +27,9 @@ var (
 	ErrDefinitionConflict = errors.New("workflow definition conflicts with the one registered for this version")
 	// ErrVersionInUse is returned by ForgetVersion when instances of the version still exist
 	ErrVersionInUse = errors.New("workflow version still has instances")
-
 	// errWaitingForStart is returned by a turn whose event arrived before the start job created the journal
 	// It is an ordinary error rather than a permanent one, so Francis retries the job and the control lands once the instance exists
 	errWaitingForStart = errors.New("workflow instance has not started yet")
-
 	// errVersionNotServed is returned by a turn whose durable input names a version this host does not serve
 	// It never reaches a caller: a job is re-routed with actor.ErrJobRejected, and a deadline follows the definition's unknown-version policy instead
 	errVersionNotServed = errors.New("workflow instance version is not served by this host")

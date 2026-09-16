@@ -957,7 +957,7 @@ const alarmResolution = time.Millisecond
 // A deadline alarm fires because the provider reached the time the journal asked for, but the row holds that time truncated to the provider's own resolution, so the handler can run a fraction before the journal's own deadline
 // Treating that instant as reached is what stops a deadline turn from finding nothing elapsed: the alarm is a one-shot, so a turn that changes nothing leaves the instance with no timer at all
 // The tolerance is bounded to the alarm's resolution, so a deadline genuinely further out is never brought forward by an alarm that fired for something else
-func deadlineTurnTime(st *instanceState, ev *event, now time.Time) time.Time {
+func (st *instanceState) deadlineTurnTime(ev *event, now time.Time) time.Time {
 	if ev.kind != evDeadline || st.DeadlineAt.IsZero() || !now.Before(st.DeadlineAt) {
 		return now
 	}

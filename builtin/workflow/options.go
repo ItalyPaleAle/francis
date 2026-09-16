@@ -16,7 +16,7 @@ const (
 	defaultConcurrency = 1
 	// defaultParkInterval is how long an instance whose version this host cannot serve waits before looking again for a host that can
 	defaultParkInterval = 10 * time.Minute
-	// defaultMaxDepth bounds the parent chain of child instances, which is the only thing that stops a definition referencing itself
+	// defaultMaxDepth bounds the parent chain of child instances, to prevent infinite recursion
 	defaultMaxDepth = 8
 
 	// defaultMaxAttempts is how many attempts a forward task gets before it is failed
@@ -31,10 +31,13 @@ const (
 	defaultCompMax     = 10 * time.Minute
 
 	// defaultMaxInputSize caps the workflow input, which is shipped in every task's payload
+	// 64KB
 	defaultMaxInputSize = 64 << 10
 	// defaultMaxOutputSize caps a single task's output, as a ceiling against a misbehaving task rather than a per-task budget
+	// 16KB
 	defaultMaxOutputSize = 16 << 10
 	// defaultMaxJournalSize caps the encoded journal, because every report rewrites the whole document
+	// 1MB
 	defaultMaxJournalSize = 1 << 20
 
 	// defaultRetention is how long a terminated instance is kept when WithRetention names no duration for its status

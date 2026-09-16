@@ -126,16 +126,16 @@ func New(name string, opts ...Option) (*Workflow, error) {
 	}
 
 	// Apply the defaults before validating, so validation sees the values the engine will actually run with
-	applyDefaults(&o)
+	o.applyDefaults()
 
 	// Validate the advertised capabilities up front, rejecting empties and duplicates
-	err = validateCapabilities(o.capabilities)
+	err = o.validateCapabilities()
 	if err != nil {
 		return nil, err
 	}
 
-	// Build and validate the graph, which is most of what New does
-	def, err := newDefinition(name, &o)
+	// Build and validate the graph
+	def, err := o.newDefinition(name)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +171,7 @@ func New(name string, opts ...Option) (*Workflow, error) {
 }
 
 // applyDefaults fills in every option the caller left unset, so the rest of the engine never has to ask whether a value was configured
-func applyDefaults(o *options) {
+func (o *options) applyDefaults() {
 	if o.version <= 0 {
 		o.version = defaultVersion
 	}
@@ -196,7 +196,6 @@ func applyDefaults(o *options) {
 	if o.maxDepth <= 0 {
 		o.maxDepth = defaultMaxDepth
 	}
-
 	if o.unknownVersion == "" {
 		o.unknownVersion = ParkUnknownVersion
 	}
@@ -206,9 +205,9 @@ func applyDefaults(o *options) {
 }
 
 // validateCapabilities rejects an empty or duplicated capability, which would otherwise produce a queue no task can reach or two registrations of the same type
-func validateCapabilities(capabilities []string) error {
-	seen := make(map[string]struct{}, len(capabilities))
-	for _, capName := range capabilities {
+func (o *options) validateCapabilities() error {
+	seen := make(map[string]struct{}, len(o.capabilities))
+	for _, capName := range o.capabilities {
 		if capName == "" {
 			return errors.New("capability name must not be empty")
 		}
@@ -224,11 +223,12 @@ func validateCapabilities(capabilities []string) error {
 		}
 		seen[capName] = struct{}{}
 	}
+
 	return nil
 }
 
 // newDefinition assembles the graph and validates every rule a definition has to satisfy before it can run
-func newDefinition(name string, o *options) (*definition, error) {
+func (o *options) newDefinition(name string) (*definition, error) {
 	if len(o.steps) == 0 {
 		return nil, errors.New("WithSteps is required, with at least one step")
 	}
@@ -257,7 +257,7 @@ func newDefinition(name string, o *options) (*definition, error) {
 		def.steps[i] = d
 		def.order[d.name] = i
 
-		err := indexStep(def, d, eventNames)
+		err := def.indexStep(d, eventNames)
 		if err != nil {
 			return nil, err
 		}
@@ -265,7 +265,7 @@ func newDefinition(name string, o *options) (*definition, error) {
 
 	// Validate each step against the indexed graph, now that every name is known
 	for i, d := range def.steps {
-		err := validateStep(def, d, i)
+		err := def.validateStep(d, i)
 		if err != nil {
 			return nil, err
 		}
@@ -279,12 +279,14 @@ func newDefinition(name string, o *options) (*definition, error) {
 		}
 	}
 
-	def.fingerprint = fingerprint(def)
+	// Set the fingerprint in the definition
+	def.setFingerprint()
+
 	return def, nil
 }
 
 // indexStep records a step and, for a group, its members, rejecting a name or an event name that is already taken
-func indexStep(def *definition, d *stepDef, eventNames map[string]string) error {
+func (def *definition) indexStep(d *stepDef, eventNames map[string]string) error {
 	if d.name == "" {
 		return errors.New("step name is required")
 	}
@@ -316,7 +318,7 @@ func indexStep(def *definition, d *stepDef, eventNames map[string]string) error 
 	}
 
 	for _, m := range d.members {
-		err = indexStep(def, m, eventNames)
+		err = def.indexStep(m, eventNames)
 		if err != nil {
 			return err
 		}
@@ -326,7 +328,7 @@ func indexStep(def *definition, d *stepDef, eventNames map[string]string) error 
 }
 
 // validateStep checks one step's options against the assembled graph, where index is its position among the top-level steps
-func validateStep(def *definition, d *stepDef, index int) error {
+func (def *definition) validateStep(d *stepDef, index int) error {
 	switch d.kind {
 	case KindStep:
 		if d.run == nil {
@@ -341,7 +343,7 @@ func validateStep(def *definition, d *stepDef, index int) error {
 			if m.kind != KindStep && m.kind != KindChild {
 				return fmt.Errorf("parallel group %q may only contain plain or child steps, but %q is a %s", d.name, m.name, m.kind)
 			}
-			err := validateStep(def, m, index)
+			err := def.validateStep(m, index)
 			if err != nil {
 				return err
 			}
@@ -350,7 +352,7 @@ func validateStep(def *definition, d *stepDef, index int) error {
 		if d.itemsFrom == "" {
 			return fmt.Errorf("fan-out %q requires WithItemsFrom", d.name)
 		}
-		err := requireEarlierStep(def, d.name, index, d.itemsFrom, "WithItemsFrom")
+		err := def.requireEarlierStep(d.name, index, d.itemsFrom, "WithItemsFrom")
 		if err != nil {
 			return err
 		}
@@ -374,7 +376,7 @@ func validateStep(def *definition, d *stepDef, index int) error {
 
 	// A step can only read the output of a step that has already produced one
 	for _, from := range d.inputFrom {
-		err := requireEarlierStep(def, d.name, index, from, "WithInputFrom")
+		err := def.requireEarlierStep(d.name, index, from, "WithInputFrom")
 		if err != nil {
 			return err
 		}
@@ -382,7 +384,7 @@ func validateStep(def *definition, d *stepDef, index int) error {
 
 	// A condition has to be decided before the step it gates runs
 	if d.hasSkipIf {
-		err := requireEarlierStep(def, d.name, index, d.skipIfStep, "WithSkipIf")
+		err := def.requireEarlierStep(d.name, index, d.skipIfStep, "WithSkipIf")
 		if err != nil {
 			return err
 		}
@@ -411,7 +413,7 @@ func validateStep(def *definition, d *stepDef, index int) error {
 }
 
 // requireEarlierStep checks that a referenced step exists among the top-level steps and runs before the referring one
-func requireEarlierStep(def *definition, stepName string, index int, referenced string, option string) error {
+func (def *definition) requireEarlierStep(stepName string, index int, referenced string, option string) error {
 	pos, ok := def.order[referenced]
 	if !ok {
 		return fmt.Errorf("step %q names %q in %s, which is not a top-level step of this workflow", stepName, referenced, option)
@@ -423,9 +425,9 @@ func requireEarlierStep(def *definition, stepName string, index int, referenced 
 }
 
 // fingerprint hashes everything about a definition that the engine reads while running an instance, so two hosts cannot serve the same version and then apply different transitions to one journal
-// That is wider than the graph: the caps, the deadlines, the attempt policies, and the unknown-version and compensation-failure choices all decide what a turn does, so a host that disagrees about any of them needs a new version
-// Handler bodies are the one deliberate exception: changing one needs no new version, which is the direct consequence of not replaying code
-func fingerprint(def *definition) string {
+func (def *definition) setFingerprint() {
+	// Includes the caps, the deadlines, the attempt policies, and the unknown-version and compensation-failure choices all decide what a turn does, so a host that disagrees about any of them needs a new version
+	// Handler bodies are the one deliberate exception: changing one needs no new version, which is the direct consequence of not replaying code
 	h := sha256.New()
 	fmt.Fprintf(h, "workflow=%s;version=%d;output=%s\n", def.name, def.version, def.outputStep)
 	fmt.Fprintf(h, "timeout=%d;maxInput=%d;maxOutput=%d;maxJournal=%d;maxDepth=%d;unknownVersion=%s;compFailure=%s\n",
@@ -437,44 +439,46 @@ func fingerprint(def *definition) string {
 		def.retention.forStatus(StatusFailed),
 		def.retention.forStatus(StatusCancelled),
 	)
+
 	for _, d := range def.steps {
-		writeStepFingerprint(h, d)
+		d.writeStepFingerprint(h)
 	}
-	return hex.EncodeToString(h.Sum(nil))
+
+	def.fingerprint = hex.EncodeToString(h.Sum(nil))
 }
 
 // writeStepFingerprint writes one step's behavior-affecting options into the running hash
-func writeStepFingerprint(w io.Writer, d *stepDef) {
+func (def *stepDef) writeStepFingerprint(w io.Writer) {
 	// We don't use JSON and rather rely on something that's more deterministic
 	fmt.Fprintf(w, "step=%s;kind=%s;inputFrom=%s;itemsFrom=%s;skipOnFailure=%s;optional=%t;policy=%s;compensable=%t;capability=%s;event=%s",
-		d.name, d.kind,
-		strings.Join(d.inputFrom, ","),
-		d.itemsFrom,
-		strings.Join(d.skipOnFailure, ","),
-		d.optional,
-		d.failurePolicy,
-		d.compensate != nil,
-		d.capability,
-		d.eventName,
+		def.name, def.kind,
+		strings.Join(def.inputFrom, ","),
+		def.itemsFrom,
+		strings.Join(def.skipOnFailure, ","),
+		def.optional,
+		def.failurePolicy,
+		def.compensate != nil,
+		def.capability,
+		def.eventName,
 	)
 
 	// The attempt and deadline policies decide how a failure or a timeout is folded into the journal, so a host that disagrees about them would advance the same journal differently
 	fmt.Fprintf(w, ";attempts=%d;backoff=%d/%d;compAttempts=%d;compBackoff=%d/%d;stepTimeout=%d;eventTimeout=%d;maxParallel=%d;compensateOnFailure=%t",
-		d.maxAttempts, d.retryInitial, d.retryMax,
-		d.compMaxAttempt, d.compInitial, d.compMax,
-		d.stepTimeout, d.eventTimeout, d.maxParallel, d.compensateOnFailure,
+		def.maxAttempts, def.retryInitial, def.retryMax,
+		def.compMaxAttempt, def.compInitial, def.compMax,
+		def.stepTimeout, def.eventTimeout, def.maxParallel, def.compensateOnFailure,
 	)
-	if d.hasSkipIf {
-		fmt.Fprintf(w, ";skipIf=%s=%t", d.skipIfStep, d.skipIfValue)
+	if def.hasSkipIf {
+		fmt.Fprintf(w, ";skipIf=%s=%t", def.skipIfStep, def.skipIfValue)
 	}
-	if d.child != nil {
-		fmt.Fprintf(w, ";child=%s@%d", d.child.def.name, d.child.def.version)
+	if def.child != nil {
+		fmt.Fprintf(w, ";child=%s@%d", def.child.def.name, def.child.def.version)
 	}
 	fmt.Fprint(w, "\n")
 
-	for _, m := range d.members {
+	for _, m := range def.members {
 		fmt.Fprint(w, "  ")
-		writeStepFingerprint(w, m)
+		m.writeStepFingerprint(w)
 	}
 }
 
@@ -527,26 +531,31 @@ func (w *Workflow) buildRegistrations(o *options) error {
 
 	// The auto-purge sweep is an ordinary cron job built-in, registered alongside the workflow's own types so one call registers everything
 	if o.autoPurgeCron != "" {
-		purge, err := cronjob.New(w.name+".purge",
+		var err error
+		w.purgeCron, err = cronjob.New(w.name+".purge",
 			cronjob.WithCron(o.autoPurgeCron),
 			cronjob.WithLogger(w.log),
 			cronjob.WithJob(func(ctx context.Context) error {
-				// The sweep runs against the service the host bound this workflow's actors to, which every factory records as it is called
+				// The sweep runs against the service created for this workflow's actors
 				svc := w.boundService.Load()
 				if svc == nil {
+					// Should not have happened
 					return errors.New("the workflow is not bound to a host service yet")
 				}
+
 				_, pErr := w.Service(svc).PurgeTerminated(ctx)
-				return pErr
+				if pErr != nil {
+					return fmt.Errorf("failed to purge terminated workflows: %w", pErr)
+				}
+				return nil
 			}),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to create the auto-purge cron job: %w", err)
 		}
-		w.purgeCron = purge
 
 		// The cron job's own factory records the service too, so the sweep is bound even on a host that never activates an orchestrator
-		for _, reg := range builtinactor.RegistrationsFor(purge) {
+		for _, reg := range builtinactor.RegistrationsFor(w.purgeCron) {
 			regs = append(regs, w.bindService(reg))
 		}
 	}
@@ -580,9 +589,9 @@ func (w *Workflow) workerRegistration(suffix string, capName string, group strin
 			return newWorker(w, bareType, actorID, svc, undo)
 		},
 		RegisterOptions: actorcore.RegisterActorOptions{
-			ConcurrencyLimit: limit,
-			// A worker only returns an error to Francis when its report dispatch failed, and this covers that case alone
+			// A worker only returns an error to Francis when its report dispatch failed
 			MaxAttempts:              workerMaxAttempts,
+			ConcurrencyLimit:         limit,
 			CapacityGroup:            group,
 			CapacityGroupLimit:       limit,
 			CompletedJobRetention:    w.def.jobRetention(),
