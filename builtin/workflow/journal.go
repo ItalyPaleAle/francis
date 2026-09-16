@@ -77,6 +77,9 @@ const (
 
 // instanceState is the journal: the Workflow actor's durable state and the single source of truth for an instance
 // Every transition rewrites the whole document in one state write, so a step transition is atomic
+// MarshalMsgpack is deliberately the one method on a value receiver, because the actor client hands the state to the encoder as a value and a pointer method is unreachable from one
+//
+//nolint:recvcheck
 type instanceState struct {
 	Workflow              string `msgpack:"workflow"`
 	Version               int    `msgpack:"version"`
@@ -127,11 +130,12 @@ type instanceState struct {
 type instanceStateWire instanceState
 
 // MarshalMsgpack lets persistence reuse the exact wire encoding already produced by the journal size check
-func (st *instanceState) MarshalMsgpack() ([]byte, error) {
+// The receiver must stay a value, so that the value the actor client passes to the encoder carries it
+func (st instanceState) MarshalMsgpack() ([]byte, error) {
 	if st.encoded != nil {
 		return st.encoded, nil
 	}
-	return msgpack.Marshal(instanceStateWire(*st))
+	return msgpack.Marshal(instanceStateWire(st))
 }
 
 // stepRecord is one step of the definition as the journal sees it
