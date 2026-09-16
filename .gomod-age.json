@@ -5,10 +5,5 @@
     "golang.org/x/*"
   ],
   "allow": [
-    {
-      "module": "github.com/jackc/pgx/v5",
-      "version": "v5.11.0",
-      "reason": ""
-    }
   ]
 }

@@ -4,7 +4,7 @@ go 1.27.1
 
 require (
 	github.com/italypaleale/francis v0.0.0
-	github.com/italypaleale/go-kit v1.1.1
+	github.com/italypaleale/go-kit v1.1.2
 	github.com/stretchr/testify v1.12.1
 	k8s.io/api v0.34.0
 	k8s.io/apimachinery v0.34.0
@@ -46,7 +46,7 @@ require (
 	github.com/lestrrat-go/dsig v1.4.0 // indirect
 	github.com/lestrrat-go/httpcc v1.0.1 // indirect
 	github.com/lestrrat-go/httprc/v3 v3.0.6 // indirect
-	github.com/lestrrat-go/jwx/v4 v4.4.0 // indirect
+	github.com/lestrrat-go/jwx/v4 v4.5.0 // indirect
 	github.com/lestrrat-go/option/v2 v2.0.0 // indirect
 	github.com/lestrrat-go/option/v3 v3.0.0-alpha1 // indirect
 	github.com/moby/spdystream v0.5.1 // indirect
