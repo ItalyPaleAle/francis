@@ -16,9 +16,9 @@ wf, err := workflow.New("order-fulfillment",
 
 ## The two that matter most
 
-**`francis.workflow.turn.duration`** is a histogram of how long a `Workflow` turn took. It should sit in **single-digit milliseconds**, because a turn only reads and writes the journal, decides what comes next, and dispatches jobs. A regression is the signal that something has been inlined onto the orchestrator that should be a step — which is the one failure this design is most concerned with, since a blocking call on the orchestrator degrades every property the engine is supposed to provide, exactly when things are going worst.
+**`francis.workflow.turn.duration`** is how long the engine spends deciding what an instance does next, once for each result it takes in. It should sit in **single-digit milliseconds**. If it climbs, every instance is slower to advance, and status reads start queueing behind it.
 
-**`francis.workflow.turns.duplicate_events`** counts turns that re-applied an event the journal already reflected. That is the direct measure of how often the second ordering invariant is doing its job: a turn that persisted a result and then failed to dispatch is recovered through the duplicate report. A non-zero, low rate is healthy. A rate that climbs means dispatches are failing.
+**`francis.workflow.turns.duplicate_events`** counts results the engine received more than once and had already recorded. A low, non-zero rate is healthy: it is how an instance recovers when a host dies partway through handing off work. A climbing rate means work is repeatedly failing to be handed off, so look at `task.transport_failures` and the provider next.
 
 ## Every instrument
 
@@ -40,25 +40,25 @@ wf, err := workflow.New("order-fulfillment",
 | `francis.workflow.turns.duplicate_events` | counter | `workflow`, `event` |
 | `francis.workflow.definition.conflicts` | counter | `workflow`, `version` |
 
-`task.transport_failures` is worth separating from ordinary attempt failures: it counts attempts that failed because the **report could not be delivered**, not because the handler failed. A task that ran and could not say so is a different problem from a task that ran and failed — it means the work may well have happened and is about to happen again.
+`task.transport_failures` is worth watching separately from ordinary attempt failures: it counts attempts that failed because the **result could not be delivered**, not because the handler failed. A task that ran and could not report is a different problem from a task that ran and failed, because the work probably did happen and is about to happen again. This is the counter that says your handlers' idempotency is being exercised for real.
 
 ## What to alert on
 
-- `instances.terminated{status="failed"}` climbing, obviously.
-- A terminal `compensation: partial` or `compensation: failed` outcome. These are the "money may be stranded" cases, and the reason the compensation outcome is carried separately from the status rather than folded into it. They are visible in `GetStatus` and, per workflow, through the `compensations.failed` counter.
-- `definition.conflicts` above zero, at any rate: two hosts are serving different graphs under one version number.
+- `instances.terminated{status="failed"}` climbing.
+- A terminal `compensation: partial` or `compensation: failed` outcome. These are the "money may be stranded" cases, and they are the reason the compensation outcome is reported separately from the status. Watch `compensations.failed` per workflow, and read `GetStatus` for the instance itself.
+- `definition.conflicts` above zero, at any rate: two hosts are serving different graphs under one version number. See [Deploying and versioning](/workflows/deploying#if-you-forget-to-bump).
 - `turn.duration` regressing past a few milliseconds.
 
 ## Tracing
 
-A workflow instance is a long-lived, multi-host activity, so it cannot be one span. A Francis job does not carry its dispatcher's trace context either — only transport hops propagate it — so the engine carries it in the payloads it controls:
+A workflow instance is long-lived and spread across hosts, so it is not one span. Instead:
 
-- `Start` records the caller's trace context in the journal, and every `start`, `run`, `compensate`, and report payload the engine builds carries the context of the turn or attempt that dispatched it.
-- There is **one span per `Workflow` turn** and **one per attempt**, tagged with instance ID, workflow, version, step, index, and attempt, each a child of the span in its payload and **linked** to the instance's recorded trace context. So a trace can be followed either from the caller's original request or from any single turn.
-- A child instance's spans link to the parent's trace context as well as their own.
+- `Start` records the caller's trace context on the instance, and it is carried through everything the engine dispatches afterwards.
+- There is **one span per attempt** and one for each time the engine advances the instance, tagged with instance ID, workflow, version, step, index, and attempt. Each is linked back to the instance's original trace context, so you can follow a run either from the request that started it or from any single step.
+- A child instance's spans link to its parent's trace context as well as its own.
 
 ## Logs
 
-`WithLogger` gets you instance and task lifecycle events, every line tagged with the instance ID and, for a task, the step, index, and attempt. Worker actor IDs are readable on purpose — `<instanceID>|<step>|<index>` — because those are what an operator greps for.
+`WithLogger` gets you instance and task lifecycle events, every line tagged with the instance ID and, for a task, the step, index, and attempt.
 
-The journal itself is a document you can read. Its shape is in [How it works](/workflows/how-it-works#the-journal).
+The actor IDs in those lines are readable rather than hashed, so they are what to grep for. A task's worker is `<instanceID>|<step>|<index>`, and a [child instance](/workflows/child-workflows#instance-ids) uses the same shape, which means a parent's ID is a prefix of everything underneath it.

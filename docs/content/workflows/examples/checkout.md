@@ -151,11 +151,11 @@ if !created {
 
 ## What happens when it goes wrong
 
-**The card is declined.** `charge` reports a permanent failure on its first attempt; the instance unwinds. The stack holds one frame, `reserve-inventory`, so `releaseInventory` runs, and the instance terminates `failed` with `compensation: completed`. Nothing was charged, so nothing is refunded — the failing step is not on the stack.
+**The card is declined.** `charge` reports a permanent failure on its first attempt; the instance unwinds. The stack holds one entry, `reserve-inventory`, so `releaseInventory` runs and the instance terminates `failed` with `compensation: completed`. Nothing was charged, so nothing is refunded: the failing step is not on the stack.
 
-**The carrier times out for six minutes.** `create-shipment` attempts one through six fail retryable, five seconds, ten, twenty, forty, eighty, and two minutes apart; the sixth failure fails the step. The unwind pops `charge` first — `refundCharge` runs on an undo worker — then `reserve-inventory`. The instance is `failed`, `compensation: completed`, and **the customer was refunded before the stock was released**, in that order, as the stack guarantees.
+**The carrier times out for six minutes.** `create-shipment` attempts one through six fail retryable, five seconds, ten, twenty, forty, eighty, and two minutes apart; the sixth failure fails the step. The rollback pops `charge` first, running `refundCharge`, then `reserve-inventory`. The instance is `failed`, `compensation: completed`, and **the customer was refunded before the stock was released**, in that order, as the stack guarantees.
 
-**The refund itself keeps failing because the payment provider is down.** `refundCharge` is retried up to twenty times over about two hours of backoff. If it never succeeds, `ContinueUnwinding` still releases the inventory and the instance terminates `failed` with `compensation: partial` — the status a "money may be stranded" alert is built on — with the charge ID in the journal for the operator.
+**The refund itself keeps failing because the payment provider is down.** `refundCharge` is retried up to twenty times over about two hours of backoff. If it never succeeds, `ContinueUnwinding` still releases the inventory and the instance terminates `failed` with `compensation: partial`, which is the status to build a "money may be stranded" alert on. `GetStatus` still has the charge ID.
 
 **A host dies after the charge succeeded and before the worker reported.** The attempt's job is retried on another host; the handler runs again with the same idempotency key, the provider returns the existing charge, and the report goes out. One charge.
 

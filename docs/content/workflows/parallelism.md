@@ -64,11 +64,9 @@ func generateThumbnail(ctx context.Context, t workflow.Task) (any, error) {
 }
 ```
 
-The size is decided once, when the upstream step reports, and is then **journaled**: a retried turn re-reads the recorded items rather than re-deriving them against a journal that has since moved on.
+The item list is fixed when the upstream step reports, and recorded from then on, so it never changes underneath a fan-out that is already running.
 
-**Deriving the list is a normal step that runs on a worker.** An expander callback invoked on the orchestrator would be simpler to write, but it would put an arbitrary user function on the instance's control plane, which is the exact thing the [orchestration boundary](/workflows/how-it-works#the-orchestration-boundary) exists to prevent. The cost is one extra durable round-trip; the benefit is that the expansion is itself retried, traced, bounded by a deadline, and recorded like any other step.
-
-The list is always a step's **whole** output. There is no selector for fanning out over one field of the input, because that would mean an expression language to save a round-trip, and a small `plan` step is the honest price.
+The items are always a step's **whole** output: there is no selector for fanning out over one field of something larger. When the list needs deriving, write a small step that returns it, as `plan` does above. It is an ordinary step, so it gets its own retries, timeout, and trace like any other.
 
 ### Bounding a fan-out
 
@@ -76,7 +74,7 @@ The list is always a step's **whole** output. There is no selector for fanning o
 
 This is separate from `WithConcurrency`, which limits how much work a host accepts across **all** instances. A fan-out of 500 with `WithMaxParallel(8)`, on four hosts each running `WithConcurrency(4)`, has at most 8 in flight for that instance and at most 16 running across the cluster.
 
-`WithMaxParallel` knows nothing about cluster capacity. When the in-flight tasks exceed the cluster's total budget, each surplus occurrence is released and re-fetched an alarm poll interval later, so an over-subscribed fan-out degrades to poll-interval pacing rather than failing.
+`WithMaxParallel` knows nothing about cluster capacity. Asking for more in-flight tasks than the cluster can run does not fail the fan-out: the surplus simply waits its turn, so the step paces itself and takes longer.
 
 ## Failure policies
 
@@ -96,7 +94,7 @@ err := t.DecodeOutput("generate", &results)
 // A failed slot carries {"error": "..."} in place of the value
 ```
 
-Cancelling a pending job does not interrupt one that is already executing, and Francis does not cancel the handler's context. A task that wants to stop early should watch its context for host shutdown and otherwise finish; the engine records its late report as a result. If it **succeeded** after the step was already decided, the engine still records it and still compensates it, because the work really happened.
+A task that has already started is **never interrupted**, under any policy: Francis does not cancel a running handler's context to stop it early. A task that wants to bail out should watch its context for host shutdown and otherwise run to the end. If it succeeds after the step has already failed, its result is still recorded and still compensated, because the work really happened.
 
 ## Capabilities
 
@@ -116,15 +114,15 @@ wf, err := workflow.New("documents",
 )
 ```
 
-A step with no requirement runs anywhere. A step's **compensation is routed to the undo queue of the same capability**, since undoing almost always needs the placement the forward task had: the same GPU, the same region.
+A step with no requirement runs anywhere. A step's **compensation runs on a host with the same capability**, since undoing usually needs whatever the forward task needed: the same GPU, the same region.
 
-That makes "the OCR step only runs on hosts with a GPU" a one-line property of the definition, and it means throughput scales by adding hosts with no change to the definition at all.
+Throughput then scales by adding hosts that advertise the capability, with no change to the definition.
 
 ## Capacity
 
-`WithConcurrency(n)` puts every worker queue of the workflow into **one capacity group** with a strict, in-process per-host budget, and mirrors it as a cluster-wide placement hint so hosts are rarely handed more than they can run. The undo queues form a second group, sized by `WithCompensateConcurrency` (defaulting to the same number), so a slow unwind cannot starve forward work or the other way around.
+`WithConcurrency(n)` is the strict maximum number of tasks a host runs at once for this workflow. Compensations have a separate budget, set by `WithCompensateConcurrency` and defaulting to the same number, so a slow rollback cannot starve forward work or the other way around.
 
-Two things worth knowing:
+Two things to watch for:
 
-- **Every step of a workflow shares one worker budget.** A slow step occupies a slot an expensive one could have used — a callback waiting on a remote server holds a slot sized for an image encode. When that matters, give the step its own budget with a required capability.
-- **There is no per-step capacity group.** Capability queues already give a step its own budget when it needs one, at no extra concept.
+- **Every step of a workflow shares one budget.** A step that spends its time waiting on a remote server holds a slot sized for an image encode. When that matters, give the step a required capability, which gives it a budget of its own.
+- **`WithConcurrency` is per host.** Raising it on one host does not raise it anywhere else, and the cluster's total is the sum across the hosts that registered the workflow.

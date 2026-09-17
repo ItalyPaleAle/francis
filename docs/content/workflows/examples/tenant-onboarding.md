@@ -8,7 +8,7 @@ A new tenant is requested, a manager has to approve it, and then three subsystem
 
 ## The child definitions
 
-Each child keeps its own journal, its own compensation stack, and its own timers. `WithOutput` names the step whose output the parent reads back.
+Each child keeps its own status, its own compensation stack, and its own timers. `WithOutput` names the step whose output the parent reads back.
 
 ```go
 provisionDatabase, err := workflow.New("provision-database",
@@ -145,7 +145,7 @@ err = svc.RaiseEvent(ctx, tenantID, "approval", approvalPayload{Approved: true, 
 
 ## What happens when it goes wrong
 
-**Nobody approves within three days.** The event timeout elapses; the instance unwinds. The stack holds one frame, `request-review`, so `closeReviewTicket` runs with the cause `event "approval" timed out`, and the instance terminates `failed`. Nothing was provisioned.
+**Nobody approves within three days.** The event timeout elapses; the instance unwinds. The stack holds one entry, `request-review`, so `closeReviewTicket` runs with the cause `event "approval" timed out`, and the instance terminates `failed`. Nothing was provisioned.
 
 **The manager rejects.** `RaiseEvent` carries `Approved: false`; the wait completes, `readApproval` returns `false`, and `WithSkipIf` skips `verify`. The provision group still runs — in this graph a rejected tenant is still provisioned in a sandbox — and the instance completes with `verify` recorded as `skipped`.
 
@@ -162,4 +162,4 @@ page, err := dbSvc.List(ctx, &workflow.ListOptions{Parent: tenantID})
 err = svc.Suspend(ctx, tenantID, "cloud maintenance")
 ```
 
-That stops it starting anything new. The children keep running to whatever point their own attempts allow, and their reports wait. The seven-day instance timeout is paused for the duration. `Resume` continues from wherever the journal says the instance is.
+That stops it starting anything new. The children keep running to whatever point their own attempts allow, and their results wait. The seven-day instance timeout is paused for the duration, and `Resume` continues from exactly where the instance left off.

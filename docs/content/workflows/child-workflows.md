@@ -4,7 +4,7 @@ weight: 60
 description: "Running one workflow from another, and what crosses between them"
 ---
 
-A **child workflow** is a step whose task is a whole instance of another registered definition. The child has its own journal, its own compensation stack, its own timers, and its own attempts; only its result enters the parent's.
+A **child workflow** is a step whose task is a whole instance of another registered definition. The child has its own status, its own compensation stack, its own timers, and its own attempts. Only its result reaches the parent.
 
 ```go
 // A step that runs one child instance
@@ -27,15 +27,15 @@ err = host.RegisterBuiltInActor(onboarding)
 
 ## Why reach for one
 
-Two reasons, and they are different:
+There are two reasons, and they are different:
 
-**Composition.** A subsystem complex enough to be a workflow on its own — with its own steps, its own rollback, its own timeouts — is a child, and the parent treats it as one step. That keeps the parent's graph readable and makes the child reusable.
+**Composition.** A subsystem complex enough to be a workflow on its own, with its own steps, rollback, and timeouts, is a child, and the parent treats it as one step. That keeps the parent's graph readable and makes the child reusable.
 
-**Journal width.** Every report rewrites the parent's whole journal, so a very wide fan-out is expensive (see [How it works](/workflows/how-it-works#size-and-write-amplification)). A child workflow per batch moves that width into journals that are rewritten independently. A parent of a hundred children with a thousand steps each is a journal of a hundred small records.
+**Keeping a wide fan-out small.** Every task's output is recorded in its instance, so a fan-out of several hundred large outputs runs into `WithMaxJournalSize` (see [Steps and data flow](/workflows/steps#what-a-step-outputs)). A child workflow per batch splits that across instances instead: a parent of a hundred children with a thousand steps each stays small at every level.
 
-## What crosses between journals
+## What crosses between them
 
-The parent's journal records, per child task, only the child's instance ID and — once it terminates — its output, or its failure and compensation outcome. Nothing else crosses.
+For each child task, the parent records only the child's instance ID and, once it terminates, its output, or its failure and compensation outcome. Nothing else crosses.
 
 The child's input is what the task would have received:
 
@@ -79,22 +79,22 @@ A child's instance ID is derived from its parent's:
 <parentID>|<step>|<index>
 ```
 
-That is deterministic, so a retried turn finds the same child rather than starting a second. It also means a child is always locatable from its parent's journal, and the parent's ID is a prefix of the child's — useful when grepping logs.
+The ID is derived rather than random, so retries can never start a second child for the same task. It also means the parent's ID is a prefix of the child's, which is handy when grepping logs.
 
-`WithMaxDepth` (default 8) bounds the parent chain, which is the only thing that stops a definition that references itself.
+`WithMaxDepth` (default 8) bounds how deep a chain of children may go, and is what stops a definition that references itself.
 
 ## Failure
 
 A child that terminates `failed` or `cancelled` **fails the parent's task**. What that costs the parent is the parent's own step policy: the default unwinds, `WithOptional` does not, a fan-out's `TolerateFailures` records it and carries on.
 
-A child's terminal `compensation: partial` is surfaced in the parent's journal even when the parent continues, so "the child rolled back, but not completely" is never lost.
+A child's terminal `compensation: partial` is surfaced on the parent even when the parent carries on, so "the child rolled back, but not completely" is never lost.
 
 ## Unwinding a child
 
 Compensating a child step means asking the child to undo itself:
 
 - A child that is still **running** receives a cancel, unwinds its own stack, and reports back when it terminates.
-- A child that already **completed** receives an unwind — a verb only a parent may send. It moves back to `compensating`, pops its stack in reverse exactly as a failure would, and reports its own compensation outcome. That is why a completed child is kept, not purged, for as long as its parent is running.
+- A child that already **completed** is asked to undo itself. It moves back to `compensating`, pops its stack in reverse exactly as a failure would, and reports its own compensation outcome. This is why a completed child is kept for as long as its parent is running.
 
 ```
 parent:  provision ──────────────────────► ✗ verify
@@ -109,13 +109,13 @@ A parent's `Cancel` cancels its running children through the same path, and a pa
 
 ## Lifetime
 
-A child's retention follows its parent's. `Purge` on a parent purges its children first, recursively, then its own jobs, then its journal — in that order, so an interrupted purge is safe to repeat.
+`Purge` on a parent purges its children first, recursively, and is safe to repeat if it is interrupted.
 
-The auto-purge sweep **skips instances whose parent is still running**, so a child is never purged from under a parent that might still unwind it. A terminated child's journal is written **without an expiry** for the same reason: a parent may ask it to undo itself for as long as the parent runs, and an expiry the parent cannot see would take that journal out from under it. What removes a child is its parent's purge, or the sweep once the parent's journal is gone — so a child definition wants either `WithAutoPurge` of its own or a parent that is purged.
+The auto-purge sweep **skips any instance whose parent is still running**, so a child is never removed from under a parent that might still ask it to undo itself. That has one consequence worth planning for: a terminated child sticks around until its parent is purged, or until the sweep finds it after the parent is gone. **Give a child definition its own `WithAutoPurge`, or make sure its parents are purged**, or terminated children accumulate.
 
 ## Listing children
 
-Every child instance records its parent, and the listing index carries it:
+Every child records its parent, so you can list them:
 
 ```go
 // Every child of one instance, whatever the child definition

@@ -4,9 +4,9 @@ weight: 20
 description: "The step kinds, what a task receives, and what a failure costs"
 ---
 
-A **step** is a named node in the graph. A **task** is one execution unit of a step, performed by one worker actor and driven by one durable job: a plain step has one task, a parallel group has one per member, a fan-out has one per item, and a child step's task is a whole child instance. An **attempt** is one run of a task's handler, counted in the journal.
+Three words are used throughout. A **step** is a named node in the graph. A **task** is one execution unit of a step, run on its own worker: a plain step has one task, a parallel group has one per member, a fan-out has one per item, and a child step's task is a whole child instance. An **attempt** is one run of a task's handler.
 
-Steps are addressed **by name**, never by position, which is what lets a journal survive a definition change.
+Steps are identified **by name**, not by position, so reordering the graph does not confuse instances that are already running. Renaming a step is a change of graph, so it needs [a new version](/workflows/deploying).
 
 ## Step kinds
 
@@ -21,14 +21,14 @@ Steps are addressed **by name**, never by position, which is what lets a journal
 ## The handler contract
 
 ```go
-// RunFunc performs one attempt of a task and returns the output recorded in the journal
+// RunFunc performs one attempt of a task and returns the output recorded for it
 type RunFunc func(ctx context.Context, t workflow.Task) (output any, err error)
 
 // CompensateFunc undoes the effect of one task that had completed successfully
 type CompensateFunc func(ctx context.Context, c workflow.Compensation) error
 ```
 
-A handler is a plain function. It may call the clock, do I/O, use randomness, and start goroutines, precisely because it never runs on the `Workflow` actor. The one contract is **idempotency**: at-least-once delivery means it can run twice, once for a retried attempt and once if the host died between finishing and reporting.
+A handler is a plain function. It may call the clock, do I/O, use randomness, and start goroutines. The one contract is **idempotency**: delivery is at-least-once, so a handler can run twice, once for a retried attempt and once if the host died between finishing the work and reporting it.
 
 ```go
 type Task interface {
@@ -65,7 +65,7 @@ type Compensation interface {
 
 ## What a task receives
 
-Each task's payload carries only what the step declared it needs, so the engine never ships the whole journal to a worker:
+Each task receives only what its step declared it needs, and nothing else:
 
 - the **workflow input**, as given to `Start`;
 - the **output of the immediately preceding step**;
@@ -80,11 +80,11 @@ workflow.Step("verify",
 )
 ```
 
-Asking `DecodeOutput` for a step that is neither the preceding one nor named with `WithInputFrom` returns `ErrStepNotFound`. That is deliberate: a step's data dependencies are auditable from the definition alone.
+Asking `DecodeOutput` for a step that is neither the preceding one nor named with `WithInputFrom` returns `ErrStepNotFound`, so every step's data dependencies are visible in the definition.
 
 ## What a step outputs
 
-A handler returns `(any, error)`. The value is JSON-encoded into the journal, subject to `WithMaxOutputSize`. What later steps see depends on the kind:
+A handler returns `(any, error)`. The value is JSON-encoded and recorded, subject to `WithMaxOutputSize`. What later steps see depends on the kind:
 
 | Kind | Output seen by later steps |
 |------|----------------------------|
@@ -106,9 +106,11 @@ func generateThumbnail(ctx context.Context, t workflow.Task) (any, error) {
 }
 ```
 
+Everything an instance records is stored as one value, capped by `WithMaxJournalSize` (1 MiB by default), and every task's output goes into it. The rule of thumb is that **the number of tasks multiplied by a typical output should stay well under that cap**: a few hundred tasks returning under a kilobyte each is comfortable. `WithMaxOutputSize` (16 KiB) is a ceiling against one misbehaving task, not a per-task budget. For a fan-out wider than a few hundred items, use a [child workflow](/workflows/child-workflows) per batch.
+
 ## Retries, and the three ways a handler can fail
 
-Returning an error does **not** make Francis retry the job. The worker catches it, reports it to the orchestrator as a failed attempt, and halts. The orchestrator records the attempt and, if the step's policy allows another, schedules the next one after the step's backoff. Attempts are therefore **per step, per compensation, and visible in `GetStatus`**.
+Retries belong to the step, not to the actor: `WithMaxAttempts` and `WithRetryBackoff` decide how many attempts a task gets and how long to wait between them, and a compensation gets a budget of its own. Every attempt is recorded, so `GetStatus` shows how many each task has spent and why the last one failed.
 
 | Return | What happens |
 |--------|--------------|
@@ -185,7 +187,7 @@ Skipping is **not transitive**: a skipped step is not a failed one, so its own `
 
 ## Conditional steps
 
-There is no predicate evaluated on the orchestrator. A condition is a **step that returns a boolean**, and `WithSkipIf` reads that recorded output:
+A condition is a **step that returns a value**, and `WithSkipIf` compares that step's output against the one you name:
 
 ```go
 workflow.Step("approved", workflow.WithRun(readApproval)),
@@ -197,4 +199,4 @@ workflow.Step("verify",
 ),
 ```
 
-It costs one durable round-trip, and it is consistent with everything else here: the decision is a recorded output, not a hidden evaluation. A step whose condition recorded nothing — because it failed or was skipped — is **not** skipped, since skipping happens only on an explicit recorded value.
+A step whose condition recorded nothing, because it failed or was skipped itself, is **not** skipped: only an explicit recorded value skips a step.

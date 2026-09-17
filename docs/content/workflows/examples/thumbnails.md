@@ -87,12 +87,12 @@ func planThumbnails(ctx context.Context, t workflow.Task) (any, error) {
 		}
 	}
 
-	// The fan-out is sized from this array, and the items are journaled when this step reports
+	// The fan-out is sized from this array, and the items are fixed once this step returns
 	return specs, nil
 }
 ```
 
-`generateThumbnail` reads its item, does the work, and returns a small handle — never the bytes:
+`generateThumbnail` reads its item, does the work, and returns a small handle, never the bytes:
 
 ```go
 type thumbnailResult struct {
@@ -229,7 +229,7 @@ id, _, err := svc.Start(ctx, uploadRequest{
 
 **One thumbnail's format is unsupported.** Its attempt reports a permanent failure; `TolerateFailures` records it and the group completes. The manifest lists it with its error, the notification goes out, and the instance is `completed` — `GetStatus` shows the failed task inside a completed step.
 
-**The object store is unreachable for twenty seconds during the fan-out.** Every in-flight attempt reports a retryable error; the orchestrator schedules second attempts two seconds out, and third attempts four seconds out if needed. The journal shows `attempts: 2` or `3` on the affected tasks and the run completes a little later.
+**The object store is unreachable for twenty seconds during the fan-out.** Every in-flight attempt reports a retryable error, so second attempts are scheduled two seconds out and third attempts four seconds out if needed. `GetStatus` shows `attempts: 2` or `3` on the affected tasks, and the run completes a little later.
 
 **The manifest store is down for longer than five attempts cover.** The step fails; `WithSkipOnFailure` records `notify` as skipped; the instance terminates `failed`, with no unwind, because there is nothing to undo. `List(Status: failed)` finds it, and a new instance with the same input re-drives it once the store is back.
 

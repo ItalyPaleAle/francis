@@ -44,7 +44,7 @@ A few rules:
 
 - The event name **defaults to the step's name**, and `WithEventName` sets it explicitly. No two steps may listen for the same name, so an event is never ambiguous about which record it belongs to.
 - `RaiseEvent` returns `ErrNoSuchEvent` for a name nothing in the definition waits for, rather than dispatching a job nothing reads.
-- Only the **open** wait accepts its event. One raised before the step is reached, or after it completed, records nothing.
+- Only the **open** wait accepts its event. One raised before the step is reached, or after it completed, is discarded.
 - Repeated calls with the same name coalesce, so a double-clicked approve button produces one event.
 - If the timeout elapses first, the instance **unwinds**, with `event "approval" timed out` as the cause every compensation receives.
 
@@ -70,16 +70,16 @@ err := svc.Suspend(ctx, id, "downstream maintenance")
 err = svc.Resume(ctx, id)
 ```
 
-Both are durable jobs with constant keys, so a repeated call coalesces with a pending one, and a call on an instance already in the requested state records nothing.
+Both are durable, so they survive a restart of the process. Repeated calls coalesce, and a call on an instance that is already in the requested state does nothing.
 
 While suspended:
 
-- **Nothing new is started.** No next step, no next attempt, no compensation frame. That is the whole of the mechanism: the journal keeps recording the truth, and only the scheduling half of each turn is gated.
-- **In-flight work finishes.** A task already dispatched runs to completion and its report is recorded. Suspension is a promise not to start things, not an interruption.
-- **Deadlines are paused.** The deadline alarm is dropped and the journal records how much of the instance timeout, the current step's timeout, and any event timeout remained. On resume they are re-armed from those remainders, so a two-day suspension does not eat a thirty-minute timeout.
+- **Nothing new is started.** No next step, no next attempt, no compensation. Suspension gates what gets started, and nothing else.
+- **In-flight work finishes.** A task that has already started runs to completion and its result is recorded. Suspension is a promise not to start things, not an interruption.
+- **Deadlines are paused.** Francis records how much of the instance timeout, the current step's timeout, and any event timeout was left, and restores them on resume, so a two-day suspension does not eat a thirty-minute timeout.
 - **Events are accepted.** A `RaiseEvent` for the open `WaitForEvent` step is recorded, and the step completes on resume.
-- **Cancel takes precedence.** `Cancel` on a suspended instance resumes it straight into `compensating`. Suspending during an unwind pauses the unwind at the current frame.
-- **Children are not affected.** A suspended parent's running children keep running, and their results wait in the parent's journal for the resume. Suspend a child explicitly if that is not what you want; the parent's journal has every child's instance ID.
+- **Cancel takes precedence.** `Cancel` on a suspended instance resumes it straight into `compensating`. Suspending during a rollback pauses it at the step it had reached.
+- **Children are not affected.** A suspended parent's running children keep running, and their results wait for the resume. Suspend a child explicitly if that is not what you want: `GetStatus` on the parent lists every child's instance ID.
 
 `GetStatus` reports the suspension, why, since when, and what the instance goes back to:
 
@@ -90,10 +90,10 @@ if status.Suspended != nil {
 }
 ```
 
-The listing index sees the status change like any other, so `List(&workflow.ListOptions{Status: workflow.StatusSuspended})` finds everything currently paused.
+`List(&workflow.ListOptions{Status: workflow.StatusSuspended})` finds everything currently paused.
 
 ## Which one to use
 
 Use a **wait step** when the workflow's own logic requires something from outside: an approval, a callback, a third party confirming. It is part of the graph, it has its own timeout, and its payload feeds the steps after it.
 
-Use **suspend** when something operational is wrong and you want the instance to stop touching it: a dependency under maintenance, a bad deployment, an incident. It is not part of the graph, any instance can be suspended at any point, and resuming picks up wherever the journal says it was.
+Use **suspend** when something operational is wrong and you want the instance to stop touching it: a dependency under maintenance, a bad deployment, an incident. It is not part of the graph, any instance can be suspended at any point, and resuming picks up exactly where it left off.

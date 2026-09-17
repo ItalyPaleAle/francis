@@ -5,7 +5,7 @@ weight: 110
 description: "Three complete workflows, with every handler and what happens when they go wrong"
 ---
 
-Three workflows, chosen so that between them they exercise every feature of the design. Each one is complete: the definition, every handler, and a walk through the ways it goes wrong.
+Three workflows that between them exercise every feature. Each one is complete: the definition, every handler, and a walk through the ways it goes wrong.
 
 | Example | What it shows |
 |---------|---------------|

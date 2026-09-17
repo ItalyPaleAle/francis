@@ -53,7 +53,7 @@ if err != nil {
 err = host.RegisterBuiltInActor(orders)
 ```
 
-**Register the same workflow on every host that should run its steps**, with the same name and the same graph. A host that has the workflow registered can orchestrate its instances and run its handlers; a host that does not will never be handed either. Any [child workflow](/workflows/child-workflows) is registered the same way, on the same hosts.
+**Register the same workflow on every host that should run its steps**, with the same name and the same graph. A host that has the workflow registered can run its instances and their handlers; a host that does not will never be handed either. Any [child workflow](/workflows/child-workflows) is registered the same way, on the same hosts.
 
 Each host passes its **own** capabilities and its **own** concurrency, so hosts can differ in what they can run and how much:
 
@@ -66,7 +66,7 @@ wf, err := workflow.New("thumbnails",
 )
 ```
 
-One call registers everything the workflow needs: the orchestrator, the worker and undo queues, the definition registry, and the auto-purge cron job when `WithAutoPurge` is set.
+One call registers everything the workflow needs, including the actors that run its steps and compensations, and the auto-purge cron job when `WithAutoPurge` is set.
 
 ## What `New` validates
 
@@ -79,7 +79,7 @@ One call registers everything the workflow needs: the orchestrator, the worker a
 - `WithSkipOnFailure` names steps that exist and run **after** it.
 - A `Parallel` group has at least one member, and its members are plain or child steps.
 - `WithOutput` names a step that exists.
-- A child definition is itself valid, because it was built by its own `New`.
+- A child definition is itself valid, since it was built by its own `New`.
 
 ## Workflow options
 
@@ -92,21 +92,23 @@ One call registers everything the workflow needs: the orchestrator, the worker a
 | `WithCompensateConcurrency(n)` | The same budget for the undo queues, which form their own capacity group. Defaults to `WithConcurrency`. |
 | `WithCapability(cap)` | Advertise a capability on this host, so steps that require it can run here. Repeatable. |
 | `WithOutput(step)` | The step whose output becomes the instance's output. Defaults to the last step that produced one. |
-| `WithRetention(policy)` | How long a terminated instance's journal is kept, per terminal status. Defaults to 24 hours each. |
+| `WithRetention(policy)` | How long a terminated instance is kept, per terminal status. Defaults to 24 hours each. |
 | `WithAutoPurge(cron)` | Register a cron job that sweeps terminated instances past their retention on this schedule. |
 | `WithCompensationFailurePolicy(p)` | What a failing compensation costs the rest of the unwind. Defaults to `ContinueUnwinding`. |
 | `WithUnknownVersionPolicy(p)` | What to do with an instance no host can serve. Defaults to `ParkUnknownVersion`. |
 | `WithMaxDepth(n)` | How deep a chain of child instances may go. Defaults to `8`. |
 | `WithMaxInputSize(n)` | Cap on the encoded workflow input, checked at `Start`. Defaults to 64 KiB. |
 | `WithMaxOutputSize(n)` | Cap on a single task's encoded output, checked on the worker. Defaults to 16 KiB. |
-| `WithMaxJournalSize(n)` | Cap on the encoded journal, checked before every write. Defaults to 1 MiB. |
+| `WithMaxJournalSize(n)` | Cap on everything one instance records, checked before every write. Defaults to 1 MiB. |
 | `WithLogger(l)` | A logger for instance and task lifecycle events. |
 | `WithMeter(m)` | The OpenTelemetry meter the engine records on. Without one the instruments are no-ops. |
 
-The three size caps are not arbitrary. Every report rewrites the whole journal, so an N-task fan-out writes on the order of N² bytes through the state store; [How it works](/workflows/how-it-works#size-and-write-amplification) has the arithmetic. Keep outputs small — a key or an ID, not the bytes they refer to.
+Keep step outputs small: a key or an ID, not the bytes it refers to. Everything an instance records is stored as a single value, so a wide fan-out of large outputs is the one shape that runs into `WithMaxJournalSize`. [Steps and data flow](/workflows/steps#what-a-step-outputs) has the sizing rule.
 
 ## Versions
 
-`WithVersion` is the definition's version, and it is stamped on every instance the workflow starts. **Bump it for any change the engine reads while running an instance**: a step added, removed, renamed, reordered, or with a changed policy, timeout, attempt budget or backoff, and any change to the definition's own timeout, retention, size caps, or unknown-version and compensation-failure policies. A cluster-wide registry records the fingerprint of each version and refuses a second, different definition under the same number, so a forgotten bump is loud rather than silent.
+`WithVersion` is the definition's version, and it is stamped on every instance the workflow starts. **Bump it whenever you change the graph or any setting that governs how a step runs**: a step added, removed, renamed, or reordered, a changed policy, timeout, attempt budget or backoff, and any change to the definition's own timeout, retention, size caps, or unknown-version and compensation-failure policies.
 
-A change to a **handler's body** alone changes no fingerprint and needs no new version. [Deploying and versioning](/workflows/deploying) covers what that means in practice, and when to bump anyway.
+Francis refuses a second, different definition under the same version number, so a forgotten bump fails loudly instead of letting two hosts disagree about a running instance.
+
+Changing only a **handler's body** needs no new version. [Deploying and versioning](/workflows/deploying) covers what that means in practice, and when to bump anyway.
