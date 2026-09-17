@@ -257,3 +257,107 @@ func TestStartFindsAnInstanceThatAlreadyHasAJournal(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, created)
 }
+
+func TestChildAdmissionEnforcesItsInputLimit(t *testing.T) {
+	// A child start bypasses the public service, so admission must still fail oversized input durably and report it to the parent
+	wf, err := New("input-limited-child", WithMaxInputSize(128), WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+	host := newFakeHost()
+	o := newTestOrchestrator(t, wf, host, "child-1")
+	encoded, err := json.Marshal(strings.Repeat("x", 1024))
+	require.NoError(t, err)
+	err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{
+		Version: 1,
+		Input:   encoded,
+		Parent:  &parentRef{Workflow: "parent", InstanceID: "parent-1", Step: "child", Attempt: 1},
+	}})
+	require.NoError(t, err)
+	st := readJournal(t, host, wf, "child-1")
+	assert.Equal(t, StatusFailed, st.Status)
+	assert.Contains(t, st.Cause, ErrInputTooLarge.Error())
+	assert.Empty(t, host.dispatchedTo(builtinActorType(wf.workerType("")), workerActorID("child-1", "work", 0)))
+	report := reportedRun(t, host)
+	assert.Equal(t, StatusFailed, report.ChildStatus)
+	assert.Contains(t, report.Error, ErrInputTooLarge.Error())
+}
+
+func TestParentUnwindsForwardFailedChild(t *testing.T) {
+	for _, reported := range []bool{false, true} {
+		t.Run(map[bool]string{false: "before-result-delivery", true: "after-result-delivery"}[reported], func(t *testing.T) {
+			// A child can fail after continuing its forward path without ever opening rollback
+			now := time.Now()
+			def := testDefinition(t, "forward-failed-child", WithSteps(
+				Step("effect", WithRun(noopRun), WithCompensate(noopCompensate)),
+				Step("failure", WithRun(noopRun), WithSkipOnFailure("skipped")),
+				Step("skipped", WithRun(noopRun)),
+			))
+			st := startJournal(t, def, now)
+			st.Parent = childOf("parent")
+			reportSuccess(t, st, def, "effect", 0, "effect", now)
+			advance(st, def, "inst-1", now)
+			reportFailure(t, st, def, "failure", 0, "failed", false, now)
+			advance(st, def, "inst-1", now)
+			st.Reported = reported
+			require.Equal(t, StatusFailed, st.Status)
+			require.Equal(t, CompensationNone, st.Compensation)
+			require.Empty(t, st.TerminalStatus)
+
+			// Parent rollback must undo the retained effect regardless of when the forward failure was delivered
+			unwind := &event{kind: evUnwind, fromParent: true, compAttempt: 1}
+			apply(st, def, unwind, now)
+			advance(st, def, "inst-1", now)
+			require.Equal(t, StatusCompensating, st.Status)
+			require.NotNil(t, st.step("effect").task(0).Comp)
+			apply(st, def, &event{kind: evCompensated, comp: &compReportPayload{Step: "effect", Attempt: 1}}, now)
+			advance(st, def, "inst-1", now)
+			require.Equal(t, CompensationCompleted, st.Compensation)
+			apply(st, def, unwind, now)
+			advance(st, def, "inst-1", now)
+			assert.True(t, st.Status.IsTerminal())
+			assert.True(t, st.step("effect").task(0).Comp.Done)
+			assert.Equal(t, 1, st.step("effect").task(0).Comp.Attempts)
+		})
+	}
+}
+
+func TestJoiningChildUnwindKeepsLatestAttempt(t *testing.T) {
+	// A parent's newer causal undo must be acknowledged even if a prior child rollback is still running
+	now := time.Now()
+	def := testDefinition(t, "joining-child-unwind", WithSteps(
+		Step("effect", WithRun(noopRun), WithCompensate(noopCompensate)),
+		Step("failure", WithRun(noopRun)),
+	))
+	st := startJournal(t, def, now)
+	st.Parent = childOf("parent")
+	reportSuccess(t, st, def, "effect", 0, "effect", now)
+	advance(st, def, "inst-1", now)
+	reportFailure(t, st, def, "failure", 0, "failed", false, now)
+	advance(st, def, "inst-1", now)
+	assert.False(t, apply(st, def, &event{kind: evUnwind, fromParent: true, compAttempt: 2}, now))
+	assert.Equal(t, 2, st.Parent.UnwoundBy)
+	assert.True(t, apply(st, def, &event{kind: evUnwind, fromParent: true, compAttempt: 1}, now))
+	assert.Equal(t, 2, st.Parent.UnwoundBy)
+}
+
+func TestChildRejectsOversizedStartDurably(t *testing.T) {
+	// A parent bypasses the child's public Start method, so the receiving actor must validate the encoded input
+	host := newFakeHost()
+	wf, err := New("small-input-child", WithMaxInputSize(4), WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+	o := newTestOrchestrator(t, wf, host, "child")
+	err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{
+		Version: 1,
+		Input:   json.RawMessage(`"oversized"`),
+		Parent:  childOf("parent"),
+	}})
+	require.NoError(t, err)
+
+	// Failure must be reportable without retaining oversized data or dispatching a worker
+	st := readJournal(t, host, wf, "child")
+	assert.Equal(t, StatusFailed, st.Status)
+	assert.Contains(t, st.Cause, ErrInputTooLarge.Error())
+	assert.Empty(t, st.Input)
+	assert.Equal(t, StepSkipped, st.step("work").Status)
+	assert.Empty(t, host.dispatchedTo(builtinActorType(wf.workerType("")), workerActorID("child", "work", 0)))
+	assert.Equal(t, []string{methodDone}, reportsToParent(t, host, "parent"))
+}

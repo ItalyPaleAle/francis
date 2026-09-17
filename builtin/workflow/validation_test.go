@@ -210,3 +210,115 @@ func TestRetryWhilePlacementMovesWaitsForThePlacementToSettle(t *testing.T) {
 		assert.Equal(t, placementRetryAttempts, calls, "the wait is bounded, so a caller is never blocked indefinitely")
 	})
 }
+
+func TestNewRejectsUninitializedDeclarations(t *testing.T) {
+	// Invalid values can be assembled through the exported API and must produce construction errors rather than panics
+	tests := []struct {
+		name  string
+		steps []StepSpec
+	}{
+		{"zero step", []StepSpec{{}}},
+		{"zero member", []StepSpec{Parallel("group", StepSpec{})}},
+		{"configured zero step", []StepSpec{StepSpec{}.With(WithRun(noopRun))}},
+		{"uninitialized child", []StepSpec{Child("child", WithDefinition(&Workflow{}))}},
+		{"uninitialized fan-out child", []StepSpec{Step("items", WithRun(noopRun)), ForEach("children", WithItemsFrom("items"), WithChild(&Workflow{}))}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NotPanics(t, func() {
+				_, err := New("invalid-declarations", WithSteps(tt.steps...))
+				require.ErrorContains(t, err, "uninitialized")
+			})
+		})
+	}
+}
+
+func TestNewRejectsUnknownPolicies(t *testing.T) {
+	// Values decoded from configuration must not fall through to a different engine policy
+	tests := []struct {
+		name string
+		opts []Option
+	}{
+		{"unknown version", []Option{WithUnknownVersionPolicy("parkk"), WithSteps(WaitForEvent("event"))}},
+		{"compensation failure", []Option{WithCompensationFailurePolicy("abortt"), WithSteps(Step("work", WithRun(noopRun)))}},
+		{"group failure", []Option{WithSteps(Parallel("group", Step("member", WithRun(noopRun))).With(WithFailurePolicy("failfast")))}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New("invalid-policies", tt.opts...)
+			require.ErrorContains(t, err, "unknown")
+		})
+	}
+}
+
+func TestNewRejectsIgnoredParallelMemberOptions(t *testing.T) {
+	// These settings govern whole steps and are not implemented for individual parallel tasks
+	tests := []struct {
+		name string
+		opt  StepOption
+	}{
+		{"WithSkipIf", WithSkipIf("source", false)},
+		{"WithOptional", WithOptional()},
+		{"WithSkipOnFailure", WithSkipOnFailure("dependent")},
+		{"WithStepTimeout", WithStepTimeout(time.Second)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New("member-options", WithSteps(
+				Step("source", WithRun(noopRun)),
+				Parallel("group", Step("member", WithRun(noopRun), tt.opt)),
+				Step("dependent", WithRun(noopRun)),
+			))
+			require.ErrorContains(t, err, "parallel member")
+			require.ErrorContains(t, err, tt.name)
+		})
+	}
+}
+
+func TestNewRejectsOptionsOnIncompatibleKinds(t *testing.T) {
+	child, err := New("option-child", WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+
+	// The applicability matrix prevents unused handlers, routing settings, and data dependencies from looking effective
+	tests := []struct {
+		name string
+		step StepSpec
+	}{
+		{"step event name", Step("target", WithRun(noopRun), WithEventName("event"))},
+		{"step fan-out source", Step("target", WithRun(noopRun), WithItemsFrom("source"))},
+		{"step group policy", Step("target", WithRun(noopRun), WithFailurePolicy(TolerateFailures))},
+		{"step child definition", Step("target", WithRun(noopRun), WithDefinition(child))},
+		{"group handler", Parallel("target", Step("member", WithRun(noopRun))).With(WithRun(noopRun))},
+		{"group compensation", Parallel("target", Step("member", WithRun(noopRun))).With(WithCompensate(noopCompensate))},
+		{"group capability", Parallel("target", Step("member", WithRun(noopRun))).With(WithRequiredCapability("gpu"))},
+		{"wait optional", WaitForEvent("target", WithOptional())},
+		{"wait input dependencies", WaitForEvent("target", WithInputFrom("source"))},
+		{"wait conflicting timeouts", WaitForEvent("target", WithEventTimeout(time.Second), WithStepTimeout(time.Minute))},
+		{"child handler", Child("target", WithDefinition(child), WithRun(noopRun))},
+		{"child input dependencies", Child("target", WithDefinition(child), WithInputFrom("source"))},
+		{"child capability", Child("target", WithDefinition(child), WithRequiredCapability("gpu"))},
+		{"child fan-out compensation", ForEach("target", WithItemsFrom("source"), WithChild(child), WithCompensate(noopCompensate))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, newErr := New("kind-options", WithSteps(Step("source", WithRun(noopRun)), tt.step))
+			require.ErrorContains(t, newErr, "cannot")
+		})
+	}
+}
+
+func TestSupportedParallelAndChildOptionsRemainValid(t *testing.T) {
+	// Keep supported member policies and group-wide settings available while rejecting only ignored combinations
+	child, err := New("supported-child", WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+	_, err = New("supported-options", WithSteps(
+		Step("source", WithRun(noopRun)),
+		Parallel("group",
+			Step("member", WithRun(noopRun), WithCompensate(noopCompensate), WithCompensateOnFailure(), WithMaxAttempts(5), WithRetryBackoff(time.Second, time.Minute), WithCompensateBackoff(time.Second, time.Minute), WithInputFrom("source"), WithRequiredCapability("gpu")),
+			Child("child", WithDefinition(child), WithCompensateMaxAttempts(3)),
+		).With(WithInputFrom("source"), WithOptional(), WithSkipIf("source", false), WithStepTimeout(time.Minute), WithFailurePolicy(CollectFailures)),
+		ForEach("fan", WithItemsFrom("source"), WithRun(noopRun), WithMaxParallel(2), WithFailurePolicy(TolerateFailures)),
+		WaitForEvent("event", WithSkipIf("source", true), WithEventTimeout(time.Minute)),
+	))
+	require.NoError(t, err)
+}

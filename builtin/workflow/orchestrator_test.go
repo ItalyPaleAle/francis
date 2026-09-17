@@ -1,7 +1,10 @@
 package workflow
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -390,4 +393,457 @@ func TestADeadlineOnAJournalOfAnotherVersionFollowsThePolicy(t *testing.T) {
 		assert.Equal(t, CompensationNone, st.Compensation)
 		assert.Contains(t, st.Cause, "unknown version 1")
 	})
+}
+
+func TestRaiseEventUsesTheTargetVersionsMetadata(t *testing.T) {
+	// A newer service must accept the event name and payload limit of the older instance it is driving
+	old, err := New("event-upgrade", WithVersion(1), WithMaxOutputSize(128), WithSteps(WaitForEvent("wait", WithEventName("approval-v1"))))
+	require.NoError(t, err)
+	current, err := New("event-upgrade", WithVersion(2), WithMaxOutputSize(16), WithSteps(WaitForEvent("wait", WithEventName("approval-v2"))))
+	require.NoError(t, err)
+	host := newFakeHost()
+	o := newTestOrchestrator(t, old, host, "old-instance")
+	err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
+	require.NoError(t, err)
+	svc := current.Service(actor.NewService(host))
+	err = svc.RaiseEvent(t.Context(), "old-instance", "approval-v1", strings.Repeat("x", 32))
+	require.NoError(t, err)
+	require.ErrorIs(t, svc.RaiseEvent(t.Context(), "old-instance", "approval-v2", nil), ErrNoSuchEvent)
+	require.ErrorIs(t, svc.RaiseEvent(t.Context(), "old-instance", "approval-v1", strings.Repeat("x", 256)), ErrInputTooLarge)
+
+	// Deliver the accepted job to the compatible orchestrator and verify the old wait completes
+	jobID := host.jobIDFor(builtinActorType(old.baseType), "old-instance", methodEvent)
+	require.NotEmpty(t, jobID)
+	err = o.Job(t.Context(), methodEvent, &payloadEnvelope{value: host.jobPayloads[jobID]})
+	require.NoError(t, err)
+	st := readJournal(t, host, old, "old-instance")
+	assert.Equal(t, StatusCompleted, st.Status)
+}
+
+func TestLegacyEventValidationRequiresTheMatchingVersion(t *testing.T) {
+	// Legacy journals can use the caller's graph only when it has the same definition version
+	wf, err := New("legacy-event", WithVersion(2), WithSteps(WaitForEvent("approval")))
+	require.NoError(t, err)
+	svc := wf.Service(nil)
+	limit, err := svc.eventLimit(&instanceState{Version: 2}, "approval")
+	require.NoError(t, err)
+	assert.Equal(t, wf.def.maxOutputSize, limit)
+	_, err = svc.eventLimit(&instanceState{Version: 1}, "approval")
+	require.ErrorContains(t, err, "use a service with that definition version")
+	require.NotErrorIs(t, err, ErrNoSuchEvent, "an unavailable legacy contract does not establish that the event is invalid")
+
+	// A recorded empty contract must not acquire an event merely because the newer host declares one
+	_, err = svc.eventLimit(&instanceState{Version: 1, MaxEventSize: 128}, "approval")
+	require.ErrorIs(t, err, ErrNoSuchEvent)
+}
+
+type concurrentCleanupHost struct {
+	*fakeHost
+
+	workerType string
+	entered    chan struct{}
+	release    chan struct{}
+}
+
+func (h *concurrentCleanupHost) ListJobs(ctx context.Context, actorType string, actorID string) ([]actor.JobInfo, error) {
+	if actorType == h.workerType {
+		h.entered <- struct{}{}
+		select {
+		case <-h.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return h.fakeHost.ListJobs(ctx, actorType, actorID)
+}
+
+func TestPurgeRefusesUnresolvableLegacyChild(t *testing.T) {
+	child, err := New("legacy-child", WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+	oldParent, err := New("legacy-parent", WithVersion(1), WithSteps(Child("sub", WithDefinition(child))))
+	require.NoError(t, err)
+	newParent, err := New("legacy-parent", WithVersion(2), WithSteps(Step("replacement", WithRun(noopRun))))
+	require.NoError(t, err)
+
+	host := newFakeHost()
+	o := newTestOrchestrator(t, newParent, host, "parent-1")
+	st := &instanceState{
+		Workflow:     oldParent.name,
+		Version:      oldParent.def.version,
+		Status:       StatusCompleted,
+		Compensation: CompensationNone,
+		CompletedAt:  time.Now(),
+		Steps: []stepRecord{{
+			Name:   "sub",
+			Kind:   KindChild,
+			Status: StepCompleted,
+			Tasks: []taskRecord{{
+				Index:   0,
+				Done:    true,
+				ChildID: "child-1",
+			}},
+		}},
+	}
+	err = o.persist(t.Context(), st, time.Now())
+	require.NoError(t, err)
+
+	_, err = o.purge(t.Context())
+	require.ErrorIs(t, err, ErrJournalIncompatible)
+
+	var retained instanceState
+	err = host.GetState(t.Context(), builtinActorType(newParent.baseType), "parent-1", &retained)
+	require.NoError(t, err)
+	assert.Equal(t, StatusCompleted, retained.Status)
+}
+
+func TestPurgeRefusesUnresolvableLegacyWorker(t *testing.T) {
+	oldWorkflow, err := New("legacy-worker", WithVersion(1), WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+	newWorkflow, err := New("legacy-worker", WithVersion(2), WithSteps(Step("replacement", WithRun(noopRun))))
+	require.NoError(t, err)
+
+	host := newFakeHost()
+	o := newTestOrchestrator(t, newWorkflow, host, "instance-1")
+	st := &instanceState{
+		Workflow:     oldWorkflow.name,
+		Version:      oldWorkflow.def.version,
+		Status:       StatusCompleted,
+		Compensation: CompensationNone,
+		CompletedAt:  time.Now(),
+		Steps: []stepRecord{{
+			Name:   "work",
+			Kind:   KindStep,
+			Status: StepCompleted,
+			Tasks:  []taskRecord{{Index: 0, Attempts: 1, Done: true}},
+		}},
+	}
+	err = o.persist(t.Context(), st, time.Now())
+	require.NoError(t, err)
+
+	_, err = o.purge(t.Context())
+	require.ErrorIs(t, err, ErrJournalIncompatible)
+}
+
+func TestPendingStatusDoesNotInventAVersion(t *testing.T) {
+	wf, err := New("pending-version", WithVersion(2), WithSteps(WaitForEvent("ready")))
+	require.NoError(t, err)
+	host := newFakeHost()
+	o := newTestOrchestrator(t, wf, host, "instance-1")
+
+	_, _, err = host.Dispatch(t.Context(), builtinActorType(wf.baseType), "instance-1", methodStart, startPayload{Version: 1}, actor.JobProperties{})
+	require.NoError(t, err)
+
+	result, err := o.status(t.Context())
+	require.NoError(t, err)
+	status, ok := result.(statusResult)
+	require.True(t, ok)
+	require.True(t, status.Found)
+	assert.Equal(t, StatusPending, status.Status.Status)
+	assert.Zero(t, status.Status.Version)
+}
+
+func TestTaskMetadataOmitsActorsThatCannotReceiveJobs(t *testing.T) {
+	child, err := New("task-metadata-child", WithSteps(WaitForEvent("ready")))
+	require.NoError(t, err)
+	def := testDefinition(t, "task-metadata", WithSteps(
+		Child("child", WithDefinition(child)),
+		Step("plain", WithRun(noopRun)),
+	))
+	st := startJournal(t, def, time.Now())
+
+	childTask := st.step("child").task(0)
+	require.NotNil(t, childTask)
+	assert.NotEmpty(t, childTask.ChildType)
+	assert.Empty(t, childTask.WorkerType)
+	assert.Empty(t, childTask.UndoType)
+
+	apply(st, def, &event{kind: evDone, report: &reportPayload{Step: "child", Index: 0, Attempt: 1, ChildStatus: StatusCompleted}}, time.Now())
+	advance(st, def, "instance-1", time.Now())
+	plainTask := st.step("plain").task(0)
+	require.NotNil(t, plainTask)
+	assert.NotEmpty(t, plainTask.WorkerType)
+	assert.Empty(t, plainTask.UndoType)
+}
+
+func TestPurgeOverlapsIndependentJobCleanup(t *testing.T) {
+	wf, err := New("parallel-cleanup", WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+	base := newFakeHost()
+	host := &concurrentCleanupHost{
+		fakeHost:   base,
+		workerType: builtinActorType(wf.workerType("")),
+		entered:    make(chan struct{}, 4),
+		release:    make(chan struct{}),
+	}
+	o := newReviewOrchestrator(t, wf, "instance-1", actor.NewService(host))
+	st := &instanceState{
+		Workflow: wf.name,
+		Version:  wf.def.version,
+		Status:   StatusCompleted,
+		Steps: []stepRecord{{
+			Name:   "work",
+			Kind:   KindForEach,
+			Status: StepCompleted,
+			Tasks: []taskRecord{
+				{Index: 0, WorkerType: wf.workerType(""), Done: true},
+				{Index: 1, WorkerType: wf.workerType(""), Done: true},
+				{Index: 2, WorkerType: wf.workerType(""), Done: true},
+				{Index: 3, WorkerType: wf.workerType(""), Done: true},
+			},
+		}},
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- o.purgeJobs(t.Context(), st)
+	}()
+
+	for range 2 {
+		select {
+		case <-host.entered:
+		case <-time.After(time.Second):
+			t.Fatal("cleanup did not overlap independent job-list calls")
+		}
+	}
+	close(host.release)
+	err = <-done
+	require.NoError(t, err)
+}
+
+func TestTerminationOverlapsIndependentJobCancellation(t *testing.T) {
+	wf, err := New("parallel-cancellation", WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+	base := newFakeHost()
+	host := &concurrentCleanupHost{
+		fakeHost:   base,
+		workerType: builtinActorType(wf.workerType("")),
+		entered:    make(chan struct{}, 4),
+		release:    make(chan struct{}),
+	}
+	o := newReviewOrchestrator(t, wf, "instance-1", actor.NewService(host))
+	st := &instanceState{
+		Workflow: wf.name,
+		Version:  wf.def.version,
+		Status:   StatusFailed,
+		Steps: []stepRecord{{
+			Name:   "work",
+			Kind:   KindForEach,
+			Status: StepFailed,
+			Tasks: []taskRecord{
+				{Index: 0, WorkerType: wf.workerType(""), Done: true, Abandoned: true},
+				{Index: 1, WorkerType: wf.workerType(""), Done: true, Abandoned: true},
+				{Index: 2, WorkerType: wf.workerType(""), Done: true, Abandoned: true},
+				{Index: 3, WorkerType: wf.workerType(""), Done: true, Abandoned: true},
+			},
+		}},
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- o.cancelAllOutstanding(t.Context(), st)
+	}()
+
+	for range 2 {
+		select {
+		case <-host.entered:
+		case <-time.After(time.Second):
+			t.Fatal("termination did not overlap independent job-list calls")
+		}
+	}
+	close(host.release)
+	err = <-done
+	require.NoError(t, err)
+}
+
+func TestUnknownHostUsesJournaledDeadlinePolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		policy  UnknownVersionPolicy
+		timeout time.Duration
+		status  Status
+		want    Status
+	}{
+		{name: "park survives a host configured to fail", policy: ParkUnknownVersion, timeout: time.Minute, status: StatusRunning, want: StatusRunning},
+		{name: "original timeout prevents an early failure", policy: FailUnknownVersion, timeout: time.Hour, status: StatusRunning, want: StatusRunning},
+		{name: "original failure policy survives a host configured to park", policy: FailUnknownVersion, timeout: time.Minute, status: StatusRunning, want: StatusFailed},
+		{name: "legacy unknown policy parks conservatively", status: StatusRunning, want: StatusRunning},
+		{name: "suspended instance stays paused", policy: FailUnknownVersion, timeout: time.Minute, status: StatusSuspended, want: StatusSuspended},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hostPolicy := FailUnknownVersion
+			if tc.want == StatusFailed {
+				hostPolicy = ParkUnknownVersion
+			}
+			wf, err := New("unknown-policy", WithVersion(2), WithTimeout(time.Minute), WithUnknownVersionPolicy(hostPolicy), WithSteps(Step("replacement", WithRun(noopRun))))
+			require.NoError(t, err)
+			h := newFakeHost()
+			o := newTestOrchestrator(t, wf, h, "inst-1")
+			st := instanceState{Workflow: wf.name, Version: 1, Status: tc.status, StartedAt: time.Now().Add(-2 * time.Minute), Timeout: tc.timeout, UnknownVersion: tc.policy}
+			err = o.persist(t.Context(), &st, time.Now())
+			require.NoError(t, err)
+			err = o.runDeadline(t.Context())
+			require.NoError(t, err)
+			result := readJournal(t, h, wf, "inst-1")
+			assert.Equal(t, tc.want, result.Status)
+			assert.Equal(t, tc.timeout, result.Timeout)
+			assert.Equal(t, tc.policy, result.UnknownVersion)
+		})
+	}
+}
+
+func TestUnknownVersionChildReportsFailureBeforeDroppingDeadline(t *testing.T) {
+	wf, err := New("unknown-child", WithVersion(2), WithSteps(Step("replacement", WithRun(noopRun))))
+	require.NoError(t, err)
+	h := newFakeHost()
+	o := newTestOrchestrator(t, wf, h, "child-1")
+	st := instanceState{
+		Workflow: wf.name, Version: 1, Status: StatusRunning,
+		DefinitionFingerprint: "original-child-graph", RegistryGeneration: 1,
+		StartedAt: time.Now().Add(-2 * time.Minute), Timeout: time.Minute, UnknownVersion: FailUnknownVersion,
+		Parent: childOf("parent-1"),
+	}
+	err = o.persist(t.Context(), &st, time.Now())
+	require.NoError(t, err)
+	err = o.client.SetAlarm(t.Context(), alarmDeadline, deadlineAlarmProperties(time.Now()))
+	require.NoError(t, err)
+
+	// An unavailable parent transport keeps the terminal journal and recovery alarm until the failure report can be delivered
+	h.failDispatch = true
+	err = o.runDeadline(t.Context())
+	require.Error(t, err)
+	result := readJournal(t, h, wf, "child-1")
+	assert.Equal(t, StatusFailed, result.Status)
+	assert.True(t, result.RegistryConfirmed)
+	assert.False(t, result.Reported)
+	_, armed := alarmDue(t, h, wf, "child-1")
+	assert.True(t, armed)
+
+	h.failDispatch = false
+	err = o.runDeadline(t.Context())
+	require.NoError(t, err)
+	result = readJournal(t, h, wf, "child-1")
+	assert.True(t, result.Reported)
+	assert.Equal(t, []string{methodDone}, reportsToParent(t, h, "parent-1"))
+	_, armed = alarmDue(t, h, wf, "child-1")
+	assert.False(t, armed)
+}
+
+func TestSweepRetainsDescendantsUntilTheirRootTerminates(t *testing.T) {
+	leafWF, err := New("leaf", WithSteps(Step("effect", WithRun(noopRun), WithCompensate(noopCompensate))))
+	require.NoError(t, err)
+	middleWF, err := New("middle", WithSteps(Child("leaf", WithDefinition(leafWF))))
+	require.NoError(t, err)
+	rootWF, err := New("root", WithSteps(Child("middle", WithDefinition(middleWF)), WaitForEvent("approval")))
+	require.NoError(t, err)
+	host := newFakeHost()
+	root := newTestOrchestrator(t, rootWF, host, "root")
+	middleID := workerActorID("root", "middle", 0)
+	leafID := workerActorID(middleID, "leaf", 0)
+	middle := newTestOrchestrator(t, middleWF, host, middleID)
+	leaf := newTestOrchestrator(t, leafWF, host, leafID)
+
+	// Complete both descendant workflows while the root remains open for a later external decision
+	err = root.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
+	require.NoError(t, err)
+	deliverInstanceJob(t, host, middleWF, middleID, methodStart, middle)
+	deliverInstanceJob(t, host, leafWF, leafID, methodStart, leaf)
+	err = leaf.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "effect", Index: 0, Attempt: 1}})
+	require.NoError(t, err)
+	deliverInstanceJob(t, host, middleWF, middleID, methodDone, middle)
+	deliverInstanceJob(t, host, rootWF, "root", methodDone, root)
+	require.Equal(t, StatusRunning, readJournal(t, host, rootWF, "root").Status)
+	require.Equal(t, StatusCompleted, readJournal(t, host, middleWF, middleID).Status)
+	leafState := readJournal(t, host, leafWF, leafID)
+	leafState.CompletedAt = time.Now().Add(-3 * defaultRetention)
+	err = leaf.client.SetState(t.Context(), leafState, nil)
+	require.NoError(t, err)
+
+	// The leaf sweep must follow its completed parent to the still-active root before deciding it can purge
+	sweepHost := &reviewAPIHost{fakeHost: host, workflows: map[string]*Workflow{builtinActorType(leafWF.baseType): leafWF}}
+	removed, err := leafWF.Service(actor.NewService(sweepHost)).PurgeTerminated(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, removed)
+	require.Equal(t, StatusCompleted, readJournal(t, host, leafWF, leafID).Status)
+
+	// Retained descendants must still be able to undo their effects when the root is subsequently cancelled
+	err = root.Job(t.Context(), methodCancel, &payloadEnvelope{value: reasonPayload{Reason: "approval withdrawn"}})
+	require.NoError(t, err)
+	deliverInstanceJob(t, host, middleWF, middleID, methodUnwind, middle)
+	deliverInstanceJob(t, host, leafWF, leafID, methodUnwind, leaf)
+	require.NotEmpty(t, host.jobIDFor(builtinActorType(leafWF.undoType("")), workerActorID(leafID, "effect", 0), methodCompensate))
+	err = leaf.Job(t.Context(), methodCompensated, &payloadEnvelope{value: compReportPayload{Step: "effect", Index: 0, Attempt: 1}})
+	require.NoError(t, err)
+	deliverInstanceJob(t, host, middleWF, middleID, methodCompensated, middle)
+	deliverInstanceJob(t, host, rootWF, "root", methodCompensated, root)
+	rootState := readJournal(t, host, rootWF, "root")
+	require.Equal(t, StatusCancelled, rootState.Status)
+	require.Equal(t, CompensationCompleted, rootState.Compensation)
+
+	// Once the root terminates, the same retained chain no longer prevents collection
+	active, err := leaf.parentStillRunning(t.Context(), leafState.Parent)
+	require.NoError(t, err)
+	require.False(t, active)
+}
+
+func TestPurgeRefusesCyclicAncestry(t *testing.T) {
+	host := newFakeHost()
+	wf, err := New("cycle", WithSteps(Step("effect", WithRun(noopRun))))
+	require.NoError(t, err)
+	st := instanceState{Status: StatusCompleted, Parent: &parentRef{Workflow: wf.name, InstanceID: "cycle"}}
+	err = host.SetState(t.Context(), builtinActorType(wf.baseType), "cycle", st, nil)
+	require.NoError(t, err)
+	o := newTestOrchestrator(t, wf, host, "cycle")
+	_, err = o.purge(t.Context())
+	require.ErrorContains(t, err, "ancestry contains a cycle")
+	require.Equal(t, StatusCompleted, readJournal(t, host, wf, "cycle").Status)
+}
+
+type deleteStateFailingHost struct {
+	*fakeHost
+
+	deleteErr error
+}
+
+func (h *deleteStateFailingHost) DeleteState(ctx context.Context, actorType string, actorID string) error {
+	if h.deleteErr != nil {
+		return h.deleteErr
+	}
+	return h.fakeHost.DeleteState(ctx, actorType, actorID)
+}
+
+func TestPurgeRetriesAFailedStateDeletion(t *testing.T) {
+	host := &deleteStateFailingHost{fakeHost: newFakeHost()}
+	wf, err := New("purge-retry", WithSteps(Step("effect", WithRun(noopRun))))
+	require.NoError(t, err)
+	o := newReviewOrchestrator(t, wf, "instance", actor.NewService(host))
+	err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
+	require.NoError(t, err)
+	err = o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "effect", Index: 0, Attempt: 1}})
+	require.NoError(t, err)
+
+	// A provider failure must leave both the durable journal and the activation's retryable snapshot intact
+	host.deleteErr = errors.New("injected deletion failure")
+	_, err = o.purge(t.Context())
+	require.ErrorIs(t, err, host.deleteErr)
+	require.Equal(t, StatusCompleted, readJournal(t, host.fakeHost, wf, "instance").Status)
+	host.deleteErr = nil
+	result, err := o.purge(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, purgeResult{Found: true}, result)
+	var st instanceState
+	err = host.GetState(t.Context(), builtinActorType(wf.baseType), "instance", &st)
+	require.ErrorIs(t, err, actor.ErrStateNotFound)
+}
+
+type undoCleanupHost struct {
+	*fakeHost
+
+	failActorType string
+}
+
+func (h *undoCleanupHost) ListJobs(ctx context.Context, actorType string, actorID string) ([]actor.JobInfo, error) {
+	if actorType == h.failActorType {
+		return nil, errors.New("injected undo cleanup failure")
+	}
+	return h.fakeHost.ListJobs(ctx, actorType, actorID)
 }

@@ -63,3 +63,29 @@ func TestAJournalEncodesWhenItIsHandedOverAsAValue(t *testing.T) {
 		assert.Equal(t, st.Status, got.Status)
 	})
 }
+
+func TestJournalSizeUsesTheProviderEncoding(t *testing.T) {
+	st := &instanceState{
+		Workflow: "wire-size",
+		Version:  1,
+		Status:   StatusRunning,
+		Steps:    []stepRecord{{Name: "work", Kind: KindStep, Status: StepRunning, Tasks: []taskRecord{{Index: 0, Attempts: 1}}}},
+	}
+
+	size, err := journalSize(st)
+	require.NoError(t, err)
+	encoded, err := msgpack.Marshal(*st)
+	require.NoError(t, err)
+	assert.Len(t, encoded, size)
+	assert.Equal(t, st.encoded, encoded)
+
+	wf, err := New("wire-size", WithSteps(WaitForEvent("ready")))
+	require.NoError(t, err)
+	host := newFakeHost()
+	o := newTestOrchestrator(t, wf, host, "instance-1")
+	st.Status = StatusFailed
+	err = o.persist(t.Context(), st, time.Now())
+	require.NoError(t, err)
+	stored := readJournal(t, host, wf, "instance-1")
+	assert.Equal(t, StatusFailed, stored.Status)
+}

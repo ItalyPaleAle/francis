@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	msgpack "github.com/vmihailenco/msgpack/v5"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
@@ -901,6 +902,515 @@ func TestWirePayloadsSurviveAGenericDecode(t *testing.T) {
 			require.NoError(t, msgpack.Unmarshal(reEncoded, viaGeneric))
 
 			assert.Equal(t, direct, viaGeneric, "the value must survive the round-trip a cross-host response goes through")
+		})
+	}
+}
+
+// deliverInstanceJob advances one durable delivery and releases its live idempotency key as the runtime would
+func deliverInstanceJob(t *testing.T, host *fakeHost, wf *Workflow, instanceID string, method string, o *orchestrator) {
+	t.Helper()
+	jobID := host.jobIDFor(builtinActorType(wf.baseType), instanceID, method)
+	require.NotEmpty(t, jobID)
+	err := o.Job(t.Context(), method, &payloadEnvelope{value: host.jobPayloads[jobID]})
+	require.NoError(t, err)
+	host.mu.Lock()
+	host.removeJobLocked(jobID)
+	host.mu.Unlock()
+}
+
+func TestCompensationTimeoutRemovesQueuedUndo(t *testing.T) {
+	for _, failCleanup := range []bool{false, true} {
+		t.Run(map[bool]string{false: "cleanup succeeds", true: "cleanup retries"}[failCleanup], func(t *testing.T) {
+			host := &undoCleanupHost{fakeHost: newFakeHost()}
+			wf, err := New("undo-timeout", WithTimeout(time.Hour), WithSteps(
+				Step("effect", WithRun(noopRun), WithCompensate(noopCompensate)),
+				WaitForEvent("approval"),
+			))
+			require.NoError(t, err)
+			o := newReviewOrchestrator(t, wf, "instance", actor.NewService(host))
+			err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
+			require.NoError(t, err)
+			err = o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "effect", Index: 0, Attempt: 1}})
+			require.NoError(t, err)
+			err = o.Job(t.Context(), methodCancel, &payloadEnvelope{value: reasonPayload{Reason: "stop"}})
+			require.NoError(t, err)
+			undoJob := host.jobIDFor(builtinActorType(wf.undoType("")), workerActorID("instance", "effect", 0), methodCompensate)
+			require.NotEmpty(t, undoJob)
+
+			// Exhaust the compensation budget before the queued undo can enter its handler
+			st, err := o.client.GetState(t.Context())
+			require.NoError(t, err)
+			st.StartedAt = time.Now().Add(-2 * time.Hour)
+			st.DeadlineAt = instanceDeadline(&st, wf.def)
+			err = o.client.SetState(t.Context(), st, nil)
+			require.NoError(t, err)
+			if failCleanup {
+				host.failActorType = builtinActorType(wf.undoType(""))
+				err = o.Alarm(t.Context(), alarmDeadline, nil)
+				require.NoError(t, err)
+				require.Equal(t, StatusCompensating, readJournal(t, host.fakeHost, wf, "instance").Status)
+				host.failActorType = ""
+			}
+
+			// Publishing abandonment requires queued undo removal, including after a transient cleanup failure
+			err = o.Alarm(t.Context(), alarmDeadline, nil)
+			require.NoError(t, err)
+			st = readJournal(t, host.fakeHost, wf, "instance")
+			require.True(t, st.Status.IsTerminal())
+			require.Equal(t, CompensationFailed, st.Compensation)
+			_, err = host.GetJob(t.Context(), undoJob)
+			require.ErrorIs(t, err, actor.ErrJobNotFound)
+		})
+	}
+}
+
+type recoveryFailureHost struct {
+	*fakeHost
+
+	failAlarm bool
+	failRead  bool
+	failState bool
+	failRetry bool
+}
+
+func (h *recoveryFailureHost) SetAlarm(ctx context.Context, actorType string, actorID string, name string, props actor.AlarmProperties) error {
+	if h.failAlarm {
+		return errors.New("injected alarm write failure")
+	}
+	return h.fakeHost.SetAlarm(ctx, actorType, actorID, name, props)
+}
+
+func (h *recoveryFailureHost) SetState(ctx context.Context, actorType string, actorID string, state any, opts *actor.SetStateOpts) error {
+	if h.failState {
+		return errors.New("injected state write failure")
+	}
+	return h.fakeHost.SetState(ctx, actorType, actorID, state, opts)
+}
+
+func (h *recoveryFailureHost) GetState(ctx context.Context, actorType string, actorID string, into any) error {
+	if h.failRead {
+		return errors.New("injected state read failure")
+	}
+	return h.fakeHost.GetState(ctx, actorType, actorID, into)
+}
+
+func (h *recoveryFailureHost) RetryJob(ctx context.Context, jobID string) (string, error) {
+	if h.failRetry {
+		return "", errors.New("injected job replay failure")
+	}
+	return h.fakeHost.RetryJob(ctx, jobID)
+}
+
+func TestRecurringDeadlineOutlivesTransientFailures(t *testing.T) {
+	for _, failure := range []string{"journal read", "journal write", "alarm replacement"} {
+		t.Run(failure, func(t *testing.T) {
+			host := &recoveryFailureHost{fakeHost: newFakeHost()}
+			wf, err := New("recurring", WithTimeout(time.Minute), WithSteps(WaitForEvent("approval")))
+			require.NoError(t, err)
+			o := newReviewOrchestrator(t, wf, "instance", actor.NewService(host))
+			err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
+			require.NoError(t, err)
+			props, err := host.GetAlarm(t.Context(), builtinActorType(wf.baseType), "instance", alarmDeadline)
+			require.NoError(t, err)
+			require.Equal(t, "PT5S", props.Interval)
+			err = props.Validate()
+			require.NoError(t, err)
+			delivery := &payloadEnvelope{value: props.Data}
+			o = newReviewOrchestrator(t, wf, "instance", actor.NewService(host))
+
+			// Fail more occurrences than the ordinary alarm retry limit while preventing any replacement write from repairing the row
+			host.failAlarm = true
+			host.failRead = failure == "journal read"
+			host.failState = failure == "journal write"
+			for range orchestratorMaxAttempts + 5 {
+				err = o.Alarm(t.Context(), alarmDeadline, delivery)
+				require.NoError(t, err, "a recurring occurrence must complete so the runtime reschedules it")
+				remaining, readErr := host.GetAlarm(t.Context(), builtinActorType(wf.baseType), "instance", alarmDeadline)
+				require.NoError(t, readErr)
+				require.Equal(t, "PT5S", remaining.Interval)
+				require.Equal(t, StatusRunning, readJournal(t, host.fakeHost, wf, "instance").Status)
+			}
+
+			// Recovery of the dependencies allows a later occurrence to enforce the original instance timeout and remove the recurrence
+			host.failAlarm = false
+			host.failRead = false
+			host.failState = false
+			st, err := o.client.GetState(t.Context())
+			require.NoError(t, err)
+			st.StartedAt = time.Now().Add(-2 * time.Minute)
+			st.DeadlineAt = instanceDeadline(&st, wf.def)
+			err = o.client.SetState(t.Context(), st, nil)
+			require.NoError(t, err)
+			err = o.Alarm(t.Context(), alarmDeadline, delivery)
+			require.NoError(t, err)
+			require.Equal(t, StatusFailed, readJournal(t, host.fakeHost, wf, "instance").Status)
+			_, err = host.GetAlarm(t.Context(), builtinActorType(wf.baseType), "instance", alarmDeadline)
+			require.ErrorIs(t, err, actor.ErrAlarmNotFound)
+		})
+	}
+}
+
+func TestLegacyDeadlineMigratesBeforeAJournalFailure(t *testing.T) {
+	host := &recoveryFailureHost{fakeHost: newFakeHost()}
+	wf, err := New("legacy-alarm", WithSteps(WaitForEvent("approval")))
+	require.NoError(t, err)
+	o := newReviewOrchestrator(t, wf, "instance", actor.NewService(host))
+	err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
+	require.NoError(t, err)
+
+	// An alarm created by an older release must gain its fallback before a journal write can prevent a turn
+	err = host.SetAlarm(t.Context(), builtinActorType(wf.baseType), "instance", alarmDeadline, actor.AlarmProperties{DueTime: time.Now()})
+	require.NoError(t, err)
+	host.failState = true
+	err = o.Alarm(t.Context(), alarmDeadline, nil)
+	require.NoError(t, err)
+	props, err := host.GetAlarm(t.Context(), builtinActorType(wf.baseType), "instance", alarmDeadline)
+	require.NoError(t, err)
+	require.Equal(t, "PT5S", props.Interval)
+	require.Equal(t, deadlinePayload{Recurring: true}, props.Data)
+}
+
+func TestRecurringDeadlineStopsForInactiveJournals(t *testing.T) {
+	for _, status := range []Status{"", StatusCompleted, StatusSuspended} {
+		t.Run(string(status), func(t *testing.T) {
+			host := newFakeHost()
+			wf, err := New("inactive-alarm", WithSteps(WaitForEvent("approval")))
+			require.NoError(t, err)
+			o := newTestOrchestrator(t, wf, host, "instance")
+			err = o.client.SetState(t.Context(), instanceState{Status: status}, nil)
+			require.NoError(t, err)
+			props := deadlineAlarmProperties(time.Now())
+			err = o.client.SetAlarm(t.Context(), alarmDeadline, props)
+			require.NoError(t, err)
+
+			// A recurrence must stop explicitly when no active journal needs its deadline
+			err = o.Alarm(t.Context(), alarmDeadline, &payloadEnvelope{value: props.Data})
+			require.NoError(t, err)
+			_, err = host.GetAlarm(t.Context(), builtinActorType(wf.baseType), "instance", alarmDeadline)
+			require.ErrorIs(t, err, actor.ErrAlarmNotFound)
+		})
+	}
+}
+
+func TestDeadLetterRecoveryPreservesOriginalEvents(t *testing.T) {
+	cases := []struct {
+		method  string
+		payload any
+		status  Status
+	}{
+		{methodStart, startPayload{Version: 1, Input: json.RawMessage(`{"order":42}`), CreatedAt: time.Date(2026, time.September, 1, 0, 0, 0, 0, time.UTC)}, StatusRunning},
+		{methodEvent, eventPayload{Name: "approval", Payload: json.RawMessage(`{"approved":true}`)}, StatusCompleted},
+		{methodCancel, reasonPayload{Reason: "customer withdrew order"}, StatusCancelled},
+		{methodSuspend, reasonPayload{Reason: "waiting for operator"}, StatusSuspended},
+		{methodResume, nil, StatusRunning},
+	}
+	for _, tc := range cases {
+		for _, callbackFails := range []bool{false, true} {
+			name := tc.method
+			if callbackFails {
+				name += "/callback failure"
+			}
+			t.Run(name, func(t *testing.T) {
+				host := &recoveryFailureHost{fakeHost: newFakeHost()}
+				wf, err := New("event-recovery", WithSteps(WaitForEvent("approval")))
+				require.NoError(t, err)
+				svc := actor.NewService(host)
+				o := newReviewOrchestrator(t, wf, "instance", svc)
+				if tc.method != methodStart {
+					err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
+					require.NoError(t, err)
+				}
+				if tc.method == methodResume {
+					err = o.Job(t.Context(), methodSuspend, &payloadEnvelope{value: reasonPayload{Reason: "paused"}})
+					require.NoError(t, err)
+				}
+
+				// Exhaust a durable request before it can alter the journal and invoke the same best-effort hook as the runtime
+				jobID, _, err := o.client.Dispatch(t.Context(), tc.method, tc.payload)
+				require.NoError(t, err)
+				host.deadLetter(jobID, "transient delivery failure")
+				host.failRetry = callbackFails
+				err = o.JobFailed(t.Context(), jobID, tc.method, nil, errors.New("transient delivery failure"))
+				if callbackFails {
+					require.Error(t, err)
+				} else {
+					require.NoError(t, err)
+				}
+
+				// A new activation's recurring deadline can repair a failed callback from the retained record alone
+				host.failRetry = false
+				o = newReviewOrchestrator(t, wf, "instance", svc)
+				err = o.Alarm(t.Context(), alarmDeadline, &payloadEnvelope{value: deadlinePayload{Recurring: true}})
+				require.NoError(t, err)
+				recovered := host.jobIDFor(builtinActorType(wf.baseType), "instance", tc.method)
+				require.NotEmpty(t, recovered)
+				require.NotEqual(t, jobID, recovered)
+				require.Equal(t, tc.payload, host.jobPayloads[recovered])
+				deliverInstanceJob(t, host.fakeHost, wf, "instance", tc.method, o)
+				st := readJournal(t, host.fakeHost, wf, "instance")
+				require.Equal(t, tc.status, st.Status)
+				if tc.method == methodEvent {
+					require.JSONEq(t, `{"approved":true}`, string(st.Output))
+				}
+				if tc.method == methodStart {
+					require.JSONEq(t, `{"order":42}`, string(st.Input))
+				}
+			})
+		}
+	}
+}
+
+func TestDeadlineRecoversAnEventWhoseCallbackNeverRan(t *testing.T) {
+	host := newFakeHost()
+	wf, err := New("missed-hook", WithSteps(WaitForEvent("approval")))
+	require.NoError(t, err)
+	o := newTestOrchestrator(t, wf, host, "instance")
+	err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
+	require.NoError(t, err)
+	payload := eventPayload{Name: "approval", Payload: json.RawMessage(`"accepted"`)}
+	jobID, _, err := o.client.Dispatch(t.Context(), methodEvent, payload)
+	require.NoError(t, err)
+	host.deadLetter(jobID, "transient delivery failure")
+
+	// The durable alarm is sufficient to repair a dead letter even when no failure callback was delivered
+	err = o.Alarm(t.Context(), alarmDeadline, &payloadEnvelope{value: deadlinePayload{Recurring: true}})
+	require.NoError(t, err)
+	deliverInstanceJob(t, host, wf, "instance", methodEvent, o)
+	st := readJournal(t, host, wf, "instance")
+	require.Equal(t, StatusCompleted, st.Status)
+	require.JSONEq(t, `"accepted"`, string(st.Output))
+}
+
+func TestPermanentDeliveryFailuresRemainInspectable(t *testing.T) {
+	host := newFakeHost()
+	wf, err := New("permanent-event", WithSteps(WaitForEvent("approval")))
+	require.NoError(t, err)
+	o := newTestOrchestrator(t, wf, host, "instance")
+	err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
+	require.NoError(t, err)
+	jobID, _, err := o.client.Dispatch(t.Context(), methodEvent, "malformed payload")
+	require.NoError(t, err)
+	host.deadLetter(jobID, actor.ErrJobPermanentFailure.Error())
+
+	// Retrying a malformed payload cannot succeed and must not create an endless recovery loop
+	err = o.JobFailed(t.Context(), jobID, methodEvent, nil, actor.ErrJobPermanentFailure)
+	require.NoError(t, err)
+	err = o.Alarm(t.Context(), alarmDeadline, &payloadEnvelope{value: deadlinePayload{Recurring: true}})
+	require.NoError(t, err)
+	job, err := host.GetJob(t.Context(), jobID)
+	require.NoError(t, err)
+	require.Equal(t, actor.JobStatusDeadLettered, job.Status)
+	require.Equal(t, StatusRunning, readJournal(t, host, wf, "instance").Status)
+}
+
+type dispatchCountingHost struct {
+	*fakeHost
+
+	dispatchCalls map[string]int
+	failAck       bool
+}
+
+func (h *dispatchCountingHost) Dispatch(ctx context.Context, actorType string, actorID string, method string, data any, props actor.JobProperties) (string, bool, error) {
+	// Count provider requests before idempotency coalescing so repeated dispatch work remains visible
+	h.mu.Lock()
+	h.dispatchCalls[method]++
+	h.mu.Unlock()
+	return h.fakeHost.Dispatch(ctx, actorType, actorID, method, data, props)
+}
+
+func (h *dispatchCountingHost) SetState(ctx context.Context, actorType string, actorID string, state any, opts *actor.SetStateOpts) error {
+	// Reject only acknowledgement writes to reproduce a crash after job acceptance but before its marker becomes durable
+	st, ok := state.(instanceState)
+	if h.failAck && ok {
+		for _, sr := range st.Steps {
+			for _, tr := range sr.Tasks {
+				if tr.DispatchedAttempt > 0 {
+					return errors.New("injected dispatch acknowledgement failure")
+				}
+			}
+		}
+	}
+	return h.fakeHost.SetState(ctx, actorType, actorID, state, opts)
+}
+
+func TestFanOutDispatchCallsGrowLinearly(t *testing.T) {
+	for _, width := range []int{100, 200, 400} {
+		for _, kind := range []string{"worker", "child"} {
+			for _, window := range []int{0, 8} {
+				t.Run(fmt.Sprintf("%s/%d/window-%d", kind, width, window), func(t *testing.T) {
+					// Keep the provider jobs live so the old quadratic dispatch loop would still be counted despite coalescing
+					host := &dispatchCountingHost{fakeHost: newFakeHost(), dispatchCalls: map[string]int{}}
+					work := ForEach("work", WithItemsFrom("plan"), WithRun(noopRun), WithCompensate(noopCompensate), WithMaxParallel(window))
+					forwardMethod := methodRun
+					undoMethod := methodCompensate
+					if kind == "child" {
+						child, err := New("performance-child", WithSteps(Step("effect", WithRun(noopRun), WithCompensate(noopCompensate))))
+						require.NoError(t, err)
+						work = ForEach("work", WithItemsFrom("plan"), WithChild(child), WithMaxParallel(window))
+						forwardMethod = methodStart
+						undoMethod = methodUnwind
+					}
+					wf, err := New("performance-fanout", WithSteps(
+						Step("plan", WithRun(noopRun)),
+						work,
+						WaitForEvent("hold"),
+					))
+					require.NoError(t, err)
+					svc := actor.NewService(host)
+					o := newReviewOrchestrator(t, wf, "instance", svc)
+					err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
+					require.NoError(t, err)
+					items := make([]int, width)
+					encoded, err := json.Marshal(items)
+					require.NoError(t, err)
+					err = o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "plan", Attempt: 1, Output: encoded}})
+					require.NoError(t, err)
+
+					// Every result uses a fresh activation, proving the dispatch bound comes from durable markers
+					for index := range width {
+						o = newReviewOrchestrator(t, wf, "instance", svc)
+						err = o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "work", Index: index, Attempt: 1, Output: json.RawMessage(`"effect"`)}})
+						require.NoError(t, err)
+					}
+					expectedForward := width
+					if kind == "worker" {
+						expectedForward++
+					}
+					assert.Equal(t, expectedForward, host.dispatchCalls[forwardMethod])
+
+					// A wide compensation frame must also dispatch each member only once across sequential acknowledgements
+					err = o.Job(t.Context(), methodCancel, &payloadEnvelope{value: reasonPayload{Reason: "undo"}})
+					require.NoError(t, err)
+					for index := range width {
+						o = newReviewOrchestrator(t, wf, "instance", svc)
+						err = o.Job(t.Context(), methodCompensated, &payloadEnvelope{value: compReportPayload{Step: "work", Index: index, Attempt: 1}})
+						require.NoError(t, err)
+					}
+					assert.Equal(t, width, host.dispatchCalls[undoMethod])
+					st := readJournal(t, host.fakeHost, wf, "instance")
+					assert.Equal(t, StatusCancelled, st.Status)
+					assert.Equal(t, CompensationCompleted, st.Compensation)
+				})
+			}
+		}
+	}
+}
+
+func TestDispatchAcknowledgementFailureDoesNotPoisonRetry(t *testing.T) {
+	// Accept the first task's job but fail the subsequent acknowledgement write
+	host := &dispatchCountingHost{fakeHost: newFakeHost(), dispatchCalls: map[string]int{}, failAck: true}
+	wf, err := New("dispatch-ack-failure", WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+	svc := actor.NewService(host)
+	o := newReviewOrchestrator(t, wf, "instance", svc)
+	start := &payloadEnvelope{value: startPayload{Version: 1}}
+	require.ErrorContains(t, o.Job(t.Context(), methodStart, start), "acknowledgement failure")
+	st := readJournal(t, host.fakeHost, wf, "instance")
+	assert.Zero(t, st.step("work").task(0).DispatchedAttempt)
+	cached, err := o.client.GetState(t.Context())
+	require.NoError(t, err)
+	assert.Zero(t, cached.step("work").task(0).DispatchedAttempt)
+
+	// The retry repeats the same idempotency key, then a new activation skips the durably acknowledged job
+	host.failAck = false
+	err = o.Job(t.Context(), methodStart, start)
+	require.NoError(t, err)
+	assert.Equal(t, 2, host.dispatchCalls[methodRun])
+	assert.Len(t, host.dispatchedTo(builtinActorType(wf.workerType("")), workerActorID("instance", "work", 0)), 1)
+	o = newReviewOrchestrator(t, wf, "instance", svc)
+	err = o.Job(t.Context(), methodStart, start)
+	require.NoError(t, err)
+	assert.Equal(t, 2, host.dispatchCalls[methodRun])
+	st = readJournal(t, host.fakeHost, wf, "instance")
+	assert.Equal(t, 1, st.step("work").task(0).DispatchedAttempt)
+}
+
+func TestDispatchMarkersPermitNewAttempts(t *testing.T) {
+	// A transport failure reported by a dead-lettered worker must still schedule the engine's next attempt
+	host := &dispatchCountingHost{fakeHost: newFakeHost(), dispatchCalls: map[string]int{}}
+	wf, err := New("dispatch-attempts", WithSteps(
+		Step("work", WithRun(noopRun), WithCompensate(noopCompensate)),
+		WaitForEvent("hold"),
+	))
+	require.NoError(t, err)
+	o := newReviewOrchestrator(t, wf, "instance", actor.NewService(host))
+	err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
+	require.NoError(t, err)
+	err = o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "work", Attempt: 1, Error: "transport exhausted", Retryable: true}})
+	require.NoError(t, err)
+	assert.Equal(t, 2, host.dispatchCalls[methodRun])
+	err = o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "work", Attempt: 2}})
+	require.NoError(t, err)
+	err = o.Job(t.Context(), methodCancel, &payloadEnvelope{value: reasonPayload{Reason: "undo"}})
+	require.NoError(t, err)
+
+	// Compensation retries use their own durable attempt acknowledgement
+	err = o.Job(t.Context(), methodCompensated, &payloadEnvelope{value: compReportPayload{Step: "work", Attempt: 1, Error: "transport exhausted", Retryable: true}})
+	require.NoError(t, err)
+	assert.Equal(t, 2, host.dispatchCalls[methodCompensate])
+	err = o.Job(t.Context(), methodCompensated, &payloadEnvelope{value: compReportPayload{Step: "work", Attempt: 2}})
+	require.NoError(t, err)
+	assert.Equal(t, CompensationCompleted, readJournal(t, host.fakeHost, wf, "instance").Compensation)
+}
+
+func TestOversizedDispatchAcknowledgementRecordsTermination(t *testing.T) {
+	// Measure the journal before its first dispatch acknowledgement so the marker alone crosses the configured cap
+	baselineHost := newFakeHost()
+	baselineWF, err := New("oversized-markers", WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+	baselineActor := newTestOrchestrator(t, baselineWF, baselineHost, "instance")
+	err = baselineActor.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
+	require.NoError(t, err)
+	baseline := readJournal(t, baselineHost, baselineWF, "instance")
+	baseline.step("work").task(0).DispatchedAttempt = 0
+	baseline.encoded = nil
+	limit, err := journalSize(&baseline)
+	require.NoError(t, err)
+
+	// The second state write may terminate the instance after the start transition was already counted
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() {
+		err := provider.Shutdown(t.Context())
+		require.NoError(t, err)
+	})
+	host := &dispatchCountingHost{fakeHost: newFakeHost(), dispatchCalls: map[string]int{}}
+	wf, err := New("oversized-markers", WithMaxJournalSize(limit), WithMeter(provider.Meter("markers")), WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+	o := newReviewOrchestrator(t, wf, "instance", actor.NewService(host))
+	err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
+	require.NoError(t, err)
+	st := readJournal(t, host.fakeHost, wf, "instance")
+	assert.Equal(t, 1, host.dispatchCalls[methodRun], "the ordinary journal must fit until dispatch is acknowledged")
+	assert.Equal(t, StatusFailed, st.Status)
+	assert.Contains(t, st.Cause, ErrJournalTooLarge.Error())
+	assert.Equal(t, int64(0), int64MetricTotal(t, reader, "francis.workflow.instances.running"))
+	assert.Equal(t, int64(1), int64MetricTotal(t, reader, "francis.workflow.instances.terminated"))
+}
+
+func TestFanOutShipsSourceArrayOnlyWhenRequested(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("explicit-%t", explicit), func(t *testing.T) {
+			// The item is sufficient for an ordinary fan-out handler, while explicit input dependencies retain their contract
+			now := time.Now()
+			work := ForEach("work", WithItemsFrom("plan"), WithRun(noopRun), WithCompensate(noopCompensate))
+			if explicit {
+				work = work.With(WithInputFrom("plan"))
+			}
+			def := testDefinition(t, "fanout-payload", WithSteps(Step("plan", WithRun(noopRun)), work))
+			st := startJournal(t, def, now)
+			reportSuccess(t, st, def, "plan", 0, []string{"first", "second"}, now)
+			advance(st, def, "instance", now)
+			o := &orchestrator{instanceID: "instance", def: def, wf: &Workflow{baseType: "workflow-payload"}}
+			sr := st.step("work")
+			d := def.byName["work"]
+			payload := o.buildRunPayload(st, sr, d, d, sr.task(0))
+			assert.JSONEq(t, `"first"`, string(payload.Item))
+			if explicit {
+				assert.JSONEq(t, `["first","second"]`, string(payload.Outputs["plan"]))
+			} else {
+				assert.NotContains(t, payload.Outputs, "plan")
+			}
 		})
 	}
 }
