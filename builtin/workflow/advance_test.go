@@ -1416,3 +1416,143 @@ func TestCompensationIgnoresForwardStepDeadline(t *testing.T) {
 		})
 	}
 }
+
+func TestSuspendedFailurePreservesSuspension(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "suspend", WithSteps(
+		Step("a", WithRun(noopRun), WithCompensate(noopCompensate)),
+		Step("b", WithRun(noopRun)),
+	))
+	st := startJournal(t, def, now)
+	reportSuccess(t, st, def, "a", 0, "effect", now)
+	advance(st, def, "inst-1", now)
+	apply(st, def, &event{kind: evSuspend}, now)
+	advance(st, def, "inst-1", now)
+
+	// A report arriving during a pause must preserve the pause and leave a resumable unwind
+	reportFailure(t, st, def, "b", 0, "failed", false, now)
+	advance(st, def, "inst-1", now)
+	assert.Equal(t, StatusSuspended, st.Status)
+	t.Logf("status=%s deadline=%v stack=%v a.status=%s a.comp=%v", st.Status, st.DeadlineAt, st.Stack, st.step("a").Status, st.step("a").Tasks[0].Comp)
+
+	// Resuming opens the unwind that the suspended failure recorded
+	apply(st, def, &event{kind: evResume}, now)
+	advance(st, def, "inst-1", now)
+	assert.Equal(t, StatusCompensating, st.Status)
+	assert.NotNil(t, st.step("a").Tasks[0].Comp)
+}
+
+func TestLateSuccessJoinsOpenCompensationFrame(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "late-frame", WithSteps(Parallel("group",
+		Step("a", WithRun(noopRun), WithCompensate(noopCompensate)),
+		Step("b", WithRun(noopRun), WithCompensate(noopCompensate)),
+		Step("c", WithRun(noopRun)),
+	)))
+	st := startJournal(t, def, now)
+	reportSuccess(t, st, def, "group", 0, "a-effect", now)
+	advance(st, def, "inst-1", now)
+	reportFailure(t, st, def, "group", 2, "failed", false, now)
+	advance(st, def, "inst-1", now)
+	require.Equal(t, StepCompensating, st.step("group").Status)
+
+	// The late success is a new effect that still needs its own compensation
+	reportSuccess(t, st, def, "group", 1, "b-effect", now)
+	advance(st, def, "inst-1", now)
+	assert.NotNil(t, st.step("group").Tasks[1].Comp)
+	apply(st, def, &event{kind: evCompensated, comp: &compReportPayload{Step: "group", Index: 0, Attempt: 1}}, now)
+	advance(st, def, "inst-1", now)
+	assert.False(t, st.Status.IsTerminal(), "the second effect still needs undo")
+	t.Logf("status=%s compensation=%s b.output=%s b.comp=%v", st.Status, st.Compensation, st.step("group").Tasks[1].Output, st.step("group").Tasks[1].Comp)
+}
+
+func TestRepeatedUnwindPreservesFailedRollback(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "child-failed-undo", WithSteps(
+		Step("a", WithRun(noopRun), WithCompensate(noopCompensate)),
+		Step("b", WithRun(noopRun)),
+	))
+	st := startJournal(t, def, now)
+	st.Parent = &parentRef{InstanceID: "parent", Workflow: "parent-workflow", Step: "child", Attempt: 1}
+	reportSuccess(t, st, def, "a", 0, "effect", now)
+	advance(st, def, "inst-1", now)
+	reportFailure(t, st, def, "b", 0, "failed", false, now)
+	advance(st, def, "inst-1", now)
+	apply(st, def, &event{kind: evCompensated, comp: &compReportPayload{Step: "a", Index: 0, Attempt: 1, Error: "undo failed"}}, now)
+	advance(st, def, "inst-1", now)
+	require.Equal(t, CompensationPartial, st.Compensation)
+
+	// Asking for the same rollback later cannot erase its known failure
+	apply(st, def, &event{kind: evUnwind, fromParent: true, compAttempt: 1}, now)
+	advance(st, def, "inst-1", now)
+	assert.Equal(t, CompensationPartial, st.Compensation)
+	t.Logf("status=%s compensation=%s a.status=%s a.comp.error=%s", st.Status, st.Compensation, st.step("a").Status, st.step("a").Tasks[0].Comp.Error)
+}
+
+func TestStepTimeoutRecordsLateSuccess(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "timeout-late", WithSteps(
+		Step("a", WithRun(noopRun), WithCompensate(noopCompensate)),
+		Step("b", WithRun(noopRun), WithCompensate(noopCompensate), WithStepTimeout(time.Second)),
+	))
+	st := startJournal(t, def, now)
+	reportSuccess(t, st, def, "a", 0, "a-effect", now)
+	advance(st, def, "inst-1", now)
+	o := &orchestrator{def: def}
+	o.applyElapsedDeadlines(st, now.Add(2*time.Second))
+	advance(st, def, "inst-1", now.Add(2*time.Second))
+	require.Equal(t, StatusCompensating, st.Status)
+
+	// Timeout does not interrupt the worker, so its eventual success is still real
+	duplicate := reportSuccess(t, st, def, "b", 0, "b-effect", now.Add(3*time.Second))
+	advance(st, def, "inst-1", now.Add(3*time.Second))
+	assert.False(t, duplicate)
+	assert.NotNil(t, st.step("b").Tasks[0].Comp)
+}
+
+func TestLateSuccessReopensATerminatedCancellation(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "terminal-late", WithSteps(
+		Step("effect", WithRun(noopRun), WithCompensate(noopCompensate)),
+	))
+	st := startJournal(t, def, now)
+	apply(st, def, &event{kind: evCancel, reason: "stop"}, now)
+	advance(st, def, "inst-1", now)
+	require.Equal(t, StatusCancelled, st.Status)
+
+	// A worker that was already executing can still reveal an effect after the cancellation looked terminal
+	duplicate := reportSuccess(t, st, def, "effect", 0, "created-resource", now.Add(time.Second))
+	require.False(t, duplicate)
+	advance(st, def, "inst-1", now.Add(time.Second))
+	assert.Equal(t, StatusCompensating, st.Status)
+	assert.NotNil(t, st.step("effect").task(0).Comp)
+}
+
+func TestLateSuccessDoesNotRepeatAClosedCompensation(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "terminal-frame", WithSteps(Parallel("effects",
+		Step("first", WithRun(noopRun), WithCompensate(noopCompensate)),
+		Step("second", WithRun(noopRun), WithCompensate(noopCompensate)),
+	)))
+	st := startJournal(t, def, now)
+	apply(st, def, &event{kind: evCancel, reason: "stop"}, now)
+	advance(st, def, "inst-1", now)
+	require.Equal(t, StatusCancelled, st.Status)
+
+	// The first late effect reopens and completes its compensation
+	reportSuccess(t, st, def, "effects", 0, "first-effect", now.Add(time.Second))
+	advance(st, def, "inst-1", now.Add(time.Second))
+	apply(st, def, &event{kind: evCompensated, comp: &compReportPayload{Step: "effects", Index: 0, Attempt: 1}}, now.Add(2*time.Second))
+	advance(st, def, "inst-1", now.Add(2*time.Second))
+	require.Equal(t, StatusCancelled, st.Status)
+	require.True(t, st.step("effects").task(0).Compensated)
+	require.True(t, st.step("effects").task(0).Comp.Done)
+
+	// A second late effect opens only the compensation that has not already run
+	reportSuccess(t, st, def, "effects", 1, "second-effect", now.Add(3*time.Second))
+	advance(st, def, "inst-1", now.Add(3*time.Second))
+	assert.True(t, st.step("effects").task(0).Comp.Done)
+	assert.True(t, st.step("effects").task(0).Compensated)
+	assert.NotNil(t, st.step("effects").task(1).Comp)
+	assert.False(t, st.step("effects").task(1).Comp.Done)
+}

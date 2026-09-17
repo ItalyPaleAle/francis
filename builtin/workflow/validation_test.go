@@ -322,3 +322,18 @@ func TestSupportedParallelAndChildOptionsRemainValid(t *testing.T) {
 	))
 	require.NoError(t, err)
 }
+
+func TestStepSpecReuseDoesNotMutateBuiltDefinition(t *testing.T) {
+	// Reusing a declaration for a second workflow must preserve the first workflow's validated attempt policy
+	spec := Step("charge", WithRun(noopRun), WithMaxAttempts(1))
+	first, err := New("first", WithSteps(spec))
+	require.NoError(t, err)
+	originalFingerprint := first.def.fingerprint
+	_, err = New("second", WithSteps(spec.With(WithMaxAttempts(9))))
+	require.NoError(t, err)
+	assert.Equal(t, 1, first.def.byName["charge"].maxAttempts, "building another workflow mutated the existing definition")
+
+	// Recomputing the fingerprint reveals that the live graph no longer matches the fingerprint cached at construction
+	first.def.setFingerprint()
+	assert.Equal(t, originalFingerprint, first.def.fingerprint, "the graph changed behind its previously published fingerprint")
+}

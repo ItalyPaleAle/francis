@@ -575,7 +575,7 @@ func TestPurgeOverlapsIndependentJobCleanup(t *testing.T) {
 		entered:    make(chan struct{}, 4),
 		release:    make(chan struct{}),
 	}
-	o := newReviewOrchestrator(t, wf, "instance-1", actor.NewService(host))
+	o := newRoutedOrchestrator(t, wf, "instance-1", actor.NewService(host))
 	st := &instanceState{
 		Workflow: wf.name,
 		Version:  wf.def.version,
@@ -620,7 +620,7 @@ func TestTerminationOverlapsIndependentJobCancellation(t *testing.T) {
 		entered:    make(chan struct{}, 4),
 		release:    make(chan struct{}),
 	}
-	o := newReviewOrchestrator(t, wf, "instance-1", actor.NewService(host))
+	o := newRoutedOrchestrator(t, wf, "instance-1", actor.NewService(host))
 	st := &instanceState{
 		Workflow: wf.name,
 		Version:  wf.def.version,
@@ -759,7 +759,7 @@ func TestSweepRetainsDescendantsUntilTheirRootTerminates(t *testing.T) {
 	require.NoError(t, err)
 
 	// The leaf sweep must follow its completed parent to the still-active root before deciding it can purge
-	sweepHost := &reviewAPIHost{fakeHost: host, workflows: map[string]*Workflow{builtinActorType(leafWF.baseType): leafWF}}
+	sweepHost := &registryRoutingHost{fakeHost: host, workflows: map[string]*Workflow{builtinActorType(leafWF.baseType): leafWF}}
 	removed, err := leafWF.Service(actor.NewService(sweepHost)).PurgeTerminated(t.Context())
 	require.NoError(t, err)
 	require.Zero(t, removed)
@@ -815,7 +815,7 @@ func TestPurgeRetriesAFailedStateDeletion(t *testing.T) {
 	host := &deleteStateFailingHost{fakeHost: newFakeHost()}
 	wf, err := New("purge-retry", WithSteps(Step("effect", WithRun(noopRun))))
 	require.NoError(t, err)
-	o := newReviewOrchestrator(t, wf, "instance", actor.NewService(host))
+	o := newRoutedOrchestrator(t, wf, "instance", actor.NewService(host))
 	err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
 	require.NoError(t, err)
 	err = o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "effect", Index: 0, Attempt: 1}})
@@ -846,4 +846,201 @@ func (h *undoCleanupHost) ListJobs(ctx context.Context, actorType string, actorI
 		return nil, errors.New("injected undo cleanup failure")
 	}
 	return h.fakeHost.ListJobs(ctx, actorType, actorID)
+}
+
+func TestSweepCollectsChildAfterParentJournalExpires(t *testing.T) {
+	// Persist an old completed child with an absent parent, which models the parent's independent retention TTL expiring
+	wf, err := New("orphan", WithSteps(Step("done", WithRun(noopRun))))
+	require.NoError(t, err)
+	host := &registryRoutingHost{fakeHost: newFakeHost(), workflows: map[string]*Workflow{builtinActorType(wf.baseType): wf}}
+	svc := actor.NewService(host)
+	child := newRoutedOrchestrator(t, wf, "child-1", svc)
+	st := &instanceState{
+		Workflow:    wf.name,
+		Version:     1,
+		Status:      StatusCompleted,
+		CompletedAt: time.Now().Add(-3 * defaultRetention),
+		Parent:      &parentRef{Workflow: "expired-parent", InstanceID: "parent-1", Step: "child"},
+	}
+	require.NoError(t, child.persist(t.Context(), st, time.Now()))
+	require.Zero(t, host.ttls[key(builtinActorType(wf.baseType), "child-1")], "children have no TTL fallback")
+	active, err := child.parentStillRunning(t.Context(), st.Parent)
+	require.NoError(t, err)
+	require.False(t, active, "the missing parent cannot need a future compensation")
+
+	// The actual sweep must reclaim this child now that no parent remains to purge it recursively
+	removed, err := wf.Service(svc).PurgeTerminated(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, 1, removed, "the sweep skipped a permanently orphaned child")
+	var remaining instanceState
+	err = host.GetState(t.Context(), builtinActorType(wf.baseType), "child-1", &remaining)
+	assert.ErrorIs(t, err, actor.ErrStateNotFound)
+}
+
+func TestPurgeRemovesRetainedWorkerAndUndoJobs(t *testing.T) {
+	// Recreate a terminal compensated journal with retained jobs in all three actor families
+	wf, err := New("purge-jobs", WithSteps(Step("charge", WithRun(noopRun), WithCompensate(noopCompensate))))
+	require.NoError(t, err)
+	host := newFakeHost()
+	o := newTestOrchestrator(t, wf, host, "inst-1")
+	st := &instanceState{
+		Workflow:     wf.name,
+		Version:      1,
+		Status:       StatusCancelled,
+		Compensation: CompensationCompleted,
+		CompletedAt:  time.Now(),
+		Steps:        []stepRecord{{Name: "charge", Kind: KindStep, Status: StepCompensated, Tasks: []taskRecord{{Index: 0, Done: true, Compensated: true, Comp: &compRecord{Done: true, Attempts: 1}}}}},
+	}
+	require.NoError(t, o.persist(t.Context(), st, time.Now()))
+	retainedIDs := make([]string, 0, 3)
+	for _, target := range []struct{ actorType, actorID, method string }{
+		{builtinActorType(wf.baseType), "inst-1", methodDone},
+		{builtinActorType(wf.workerType("")), workerActorID("inst-1", "charge", 0), methodRun},
+		{builtinActorType(wf.undoType("")), workerActorID("inst-1", "charge", 0), methodCompensate},
+	} {
+		id, _, dispatchErr := host.Dispatch(t.Context(), target.actorType, target.actorID, target.method, nil, actor.JobProperties{})
+		require.NoError(t, dispatchErr)
+		host.deadLetter(id, "retained transport failure")
+		retainedIDs = append(retainedIDs, id)
+	}
+
+	// Successful purge must remove every retained job before deleting the only journal that identifies its task actors
+	result, err := o.purge(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, purgeResult{Found: true}, result)
+	for _, id := range retainedIDs {
+		job, jobErr := host.GetJob(t.Context(), id)
+		assert.ErrorIs(t, jobErr, actor.ErrJobNotFound, "purge left job %s for %s/%s", id, job.ActorType, job.ActorID)
+	}
+}
+
+func TestPurgeUsesTheJournaledChildType(t *testing.T) {
+	child, err := New("journaled-child", WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+	oldParent, err := New("changing-parent", WithVersion(1), WithSteps(Child("sub", WithDefinition(child))))
+	require.NoError(t, err)
+	newParent, err := New("changing-parent", WithVersion(2), WithSteps(Step("replacement", WithRun(noopRun))))
+	require.NoError(t, err)
+
+	// Persist a version-one parent and child while the serving parent definition no longer contains the child step
+	host := &registryRoutingHost{
+		fakeHost: newFakeHost(),
+		workflows: map[string]*Workflow{
+			builtinActorType(newParent.baseType): newParent,
+			builtinActorType(child.baseType):     child,
+		},
+	}
+	svc := actor.NewService(host)
+	parentState := &instanceState{
+		Workflow:     oldParent.name,
+		Version:      1,
+		Status:       StatusCompleted,
+		Compensation: CompensationNone,
+		CompletedAt:  time.Now(),
+		Steps: []stepRecord{{
+			Name:   "sub",
+			Kind:   KindChild,
+			Status: StepCompleted,
+			Tasks: []taskRecord{{
+				Index:     0,
+				Done:      true,
+				ChildID:   "child-1",
+				ChildType: child.baseType,
+			}},
+		}},
+	}
+	parent := newRoutedOrchestrator(t, newParent, "parent-1", svc)
+	require.NoError(t, parent.persist(t.Context(), parentState, time.Now()))
+	childState := &instanceState{
+		Workflow:     child.name,
+		Version:      1,
+		Status:       StatusCompleted,
+		Compensation: CompensationNone,
+		CompletedAt:  time.Now(),
+		Parent:       &parentRef{Workflow: oldParent.name, InstanceID: "parent-1", Step: "sub"},
+	}
+	childOrchestrator := newRoutedOrchestrator(t, child, "child-1", svc)
+	require.NoError(t, childOrchestrator.persist(t.Context(), childState, time.Now()))
+
+	// Purging through version two must still remove the child named by the version-one journal
+	require.NoError(t, newParent.Service(svc).Purge(t.Context(), "parent-1"))
+	var remaining instanceState
+	err = host.GetState(t.Context(), builtinActorType(child.baseType), "child-1", &remaining)
+	assert.ErrorIs(t, err, actor.ErrStateNotFound)
+}
+
+type failingCleanupHost struct {
+	*fakeHost
+
+	failList bool
+}
+
+func (h *failingCleanupHost) ListJobs(ctx context.Context, actorType string, actorID string) ([]actor.JobInfo, error) {
+	if h.failList {
+		return nil, errors.New("injected job listing failure")
+	}
+	return h.fakeHost.ListJobs(ctx, actorType, actorID)
+}
+
+func TestTerminalCleanupFailureLeavesCancellationRetryable(t *testing.T) {
+	host := &failingCleanupHost{fakeHost: newFakeHost()}
+	wf, err := New("cleanup-retry", WithSteps(Step("effect", WithRun(noopRun), WithCompensate(noopCompensate))))
+	require.NoError(t, err)
+	o := newRoutedOrchestrator(t, wf, "instance", actor.NewService(host))
+	require.NoError(t, o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}}))
+
+	// A cleanup failure must leave the pre-cancellation journal durable so Francis can retry the same event
+	host.failList = true
+	err = o.Job(t.Context(), methodCancel, &payloadEnvelope{value: reasonPayload{Reason: "stop"}})
+	require.Error(t, err)
+	st := readJournal(t, host.fakeHost, wf, "instance")
+	require.Equal(t, StatusRunning, st.Status)
+
+	// Retrying after storage recovers publishes termination only after the queued work is gone
+	host.failList = false
+	require.NoError(t, o.Job(t.Context(), methodCancel, &payloadEnvelope{value: reasonPayload{Reason: "stop"}}))
+	st = readJournal(t, host.fakeHost, wf, "instance")
+	require.Equal(t, StatusCancelled, st.Status)
+	jobs, err := host.ListJobs(t.Context(), builtinActorType(wf.workerType("")), workerActorID("instance", "effect", 0))
+	require.NoError(t, err)
+	require.Empty(t, jobs)
+}
+
+func TestCancelDoesNotLeaveQueuedForwardJob(t *testing.T) {
+	host := newFakeHost()
+	wf, err := New("cancel-queue", WithSteps(Step("a", WithRun(noopRun), WithCompensate(noopCompensate))))
+	require.NoError(t, err)
+	o := newTestOrchestrator(t, wf, host, "inst-1")
+	err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
+	require.NoError(t, err)
+	err = o.Job(t.Context(), methodCancel, &payloadEnvelope{value: reasonPayload{Reason: "stop"}})
+	require.NoError(t, err)
+	st := readJournal(t, host, wf, "inst-1")
+	require.Equal(t, StatusCancelled, st.Status)
+
+	// Cancellation before execution must remove work that is still only queued
+	jobs, err := host.ListJobs(t.Context(), builtinActorType(wf.workerType("")), workerActorID("inst-1", "a", 0))
+	require.NoError(t, err)
+	assert.Empty(t, jobs)
+}
+
+func TestOpenedTasksRetainEveryActorTypeNeededForCleanup(t *testing.T) {
+	child, err := New("cleanup-child", WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+	wf, err := New("cleanup-types",
+		WithCapability("gpu"),
+		WithSteps(Parallel("work",
+			Step("render", WithRun(noopRun), WithCompensate(noopCompensate), WithRequiredCapability("gpu")),
+			Child("child", WithDefinition(child)),
+		)),
+	)
+	require.NoError(t, err)
+	st := startJournal(t, wf.def, time.Now())
+	sr := st.step("work")
+	require.NotNil(t, sr)
+	require.Len(t, sr.Tasks, 2)
+
+	require.Equal(t, wf.workerType("gpu"), sr.Tasks[0].WorkerType)
+	require.Equal(t, wf.undoType("gpu"), sr.Tasks[0].UndoType)
+	require.Equal(t, child.baseType, sr.Tasks[1].ChildType)
 }

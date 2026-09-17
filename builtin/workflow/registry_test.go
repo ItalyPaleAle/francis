@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	msgpack "github.com/vmihailenco/msgpack/v5"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
 	"github.com/italypaleale/francis/actor"
@@ -255,7 +258,7 @@ func TestAHostRechecksARegistryDecline(t *testing.T) {
 
 // identityHost models the registry actor's exclusive invocation lock and can pause the first workflow journal write
 type identityHost struct {
-	*reviewAPIHost
+	*registryRoutingHost
 
 	registryMu   sync.RWMutex
 	writeOnce    sync.Once
@@ -267,7 +270,7 @@ type identityHost struct {
 
 func newIdentityHost(t *testing.T, wf *Workflow) *identityHost {
 	t.Helper()
-	h := &identityHost{reviewAPIHost: &reviewAPIHost{fakeHost: newFakeHost()}, workflowType: builtinActorType(wf.baseType)}
+	h := &identityHost{registryRoutingHost: &registryRoutingHost{fakeHost: newFakeHost()}, workflowType: builtinActorType(wf.baseType)}
 	svc := actor.NewService(h)
 	r, ok := newRegistryActor(wf.registryType(), "singleton", svc).(*registryActor)
 	require.True(t, ok)
@@ -280,7 +283,7 @@ func (h *identityHost) Invoke(ctx context.Context, actorType string, actorID str
 		h.registryMu.Lock()
 		defer h.registryMu.Unlock()
 	}
-	return h.reviewAPIHost.Invoke(ctx, actorType, actorID, method, data, opts...)
+	return h.registryRoutingHost.Invoke(ctx, actorType, actorID, method, data, opts...)
 }
 
 func (h *identityHost) Peek(ctx context.Context, actorType string, actorID string, method string, data any, opts ...actor.InvokeOption) (actor.Envelope, error) {
@@ -288,7 +291,7 @@ func (h *identityHost) Peek(ctx context.Context, actorType string, actorID strin
 		h.registryMu.RLock()
 		defer h.registryMu.RUnlock()
 	}
-	return h.reviewAPIHost.Peek(ctx, actorType, actorID, method, data, opts...)
+	return h.registryRoutingHost.Peek(ctx, actorType, actorID, method, data, opts...)
 }
 
 func (h *identityHost) SetState(ctx context.Context, actorType string, actorID string, state any, opts *actor.SetStateOpts) error {
@@ -357,7 +360,7 @@ func TestForgetSerializesWithJournalPublication(t *testing.T) {
 			require.Equal(t, old.def.fingerprint, p.DefinitionFingerprint)
 
 			// Pause exactly before or after persistence, without depending on scheduler timing
-			o := newReviewOrchestrator(t, old, "inst-1", svc)
+			o := newRoutedOrchestrator(t, old, "inst-1", svc)
 			result := make(chan error, 1)
 			go func() { result <- o.Job(t.Context(), methodStart, &payloadEnvelope{value: p}) }()
 			select {
@@ -576,4 +579,141 @@ func TestChildStartCarriesAuthorizedIdentity(t *testing.T) {
 	assert.Equal(t, child.def.fingerprint, p.DefinitionFingerprint)
 	assert.Positive(t, p.RegistryGeneration)
 	assert.Equal(t, child.def.version, p.Version)
+}
+
+// registryRoutingHost routes synchronous registry and purge calls while retaining the existing fake host's deterministic storage
+type registryRoutingHost struct {
+	*fakeHost
+
+	registry  *registryActor
+	workflows map[string]*Workflow
+}
+
+func (h *registryRoutingHost) Invoke(ctx context.Context, actorType string, actorID string, method string, data any, opts ...actor.InvokeOption) (actor.Envelope, error) {
+	// Route registry calls through the real registry implementation so forget and cache behavior share one durable state
+	if method == methodRegister || method == methodForget || method == methodDefinitions {
+		result, err := h.registry.Invoke(ctx, method, &payloadEnvelope{value: data})
+		return &fakeEnvelope{value: result}, err
+	}
+
+	// Route purge calls through the real orchestrator to exercise the service's sweep decisions
+	if method == methodPurge {
+		wf := h.workflows[actorType]
+		obj := newOrchestrator(wf, actorID, actor.NewService(h))
+		orchestrator, ok := obj.(*orchestrator)
+		if !ok {
+			return nil, errors.New("workflow factory did not return an orchestrator")
+		}
+		result, err := orchestrator.purge(ctx)
+		return &fakeEnvelope{value: result}, err
+	}
+	return h.fakeHost.Invoke(ctx, actorType, actorID, method, data, opts...)
+}
+
+func newRoutedOrchestrator(t *testing.T, wf *Workflow, actorID string, svc *actor.Service) *orchestrator {
+	t.Helper()
+	obj := newOrchestrator(wf, actorID, svc)
+	orchestrator, ok := obj.(*orchestrator)
+	require.True(t, ok)
+	return orchestrator
+}
+
+func (h *registryRoutingHost) Peek(ctx context.Context, actorType string, actorID string, method string, data any, opts ...actor.InvokeOption) (actor.Envelope, error) {
+	if method == methodCheck {
+		result, err := h.registry.Peek(ctx, method, &payloadEnvelope{value: data})
+		return &fakeEnvelope{value: result}, err
+	}
+	return h.fakeHost.Peek(ctx, actorType, actorID, method, data, opts...)
+}
+
+func (h *registryRoutingHost) ListStates(ctx context.Context, actorType string, opts *actor.ListStatesOpts) (actor.StateList, error) {
+	// Supply the filtering that the baseline fake host omits so the actual service listing and sweep can run
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	page := actor.StateList{}
+	filter := opts.WorkflowLabels()
+	for stateKey, encoded := range h.state {
+		if !strings.HasPrefix(stateKey, actorType+"/") {
+			continue
+		}
+		var st instanceState
+		err := msgpack.Unmarshal(encoded, &st)
+		if err != nil {
+			return page, err
+		}
+		if filter != nil && filter.Status != "" && filter.Status != string(st.Status) {
+			continue
+		}
+		if filter != nil && filter.Version != 0 && filter.Version != st.Version {
+			continue
+		}
+		id := strings.TrimPrefix(stateKey, actorType+"/")
+		if id <= opts.After {
+			continue
+		}
+		page.States = append(page.States, actor.StateInfo{ActorID: id, Data: &fakeEnvelope{value: st}})
+	}
+	sort.Slice(page.States, func(i, j int) bool { return page.States[i].ActorID < page.States[j].ActorID })
+	if opts.Limit > 0 && len(page.States) > opts.Limit {
+		page.HasMore = true
+		page.States = page.States[:opts.Limit]
+	}
+	return page, nil
+}
+
+func TestForgetVersionInvalidatesExistingDecisions(t *testing.T) {
+	// Establish one approved graph and one rejected graph before the operator resets the unused version
+	host := &registryRoutingHost{fakeHost: newFakeHost()}
+	host.registry = newTestRegistry(t, host.fakeHost)
+	svc := actor.NewService(host)
+	old, err := New("cache", WithSteps(Step("old", WithRun(noopRun))))
+	require.NoError(t, err)
+	corrected, err := New("cache", WithSteps(Step("corrected", WithRun(noopRun))))
+	require.NoError(t, err)
+	served, err := old.serveVersion(t.Context(), svc, 1)
+	require.NoError(t, err)
+	require.True(t, served)
+	served, err = corrected.serveVersion(t.Context(), svc, 1)
+	require.NoError(t, err)
+	require.False(t, served)
+
+	// Reset through the public service and let a new process claim the corrected graph under the same version
+	require.NoError(t, corrected.Service(svc).ForgetVersion(t.Context(), 1))
+	restarted, err := New("cache", WithSteps(Step("corrected", WithRun(noopRun))))
+	require.NoError(t, err)
+	served, err = restarted.serveVersion(t.Context(), svc, 1)
+	require.NoError(t, err)
+	require.True(t, served)
+
+	// Existing processes must converge on the new registry entry instead of retaining conflicting approvals or stale rejections
+	served, err = old.serveVersion(t.Context(), svc, 1)
+	require.NoError(t, err)
+	assert.False(t, served, "the old graph remains approved after another graph claims its version")
+	served, err = corrected.serveVersion(t.Context(), svc, 1)
+	require.NoError(t, err)
+	assert.True(t, served, "the corrected graph remains rejected after the registry reset")
+}
+
+func TestFingerprintDistinguishesCommaContainingReferences(t *testing.T) {
+	for _, option := range []string{"inputFrom", "skipOnFailure"} {
+		t.Run(option, func(t *testing.T) {
+			// Keep the full graph identical while changing whether a reference names one comma-containing step or two separate steps
+			build := func(references []string) *definition {
+				steps := []StepSpec{
+					Step("a", WithRun(noopRun)),
+					Step("b", WithRun(noopRun)),
+					Step("a,b", WithRun(noopRun)),
+				}
+				if option == "inputFrom" {
+					steps = append(steps, Step("consumer", WithRun(noopRun), WithInputFrom(references...)))
+				} else {
+					steps = append([]StepSpec{Step("producer", WithRun(noopRun), WithSkipOnFailure(references...))}, steps...)
+				}
+				return testDefinition(t, "fingerprint", WithSteps(steps...))
+			}
+			oneReference := build([]string{"a,b"})
+			twoReferences := build([]string{"a", "b"})
+			assert.NotEqual(t, oneReference.fingerprint, twoReferences.fingerprint, "different valid reference lists have identical fingerprints")
+		})
+	}
 }

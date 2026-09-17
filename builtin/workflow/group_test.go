@@ -138,3 +138,15 @@ func TestGroupOptionsSurviveOnTheSpec(t *testing.T) {
 	assert.Equal(t, []string{"plan"}, notify.inputFrom)
 	assert.Equal(t, time.Minute, notify.stepTimeout)
 }
+
+func TestMemberCompensateOnFailure(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "member-policy", WithSteps(Parallel("group",
+		Step("a", WithRun(noopRun), WithCompensate(noopCompensate), WithCompensateOnFailure()),
+	)))
+	st := startJournal(t, def, now)
+	reportFailure(t, st, def, "group", 0, "partial effect", false, now)
+	advance(st, def, "inst-1", now)
+	assert.NotNil(t, st.step("group").Tasks[0].Comp)
+	t.Logf("status=%s compensation=%s", st.Status, st.Compensation)
+}

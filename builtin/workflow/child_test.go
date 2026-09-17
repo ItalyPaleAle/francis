@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -360,4 +361,110 @@ func TestChildRejectsOversizedStartDurably(t *testing.T) {
 	assert.Equal(t, StepSkipped, st.step("work").Status)
 	assert.Empty(t, host.dispatchedTo(builtinActorType(wf.workerType("")), workerActorID("child", "work", 0)))
 	assert.Equal(t, []string{methodDone}, reportsToParent(t, host, "parent"))
+}
+
+func TestParentStatusRetainsTheChildCompensationOutcome(t *testing.T) {
+	child, err := New("outcome-child", WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+	def := testDefinition(t, "outcome-parent", WithSteps(
+		Child("sub", WithDefinition(child), WithOptional()),
+	))
+	st := startJournal(t, def, time.Now())
+	tr := st.step("sub").task(0)
+	require.NotNil(t, tr)
+
+	// A child may leave effects behind even when the parent policy allows the workflow to continue
+	apply(st, def, &event{kind: evDone, report: &reportPayload{
+		Step:              "sub",
+		Index:             0,
+		Attempt:           1,
+		Error:             "child failed",
+		ChildStatus:       StatusFailed,
+		ChildCompensation: CompensationPartial,
+	}}, time.Now())
+	advance(st, def, "parent-1", time.Now())
+	view := statusView("parent-1", st, def)
+	require.Len(t, view.Steps, 1)
+	require.Len(t, view.Steps[0].Children, 1)
+	assert.Equal(t, StatusFailed, view.Steps[0].Children[0].Status)
+	assert.Equal(t, CompensationPartial, view.Steps[0].Children[0].Compensation)
+}
+
+func TestParentStatusUpdatesAChildOutcomeAfterParentDrivenUnwind(t *testing.T) {
+	child, err := New("unwind-outcome-child", WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+	def := testDefinition(t, "unwind-outcome-parent", WithSteps(Child("sub", WithDefinition(child))))
+	st := startJournal(t, def, time.Now())
+	tr := st.step("sub").task(0)
+	require.NotNil(t, tr)
+	tr.Comp = &compRecord{Attempts: 1}
+
+	apply(st, def, &event{kind: evCompensated, comp: &compReportPayload{
+		Step:              "sub",
+		Index:             0,
+		Attempt:           1,
+		Error:             "child rollback was incomplete",
+		ChildStatus:       StatusCancelled,
+		ChildCompensation: CompensationPartial,
+	}}, time.Now())
+
+	view := statusView("parent-1", st, def)
+	require.Len(t, view.Steps[0].Children, 1)
+	assert.Equal(t, StatusCancelled, view.Steps[0].Children[0].Status)
+	assert.Equal(t, CompensationPartial, view.Steps[0].Children[0].Compensation)
+}
+
+func TestDeadLetteredChildReportCanBeRecovered(t *testing.T) {
+	host := newFakeHost()
+	kid, err := New("report-child", WithSteps(Step("only", WithRun(noopRun))))
+	require.NoError(t, err)
+	parentWF, err := New("report-parent", WithSteps(Child("sub", WithDefinition(kid))))
+	require.NoError(t, err)
+	parent := newTestOrchestrator(t, parentWF, host, "parent")
+	require.NoError(t, parent.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}}))
+	st := readJournal(t, host, parentWF, "parent")
+	childID := st.step("sub").task(0).ChildID
+	startJob := host.jobIDFor(builtinActorType(kid.baseType), childID, methodStart)
+	require.NotEmpty(t, startJob)
+	start := host.jobPayloads[startJob]
+	child := newTestOrchestrator(t, kid, host, childID)
+	require.NoError(t, child.Job(t.Context(), methodStart, &payloadEnvelope{value: start}))
+	host.mu.Lock()
+	host.removeJobLocked(startJob)
+	host.mu.Unlock()
+	require.NoError(t, child.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "only", Index: 0, Attempt: 1}}))
+	require.True(t, readJournal(t, host, kid, childID).Reported)
+
+	// A durable child report exhausts transport retries before its parent can apply it
+	reportJob := host.jobIDFor(builtinActorType(parentWF.baseType), "parent", methodDone)
+	require.NotEmpty(t, reportJob)
+	host.deadLetter(reportJob, "injected report delivery failure")
+	require.NoError(t, parent.JobFailed(t.Context(), reportJob, methodDone, nil, errors.New("delivery failed")))
+	require.NoError(t, parent.Alarm(t.Context(), alarmDeadline, nil))
+
+	// The durable report is replayed directly without executing or restarting the completed child
+	recoveredJob := host.jobIDFor(builtinActorType(parentWF.baseType), "parent", methodDone)
+	require.NotEmpty(t, recoveredJob)
+	require.NotEqual(t, reportJob, recoveredJob)
+	err = parent.Job(t.Context(), methodDone, &payloadEnvelope{value: host.jobPayloads[recoveredJob]})
+	require.NoError(t, err)
+	require.Equal(t, StatusCompleted, readJournal(t, host, parentWF, "parent").Status)
+}
+
+func TestStepTimeoutUnwindsChild(t *testing.T) {
+	now := time.Now()
+	child, err := New("timeout-child", WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+	def := testDefinition(t, "timeout-parent", WithSteps(
+		Child("child", WithDefinition(child), WithStepTimeout(time.Second)),
+	))
+	st := startJournal(t, def, now)
+	require.NotEmpty(t, st.step("child").Tasks[0].ChildID)
+
+	// A timed-out child remains independently active until its parent sends an unwind
+	o := &orchestrator{def: def}
+	o.applyElapsedDeadlines(st, now.Add(2*time.Second))
+	advance(st, def, "inst-1", now.Add(2*time.Second))
+	assert.NotNil(t, st.step("child").Tasks[0].Comp)
+	t.Logf("status=%s compensation=%s child.abandoned=%v", st.Status, st.Compensation, st.step("child").Tasks[0].Abandoned)
 }

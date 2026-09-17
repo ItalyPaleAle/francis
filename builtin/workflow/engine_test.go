@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	msgpack "github.com/vmihailenco/msgpack/v5"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
@@ -927,7 +928,7 @@ func TestCompensationTimeoutRemovesQueuedUndo(t *testing.T) {
 				WaitForEvent("approval"),
 			))
 			require.NoError(t, err)
-			o := newReviewOrchestrator(t, wf, "instance", actor.NewService(host))
+			o := newRoutedOrchestrator(t, wf, "instance", actor.NewService(host))
 			err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
 			require.NoError(t, err)
 			err = o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "effect", Index: 0, Attempt: 1}})
@@ -1007,7 +1008,7 @@ func TestRecurringDeadlineOutlivesTransientFailures(t *testing.T) {
 			host := &recoveryFailureHost{fakeHost: newFakeHost()}
 			wf, err := New("recurring", WithTimeout(time.Minute), WithSteps(WaitForEvent("approval")))
 			require.NoError(t, err)
-			o := newReviewOrchestrator(t, wf, "instance", actor.NewService(host))
+			o := newRoutedOrchestrator(t, wf, "instance", actor.NewService(host))
 			err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
 			require.NoError(t, err)
 			props, err := host.GetAlarm(t.Context(), builtinActorType(wf.baseType), "instance", alarmDeadline)
@@ -1016,7 +1017,7 @@ func TestRecurringDeadlineOutlivesTransientFailures(t *testing.T) {
 			err = props.Validate()
 			require.NoError(t, err)
 			delivery := &payloadEnvelope{value: props.Data}
-			o = newReviewOrchestrator(t, wf, "instance", actor.NewService(host))
+			o = newRoutedOrchestrator(t, wf, "instance", actor.NewService(host))
 
 			// Fail more occurrences than the ordinary alarm retry limit while preventing any replacement write from repairing the row
 			host.failAlarm = true
@@ -1054,7 +1055,7 @@ func TestLegacyDeadlineMigratesBeforeAJournalFailure(t *testing.T) {
 	host := &recoveryFailureHost{fakeHost: newFakeHost()}
 	wf, err := New("legacy-alarm", WithSteps(WaitForEvent("approval")))
 	require.NoError(t, err)
-	o := newReviewOrchestrator(t, wf, "instance", actor.NewService(host))
+	o := newRoutedOrchestrator(t, wf, "instance", actor.NewService(host))
 	err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
 	require.NoError(t, err)
 
@@ -1115,7 +1116,7 @@ func TestDeadLetterRecoveryPreservesOriginalEvents(t *testing.T) {
 				wf, err := New("event-recovery", WithSteps(WaitForEvent("approval")))
 				require.NoError(t, err)
 				svc := actor.NewService(host)
-				o := newReviewOrchestrator(t, wf, "instance", svc)
+				o := newRoutedOrchestrator(t, wf, "instance", svc)
 				if tc.method != methodStart {
 					err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
 					require.NoError(t, err)
@@ -1139,7 +1140,7 @@ func TestDeadLetterRecoveryPreservesOriginalEvents(t *testing.T) {
 
 				// A new activation's recurring deadline can repair a failed callback from the retained record alone
 				host.failRetry = false
-				o = newReviewOrchestrator(t, wf, "instance", svc)
+				o = newRoutedOrchestrator(t, wf, "instance", svc)
 				err = o.Alarm(t.Context(), alarmDeadline, &payloadEnvelope{value: deadlinePayload{Recurring: true}})
 				require.NoError(t, err)
 				recovered := host.jobIDFor(builtinActorType(wf.baseType), "instance", tc.method)
@@ -1257,7 +1258,7 @@ func TestFanOutDispatchCallsGrowLinearly(t *testing.T) {
 					))
 					require.NoError(t, err)
 					svc := actor.NewService(host)
-					o := newReviewOrchestrator(t, wf, "instance", svc)
+					o := newRoutedOrchestrator(t, wf, "instance", svc)
 					err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
 					require.NoError(t, err)
 					items := make([]int, width)
@@ -1268,7 +1269,7 @@ func TestFanOutDispatchCallsGrowLinearly(t *testing.T) {
 
 					// Every result uses a fresh activation, proving the dispatch bound comes from durable markers
 					for index := range width {
-						o = newReviewOrchestrator(t, wf, "instance", svc)
+						o = newRoutedOrchestrator(t, wf, "instance", svc)
 						err = o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "work", Index: index, Attempt: 1, Output: json.RawMessage(`"effect"`)}})
 						require.NoError(t, err)
 					}
@@ -1282,7 +1283,7 @@ func TestFanOutDispatchCallsGrowLinearly(t *testing.T) {
 					err = o.Job(t.Context(), methodCancel, &payloadEnvelope{value: reasonPayload{Reason: "undo"}})
 					require.NoError(t, err)
 					for index := range width {
-						o = newReviewOrchestrator(t, wf, "instance", svc)
+						o = newRoutedOrchestrator(t, wf, "instance", svc)
 						err = o.Job(t.Context(), methodCompensated, &payloadEnvelope{value: compReportPayload{Step: "work", Index: index, Attempt: 1}})
 						require.NoError(t, err)
 					}
@@ -1302,7 +1303,7 @@ func TestDispatchAcknowledgementFailureDoesNotPoisonRetry(t *testing.T) {
 	wf, err := New("dispatch-ack-failure", WithSteps(Step("work", WithRun(noopRun))))
 	require.NoError(t, err)
 	svc := actor.NewService(host)
-	o := newReviewOrchestrator(t, wf, "instance", svc)
+	o := newRoutedOrchestrator(t, wf, "instance", svc)
 	start := &payloadEnvelope{value: startPayload{Version: 1}}
 	require.ErrorContains(t, o.Job(t.Context(), methodStart, start), "acknowledgement failure")
 	st := readJournal(t, host.fakeHost, wf, "instance")
@@ -1317,7 +1318,7 @@ func TestDispatchAcknowledgementFailureDoesNotPoisonRetry(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, host.dispatchCalls[methodRun])
 	assert.Len(t, host.dispatchedTo(builtinActorType(wf.workerType("")), workerActorID("instance", "work", 0)), 1)
-	o = newReviewOrchestrator(t, wf, "instance", svc)
+	o = newRoutedOrchestrator(t, wf, "instance", svc)
 	err = o.Job(t.Context(), methodStart, start)
 	require.NoError(t, err)
 	assert.Equal(t, 2, host.dispatchCalls[methodRun])
@@ -1333,7 +1334,7 @@ func TestDispatchMarkersPermitNewAttempts(t *testing.T) {
 		WaitForEvent("hold"),
 	))
 	require.NoError(t, err)
-	o := newReviewOrchestrator(t, wf, "instance", actor.NewService(host))
+	o := newRoutedOrchestrator(t, wf, "instance", actor.NewService(host))
 	err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
 	require.NoError(t, err)
 	err = o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "work", Attempt: 1, Error: "transport exhausted", Retryable: true}})
@@ -1377,7 +1378,7 @@ func TestOversizedDispatchAcknowledgementRecordsTermination(t *testing.T) {
 	host := &dispatchCountingHost{fakeHost: newFakeHost(), dispatchCalls: map[string]int{}}
 	wf, err := New("oversized-markers", WithMaxJournalSize(limit), WithMeter(provider.Meter("markers")), WithSteps(Step("work", WithRun(noopRun))))
 	require.NoError(t, err)
-	o := newReviewOrchestrator(t, wf, "instance", actor.NewService(host))
+	o := newRoutedOrchestrator(t, wf, "instance", actor.NewService(host))
 	err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
 	require.NoError(t, err)
 	st := readJournal(t, host.fakeHost, wf, "instance")
@@ -1413,4 +1414,162 @@ func TestFanOutShipsSourceArrayOnlyWhenRequested(t *testing.T) {
 			}
 		})
 	}
+}
+
+func int64MetricTotal(t *testing.T, reader *sdkmetric.ManualReader, name string) int64 {
+	t.Helper()
+	var collected metricdata.ResourceMetrics
+	err := reader.Collect(t.Context(), &collected)
+	require.NoError(t, err)
+
+	for _, scope := range collected.ScopeMetrics {
+		for _, metric := range scope.Metrics {
+			if metric.Name != name {
+				continue
+			}
+			sum, ok := metric.Data.(metricdata.Sum[int64])
+			require.True(t, ok, "metric %s should contain an int64 sum", name)
+			var total int64
+			for _, point := range sum.DataPoints {
+				total += point.Value
+			}
+			return total
+		}
+	}
+	require.FailNow(t, "metric was not collected", name)
+	return 0
+}
+
+func TestDeadLetterRecoveryPreservesDeadline(t *testing.T) {
+	host := newFakeHost()
+	wf, err := New("deadline", WithTimeout(time.Hour), WithSteps(Step("a", WithRun(noopRun))))
+	require.NoError(t, err)
+	o := newTestOrchestrator(t, wf, host, "instance")
+	require.NoError(t, o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}}))
+	originalDue, armed := alarmDue(t, host, wf, "instance")
+	require.True(t, armed)
+
+	// Deliver the recovery alarm on the same activation that armed the original deadline
+	require.NoError(t, o.JobFailed(t.Context(), "report", methodDone, nil, errors.New("transport failed")))
+	require.NoError(t, o.Alarm(t.Context(), alarmDeadline, nil))
+	actualDue, armed := alarmDue(t, host, wf, "instance")
+	require.True(t, armed)
+	require.Equal(t, originalDue, actualDue, "recovery must replace its immediate alarm with the outstanding deadline")
+}
+
+func TestTimeoutStartingUnwindKeepsBackstop(t *testing.T) {
+	host := newFakeHost()
+	wf, err := New("timeout-unwind", WithTimeout(time.Hour), WithSteps(
+		Step("first", WithRun(noopRun), WithCompensate(noopCompensate)),
+		Step("second", WithRun(noopRun)),
+	))
+	require.NoError(t, err)
+	o := newTestOrchestrator(t, wf, host, "instance")
+	require.NoError(t, o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}}))
+	require.NoError(t, o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "first", Index: 0, Attempt: 1}}))
+
+	// Advance the persisted deadline without requiring the test to wait an hour
+	st, err := o.client.GetState(t.Context())
+	require.NoError(t, err)
+	st.StartedAt = time.Now().Add(-2 * time.Hour)
+	st.DeadlineAt = instanceDeadline(&st, wf.def)
+	require.NoError(t, o.client.SetState(t.Context(), st, nil))
+	require.NoError(t, o.armDeadline(t.Context(), &st))
+
+	// Consume the one-shot alarm before invoking its handler so only a replacement remains afterwards
+	require.NoError(t, host.DeleteAlarm(t.Context(), builtinActorType(wf.baseType), "instance", alarmDeadline))
+	require.NoError(t, o.Alarm(t.Context(), alarmDeadline, nil))
+	st = readJournal(t, host, wf, "instance")
+	_, armed := alarmDue(t, host, wf, "instance")
+	require.True(t, st.Status.IsTerminal() || armed, "a newly opened unwind must terminate or retain its timeout backstop")
+}
+
+type failingStateHost struct {
+	*fakeHost
+
+	failState bool
+}
+
+func (h *failingStateHost) SetState(ctx context.Context, actorType string, actorID string, state any, opts *actor.SetStateOpts) error {
+	if h.failState {
+		return errors.New("injected state write failure")
+	}
+	return h.fakeHost.SetState(ctx, actorType, actorID, state, opts)
+}
+
+func TestFailedStateWriteDoesNotCorruptRetry(t *testing.T) {
+	host := &failingStateHost{fakeHost: newFakeHost()}
+	wf, err := New("state-failure", WithSteps(
+		Step("first", WithRun(noopRun), WithCompensate(noopCompensate)),
+		Step("second", WithRun(noopRun)),
+	))
+	require.NoError(t, err)
+	o := newRoutedOrchestrator(t, wf, "instance", actor.NewService(host))
+	require.NoError(t, o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}}))
+	require.NoError(t, o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "first", Index: 0, Attempt: 1}}))
+	report := &payloadEnvelope{value: reportPayload{Step: "second", Index: 0, Attempt: 1, Error: "permanent handler failure"}}
+
+	// Fail persistence while the report changes the workflow from running to compensating
+	host.failState = true
+	require.Error(t, o.Job(t.Context(), methodDone, report))
+	durable := readJournal(t, host.fakeHost, wf, "instance")
+	require.Equal(t, StepRunning, durable.step("second").Status)
+
+	// Retry on the same activation, as a transient provider failure normally does
+	host.failState = false
+	require.NoError(t, o.Job(t.Context(), methodDone, report))
+	durable = readJournal(t, host.fakeHost, wf, "instance")
+	require.Equal(t, StatusCompensating, durable.Status, "the failed write must not leave a running workflow with a compensating step")
+	require.Contains(t, durable.Cause, "permanent handler failure")
+}
+
+func TestSuspendedFailureResumesThroughAnOrchestratorTurn(t *testing.T) {
+	host := newFakeHost()
+	wf, err := New("suspended-turn", WithSteps(
+		Step("first", WithRun(noopRun), WithCompensate(noopCompensate)),
+		Step("second", WithRun(noopRun)),
+	))
+	require.NoError(t, err)
+	o := newTestOrchestrator(t, wf, host, "instance")
+	require.NoError(t, o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}}))
+	require.NoError(t, o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "first", Index: 0, Attempt: 1}}))
+	require.NoError(t, o.Job(t.Context(), methodSuspend, &payloadEnvelope{value: reasonPayload{Reason: "pause"}}))
+
+	// A failure delivered while paused records a resumable compensation state without dispatching undo work
+	require.NoError(t, o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "second", Index: 0, Attempt: 1, Error: "failed"}}))
+	st := readJournal(t, host, wf, "instance")
+	require.Equal(t, StatusSuspended, st.Status)
+	require.Equal(t, StatusCompensating, st.Suspended.ResumeTo)
+	require.Empty(t, host.dispatchedTo(builtinActorType(wf.undoType("")), workerActorID("instance", "first", 0)))
+
+	// Resume opens the compensation frame and dispatches the retained undo
+	require.NoError(t, o.Job(t.Context(), methodResume, nil))
+	st = readJournal(t, host, wf, "instance")
+	require.Equal(t, StatusCompensating, st.Status)
+	require.Contains(t, host.dispatchedTo(builtinActorType(wf.undoType("")), workerActorID("instance", "first", 0)), methodCompensate)
+}
+
+func TestLateSuccessReopeningKeepsLifecycleMetricsBalanced(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() {
+		require.NoError(t, provider.Shutdown(t.Context()))
+	})
+
+	host := newFakeHost()
+	wf, err := New("reopen-metrics",
+		WithMeter(provider.Meter("lifecycle")),
+		WithSteps(Step("effect", WithRun(noopRun), WithCompensate(noopCompensate))),
+	)
+	require.NoError(t, err)
+	o := newTestOrchestrator(t, wf, host, "instance")
+	require.NoError(t, o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}}))
+	require.NoError(t, o.Job(t.Context(), methodCancel, &payloadEnvelope{value: reasonPayload{Reason: "stop"}}))
+
+	// Work that escaped cancellation reopens the terminal instance until its newly discovered effect is undone
+	require.NoError(t, o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "effect", Index: 0, Attempt: 1}}))
+	require.NoError(t, o.Job(t.Context(), methodCompensated, &payloadEnvelope{value: compReportPayload{Step: "effect", Index: 0, Attempt: 1}}))
+
+	require.Equal(t, int64(0), int64MetricTotal(t, reader, "francis.workflow.instances.running"))
+	require.Equal(t, int64(1), int64MetricTotal(t, reader, "francis.workflow.instances.terminated"))
 }
