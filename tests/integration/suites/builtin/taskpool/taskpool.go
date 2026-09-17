@@ -209,19 +209,31 @@ func (s *builtinTaskPool) Run(t *testing.T) {
 
 	// Submitting twice with the same task key yields a single task
 	t.Run("idempotent submit yields one task", func(t *testing.T) {
+		// A key only dedups against a task that is still live, so the pair is held pending on a capability no host advertises
+		// Letting the first one run instead would make this a race, since a task that finishes between the two calls frees its key and the second mints a new one
 		const key = "idem-1"
-		id1, err := svc.Submit(ctx, taskInput{Mode: modeOK}, taskpool.WithTaskKey(key))
+		id1, err := svc.Submit(ctx, taskInput{Mode: modeOK}, taskpool.WithTaskKey(key), taskpool.WithRequiredCapability("gpu"))
 		require.NoError(t, err)
-		id2, err := svc.Submit(ctx, taskInput{Mode: modeOK}, taskpool.WithTaskKey(key))
+		id2, err := svc.Submit(ctx, taskInput{Mode: modeOK}, taskpool.WithTaskKey(key), taskpool.WithRequiredCapability("gpu"))
 		require.NoError(t, err)
 
 		// The idempotent dispatch dedups, so both submissions resolve to the same task
 		assert.Equal(t, id1, id2)
 
-		// And that task runs
+		info, err := svc.GetTask(ctx, id1)
+		require.NoError(t, err)
+		assert.Equal(t, taskpool.TaskStatusPending, info.Status)
+
+		// Cancel it so it does not linger past the subtest
+		require.NoError(t, svc.CancelTask(ctx, id1))
+
+		// A key of its own still dispatches work, so what kept the pair pending was the capability and not the dedup
+		const runKey = "idem-2"
+		_, err = svc.Submit(ctx, taskInput{Mode: modeOK}, taskpool.WithTaskKey(runKey))
+		require.NoError(t, err)
 		require.Eventually(t, func() bool {
-			return s.runCount(key) >= 1
-		}, eventuallyTimeout, eventuallyTick, "the idempotent task should run")
+			return s.runCount(runKey) >= 1
+		}, eventuallyTimeout, eventuallyTick, "a task under its own key should run")
 	})
 
 	// A task requiring a capability no host advertises stays pending, while base tasks keep running
