@@ -276,6 +276,21 @@ func (r *registryActor) forget(ctx context.Context, data actor.Envelope) error {
 	return nil
 }
 
+// registryInvoke reaches the registry singleton under its exclusive turn, waiting out a placement that is still settling
+// The singleton moves when a host joins or leaves, so a caller arriving mid-move gets a transient condition rather than an answer, and failing on it would fail the start that asked
+func (w *Workflow) registryInvoke(ctx context.Context, svc *actor.Service, method string, req any) (actor.Envelope, error) {
+	return retryWhilePlacementMoves(ctx, func(ctx context.Context) (actor.Envelope, error) {
+		return builtinactor.Invoke(ctx, svc, w.registryType(), method, req)
+	})
+}
+
+// registryPeek is the read-side counterpart of registryInvoke, and waits out a moving placement the same way
+func (w *Workflow) registryPeek(ctx context.Context, svc *actor.Service, method string, req any) (actor.Envelope, error) {
+	return retryWhilePlacementMoves(ctx, func(ctx context.Context) (actor.Envelope, error) {
+		return builtinactor.Peek(ctx, svc, w.registryType(), actor.SingletonActorID, method, req)
+	})
+}
+
 // authorizeDefinition grants a durable identity to a start before its journal exists
 func (w *Workflow) authorizeDefinition(ctx context.Context, svc *actor.Service) (registerResponse, error) {
 	return w.confirmDefinition(ctx, svc, registerRequest{Version: w.def.version, Fingerprint: w.def.fingerprint})
@@ -283,7 +298,7 @@ func (w *Workflow) authorizeDefinition(ctx context.Context, svc *actor.Service) 
 
 // confirmDefinition serializes start authorization and post-persist confirmation with registry resets
 func (w *Workflow) confirmDefinition(ctx context.Context, svc *actor.Service, req registerRequest) (registerResponse, error) {
-	env, err := builtinactor.Invoke(ctx, svc, w.registryType(), methodRegister, req)
+	env, err := w.registryInvoke(ctx, svc, methodRegister, req)
 	if err != nil {
 		return registerResponse{}, fmt.Errorf("failed to authorize the workflow definition: %w", err)
 	}
@@ -319,11 +334,11 @@ func (w *Workflow) askRegistry(ctx context.Context, svc *actor.Service, version 
 		Version:     version,
 		Fingerprint: w.def.fingerprint,
 	}
-	res, err := builtinactor.Peek(ctx, svc, w.registryType(), actor.SingletonActorID, methodCheck, req)
+	res, err := w.registryPeek(ctx, svc, methodCheck, req)
 	registered := false
 	if errors.Is(err, actorcore.ErrActorMethodUnsupported) {
 		// A rolling deployment may place the singleton on an older host that does not implement the read path yet
-		res, err = builtinactor.Invoke(ctx, svc, w.registryType(), methodRegister, req)
+		res, err = w.registryInvoke(ctx, svc, methodRegister, req)
 		registered = true
 	}
 	if err != nil {
@@ -340,7 +355,7 @@ func (w *Workflow) askRegistry(ctx context.Context, svc *actor.Service, version 
 	}
 
 	if !resp.Found {
-		res, err = builtinactor.Invoke(ctx, svc, w.registryType(), methodRegister, req)
+		res, err = w.registryInvoke(ctx, svc, methodRegister, req)
 		if err != nil {
 			return false, fmt.Errorf("failed to register the workflow definition: %w", err)
 		}

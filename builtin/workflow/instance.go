@@ -317,7 +317,7 @@ func (o *orchestrator) bindLegacyCleanupDefinition(ctx context.Context, st *inst
 
 	// A check-only lookup must find this graph already recorded because registering an unknown version could bless the wrong legacy definition
 	request := registerRequest{Version: st.Version, Fingerprint: o.def.fingerprint}
-	envelope, err := builtinactor.Peek(ctx, o.svc, o.wf.registryType(), actor.SingletonActorID, methodCheck, request)
+	envelope, err := o.wf.registryPeek(ctx, o.svc, methodCheck, request)
 	if err != nil {
 		return fmt.Errorf("%w: failed to verify the legacy definition: %s", ErrJournalIncompatible, err.Error())
 	}

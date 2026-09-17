@@ -352,7 +352,7 @@ func (s *WorkflowService) List(ctx context.Context, opts *ListOptions) (Instance
 
 // Definitions returns what the registry holds: which versions exist, their fingerprints, and whether this host's own definition disagrees with any of them
 func (s *WorkflowService) Definitions(ctx context.Context) ([]DefinitionInfo, error) {
-	env, err := builtinactor.Invoke(ctx, s.svc, s.wf.registryType(), methodDefinitions, nil)
+	env, err := s.wf.registryInvoke(ctx, s.svc, methodDefinitions, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read the workflow definition registry: %w", err)
 	}
@@ -392,7 +392,7 @@ func (s *WorkflowService) ForgetVersion(ctx context.Context, version int) error 
 	if version == s.wf.def.version {
 		req.ReplacementFingerprint = s.wf.def.fingerprint
 	}
-	_, err = builtinactor.Invoke(ctx, s.svc, s.wf.registryType(), methodForget, req)
+	_, err = s.wf.registryInvoke(ctx, s.svc, methodForget, req)
 	if err != nil {
 		return fmt.Errorf("failed to forget the definition: %w", err)
 	}
