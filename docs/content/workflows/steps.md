@@ -4,9 +4,9 @@ weight: 20
 description: "The step kinds, what a task receives, and what a failure costs"
 ---
 
-Three words are used throughout. A **step** is a named node in the graph. A **task** is one execution unit of a step, run on its own worker: a plain step has one task, a parallel group has one per member, a fan-out has one per item, and a child step's task is a whole child instance. An **attempt** is one run of a task's handler.
+A **step** is a named node in the graph. A **task** is one execution unit of a step: a plain step has one, a parallel group has one per member, a fan-out has one per item, and a child step's task is a whole child instance. An **attempt** is one run of a task's handler.
 
-Steps are identified **by name**, not by position, so reordering the graph does not confuse instances that are already running. Renaming a step is a change of graph, so it needs [a new version](/workflows/deploying).
+Steps are identified by name, not by position. Renaming one is a change of graph, so it needs [a new version](/workflows/deploying).
 
 ## Step kinds
 
@@ -28,7 +28,7 @@ type RunFunc func(ctx context.Context, t workflow.Task) (output any, err error)
 type CompensateFunc func(ctx context.Context, c workflow.Compensation) error
 ```
 
-A handler is a plain function. It may call the clock, do I/O, use randomness, and start goroutines. The one contract is **idempotency**: delivery is at-least-once, so a handler can run twice, once for a retried attempt and once if the host died between finishing the work and reporting it.
+A handler is a plain function. It may call the clock, do I/O, use randomness, and start goroutines. It must be **idempotent**: delivery is at-least-once, so a handler can run twice.
 
 ```go
 type Task interface {
@@ -51,7 +51,7 @@ type Task interface {
 }
 ```
 
-A compensation gets everything a task does, plus two things more:
+A compensation gets everything a task does, plus two more:
 
 ```go
 type Compensation interface {
@@ -65,7 +65,7 @@ type Compensation interface {
 
 ## What a task receives
 
-Each task receives only what its step declared it needs, and nothing else:
+Each task receives only what its step declared it needs:
 
 - the **workflow input**, as given to `Start`;
 - the **output of the immediately preceding step**;
@@ -80,7 +80,7 @@ workflow.Step("verify",
 )
 ```
 
-Asking `DecodeOutput` for a step that is neither the preceding one nor named with `WithInputFrom` returns `ErrStepNotFound`, so every step's data dependencies are visible in the definition.
+`DecodeOutput` returns `ErrStepNotFound` for any other step.
 
 ## What a step outputs
 
@@ -95,7 +95,7 @@ A handler returns `(any, error)`. The value is JSON-encoded and recorded, subjec
 | Wait for event | the event's payload |
 | Skipped | absent; `DecodeOutput` returns `ErrStepSkipped` |
 
-Outputs are for **control flow and small results**, not for payloads. Keep large blobs in an object store and put a reference in the output:
+Outputs are for **control flow and small results**. Keep large blobs in an object store and return a reference:
 
 ```go
 func generateThumbnail(ctx context.Context, t workflow.Task) (any, error) {
@@ -106,11 +106,11 @@ func generateThumbnail(ctx context.Context, t workflow.Task) (any, error) {
 }
 ```
 
-Everything an instance records is stored as one value, capped by `WithMaxJournalSize` (1 MiB by default), and every task's output goes into it. The rule of thumb is that **the number of tasks multiplied by a typical output should stay well under that cap**: a few hundred tasks returning under a kilobyte each is comfortable. `WithMaxOutputSize` (16 KiB) is a ceiling against one misbehaving task, not a per-task budget. For a fan-out wider than a few hundred items, use a [child workflow](/workflows/child-workflows) per batch.
+Every task's output is recorded in the instance, capped in total by `WithMaxJournalSize` (1 MiB by default). Keep **the number of tasks multiplied by a typical output** well under that cap: a few hundred tasks returning under a kilobyte each is comfortable. For a wider fan-out, use a [child workflow](/workflows/child-workflows) per batch.
 
 ## Retries, and the three ways a handler can fail
 
-Retries belong to the step, not to the actor: `WithMaxAttempts` and `WithRetryBackoff` decide how many attempts a task gets and how long to wait between them, and a compensation gets a budget of its own. Every attempt is recorded, so `GetStatus` shows how many each task has spent and why the last one failed.
+`WithMaxAttempts` and `WithRetryBackoff` decide how many attempts a task gets and how long to wait between them. Compensations get a budget of their own. `GetStatus` shows the attempts each task has spent and why the last one failed.
 
 | Return | What happens |
 |--------|--------------|
@@ -119,15 +119,15 @@ Retries belong to the step, not to the actor: `WithMaxAttempts` and `WithRetryBa
 | `actor.ErrJobPermanentFailure` | The task fails at once, without further attempts. |
 | `actor.ErrJobRejected` | This host declines the task so another runs it, **without counting an attempt**. |
 
-The distinction between the second and third belongs to the handler. A store that is briefly unavailable recovers, so return the error as-is; a request the encoder rejects, or an identifier that does not parse, fails the same way every time:
+Deciding between the second and third is the handler's job. Return an error as-is when a retry could succeed, and join `ErrJobPermanentFailure` when it cannot:
 
 ```go
 src, err := store.ReadOriginal(ctx, in.SourceKey)
 if errors.Is(err, store.ErrNotFound) {
-	// This will never succeed, so do not spend the remaining attempts on it
+	// This will never succeed, so do not spend the remaining attempts
 	return nil, errors.Join(actor.ErrJobPermanentFailure, err)
 } else if err != nil {
-	// The store may well be back in two seconds
+	// The store may recover, so this is worth retrying
 	return nil, err
 }
 ```
@@ -142,22 +142,22 @@ if errors.Is(err, store.ErrNotFound) {
 | `WithRetryBackoff(initial, max)` | The delay before the second attempt, doubling to the cap. Defaults to 2s and 1 minute. |
 | `WithCompensateMaxAttempts(n)` | The same for the compensation. Defaults to `10`. |
 | `WithCompensateBackoff(initial, max)` | The same for the compensation. Defaults to 10s and 10 minutes. |
-| `WithStepTimeout(d)` | How long this step may take, after which its outstanding attempts are failed. |
+| `WithStepTimeout(d)` | How long this step may take before its outstanding attempts are failed. |
 | `WithOptional()` | This step's failure does not fail the instance. |
-| `WithSkipOnFailure(steps...)` | Steps that are recorded as skipped and never run when this one fails. |
+| `WithSkipOnFailure(steps...)` | Steps to skip when this one fails. |
 | `WithSkipIf(step, value)` | Skip this step when the named upstream step's output equals `value`. |
 | `WithInputFrom(steps...)` | Extra upstream outputs this step's tasks receive. |
-| `WithRequiredCapability(cap)` | Route this step's tasks to hosts advertising the capability. |
+| `WithRequiredCapability(cap)` | Run this step's tasks only on hosts advertising the capability. |
 | `WithCompensateOnFailure()` | Compensate this step even when it failed. |
 | `WithItemsFrom(step)` | *(fan-out)* the step whose output supplies the items. |
 | `WithMaxParallel(n)` | *(fan-out)* how many tasks are in flight per instance. |
-| `WithFailurePolicy(p)` | *(group or fan-out)* what a failing task costs the step. On a group it is set with `.With(...)`, since the members take the variadic slot. |
+| `WithFailurePolicy(p)` | *(group or fan-out)* what a failing task costs the step. On a group, set it with `.With(...)`. |
 | `WithChild(wf)` / `WithDefinition(wf)` | *(fan-out / child step)* the definition to run. |
 | `WithEventTimeout(d)` / `WithEventName(n)` | *(wait step)* how long to wait, and for what. |
 
 ## What a step's failure costs the workflow
 
-Not every step matters equally. Two independent options say what this one's failure means:
+Two independent options say what a step's failure means:
 
 | Declared | After the step fails | Named dependents | Terminal status |
 |----------|----------------------|------------------|-----------------|
@@ -166,28 +166,27 @@ Not every step matters equally. Two independent options say what this one's fail
 | `WithOptional()` | the workflow continues | — | `completed` |
 | both | the workflow continues | recorded as `skipped` | `completed` |
 
-`WithOptional` decides the terminal status. `WithSkipOnFailure` decides which downstream steps are pointless without this one. Neither triggers an unwind: that is only for the default case, where the failure means the work so far must be undone.
+`WithOptional` decides the terminal status, and `WithSkipOnFailure` decides which downstream steps are skipped. Neither rolls the workflow back: only the default case does that.
 
 ```go
-// Without the manifest there is nothing to notify about, and the run is a failure
-// But the thumbnails are already in the store, so there is nothing to undo
+// The run is a failure without the manifest, but there is nothing to undo
 workflow.Step("manifest",
 	workflow.WithRun(writeManifest),
 	workflow.WithSkipOnFailure("notify"),
 ),
 
-// The work the caller asked for was done, and only a notification was lost
+// Losing the notification does not fail the run
 workflow.Step("notify",
 	workflow.WithRun(deliverNotification),
 	workflow.WithOptional(),
 ),
 ```
 
-Skipping is **not transitive**: a skipped step is not a failed one, so its own `WithSkipOnFailure` list is not applied. A skipped step never enters the compensation stack, and its output is absent.
+Skipping is **not transitive**: a skipped step is not a failed one, so its own `WithSkipOnFailure` list is not applied. A skipped step never enters the compensation stack.
 
 ## Conditional steps
 
-A condition is a **step that returns a value**, and `WithSkipIf` compares that step's output against the one you name:
+A condition is a **step that returns a value**. `WithSkipIf` compares that step's output against the value you name:
 
 ```go
 workflow.Step("approved", workflow.WithRun(readApproval)),
@@ -199,4 +198,4 @@ workflow.Step("verify",
 ),
 ```
 
-A step whose condition recorded nothing, because it failed or was skipped itself, is **not** skipped: only an explicit recorded value skips a step.
+A step whose condition recorded nothing, because it failed or was skipped itself, is **not** skipped.

@@ -4,7 +4,7 @@ weight: 10
 description: "workflow.New, the options, and registering on a host"
 ---
 
-A workflow is built with `workflow.New`, which takes a unique name and a set of options, and returns a value you register on a host. The name is used to build the reserved actor types, so it must be unique within a cluster and must not contain `/`.
+A workflow is built with `workflow.New`, which takes a name and a set of options and returns a value you register on a host. The name must be unique within the cluster and must not contain `/`.
 
 ```go
 import "github.com/italypaleale/francis/builtin/workflow"
@@ -53,9 +53,9 @@ if err != nil {
 err = host.RegisterBuiltInActor(orders)
 ```
 
-**Register the same workflow on every host that should run its steps**, with the same name and the same graph. A host that has the workflow registered can run its instances and their handlers; a host that does not will never be handed either. Any [child workflow](/workflows/child-workflows) is registered the same way, on the same hosts.
+**Register the same workflow on every host that should run its steps**, with the same name and the same graph. A host that does not have it registered is never handed one of its instances or tasks. Register any [child workflow](/workflows/child-workflows) on the same hosts.
 
-Each host passes its **own** capabilities and its **own** concurrency, so hosts can differ in what they can run and how much:
+Each host passes its **own** capabilities and concurrency:
 
 ```go
 // On a GPU host
@@ -66,11 +66,11 @@ wf, err := workflow.New("thumbnails",
 )
 ```
 
-One call registers everything the workflow needs, including the actors that run its steps and compensations, and the auto-purge cron job when `WithAutoPurge` is set.
+One call registers everything the workflow needs, including the actors that run its steps and compensations.
 
 ## What `New` validates
 
-`New` builds the graph and checks it, so a mistake is a startup error rather than an instance that stalls halfway through:
+`New` checks the graph, so a mistake is a startup error:
 
 - Step names are unique, non-empty, and contain neither `/` nor `|`.
 - No two `WaitForEvent` steps listen for the same event name.
@@ -79,7 +79,7 @@ One call registers everything the workflow needs, including the actors that run 
 - `WithSkipOnFailure` names steps that exist and run **after** it.
 - A `Parallel` group has at least one member, and its members are plain or child steps.
 - `WithOutput` names a step that exists.
-- A child definition is itself valid, since it was built by its own `New`.
+- A child definition is itself valid.
 
 ## Workflow options
 
@@ -88,27 +88,25 @@ One call registers everything the workflow needs, including the actors that run 
 | `WithSteps(...)` | The graph, in the order the steps run. **Required.** |
 | `WithVersion(n)` | The definition's version, stamped on every instance it starts. Defaults to `1`. See [Deploying and versioning](/workflows/deploying). |
 | `WithTimeout(d)` | How long an instance may run before it is failed and unwound. Defaults to 1 hour. |
-| `WithConcurrency(n)` | The strict maximum number of tasks this host runs at once, across every worker queue of the workflow. Defaults to `1`. |
-| `WithCompensateConcurrency(n)` | The same budget for the undo queues, which form their own capacity group. Defaults to `WithConcurrency`. |
-| `WithCapability(cap)` | Advertise a capability on this host, so steps that require it can run here. Repeatable. |
+| `WithConcurrency(n)` | The maximum number of tasks this host runs at once. Defaults to `1`. |
+| `WithCompensateConcurrency(n)` | The same, for compensations. Defaults to `WithConcurrency`. |
+| `WithCapability(cap)` | Advertise a capability on this host. Repeatable. |
 | `WithOutput(step)` | The step whose output becomes the instance's output. Defaults to the last step that produced one. |
 | `WithRetention(policy)` | How long a terminated instance is kept, per terminal status. Defaults to 24 hours each. |
-| `WithAutoPurge(cron)` | Register a cron job that sweeps terminated instances past their retention on this schedule. |
-| `WithCompensationFailurePolicy(p)` | What a failing compensation costs the rest of the unwind. Defaults to `ContinueUnwinding`. |
+| `WithAutoPurge(cron)` | Purge terminated instances past their retention on this schedule. |
+| `WithCompensationFailurePolicy(p)` | What a failing compensation costs the rest of the rollback. Defaults to `ContinueUnwinding`. |
 | `WithUnknownVersionPolicy(p)` | What to do with an instance no host can serve. Defaults to `ParkUnknownVersion`. |
 | `WithMaxDepth(n)` | How deep a chain of child instances may go. Defaults to `8`. |
-| `WithMaxInputSize(n)` | Cap on the encoded workflow input, checked at `Start`. Defaults to 64 KiB. |
-| `WithMaxOutputSize(n)` | Cap on a single task's encoded output, checked on the worker. Defaults to 16 KiB. |
-| `WithMaxJournalSize(n)` | Cap on everything one instance records, checked before every write. Defaults to 1 MiB. |
+| `WithMaxInputSize(n)` | Cap on the workflow input, checked at `Start`. Defaults to 64 KiB. |
+| `WithMaxOutputSize(n)` | Cap on a single task's output. Defaults to 16 KiB. |
+| `WithMaxJournalSize(n)` | Cap on everything one instance records. Defaults to 1 MiB. |
 | `WithLogger(l)` | A logger for instance and task lifecycle events. |
-| `WithMeter(m)` | The OpenTelemetry meter the engine records on. Without one the instruments are no-ops. |
+| `WithMeter(m)` | The OpenTelemetry meter to record on. Without one the instruments are no-ops. |
 
-Keep step outputs small: a key or an ID, not the bytes it refers to. Everything an instance records is stored as a single value, so a wide fan-out of large outputs is the one shape that runs into `WithMaxJournalSize`. [Steps and data flow](/workflows/steps#what-a-step-outputs) has the sizing rule.
+Keep step outputs small: a key or an ID, not the bytes it refers to. See [steps and data flow](/workflows/steps#what-a-step-outputs) for the sizing rule.
 
 ## Versions
 
-`WithVersion` is the definition's version, and it is stamped on every instance the workflow starts. **Bump it whenever you change the graph or any setting that governs how a step runs**: a step added, removed, renamed, or reordered, a changed policy, timeout, attempt budget or backoff, and any change to the definition's own timeout, retention, size caps, or unknown-version and compensation-failure policies.
+`WithVersion` is stamped on every instance the workflow starts. **Bump it whenever you change the graph or a setting that governs how a step runs.** Changing only a handler's body needs no new version.
 
-Francis refuses a second, different definition under the same version number, so a forgotten bump fails loudly instead of letting two hosts disagree about a running instance.
-
-Changing only a **handler's body** needs no new version. [Deploying and versioning](/workflows/deploying) covers what that means in practice, and when to bump anyway.
+Francis refuses a second, different definition under the same version number. See [deploying and versioning](/workflows/deploying) for the full list and for rolling deployments.

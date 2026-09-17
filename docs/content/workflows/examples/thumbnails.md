@@ -4,7 +4,7 @@ weight: 10
 description: "Fan-out, tolerated failures, and three different costs of failing"
 ---
 
-An upload becomes a set of thumbnails in several formats and sizes, a manifest describing what was produced, and a notification to the service that asked.
+An upload becomes a set of thumbnails in several formats and sizes, a manifest describing what was produced, and a notification to the caller.
 
 Three steps, three different costs when they fail:
 
@@ -53,7 +53,7 @@ thumbnails, err := workflow.New("thumbnails",
 )
 ```
 
-Nothing here needs a compensation. A partial result in an object store is harmless, and the manifest records what failed.
+Nothing here needs a compensation: a partial result in an object store is harmless, and the manifest records what failed.
 
 ## The handlers
 
@@ -142,7 +142,7 @@ func generateThumbnail(ctx context.Context, t workflow.Task) (any, error) {
 }
 ```
 
-`writeManifest` reads the fan-out's output — an array with `{"error": …}` in the slots that failed — and stores the manifest under a key derived from the instance ID, so a retried write stores the same object:
+`writeManifest` reads the fan-out's output, an array with `{"error": …}` in the failed slots, and stores the manifest under a key derived from the instance ID, so a retried write stores the same object:
 
 ```go
 func writeManifest(ctx context.Context, t workflow.Task) (any, error) {
@@ -227,10 +227,10 @@ id, _, err := svc.Start(ctx, uploadRequest{
 
 ## What happens when it goes wrong
 
-**One thumbnail's format is unsupported.** Its attempt reports a permanent failure; `TolerateFailures` records it and the group completes. The manifest lists it with its error, the notification goes out, and the instance is `completed` — `GetStatus` shows the failed task inside a completed step.
+**One thumbnail's format is unsupported.** Its attempt reports a permanent failure, and `TolerateFailures` records it. The manifest lists it with its error, the notification goes out, and the instance is `completed`. `GetStatus` shows the failed task inside a completed step.
 
 **The object store is unreachable for twenty seconds during the fan-out.** Every in-flight attempt reports a retryable error, so second attempts are scheduled two seconds out and third attempts four seconds out if needed. `GetStatus` shows `attempts: 2` or `3` on the affected tasks, and the run completes a little later.
 
-**The manifest store is down for longer than five attempts cover.** The step fails; `WithSkipOnFailure` records `notify` as skipped; the instance terminates `failed`, with no unwind, because there is nothing to undo. `List(Status: failed)` finds it, and a new instance with the same input re-drives it once the store is back.
+**The manifest store is down for longer than five attempts cover.** The step fails, `WithSkipOnFailure` records `notify` as skipped, and the instance terminates `failed` with nothing to roll back. `List(Status: failed)` finds it, and a new instance with the same input re-drives it once the store is back.
 
-**The callback endpoint returns 503 for an hour.** The notification step exhausts its ten attempts over about twenty-five minutes of backoff; `WithOptional` records the failure and the instance is `completed`. The operator sees the failed optional step in status and in the step-failure metric.
+**The callback endpoint returns 503 for an hour.** The notification step exhausts its ten attempts over about twenty-five minutes of backoff. `WithOptional` records the failure and the instance is `completed`, with the failed step visible in `GetStatus` and in the step-failure metric.
