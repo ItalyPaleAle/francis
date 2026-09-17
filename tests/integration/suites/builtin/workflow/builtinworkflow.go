@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -41,7 +42,9 @@ const (
 	// pollInterval keeps job polling fast so a dispatched task starts promptly instead of waiting on the multi-second default
 	pollInterval = 250 * time.Millisecond
 
-	eventuallyTimeout = 60 * time.Second
+	// eventuallyTimeout is how long an assertion waits for the cluster to make progress
+	// It has to outlast one stalled alarm: a loaded host that misses its health checks loses its session, and the dispatch in flight to it only gives up at the runtime's sixty-second execution timeout
+	eventuallyTimeout = 100 * time.Second
 	eventuallyTick    = 100 * time.Millisecond
 	// settleWindow is how long a parked instance is watched to confirm it does not advance
 	settleWindow = 3 * time.Second
@@ -92,7 +95,8 @@ type builtinWorkflow struct {
 	// mu guards every recorded observation, since handlers run concurrently on every host
 	mu sync.Mutex
 	// undo records the compensations that ran, in the order they ran, so the reverse ordering is observable
-	undo []string
+	// It is keyed by the instance that owns the frame, because a compensation from an earlier subtest can land while a later one is asserting
+	undo map[string][]string
 	// attempts counts the attempts made per instance, so the engine-owned retry policy is observable
 	attempts map[string]int
 	// failing marks the instances whose "flaky" step must fail, so the flag is honored by every host and delivery rather than consumed once
@@ -112,6 +116,7 @@ func (s *builtinWorkflow) Name() string {
 }
 
 func (s *builtinWorkflow) Setup(t *testing.T) []framework.Option {
+	s.undo = map[string][]string{}
 	s.attempts = map[string]int{}
 	s.failing = map[string]bool{}
 	s.gates = map[string]chan struct{}{}
@@ -131,7 +136,8 @@ func (s *builtinWorkflow) Setup(t *testing.T) []framework.Option {
 	s.shipment = shipment
 
 	pipeline, err := workflow.New("e2e-pipeline",
-		workflow.WithTimeout(5*time.Minute),
+		// A stalled alarm costs a minute, so these are generous: an instance that waits one out must not fail on the clock instead
+		workflow.WithTimeout(10*time.Minute),
 		// One task at a time per host, so a fan-out's peak concurrency reveals how many hosts ran at once
 		workflow.WithConcurrency(1),
 		// A long retention keeps every instance readable for the whole scenario, since the journal is written with a TTL of twice this
@@ -159,7 +165,7 @@ func (s *builtinWorkflow) Setup(t *testing.T) []framework.Option {
 			),
 
 			// Parks the instance until the test raises the event
-			workflow.WaitForEvent("proceed", workflow.WithEventTimeout(2*time.Minute)),
+			workflow.WaitForEvent("proceed", workflow.WithEventTimeout(5*time.Minute)),
 
 			// A whole child instance, whose result alone enters this journal
 			workflow.Child("ship", workflow.WithDefinition(shipment)),
@@ -248,7 +254,7 @@ func (s *builtinWorkflow) gate(ctx context.Context, t workflow.Task) (any, error
 
 // undoGate records that the gate step was compensated
 func (s *builtinWorkflow) undoGate(ctx context.Context, c workflow.Compensation) error {
-	s.recordUndo(c.InstanceID() + ":gate")
+	s.recordUndo(c.InstanceID(), c.InstanceID()+":gate")
 	return nil
 }
 
@@ -263,7 +269,7 @@ func (s *builtinWorkflow) flaky(ctx context.Context, t workflow.Task) (any, erro
 
 // undoFlaky records that the flaky step was compensated
 func (s *builtinWorkflow) undoFlaky(ctx context.Context, c workflow.Compensation) error {
-	s.recordUndo(c.InstanceID() + ":flaky")
+	s.recordUndo(c.InstanceID(), c.InstanceID()+":flaky")
 	return nil
 }
 
@@ -316,7 +322,9 @@ func (s *builtinWorkflow) cancelShipment(ctx context.Context, c workflow.Compens
 		return errors.Join(actor.ErrJobPermanentFailure, err)
 	}
 
-	s.recordUndo(res["booking"] + ":ship")
+	// A child's frame belongs to the parent's unwind, and its instance ID is the parent's with the task's suffix appended
+	parent, _, _ := strings.Cut(res["booking"], "|")
+	s.recordUndo(parent, res["booking"]+":ship")
 	return nil
 }
 
@@ -444,7 +452,6 @@ func (s *builtinWorkflow) Run(t *testing.T) {
 	// A step that fails terminally unwinds the work that already succeeded, in reverse order, including the child
 	t.Run("unwinds in reverse order", func(t *testing.T) {
 		const id = "unwind-1"
-		s.resetUndo()
 
 		_, _, err := svc.Start(ctx, runInput{Items: 1, FailFinish: true}, workflow.WithInstanceID(id))
 		require.NoError(t, err)
@@ -461,7 +468,7 @@ func (s *builtinWorkflow) Run(t *testing.T) {
 		assert.Contains(t, status.Cause, "induced terminal failure")
 
 		// A step that ran after another is compensated before it, and the child undid itself as one of those frames
-		undone := s.undoneNames()
+		undone := s.undoneNames(id)
 		require.Len(t, undone, 3)
 		assert.Contains(t, undone[0], ":ship")
 		assert.Equal(t, id+":flaky", undone[1])
@@ -516,7 +523,6 @@ func (s *builtinWorkflow) Run(t *testing.T) {
 	// A child that terminates failed is a failure of the parent's task, which the parent's own step policy then decides what to make of
 	t.Run("fails the parent when its child fails", func(t *testing.T) {
 		const id = "child-fail-1"
-		s.resetUndo()
 
 		_, _, err := svc.Start(ctx, runInput{Items: 1}, workflow.WithInstanceID(id))
 		require.NoError(t, err)
@@ -536,7 +542,7 @@ func (s *builtinWorkflow) Run(t *testing.T) {
 
 		// The child did not complete, so nothing of it is undone, and the unwind starts from the frame below it
 		assert.Equal(t, workflow.CompensationCompleted, status.Compensation)
-		assert.Equal(t, []string{id + ":flaky", id + ":gate"}, s.undoneNames())
+		assert.Equal(t, []string{id + ":flaky", id + ":gate"}, s.undoneNames(id))
 
 		// The child's own journal records the failure, so an operator can see which instance failed and why
 		ship := s.stepView(t, status, "ship")
@@ -550,7 +556,6 @@ func (s *builtinWorkflow) Run(t *testing.T) {
 	// Cancel moves an instance in flight into an unwind and terminates it as cancelled, recording the reason every compensation receives
 	t.Run("cancels an instance in flight", func(t *testing.T) {
 		const id = "cancel-1"
-		s.resetUndo()
 
 		_, _, err := svc.Start(ctx, runInput{Items: 1}, workflow.WithInstanceID(id))
 		require.NoError(t, err)
@@ -565,7 +570,7 @@ func (s *builtinWorkflow) Run(t *testing.T) {
 		status := s.awaitStatus(t, svc, id, workflow.StatusCancelled)
 		assert.Equal(t, "operator changed their mind", status.Cause)
 		assert.Equal(t, workflow.CompensationCompleted, status.Compensation)
-		assert.Equal(t, []string{id + ":flaky", id + ":gate"}, s.undoneNames())
+		assert.Equal(t, []string{id + ":flaky", id + ":gate"}, s.undoneNames(id))
 
 		// The wait step never got its event, so it is closed out rather than recorded as completed
 		assert.NotEqual(t, workflow.StepCompleted, s.stepView(t, status, "proceed").Status)
@@ -816,25 +821,30 @@ func (s *builtinWorkflow) isFailing(id string) bool {
 	return s.failing[id]
 }
 
-// recordUndo appends a compensation to the order they ran in
-func (s *builtinWorkflow) recordUndo(name string) {
+// recordUndo appends a compensation to the list kept for the instance that owns it
+func (s *builtinWorkflow) recordUndo(instanceID string, name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.undo = append(s.undo, name)
+	s.undo[instanceID] = append(s.undo[instanceID], name)
 }
 
-// resetUndo clears the recorded compensations before a subtest that asserts on their order
-func (s *builtinWorkflow) resetUndo() {
+// undoneNames returns the compensations that ran for one instance, in the order they first ran
+// A repeat is dropped rather than reported, because compensation is at-least-once and a redelivered frame is the same frame, not a later one
+func (s *builtinWorkflow) undoneNames(instanceID string) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.undo = nil
-}
 
-// undoneNames returns the compensations that ran, in order
-func (s *builtinWorkflow) undoneNames() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]string(nil), s.undo...)
+	frames := s.undo[instanceID]
+	seen := make(map[string]struct{}, len(frames))
+	out := make([]string, 0, len(frames))
+	for _, name := range frames {
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return out
 }
 
 // registerGate creates the channel the gate step closes when an instance reaches it
