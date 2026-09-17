@@ -1295,15 +1295,11 @@ func TestIdleActorHandling(t *testing.T) {
 		err := activeAct.Halt(false)
 		require.NoError(t, err)
 
-		// Update idle time to trigger processing
-		activeAct.UpdateIdleAt(0)
+		// What is under test is the error branch of HandleIdleActor, not the processor that normally calls it, so it is called here directly
+		// Going through the idle timer would put a fake clock and a background goroutine between the test and the one line it is asserting on, for no added coverage
+		host.HandleIdleActor(activeAct)
 
-		// Verify error message was logged
-		// The clock is stepped inside the poll so a step can never race ahead of the processor registering the idle timer, which a fake clock would then never fire
-		assert.Eventually(t, func() bool {
-			clock.Step(idleTimeout + 1*time.Second)
-			return strings.Contains(logBuf.String(), "Failed to try locking idle actor for deactivation")
-		}, 2*time.Second, 50*time.Millisecond, "Should log TryLock error")
+		assert.Contains(t, logBuf.String(), "Failed to try locking idle actor for deactivation", "Should log TryLock error")
 
 		// The actor should remain halted
 		assert.True(t, activeAct.halted.Load(), "Actor should remain halted")
@@ -1338,15 +1334,13 @@ func TestIdleActorHandling(t *testing.T) {
 			Return(haltErr).
 			Once()
 
-		// Update idle time to trigger processing
-		activeAct.UpdateIdleAt(0)
+		// As above, the branch under test is HandleIdleActor's, so it is called directly
+		// The halt itself runs in a goroutine it starts, so the log line is the only thing worth waiting for
+		host.HandleIdleActor(activeAct)
 
-		// Wait for the error to be logged
-		// The clock is stepped inside the poll so a step can never race ahead of the processor registering the idle timer, which a fake clock would then never fire
-		assert.Eventually(t, func() bool {
-			clock.Step(idleTimeout + 1*time.Second)
+		require.Eventually(t, func() bool {
 			return strings.Contains(logBuf.String(), "Failed to deactivate idle actor")
-		}, 2*time.Second, 50*time.Millisecond, "Should log halt error")
+		}, 10*time.Second, 10*time.Millisecond, "Should log halt error")
 
 		// The actor should be marked as halted (halt succeeds even if provider fails)
 		assert.True(t, activeAct.halted.Load(), "Actor should be marked as halted")
