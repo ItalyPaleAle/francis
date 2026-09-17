@@ -19,7 +19,3 @@ svc := builtInActor.Service(host.Service())
 ```
 
 As a rule, register the same built-in (same name and options) on every host that should serve it.
-
-## Workflows
-
-**Workflows** are a built-in actor too, but they have enough surface to need [a section of their own](/workflows). A workflow runs a durable multi-step process — a declared graph of named steps over plain Go handlers — with parallel groups, dynamic fan-out, child workflows, waits on external events, suspend and resume, and compensations that roll back what already succeeded. Reach for one when a process has several steps that must all happen, some of which have side effects you would otherwise have to undo by hand.

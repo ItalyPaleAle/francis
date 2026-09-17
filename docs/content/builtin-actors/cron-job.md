@@ -80,7 +80,7 @@ Because the actor is a single cluster-wide instance with turn-based execution, c
 
 ## Seeing what ran
 
-Occurrences keep a record for **7 days**, so a schedule is auditable rather than silent: `ListJobs` on the runner reports the runs that completed alongside any that dead-lettered, which is what answers "did last night's job actually run?".
+Occurrences keep a record for **7 days**. You can invoke `ListJobs` to report completed jobs alongside dead-lettered ones.
 
 ```go
 jobs, err := host.Service().ListJobs(ctx, "<runner actor type>", "<runner actor ID>")
@@ -90,7 +90,7 @@ for _, j := range jobs {
 }
 ```
 
-Records past the window are garbage collected, so a busy schedule does not accumulate them without bound. See [jobs](../docs/jobs) for the retention mechanism.
+See [jobs](../docs/jobs) for the retention mechanism.
 
 ## Triggering a run on demand
 
