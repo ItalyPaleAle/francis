@@ -5,7 +5,7 @@ weight: 11
 source_path: "README.md"
 ---
 
-Francis is a framework and runtime for **Distributed Actors** (also known as _Durable Objects_) for Go apps.
+Francis is a framework and runtime for **Distributed Actors** (also known as _Durable Objects_) for Go apps, and a **durable workflow engine** built on them.
 
 <img src="/logo-transparent.svg" alt="Francis logo" width="300" height="300" />
 
@@ -14,6 +14,7 @@ With Francis, you can build **highly-available** apps that **scale horizontally*
 What you can use Francis for:
 
 - Build **stateful services** where each entity (e.g. a user, a device, a shopping cart, a game session) is an actor with its own durable state
+- Run **multi-step [workflows](/workflows)** that survive restarts and undo the work that already succeeded when a later step fails
 - **Scale horizontally** across many hosts without sharding your data by hand: Francis places each actor on exactly one host and routes calls to it
 - Run **background work on a schedule** with durable [alarms](/docs/alarms) that survive restarts
 - Add resilience to **microservices** without standing up extra infrastructure beyond a database
@@ -27,6 +28,26 @@ func (c *Counter) Invoke(ctx context.Context, method string, data actor.Envelope
 	return state.Count, nil
 }
 ```
+
+A workflow is a declared graph of steps, each one a plain Go function:
+
+```go
+checkout, _ := workflow.New("checkout",
+	workflow.WithSteps(
+		workflow.Step("reserve-inventory",
+			workflow.WithRun(reserveInventory),
+			workflow.WithCompensate(releaseInventory),
+		),
+		workflow.Step("charge",
+			workflow.WithRun(chargeCard),
+			workflow.WithCompensate(refundCharge),
+		),
+		workflow.Step("create-shipment", workflow.WithRun(createShipment)),
+	),
+)
+```
+
+If `create-shipment` fails, Francis runs `refundCharge` and then `releaseInventory`, and the instance terminates as failed.
 
 Francis is [fully open source](https://github.com/ItalyPaleAle/francis) and released under a permissive MIT license.
 
@@ -49,6 +70,7 @@ Francis is [fully open source](https://github.com/ItalyPaleAle/francis) and rele
 - **Virtual actors**: actors are addressed by type and ID, activated on demand, and run one invocation at a time, so you never manage their lifecycle or worry about concurrent access to their state.
 - **Durable state**: each actor has its own state persisted in PostgreSQL or SQLite: it survives deactivation, restarts, and moving between hosts.
 - **Durable alarms**: schedule one-off or repeating work that survives process restarts.
+- **Durable [workflows](/workflows)**: declare a multi-step process as a graph, with parallel steps, fan-out, child workflows, and a per-step undo that runs in reverse when the process fails.
 - **Two topologies, same code**: for small clusters, run everything embedded in your app (**local**) with no extra services. Alternatively, point your workers at a standalone **runtime** (**remote**) when you want a dedicated control plane to support a larger number of hosts. Your actor code is identical.
 - **Low-maintenance**: the only hard dependency is a relational database: no separate message broker, no external coordination service.
 - **Secure by default**: hosts authenticate each other with mTLS using certificates derived from a shared cluster key, with pluggable host bootstrap (pre-shared key or JWT)
@@ -59,3 +81,4 @@ Francis is [fully open source](https://github.com/ItalyPaleAle/francis) and rele
 - New to actors? Start with [What is Francis](/docs/what-is-francis) and the [core concepts](/docs/concepts).
 - Want to run something now? Follow the [Quickstart](/docs/quickstart).
 - Ready to write code? See [Writing actors](/docs/writing-actors).
+- Have a process with several steps that must all happen? See [Workflows](/workflows).
