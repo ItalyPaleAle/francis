@@ -91,7 +91,8 @@ func (o *orchestrator) precedingStepName(name string) string {
 }
 
 // childInput returns what a child instance receives as its workflow input
-// A child of a fan-out gets its item, so "one child per element" reads the way it looks; any other child gets the output of the preceding step, falling back to the parent's own input when there is none
+// A child of a fan-out gets its item, so "one child per element" reads the way it looks
+// Any other child gets the output of the preceding step, falling back to the parent's own input when there is none
 func (o *orchestrator) childInput(st *instanceState, sr *stepRecord, d *stepDef, tr *taskRecord) json.RawMessage {
 	if d.kind == KindForEach {
 		return tr.Item

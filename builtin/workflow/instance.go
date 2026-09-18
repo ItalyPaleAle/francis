@@ -423,7 +423,8 @@ func (o *orchestrator) status(ctx context.Context) (any, error) {
 }
 
 // reportToParent dispatches a terminated child's outcome to the instance that started it, which is the only thing that crosses between their journals
-// A child asked to undo itself reports a compensation; any other termination reports a result, which the parent's step policy then decides what to make of
+// A child asked to undo itself reports a compensation
+// Any other termination reports a result, which the parent's step policy then decides what to make of
 func (o *orchestrator) reportToParent(ctx context.Context, st *instanceState, force bool) error {
 	if st.Parent == nil || (st.Reported && !force) {
 		return nil
