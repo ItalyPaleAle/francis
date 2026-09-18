@@ -5,7 +5,9 @@ weight: 29
 description: "Durable multi-step processes, with parallelism, compensation, and child workflows"
 ---
 
-A workflow is a **durable multi-step process**: a declared graph of named steps, plus the Go functions that implement them. It runs as a built-in actor, so it survives restarts and host loss, and its steps are spread across the cluster.
+A workflow is a durable multi-step process: a declared graph of named steps, plus the Go functions that implement them. It runs as a built-in actor, so it survives restarts and host loss, and its steps are spread across the cluster. Steps that fail with transient errors can be retried automatically.
+
+Define a workflow:
 
 ```go
 import "github.com/italypaleale/francis/builtin/workflow"
@@ -31,6 +33,8 @@ if err != nil {
 err = host.RegisterBuiltInActor(checkout)
 ```
 
+Invoke a workflow:
+
 ```go
 // Start an instance, and read its status whenever you like
 svc := checkout.Service(host.Service())
@@ -46,20 +50,20 @@ If `create-shipment` fails, Francis runs `refundCharge` and then `releaseInvento
 - **Sequences, parallel groups, and dynamic fan-out** over a list sized at runtime.
 - **Compensation**: a per-step callback that undoes a step that succeeded, run in reverse order when the workflow fails or is cancelled.
 - **Child workflows**, each with its own history.
-- **Waiting on external events**, such as a human approval.
+- **Waiting on external events**, such as a human approval (_human in the loop_).
 - **Suspend and resume**, with the instance's deadlines paused while it is parked.
 - **Per-step retry policies**, visible in a status query.
 - **Listing, purging, metrics, and traces.**
 
 ## Your handlers are plain Go
 
-A step's handler is an ordinary function. Francis does not replay your code, so there are **no determinism rules**: a handler may read the clock, do I/O, use randomness, and start goroutines.
+A step's handler is an ordinary function. Francis does not replay your code, so there are no determinism rules: a handler may read the clock, do I/O, use randomness, and start goroutines.
 
-Handlers must be **idempotent**. Delivery is at-least-once, so a handler can run twice.
+**Handlers must be idempotent**. Delivery is at-least-once, so a handler could run twice.
 
 ## When to reach for one
 
-Use a workflow when a process has **several steps that must all happen**, some of which have side effects you would have to undo: booking a trip, provisioning a tenant, fulfilling an order.
+Use a workflow when a process has several steps that must all happen, some of which have side effects you would have to undo: booking a trip, provisioning a tenant, fulfilling an order.
 
 Do **not** use one when:
 

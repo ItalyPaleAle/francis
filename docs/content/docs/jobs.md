@@ -17,7 +17,7 @@ Jobs and [alarms](/docs/alarms) both ride on the same durable scheduling engine,
 | Keyed by | name (set replaces on collision) | server-issued JobID (each dispatch is distinct) |
 | Dispatching N | N alarms with the same name coalesce to one | N dispatches run N times |
 | On permanent failure | the alarm is deleted | the job is dead-lettered |
-| On success | the alarm is deleted | the job is deleted, or retained if the actor type asks for it |
+| On success | the alarm is deleted | the job is either deleted or retained for auditing, if the actor type asks for it |
 
 Use an **alarm** for a self-scheduled reminder or timer that an actor owns (one per name). Use a **job** to dispatch background work to an actor, especially when you need each dispatch to run and failures to be recorded rather than dropped.
 
@@ -59,7 +59,7 @@ From outside an actor, use the service, which targets any actor:
 jobID, created, err := service.Dispatch(ctx, "worker", "worker-7", "send-email", payload)
 ```
 
-`Dispatch` returns a server-issued `jobID` that is globally unique, and `created`, which reports whether this call was the one that created the job. Each call dispatches a distinct job: dispatching the same method twice runs it twice, unless you supply an idempotency key (see below), in which case only the call that created the job gets `created` as true.
+`Dispatch` returns a server-issued `jobID` that is globally unique. Each call dispatches a distinct job: dispatching the same method twice runs it twice, unless you supply an idempotency key (in which case only the call that created the job gets `created` as true) - see below.
 
 ### Job options
 
@@ -96,11 +96,11 @@ Without a key, every dispatch is a distinct job: this is the anti-coalescing gua
 
 ## When a job ends
 
-A job that ends — whether it completed or failed terminally — can leave a record behind. Both kinds of record live in the same store and are read back with the same calls.
+A job that ends (whether it completed or failed terminally) can leave a record behind. Both kinds of record live in the same store and are read back with the same calls.
 
-When a job exhausts its retries, or returns `actor.ErrJobPermanentFailure`, it is **dead-lettered** rather than dropped. You can inspect, replay, or delete dead jobs (see below).
+When a job exhausts its retries, or returns `actor.ErrJobPermanentFailure`, it is dead-lettered. You can inspect, replay, or delete dead jobs (see below).
 
-The two kinds are retained **independently**, because they are worth keeping for different reasons and for different lengths of time:
+The two kinds are retained independently, because they are worth keeping for different reasons and for different lengths of time:
 
 ```go
 host.RegisterActor("worker", newWorker,
@@ -113,16 +113,19 @@ host.RegisterActor("worker", newWorker,
 
 | Option | Default | What the default means |
 |--------|---------|------------------------|
-| `WithCompletedJobRetention` | `0` | A completed job leaves nothing behind: its row is deleted, which is why `GetJob` on a finished job reports `actor.ErrJobNotFound` |
+| `WithCompletedJobRetention` | `0` | A completed job leaves nothing behind by default |
 | `WithDeadLetteredJobRetention` | 30 days | A dead-lettered job is recorded and readable for 30 days |
 
-A **dead-lettered** job is always recorded — dropping a failure silently is never useful — so its option only decides for how long. A **completed** job is recorded only when you ask, since only you know whether a successful run's history is worth storing. Either option takes a **negative** duration to mean "keep the record with no expiry at all".
+A dead-lettered job is always recorded — dropping a failure silently is never useful — so its option only decides for how long.  
+A completed job is recorded only when you ask, since only you know whether a successful run's history is worth storing.  
+Either option takes a negative duration to mean "keep the record with no expiry at all".
 
-A completed record carries the job's metadata but **not its payload** — only a dead job is ever replayed, so only a dead job keeps the data a replay would need.
+A completed record carries the job's metadata but not its payload. Only a dead job is ever replayed, so only a dead job keeps the data a replay would need.
 
-**Built-in actors keep their successes by default.** A built-in runs work on your behalf without you holding a handle to it, so the record of a run that succeeded is the only way to see it happened at all. Every built-in gets 24 hours unless it asks for its own window; a [cron job](../builtin-actors/cron-job) keeps **7 days**, so `ListJobs` answers whether last night's run happened rather than only whether one failed. Their dead-lettered records take the same 30-day default as anything else. An application actor still defaults to keeping none of its successes.
-
-Expired records are garbage collected in the background, and read as gone as soon as the retention elapses whether or not the collector has run.
+> Built-in actors keep their successes by default.  
+> Every built-in gets 24 hours unless it asks for its own window, while a [cron job](../builtin-actors/cron-job) keeps 7 days.  
+> Their dead-lettered records take the same 30-day default as anything else.  
+> This is for built-in actors only: an application actor still defaults to keeping none of its successes.
 
 Optionally, an actor can react to a dead-lettering by implementing `actor.ActorJobFailed`:
 
@@ -160,9 +163,7 @@ err = service.DeleteJob(ctx, "worker", "worker-7", jobID)
 newJobID, err := service.RetryJob(ctx, jobID)
 ```
 
-There is deliberately one removal verb rather than separate cancel and delete calls: the caller knows the job it wants gone, not which half of its lifecycle it happens to be in. `RetryJob` is the exception that stays specific to dead jobs, since a job that completed has nothing to retry.
-
-`GetJob` returns `actor.JobInfo`; `Attempts` and `EndedAt` are populated only once a job has ended, and `LastError` only for one that dead-lettered. Missing jobs are reported as `actor.ErrJobNotFound`.
+`GetJob` returns `actor.JobInfo`. `Attempts` and `EndedAt` are populated only once a job has ended, and `LastError` only for one that dead-lettered. Missing jobs are reported as `actor.ErrJobNotFound`.
 
 ## Delivery semantics
 
