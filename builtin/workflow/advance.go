@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"slices"
 	"time"
+
+	"github.com/italypaleale/go-kit/utils"
 )
 
 // minAdvanceIterations is the floor the fixed-point loop's bound never goes below, so a graph of one or two steps still has room for the passes a turn genuinely needs
@@ -127,7 +129,7 @@ func (st *instanceState) applyStart(def *definition, p *startPayload, now time.T
 			Status: StepPending,
 		}
 		if d.kind == KindWait {
-			st.EventNames = append(st.EventNames, d.effectiveEventName())
+			st.EventNames = append(st.EventNames, d.eventName)
 		}
 	}
 
@@ -246,7 +248,7 @@ func (st *instanceState) applyReport(def *definition, p *reportPayload, now time
 	// Failure: the policy of the step that ran the task decides whether another attempt follows, which for a group's task is the member rather than the group
 	member := memberDef(d, p.Index)
 	tr.LastError = p.Error
-	maxAttempts := effectiveMaxAttempts(member)
+	maxAttempts := member.maxAttempts
 	if !p.Retryable || tr.Attempts >= maxAttempts {
 		tr.Error = p.Error
 		tr.Done = true
@@ -259,7 +261,7 @@ func (st *instanceState) applyReport(def *definition, p *reportPayload, now time
 
 	// The next attempt's number is recorded before the job that runs it exists, so a lost dispatch is recoverable and a report can never arrive for an attempt the journal does not know about
 	tr.Attempts++
-	tr.RetryAt = now.Add(backoff(member.retryInitial, member.retryMax, defaultRetryInitial, defaultRetryMax, tr.Attempts-1))
+	tr.RetryAt = now.Add(backoff(member.retryInitial, member.retryMax, tr.Attempts-1))
 	return false
 }
 
@@ -307,7 +309,7 @@ func (st *instanceState) applyCompReport(def *definition, p *compReportPayload, 
 	// It belongs to the step whose compensation ran, which for a group's task is the member rather than the group
 	member := memberDef(d, p.Index)
 	tr.Comp.LastError = p.Error
-	maxAttempts := effectiveCompMaxAttempts(member)
+	maxAttempts := member.compMaxAttempt
 	attempts := tr.Comp.Attempts
 	if tr.Comp.GenerationStart > 0 {
 		attempts -= tr.Comp.GenerationStart - 1
@@ -319,7 +321,7 @@ func (st *instanceState) applyCompReport(def *definition, p *compReportPayload, 
 	}
 
 	tr.Comp.Attempts++
-	tr.Comp.RetryAt = now.Add(backoff(member.compInitial, member.compMax, defaultCompInitial, defaultCompMax, attempts))
+	tr.Comp.RetryAt = now.Add(backoff(member.compInitial, member.compMax, attempts))
 	return false
 }
 
@@ -333,7 +335,7 @@ func (st *instanceState) applyRaisedEvent(def *definition, p *eventPayload, now 
 		}
 
 		d := def.byName[sr.Name]
-		if d == nil || d.effectiveEventName() != p.Name {
+		if d == nil || d.eventName != p.Name {
 			continue
 		}
 
@@ -658,7 +660,7 @@ func settleSteps(st *instanceState, def *definition, now time.Time) bool {
 
 		// Fail-fast decides the step the moment one task has failed for good, without waiting for the stragglers whose results are still recorded
 		failedNow := firstFailedTask(sr) >= 0
-		if sr.Remaining > 0 && (!failedNow || groupPolicy(d) != FailFast) {
+		if sr.Remaining > 0 && (!failedNow || d.failurePolicy != FailFast) {
 			continue
 		}
 
@@ -690,7 +692,7 @@ func stepOutcome(sr *stepRecord, d *stepDef) (StepStatus, string) {
 		return StepCompleted, ""
 	default:
 		// A group or a fan-out only fails when its policy says a failing member should cost the step
-		if groupPolicy(d) == TolerateFailures {
+		if d.failurePolicy == TolerateFailures {
 			return StepCompleted, ""
 		}
 		idx := firstFailedTask(sr)
@@ -1173,7 +1175,7 @@ func (def *definition) configureTaskActors(d *stepDef, tr *taskRecord, instanceI
 	}
 	if child != nil {
 		tr.ChildID = workerActorID(instanceID, stepName, tr.Index)
-		tr.ChildType = child.baseType
+		tr.ChildType = workflowActorTypePrefix + child.name
 		return
 	}
 
@@ -1315,39 +1317,8 @@ func (st *instanceState) currentRunningStep(def *definition) (*stepRecord, *step
 	return nil, nil
 }
 
-// effectiveMaxAttempts returns how many attempts a forward task of a step gets
-func effectiveMaxAttempts(d *stepDef) int {
-	if d.maxAttempts > 0 {
-		return d.maxAttempts
-	}
-	return defaultMaxAttempts
-}
-
-// effectiveCompMaxAttempts returns how many attempts a step's compensation gets
-func effectiveCompMaxAttempts(d *stepDef) int {
-	if d.compMaxAttempt > 0 {
-		return d.compMaxAttempt
-	}
-	return defaultCompMaxAttempts
-}
-
-// groupPolicy returns the failure policy of a group or a fan-out, which defaults to failing on the first failure
-func groupPolicy(d *stepDef) FailurePolicy {
-	if d.failurePolicy != "" {
-		return d.failurePolicy
-	}
-	return FailFast
-}
-
 // backoff returns the delay before an attempt, doubling from the initial delay and stopping at the cap
-func backoff(initial time.Duration, max time.Duration, defInitial time.Duration, defMax time.Duration, retries int) time.Duration {
-	if initial <= 0 {
-		initial = defInitial
-	}
-	if max <= 0 {
-		max = defMax
-	}
-
+func backoff(initial time.Duration, max time.Duration, retries int) time.Duration {
 	d := initial
 	for range retries - 1 {
 		d *= 2
@@ -1382,10 +1353,7 @@ func instanceDeadline(st *instanceState, def *definition) time.Time {
 	if start.IsZero() {
 		return time.Time{}
 	}
-	timeout := st.Timeout
-	if timeout <= 0 {
-		timeout = def.timeout
-	}
+	timeout := utils.PositiveOr(st.Timeout, def.timeout)
 	return start.Add(timeout)
 }
 

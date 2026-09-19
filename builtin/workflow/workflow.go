@@ -14,11 +14,8 @@ package workflow
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"slices"
 	"strconv"
@@ -26,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/italypaleale/go-kit/utils"
 	"go.opentelemetry.io/otel/metric/noop"
 
 	"github.com/italypaleale/francis/actor"
@@ -75,28 +73,6 @@ type Workflow struct {
 
 	// boundService is the actor.Service the host handed to this workflow's factories, which is what the auto-purge cron job's handler runs against
 	boundService atomic.Pointer[actor.Service]
-}
-
-// definition is the validated, immutable graph a workflow runs, shared by every actor the workflow registers
-type definition struct {
-	name        string
-	version     int
-	fingerprint string
-	steps       []*stepDef
-	// byName indexes the top-level steps, and the members of groups, so a report or an event resolves to its step in one lookup
-	byName map[string]*stepDef
-	// order records the position of each top-level step, so advance walks the graph in declaration order
-	order map[string]int
-
-	timeout                   time.Duration
-	retention                 RetentionPolicy
-	outputStep                string
-	maxInputSize              int
-	maxOutputSize             int
-	maxJournalSize            int
-	maxDepth                  int
-	unknownVersion            UnknownVersionPolicy
-	compensationFailurePolicy CompensationFailurePolicy
 }
 
 // New builds a workflow built-in actor identified by name
@@ -176,30 +152,14 @@ func (o *options) applyDefaults() {
 		o.autoPurgeInterval = defaultAutoPurgeInterval
 		o.autoPurgeIntervalSet = true
 	}
-	if o.version <= 0 {
-		o.version = defaultVersion
-	}
-	if o.timeout <= 0 {
-		o.timeout = defaultTimeout
-	}
-	if o.concurrency <= 0 {
-		o.concurrency = defaultConcurrency
-	}
-	if o.compensateConcurrency <= 0 {
-		o.compensateConcurrency = o.concurrency
-	}
-	if o.maxInputSize <= 0 {
-		o.maxInputSize = defaultMaxInputSize
-	}
-	if o.maxOutputSize <= 0 {
-		o.maxOutputSize = defaultMaxOutputSize
-	}
-	if o.maxJournalSize <= 0 {
-		o.maxJournalSize = defaultMaxJournalSize
-	}
-	if o.maxDepth <= 0 {
-		o.maxDepth = defaultMaxDepth
-	}
+	o.version = utils.PositiveOr(o.version, defaultVersion)
+	o.timeout = utils.PositiveOr(o.timeout, defaultTimeout)
+	o.concurrency = utils.PositiveOr(o.concurrency, defaultConcurrency)
+	o.compensateConcurrency = utils.PositiveOr(o.compensateConcurrency, o.concurrency)
+	o.maxInputSize = utils.PositiveOr(o.maxInputSize, defaultMaxInputSize)
+	o.maxOutputSize = utils.PositiveOr(o.maxOutputSize, defaultMaxOutputSize)
+	o.maxJournalSize = utils.PositiveOr(o.maxJournalSize, defaultMaxJournalSize)
+	o.maxDepth = utils.PositiveOr(o.maxDepth, defaultMaxDepth)
 	if o.unknownVersion == "" {
 		o.unknownVersion = ParkUnknownVersion
 	}
@@ -244,8 +204,8 @@ func (o *options) validatePolicies() error {
 
 // flattenSteps expands every loop declaration into its body steps followed by the loop node itself
 // A loop's body steps are ordinary steps of the workflow, which is what lets a later step read what the last iteration produced and keeps the linear walk over the graph unchanged
-func flattenSteps(specs []StepSpec) ([]*stepDef, error) {
-	out := make([]*stepDef, 0, len(specs))
+func flattenSteps(specs []StepSpec) ([]*stepDecl, error) {
+	out := make([]*stepDecl, 0, len(specs))
 	for i, spec := range specs {
 		d := spec.d.clone()
 		if d == nil {
@@ -293,21 +253,9 @@ func (o *options) newDefinition(name string) (*definition, error) {
 		return nil, err
 	}
 
-	def := &definition{
-		name:                      name,
-		version:                   o.version,
-		steps:                     steps,
-		byName:                    map[string]*stepDef{},
-		order:                     map[string]int{},
-		timeout:                   o.timeout,
-		retention:                 o.retention,
-		outputStep:                o.outputStep,
-		maxInputSize:              o.maxInputSize,
-		maxOutputSize:             o.maxOutputSize,
-		maxJournalSize:            o.maxJournalSize,
-		maxDepth:                  o.maxDepth,
-		unknownVersion:            o.unknownVersion,
-		compensationFailurePolicy: o.compensationFailurePolicy,
+	def, err := o.lowerDefinition(name, steps)
+	if err != nil {
+		return nil, err
 	}
 
 	// Index every step and member by name, which is also where duplicate names and duplicate event names are caught
@@ -329,6 +277,14 @@ func (o *options) newDefinition(name string) (*definition, error) {
 		}
 	}
 
+	// Validate constraints specific to the Go declaration frontend after the language-neutral graph is known to be structurally sound
+	for _, declaration := range steps {
+		err = validateDeclaration(declaration, false)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// WithOutput must name a step that exists, or the instance would terminate with no output and no way to tell why
 	if def.outputStep != "" {
 		_, ok := def.order[def.outputStep]
@@ -337,8 +293,11 @@ func (o *options) newDefinition(name string) (*definition, error) {
 		}
 	}
 
-	// Set the fingerprint in the definition
-	def.setFingerprint()
+	// Hash the validated canonical IR before executable bindings are used by the runtime
+	err = def.setFingerprint()
+	if err != nil {
+		return nil, err
+	}
 
 	return def, nil
 }
@@ -370,7 +329,7 @@ func (def *definition) indexStep(d *stepDef, eventNames map[string]string) error
 
 	// Two steps listening for the same event name would make a raised event ambiguous about which record it belongs to
 	if d.kind == KindWait {
-		evName := d.effectiveEventName()
+		evName := d.eventName
 		other, taken := eventNames[evName]
 		if taken {
 			return fmt.Errorf("steps %q and %q both listen for event %q", other, d.name, evName)
@@ -389,10 +348,10 @@ func (def *definition) indexStep(d *stepDef, eventNames map[string]string) error
 }
 
 // validateStep checks one step's options against the assembled graph, where index is its position among the top-level steps
-func (def *definition) validateStep(d *stepDef, index int) error {
+func (def *definition) validateStep(d *stepDef, index int) (err error) {
 	switch d.kind {
 	case KindStep:
-		if d.run == nil {
+		if !d.hasRun {
 			return fmt.Errorf("step %q requires WithRun", d.name)
 		}
 	case KindParallel:
@@ -404,11 +363,7 @@ func (def *definition) validateStep(d *stepDef, index int) error {
 			if m.kind != KindStep && m.kind != KindChild {
 				return fmt.Errorf("parallel group %q may only contain plain or child steps, but %q is a %s", d.name, m.name, m.kind)
 			}
-			err := def.validateStep(m, index)
-			if err != nil {
-				return err
-			}
-			err = m.validateOptions(true)
+			err = def.validateStep(m, index)
 			if err != nil {
 				return err
 			}
@@ -417,14 +372,14 @@ func (def *definition) validateStep(d *stepDef, index int) error {
 		if d.itemsFrom == "" {
 			return fmt.Errorf("fan-out %q requires WithItemsFrom", d.name)
 		}
-		err := def.requireEarlierStep(d.name, index, d.itemsFrom, "WithItemsFrom")
+		err = def.requireEarlierStep(d.name, index, d.itemsFrom, "WithItemsFrom")
 		if err != nil {
 			return err
 		}
-		if d.run == nil && d.child == nil {
+		if !d.hasRun && d.child == nil {
 			return fmt.Errorf("fan-out %q requires either WithRun or WithChild", d.name)
 		}
-		if d.run != nil && d.child != nil {
+		if d.hasRun && d.child != nil {
 			return fmt.Errorf("fan-out %q sets both WithRun and WithChild, which are mutually exclusive", d.name)
 		}
 	case KindChild:
@@ -432,7 +387,7 @@ func (def *definition) validateStep(d *stepDef, index int) error {
 			return fmt.Errorf("child step %q requires WithDefinition", d.name)
 		}
 	case KindWait:
-		if d.run != nil {
+		if d.hasRun {
 			return fmt.Errorf("wait step %q cannot have a handler, since it is completed by RaiseEvent rather than run", d.name)
 		}
 	case KindLoop:
@@ -460,18 +415,9 @@ func (def *definition) validateStep(d *stepDef, index int) error {
 		return fmt.Errorf("step %q has unknown kind %q", d.name, d.kind)
 	}
 
-	// Validate the shared option surface against the node's execution path before checking graph references
-	err := d.validateOptions(false)
-	if err != nil {
-		return err
-	}
-	if d.child != nil && (d.child.def == nil || d.child.baseType == "" || len(d.child.def.steps) == 0) {
-		return fmt.Errorf("step %q references an uninitialized child workflow", d.name)
-	}
-
 	// A step can only read the output of a step that has already produced one
 	for _, from := range d.inputFrom {
-		err := def.requireEarlierStep(d.name, index, from, "WithInputFrom")
+		err = def.requireEarlierStep(d.name, index, from, "WithInputFrom")
 		if err != nil {
 			return err
 		}
@@ -479,7 +425,7 @@ func (def *definition) validateStep(d *stepDef, index int) error {
 
 	// A condition has to be decided before the step it gates runs
 	if d.hasSkipIf {
-		err := def.requireEarlierStep(d.name, index, d.skipIfStep, "WithSkipIf")
+		err = def.requireEarlierStep(d.name, index, d.skipIfStep, "WithSkipIf")
 		if err != nil {
 			return err
 		}
@@ -498,7 +444,7 @@ func (def *definition) validateStep(d *stepDef, index int) error {
 
 	// A step's required capability has to be a valid type component, since it becomes part of the worker's actor type
 	if d.capability != "" {
-		err := ref.ValidateComponents(d.capability)
+		err = ref.ValidateComponents(d.capability)
 		if err != nil {
 			return fmt.Errorf("step %q has an invalid required capability: %w", d.name, err)
 		}
@@ -517,84 +463,6 @@ func (def *definition) requireEarlierStep(stepName string, index int, referenced
 		return fmt.Errorf("step %q names %q in %s, but %q does not run before it", stepName, referenced, option, referenced)
 	}
 	return nil
-}
-
-// fingerprint hashes everything about a definition that the engine reads while running an instance, so two hosts cannot serve the same version and then apply different transitions to one journal
-func (def *definition) setFingerprint() {
-	// Includes the caps, the deadlines, the attempt policies, and the unknown-version and compensation-failure choices all decide what a turn does, so a host that disagrees about any of them needs a new version
-	// Handler bodies are the one deliberate exception: changing one needs no new version, which is the direct consequence of not replaying code
-	h := sha256.New()
-	fmt.Fprintf(h, "workflow=%s;version=%d;output=%s\n", def.name, def.version, def.outputStep)
-	fmt.Fprintf(h, "timeout=%d;maxInput=%d;maxOutput=%d;maxJournal=%d;maxDepth=%d;unknownVersion=%s;compFailure=%s\n",
-		def.timeout, def.maxInputSize, def.maxOutputSize, def.maxJournalSize, def.maxDepth,
-		def.unknownVersion, def.compensationFailurePolicy,
-	)
-	fmt.Fprintf(h, "retention=%d/%d/%d\n",
-		def.retention.forStatus(StatusCompleted),
-		def.retention.forStatus(StatusFailed),
-		def.retention.forStatus(StatusCancelled),
-	)
-
-	for _, d := range def.steps {
-		d.writeStepFingerprint(h)
-	}
-
-	def.fingerprint = hex.EncodeToString(h.Sum(nil))
-}
-
-// writeStepFingerprint writes one step's behavior-affecting options into the running hash
-func (def *stepDef) writeStepFingerprint(w io.Writer) {
-	// Plain values keep the established fingerprint while delimiter-bearing values are quoted so two different graphs cannot serialize identically
-	fmt.Fprintf(w, "step=%s;kind=%s;inputFrom=%s;itemsFrom=%s;skipOnFailure=%s;optional=%t;policy=%s;compensable=%t;capability=%s;event=%s",
-		fingerprintValue(def.name), def.kind,
-		fingerprintList(def.inputFrom),
-		fingerprintValue(def.itemsFrom),
-		fingerprintList(def.skipOnFailure),
-		def.optional,
-		def.failurePolicy,
-		def.compensate != nil,
-		fingerprintValue(def.capability),
-		fingerprintValue(def.eventName),
-	)
-
-	// The attempt and deadline policies decide how a failure or a timeout is folded into the journal, so a host that disagrees about them would advance the same journal differently
-	fmt.Fprintf(w, ";attempts=%d;backoff=%d/%d;compAttempts=%d;compBackoff=%d/%d;stepTimeout=%d;eventTimeout=%d;maxParallel=%d;compensateOnFailure=%t",
-		def.maxAttempts, def.retryInitial, def.retryMax,
-		def.compMaxAttempt, def.compInitial, def.compMax,
-		def.stepTimeout, def.eventTimeout, def.maxParallel, def.compensateOnFailure,
-	)
-	if def.hasSkipIf {
-		fmt.Fprintf(w, ";skipIf=%s=%t", fingerprintValue(def.skipIfStep), def.skipIfValue)
-	}
-	if def.kind == KindLoop {
-		fmt.Fprintf(w, ";body=%s;until=%s=%t;maxIterations=%d", fingerprintList(def.body), fingerprintValue(def.untilStep), def.untilValue, def.maxIterations)
-	}
-	if def.child != nil {
-		fmt.Fprintf(w, ";child=%s@%d", fingerprintValue(def.child.def.name), def.child.def.version)
-	}
-	fmt.Fprint(w, "\n")
-
-	for _, m := range def.members {
-		fmt.Fprint(w, "  ")
-		m.writeStepFingerprint(w)
-	}
-}
-
-// fingerprintList renders a list unambiguously while preserving the previous encoding for ordinary names
-func fingerprintList(values []string) string {
-	encoded := make([]string, len(values))
-	for i := range values {
-		encoded[i] = fingerprintValue(values[i])
-	}
-	return strings.Join(encoded, ",")
-}
-
-// fingerprintValue quotes values that could otherwise inject field or list separators into the fingerprint source
-func fingerprintValue(value string) string {
-	if !strings.ContainsAny(value, ",;=\n\r\"\\") {
-		return value
-	}
-	return strconv.Quote(value)
 }
 
 // buildRegistrations creates every reserved actor type the workflow registers on a host

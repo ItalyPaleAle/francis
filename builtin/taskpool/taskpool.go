@@ -15,6 +15,8 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/italypaleale/go-kit/utils"
+
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/builtinactor"
@@ -84,10 +86,7 @@ func New(name string, opts ...Option) (*TaskPool, error) {
 	}
 
 	// The strict per-host limit defaults to one task at a time
-	concurrency := o.concurrency
-	if concurrency <= 0 {
-		concurrency = defaultConcurrency
-	}
+	concurrency := utils.PositiveOr(o.concurrency, defaultConcurrency)
 
 	log := o.logger
 	if log != nil {

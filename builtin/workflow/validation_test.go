@@ -102,17 +102,17 @@ func TestCompensationRetryPolicyIsPerStep(t *testing.T) {
 	))
 
 	tuned := def.byName["tuned"]
-	assert.Equal(t, 3, effectiveCompMaxAttempts(tuned))
-	assert.Equal(t, time.Second, backoff(tuned.compInitial, tuned.compMax, defaultCompInitial, defaultCompMax, 1))
-	assert.Equal(t, 4*time.Second, backoff(tuned.compInitial, tuned.compMax, defaultCompInitial, defaultCompMax, 3))
-	assert.Equal(t, 5*time.Second, backoff(tuned.compInitial, tuned.compMax, defaultCompInitial, defaultCompMax, 10), "the doubling stops at the step's cap")
+	assert.Equal(t, 3, tuned.compMaxAttempt)
+	assert.Equal(t, time.Second, backoff(tuned.compInitial, tuned.compMax, 1))
+	assert.Equal(t, 4*time.Second, backoff(tuned.compInitial, tuned.compMax, 3))
+	assert.Equal(t, 5*time.Second, backoff(tuned.compInitial, tuned.compMax, 10), "the doubling stops at the step's cap")
 
-	// An unset policy stays zero on the step and is resolved against the engine's defaults where the delay is computed, so nothing copies the defaults into the graph
+	// The compiler resolves defaults into the IR so the runtime plan and its canonical hash describe the policy actually enforced
 	plain := def.byName["default"]
-	assert.Zero(t, plain.compInitial)
-	assert.Zero(t, plain.compMax)
-	assert.Equal(t, defaultCompMaxAttempts, effectiveCompMaxAttempts(plain))
-	assert.Equal(t, defaultCompInitial, backoff(plain.compInitial, plain.compMax, defaultCompInitial, defaultCompMax, 1))
+	assert.Equal(t, defaultCompInitial, plain.compInitial)
+	assert.Equal(t, defaultCompMax, plain.compMax)
+	assert.Equal(t, defaultCompMaxAttempts, plain.compMaxAttempt)
+	assert.Equal(t, defaultCompInitial, backoff(plain.compInitial, plain.compMax, 1))
 }
 
 func TestValidateInstanceIDRejectsAnAmbiguousID(t *testing.T) {
@@ -334,7 +334,8 @@ func TestStepSpecReuseDoesNotMutateBuiltDefinition(t *testing.T) {
 	assert.Equal(t, 1, first.def.byName["charge"].maxAttempts, "building another workflow mutated the existing definition")
 
 	// Recomputing the fingerprint reveals that the live graph no longer matches the fingerprint cached at construction
-	first.def.setFingerprint()
+	err = first.def.setFingerprint()
+	require.NoError(t, err)
 	assert.Equal(t, originalFingerprint, first.def.fingerprint, "the graph changed behind its previously published fingerprint")
 }
 

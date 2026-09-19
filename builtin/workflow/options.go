@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/italypaleale/go-kit/utils"
 	"go.opentelemetry.io/otel/metric"
 )
 
@@ -78,34 +79,23 @@ func (r RetentionPolicy) forStatus(s Status) time.Duration {
 	case StatusCancelled:
 		d = r.Cancelled
 	}
-	if d <= 0 {
-		return defaultRetention
-	}
-	return d
+	return utils.PositiveOr(d, defaultRetention)
 }
 
 // options holds the configuration of a workflow, built up from the functional Option values passed to New
 type options struct {
-	version                   int
-	timeout                   time.Duration
-	retention                 RetentionPolicy
-	autoPurgeInterval         time.Duration
-	autoPurgeIntervalSet      bool
-	autoPurgeCron             string
-	autoPurgeCronSet          bool
-	concurrency               int
-	compensateConcurrency     int
-	capabilities              []string
-	steps                     []StepSpec
-	outputStep                string
-	maxInputSize              int
-	maxOutputSize             int
-	maxJournalSize            int
-	maxDepth                  int
-	unknownVersion            UnknownVersionPolicy
-	compensationFailurePolicy CompensationFailurePolicy
-	logger                    *slog.Logger
-	meter                     metric.Meter
+	definitionData
+
+	autoPurgeInterval     time.Duration
+	autoPurgeIntervalSet  bool
+	autoPurgeCron         string
+	autoPurgeCronSet      bool
+	concurrency           int
+	compensateConcurrency int
+	capabilities          []string
+	steps                 []StepSpec
+	logger                *slog.Logger
+	meter                 metric.Meter
 }
 
 // Option configures a workflow built with New

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/italypaleale/go-kit/utils"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
@@ -455,10 +456,7 @@ func (o *orchestrator) reportToParent(ctx context.Context, st *instanceState, fo
 		return o.markReported(ctx, st)
 	}
 
-	attempt := st.Parent.Attempt
-	if attempt <= 0 {
-		attempt = 1
-	}
+	attempt := utils.PositiveOr(st.Parent.Attempt, 1)
 
 	report := reportPayload{
 		Step:              st.Parent.Step,

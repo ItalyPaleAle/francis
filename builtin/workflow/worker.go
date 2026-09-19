@@ -197,11 +197,12 @@ func (w *worker) invokeHandler(ctx context.Context, method string, p *runPayload
 // runForward runs a step's handler and encodes what it returned, enforcing the output cap here rather than on the orchestrator
 // Checking the size on the worker means the orchestrator never spends a turn serializing something unbounded
 func (w *worker) runForward(ctx context.Context, d *stepDef, task *taskEnvelope) (json.RawMessage, error) {
-	if d.run == nil {
+	handler := w.def.binding(d).run
+	if handler == nil {
 		return nil, fmt.Errorf("%w: step %q has no handler on this host", actor.ErrJobPermanentFailure, d.name)
 	}
 
-	out, err := d.run(ctx, task)
+	out, err := handler(ctx, task)
 	if err != nil {
 		return nil, err
 	}
@@ -225,11 +226,12 @@ func (w *worker) runForward(ctx context.Context, d *stepDef, task *taskEnvelope)
 
 // runCompensate runs a step's compensation, which undoes the effect of a task that had completed successfully
 func (w *worker) runCompensate(ctx context.Context, d *stepDef, task *taskEnvelope) error {
-	if d.compensate == nil {
+	handler := w.def.binding(d).compensate
+	if handler == nil {
 		// A frame with nothing to undo is compensated by doing nothing, which is how a group whose members compensate selectively works
 		return nil
 	}
-	return d.compensate(ctx, task)
+	return handler(ctx, task)
 }
 
 // report dispatches the attempt's outcome back to the orchestrator, keyed by step, index, and attempt so a late report can never be mistaken for a newer one's

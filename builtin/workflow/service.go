@@ -570,7 +570,7 @@ func stepStatusView(sr *stepRecord) StepStatusView {
 // hasEvent reports whether the definition has a WaitForEvent step listening for a name, so RaiseEvent can refuse a name nothing waits for rather than dispatching a job nothing reads
 func (w *Workflow) hasEvent(name string) bool {
 	for _, d := range w.def.steps {
-		if d.kind == KindWait && d.effectiveEventName() == name {
+		if d.kind == KindWait && d.eventName == name {
 			return true
 		}
 	}

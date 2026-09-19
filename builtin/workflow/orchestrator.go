@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/italypaleale/go-kit/utils"
 	msgpack "github.com/vmihailenco/msgpack/v5"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -19,7 +20,6 @@ import (
 	"github.com/italypaleale/francis/internal/builtinactor"
 	"github.com/italypaleale/francis/internal/builtinkey"
 	"github.com/italypaleale/francis/internal/tracing"
-	"github.com/italypaleale/go-kit/utils"
 )
 
 // orchestrator is the Workflow actor: one instance per workflow instance, holding the journal and deciding what happens next
@@ -373,9 +373,7 @@ func (o *orchestrator) turn(ctx context.Context, ev *event) (err error) {
 	}
 	if st.Status != "" {
 		// Matching code can fill missing legacy policies once, while mismatched hosts must never invent them
-		if st.Timeout <= 0 {
-			st.Timeout = o.def.timeout
-		}
+		st.Timeout = utils.PositiveOr(st.Timeout, o.def.timeout)
 		if st.UnknownVersion == "" {
 			st.UnknownVersion = o.def.unknownVersion
 		}
@@ -785,9 +783,9 @@ func (o *orchestrator) dispatchTask(ctx context.Context, st *instanceState, sr *
 
 // startChild starts the child instance a child task runs, at an ID derived from the parent's so a retried turn finds the same child rather than starting a second
 func (o *orchestrator) startChild(ctx context.Context, st *instanceState, sr *stepRecord, d *stepDef, member *stepDef, tr *taskRecord) error {
-	child := member.child
+	child := o.def.binding(member).child
 	if child == nil {
-		child = d.child
+		child = o.def.binding(d).child
 	}
 	if child == nil {
 		return fmt.Errorf("step %q is a child step with no definition", sr.Name)
@@ -918,10 +916,11 @@ func (o *orchestrator) childDefinitionFor(stepName string, index int) *Workflow 
 	}
 
 	member := memberDef(d, index)
-	if member.child != nil {
-		return member.child
+	child := o.def.binding(member).child
+	if child != nil {
+		return child
 	}
-	return d.child
+	return o.def.binding(d).child
 }
 
 // cancelAllOutstanding removes queued forward and compensation work before a terminal journal becomes visible
@@ -1066,7 +1065,7 @@ func (o *orchestrator) applyElapsedDeadlines(st *instanceState, now time.Time) {
 
 	// A wait step that never got its event is the one case where the step's timeout ends the run rather than failing a task
 	if d.kind == KindWait {
-		st.beginUnwind(o.def, fmt.Sprintf("event %q timed out", d.effectiveEventName()), StatusFailed, now)
+		st.beginUnwind(o.def, fmt.Sprintf("event %q timed out", d.eventName), StatusFailed, now)
 		return
 	}
 

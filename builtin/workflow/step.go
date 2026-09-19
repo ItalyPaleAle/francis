@@ -68,68 +68,23 @@ type RunFunc func(ctx context.Context, t Task) (output any, err error)
 // It runs on the compensation worker type, and is retried per the step's compensation policy
 type CompensateFunc func(ctx context.Context, c Compensation) error
 
-// stepDef is one node of a definition's graph, built by Step, Parallel, ForEach, Child, or WaitForEvent
-type stepDef struct {
-	name string
-	kind Kind
+// stepDecl is one node of the Go DSL before it is lowered into the language-neutral workflow IR
+type stepDecl struct {
+	stepData
 
 	// run and compensate are the only places user code appears, and both are invoked exclusively by a worker
 	run        RunFunc
 	compensate CompensateFunc
 
 	// members are the steps of a parallel group
-	members []*stepDef
+	members []*stepDecl
 	// child is the definition a child step or a child fan-out runs
 	child *Workflow
-	// itemsFrom names the step whose output a fan-out iterates
-	itemsFrom string
-	// inputFrom names the extra steps whose outputs this step's tasks receive
-	inputFrom []string
-
-	// maxAttempts and the backoff bound the engine-owned attempts of a forward task
-	maxAttempts    int
-	retryInitial   time.Duration
-	retryMax       time.Duration
-	compMaxAttempt int
-	compInitial    time.Duration
-	compMax        time.Duration
-
-	// stepTimeout bounds one step, and eventTimeout bounds a WaitForEvent step's wait
-	stepTimeout  time.Duration
-	eventTimeout time.Duration
-	eventName    string
-
-	// optional makes this step's failure cost the instance nothing but a record
-	optional bool
-	// skipOnFailure names the steps that are pointless without this one
-	skipOnFailure []string
-	// skipIfStep and skipIfValue skip this step when the named step's output equals the value, which is how a condition stays a recorded output rather than a hidden predicate
-	skipIfStep  string
-	skipIfValue bool
-	hasSkipIf   bool
-
-	// failurePolicy applies to a group or a fan-out
-	failurePolicy FailurePolicy
-	// maxParallel bounds how many of a fan-out's tasks are in flight per instance
-	maxParallel int
-	// compensateOnFailure opts a step into being compensated even when it failed, for handlers whose effect may be partial
-	compensateOnFailure bool
-	// capability routes this step's tasks to the queue only hosts advertising it serve
-	capability string
-
-	// body names the steps a loop repeats, in order, and is filled when the declaration is flattened into the graph
-	body []string
-	// untilStep and untilValue end a loop when the named body step's output equals the value, keeping the decision a recorded output rather than a predicate the journal cannot show
-	untilStep  string
-	untilValue bool
-	hasUntil   bool
-	// maxIterations bounds how many times a loop repeats its body before it fails
-	maxIterations int
 }
 
 // StepSpec is one node of a workflow's graph, produced by Step, Parallel, ForEach, Child, or WaitForEvent and passed to WithSteps
 type StepSpec struct {
-	d *stepDef
+	d *stepDecl
 }
 
 // With applies step options to a spec that was built without them
@@ -151,7 +106,7 @@ func (s StepSpec) With(opts ...StepOption) StepSpec {
 }
 
 // validateOptions keeps option applicability in one place so an accepted declaration cannot silently discard configured behavior
-func (d *stepDef) validateOptions(member bool) error {
+func (d *stepDecl) validateOptions(member bool) error {
 	// Group members are single tasks, so conditions and policies that govern a whole step must be declared on the group
 	workerKinds := []Kind{KindStep, KindForEach}
 	taskKinds := []Kind{KindStep, KindForEach, KindChild}
@@ -209,7 +164,7 @@ func (d *stepDef) validateOptions(member bool) error {
 }
 
 // clone copies a declaration recursively so validated definitions and reused specifications never share mutable graph nodes
-func (d *stepDef) clone() *stepDef {
+func (d *stepDecl) clone() *stepDecl {
 	if d == nil {
 		return nil
 	}
@@ -217,7 +172,7 @@ func (d *stepDef) clone() *stepDef {
 	out.inputFrom = append([]string(nil), d.inputFrom...)
 	out.skipOnFailure = append([]string(nil), d.skipOnFailure...)
 	out.body = append([]string(nil), d.body...)
-	out.members = make([]*stepDef, len(d.members))
+	out.members = make([]*stepDecl, len(d.members))
 	for i := range d.members {
 		out.members[i] = d.members[i].clone()
 	}
@@ -226,7 +181,7 @@ func (d *stepDef) clone() *stepDef {
 
 // StepOption configures a step built by one of the step constructors
 // New rejects options that the node's execution path does not support instead of silently ignoring them
-type StepOption func(*stepDef)
+type StepOption func(*stepDecl)
 
 // Step declares a plain step: one task, running the handler set with WithRun
 func Step(name string, opts ...StepOption) StepSpec {
@@ -257,10 +212,10 @@ func WaitForEvent(name string, opts ...StepOption) StepSpec {
 // Each member carries its own attempt, backoff, compensation, and WithInputFrom options, which the engine applies to that member's task alone
 // Conditions, optionality, skip-on-failure rules, and step timeouts belong on the group and are rejected on individual members
 func Parallel(name string, steps ...StepSpec) StepSpec {
-	d := &stepDef{
+	d := &stepDecl{
 		name:    name,
 		kind:    KindParallel,
-		members: make([]*stepDef, len(steps)),
+		members: make([]*stepDecl, len(steps)),
 	}
 	for i, s := range steps {
 		d.members[i] = s.d
@@ -280,10 +235,10 @@ func Parallel(name string, steps ...StepSpec) StepSpec {
 // A body holds plain, child, and wait steps, because a loop runs one task at a time
 // A parallel group or a fan-out inside a loop belongs in a child workflow the body starts
 func Loop(name string, steps ...StepSpec) StepSpec {
-	d := &stepDef{
+	d := &stepDecl{
 		name:    name,
 		kind:    KindLoop,
-		members: make([]*stepDef, len(steps)),
+		members: make([]*stepDecl, len(steps)),
 	}
 	for i, s := range steps {
 		d.members[i] = s.d
@@ -293,7 +248,7 @@ func Loop(name string, steps ...StepSpec) StepSpec {
 
 // newStepSpec builds a step of the given kind and applies its options
 func newStepSpec(name string, kind Kind, opts []StepOption) StepSpec {
-	d := &stepDef{
+	d := &stepDecl{
 		name: name,
 		kind: kind,
 	}
@@ -307,7 +262,7 @@ func newStepSpec(name string, kind Kind, opts []StepOption) StepSpec {
 // It runs on a worker, so it may call the clock, do I/O, use randomness, and start goroutines
 // The only requirement is idempotency, because at-least-once delivery means it could be invoked twice
 func WithRun(fn RunFunc) StepOption {
-	return func(d *stepDef) {
+	return func(d *stepDecl) {
 		d.run = fn
 	}
 }
@@ -315,7 +270,7 @@ func WithRun(fn RunFunc) StepOption {
 // WithCompensate sets the function that undoes the effect of a task of this step that had completed successfully
 // It runs on the undo worker type and receives the output the forward task produced, which is usually what identifies the effect to undo
 func WithCompensate(fn CompensateFunc) StepOption {
-	return func(d *stepDef) {
+	return func(d *stepDecl) {
 		d.compensate = fn
 	}
 }
@@ -323,14 +278,14 @@ func WithCompensate(fn CompensateFunc) StepOption {
 // WithMaxAttempts sets how many attempts a task of this step gets before it is failed, defaulting to 3
 // Attempts are owned by the engine, counted in the journal, and independent of any actor-type setting
 func WithMaxAttempts(n int) StepOption {
-	return func(d *stepDef) {
+	return func(d *stepDecl) {
 		d.maxAttempts = n
 	}
 }
 
 // WithRetryBackoff sets the delay before the second attempt and the cap the doubling stops at, defaulting to 2s and 1 minute
 func WithRetryBackoff(initial time.Duration, max time.Duration) StepOption {
-	return func(d *stepDef) {
+	return func(d *stepDecl) {
 		d.retryInitial = initial
 		d.retryMax = max
 	}
@@ -339,14 +294,14 @@ func WithRetryBackoff(initial time.Duration, max time.Duration) StepOption {
 // WithCompensateMaxAttempts sets how many attempts this step's compensation gets before it is failed, defaulting to 10
 // The default is higher than the forward policy because a failed rollback leaves the system inconsistent, so it is worth trying harder
 func WithCompensateMaxAttempts(n int) StepOption {
-	return func(d *stepDef) {
+	return func(d *stepDecl) {
 		d.compMaxAttempt = n
 	}
 }
 
 // WithCompensateBackoff sets the delay before the second compensation attempt and the cap the doubling stops at, defaulting to 10s and 10 minutes
 func WithCompensateBackoff(initial time.Duration, max time.Duration) StepOption {
-	return func(d *stepDef) {
+	return func(d *stepDecl) {
 		d.compInitial = initial
 		d.compMax = max
 	}
@@ -354,21 +309,21 @@ func WithCompensateBackoff(initial time.Duration, max time.Duration) StepOption 
 
 // WithStepTimeout bounds how long this step may take, after which its outstanding attempts are failed
 func WithStepTimeout(d time.Duration) StepOption {
-	return func(s *stepDef) {
+	return func(s *stepDecl) {
 		s.stepTimeout = d
 	}
 }
 
 // WithEventTimeout bounds how long a WaitForEvent step waits, after which the instance unwinds with an event timeout as its cause
 func WithEventTimeout(d time.Duration) StepOption {
-	return func(s *stepDef) {
+	return func(s *stepDecl) {
 		s.eventTimeout = d
 	}
 }
 
 // WithEventName sets the event name a WaitForEvent step listens for, which defaults to the step's own name
 func WithEventName(name string) StepOption {
-	return func(d *stepDef) {
+	return func(d *stepDecl) {
 		d.eventName = name
 	}
 }
@@ -376,7 +331,7 @@ func WithEventName(name string) StepOption {
 // WithOptional makes this step's failure cost the instance nothing: the failure is recorded and the workflow still completes
 // It is the notification case, where the work the caller asked for was done and only a notification was lost
 func WithOptional() StepOption {
-	return func(d *stepDef) {
+	return func(d *stepDecl) {
 		d.optional = true
 	}
 }
@@ -384,7 +339,7 @@ func WithOptional() StepOption {
 // WithSkipOnFailure names the steps that are pointless without this one, which are recorded as skipped and never run when it fails
 // It does not trigger an unwind, and skipping is not transitive
 func WithSkipOnFailure(steps ...string) StepOption {
-	return func(d *stepDef) {
+	return func(d *stepDecl) {
 		d.skipOnFailure = append(d.skipOnFailure, steps...)
 	}
 }
@@ -392,7 +347,7 @@ func WithSkipOnFailure(steps ...string) StepOption {
 // WithSkipIf skips this step when the named upstream step's output equals value
 // A condition is a step that returns a boolean rather than a predicate the orchestrator evaluates, so the decision is a recorded output rather than a hidden evaluation
 func WithSkipIf(step string, value bool) StepOption {
-	return func(d *stepDef) {
+	return func(d *stepDecl) {
 		d.skipIfStep = step
 		d.skipIfValue = value
 		d.hasSkipIf = true
@@ -403,7 +358,7 @@ func WithSkipIf(step string, value bool) StepOption {
 // The condition is a step that returns a boolean rather than a predicate the orchestrator evaluates, exactly as WithSkipIf is, so what ended the loop is a recorded output the journal can show
 // It is read after every iteration, so a loop always runs its body at least once
 func WithUntil(step string, value bool) StepOption {
-	return func(d *stepDef) {
+	return func(d *stepDecl) {
 		d.untilStep = step
 		d.untilValue = value
 		d.hasUntil = true
@@ -413,7 +368,7 @@ func WithUntil(step string, value bool) StepOption {
 // WithMaxIterations bounds how many times a loop repeats its body, defaulting to 100
 // A loop whose condition has not held after the last iteration fails, which is what keeps a condition that never becomes true from running the instance to its timeout
 func WithMaxIterations(n int) StepOption {
-	return func(d *stepDef) {
+	return func(d *stepDecl) {
 		d.maxIterations = n
 	}
 }
@@ -421,7 +376,7 @@ func WithMaxIterations(n int) StepOption {
 // WithInputFrom names extra upstream steps whose outputs this step's tasks receive, on top of the workflow input and the preceding step's output
 // The engine never ships the whole journal to a worker, so a step's data dependencies are explicit and auditable from the definition alone
 func WithInputFrom(steps ...string) StepOption {
-	return func(d *stepDef) {
+	return func(d *stepDecl) {
 		d.inputFrom = append(d.inputFrom, steps...)
 	}
 }
@@ -429,21 +384,21 @@ func WithInputFrom(steps ...string) StepOption {
 // WithItemsFrom names the step whose output a fan-out iterates, which must decode to a JSON array
 // The list is journaled when the upstream step reports, so a retried turn re-reads the recorded items rather than re-deriving them
 func WithItemsFrom(step string) StepOption {
-	return func(d *stepDef) {
+	return func(d *stepDecl) {
 		d.itemsFrom = step
 	}
 }
 
 // WithChild makes each task of a fan-out start one child instance of the given definition, one per item
 func WithChild(wf *Workflow) StepOption {
-	return func(d *stepDef) {
+	return func(d *stepDecl) {
 		d.child = wf
 	}
 }
 
 // WithDefinition sets the definition a child step runs
 func WithDefinition(wf *Workflow) StepOption {
-	return func(d *stepDef) {
+	return func(d *stepDecl) {
 		d.child = wf
 	}
 }
@@ -451,14 +406,14 @@ func WithDefinition(wf *Workflow) StepOption {
 // WithMaxParallel bounds how many of a fan-out's tasks are in flight for one instance, as a sliding window over the tasks in index order
 // It is separate from the per-host bound set with WithConcurrency, which limits how much work a host accepts across all instances
 func WithMaxParallel(n int) StepOption {
-	return func(d *stepDef) {
+	return func(d *stepDecl) {
 		d.maxParallel = n
 	}
 }
 
 // WithFailurePolicy chooses what a failing task costs a parallel group or a fan-out, defaulting to FailFast
 func WithFailurePolicy(p FailurePolicy) StepOption {
-	return func(d *stepDef) {
+	return func(d *stepDecl) {
 		d.failurePolicy = p
 	}
 }
@@ -466,7 +421,7 @@ func WithFailurePolicy(p FailurePolicy) StepOption {
 // WithCompensateOnFailure opts this step into being compensated even when it failed
 // By default a step that failed is not compensated, on the saga convention that a step which did not complete did not take effect, so a handler whose effect may be partial needs this and a compensation written defensively
 func WithCompensateOnFailure() StepOption {
-	return func(d *stepDef) {
+	return func(d *stepDecl) {
 		d.compensateOnFailure = true
 	}
 }
@@ -474,37 +429,15 @@ func WithCompensateOnFailure() StepOption {
 // WithRequiredCapability routes this step's tasks to the queue only hosts advertising the capability serve
 // The step's compensation is routed to the undo queue of the same capability, since the undo almost always needs the placement the forward task had
 func WithRequiredCapability(capability string) StepOption {
-	return func(d *stepDef) {
+	return func(d *stepDecl) {
 		d.capability = capability
 	}
 }
 
 // effectiveEventName returns the event name a WaitForEvent step listens for, which defaults to the step's own name
-func (d *stepDef) effectiveEventName() string {
+func (d *stepDecl) effectiveEventName() string {
 	if d.eventName != "" {
 		return d.eventName
 	}
 	return d.name
-}
-
-// isCompensable reports whether a completed task of this step is pushed onto the compensation stack
-// A child step always is, because compensating it means asking the child to undo itself, which needs no handler here
-func (d *stepDef) isCompensable() bool {
-	if d.kind == KindChild {
-		return true
-	}
-	if d.compensate != nil {
-		return true
-	}
-	if d.kind == KindForEach && d.child != nil {
-		return true
-	}
-
-	// A group is compensable when any of its members is, since the group is one frame holding its members' undos
-	for _, m := range d.members {
-		if m.isCompensable() {
-			return true
-		}
-	}
-	return false
 }

@@ -875,13 +875,10 @@ func TestFingerprintCoversEverythingATurnReads(t *testing.T) {
 }
 
 func TestBackoffDoublesAndStopsAtTheCap(t *testing.T) {
-	assert.Equal(t, 2*time.Second, backoff(2*time.Second, time.Minute, defaultRetryInitial, defaultRetryMax, 1))
-	assert.Equal(t, 4*time.Second, backoff(2*time.Second, time.Minute, defaultRetryInitial, defaultRetryMax, 2))
-	assert.Equal(t, 8*time.Second, backoff(2*time.Second, time.Minute, defaultRetryInitial, defaultRetryMax, 3))
-	assert.Equal(t, time.Minute, backoff(2*time.Second, time.Minute, defaultRetryInitial, defaultRetryMax, 20))
-
-	// An unset initial or cap falls back to the defaults the engine documents
-	assert.Equal(t, defaultRetryInitial, backoff(0, 0, defaultRetryInitial, defaultRetryMax, 1))
+	assert.Equal(t, 2*time.Second, backoff(2*time.Second, time.Minute, 1))
+	assert.Equal(t, 4*time.Second, backoff(2*time.Second, time.Minute, 2))
+	assert.Equal(t, 8*time.Second, backoff(2*time.Second, time.Minute, 3))
+	assert.Equal(t, time.Minute, backoff(2*time.Second, time.Minute, 20))
 }
 
 func TestDecodeOutputReportsASkippedStep(t *testing.T) {
