@@ -680,31 +680,59 @@ func (s *builtinWorkflow) Run(t *testing.T) {
 	t.Run("purges terminated instances", func(t *testing.T) {
 		sweepSvc := s.sweeper.Service(s.cluster.Service(0))
 
-		// Both instances are started before either is awaited, so neither spends its retention waiting on the other
+		// Start both instances together so the test also covers a sweep while another instance may still be running
 		ids := []string{"sweep-1", "sweep-2"}
 		for _, id := range ids {
 			_, _, err := sweepSvc.Start(ctx, nil, workflow.WithInstanceID(id))
 			require.NoError(t, err)
 		}
 
-		completedAt := make([]time.Time, 0, len(ids))
-		for _, id := range ids {
-			status := s.awaitStatus(t, sweepSvc, id, workflow.StatusCompleted)
-			require.False(t, status.CompletedAt.IsZero(), "a completed instance records when it completed")
-			completedAt = append(completedAt, status.CompletedAt)
+		// Watch each instance independently so a slow instance cannot make an earlier completion miss its retention window
+		type completionResult struct {
+			id     string
+			status workflow.InstanceStatus
+			err    error
 		}
-		slices.SortFunc(completedAt, func(a time.Time, b time.Time) int { return a.Compare(b) })
+		completions := make(chan completionResult, len(ids))
+		watchCtx, cancelWatchers := context.WithCancel(ctx)
+		defer cancelWatchers()
+		for _, id := range ids {
+			go func(instanceID string) {
+				instanceCtx, cancel := context.WithTimeout(watchCtx, eventuallyTimeout)
+				defer cancel()
 
-		// An instance is sweepable from one retention after it completes until its journal's own TTL removes it at two
-		// Sweeping once inside each instance's own window means the two never have to have completed close together, which on a loaded cluster they may not have
-		// Whichever sweep catches which instance then depends on the spread, so what is asserted is the total they removed between them
+				status, err := waitForWorkflowStatus(instanceCtx, sweepSvc, instanceID, workflow.StatusCompleted)
+				select {
+				case completions <- completionResult{id: instanceID, status: status, err: err}:
+				case <-watchCtx.Done():
+				}
+			}(id)
+		}
+
+		// Schedule one sweep per observed completion while continuing to watch instances that are still running
+		completed := 0
+		sweepTimes := make([]time.Time, 0, len(ids))
 		removed := 0
-		for _, at := range completedAt {
-			time.Sleep(time.Until(at.Add(sweepRetention + 500*time.Millisecond)))
+		for completed < len(ids) || len(sweepTimes) > 0 {
+			var sweepDue <-chan time.Time
+			if len(sweepTimes) > 0 {
+				wait := max(time.Until(sweepTimes[0]), time.Duration(0))
+				sweepDue = time.After(wait)
+			}
 
-			n, err := sweepSvc.PurgeTerminated(ctx)
-			require.NoError(t, err)
-			removed += n
+			select {
+			case result := <-completions:
+				require.NoError(t, result.err, "instance %s should complete", result.id)
+				require.False(t, result.status.CompletedAt.IsZero(), "a completed instance records when it completed")
+				sweepTimes = append(sweepTimes, result.status.CompletedAt.Add(sweepRetention+500*time.Millisecond))
+				slices.SortFunc(sweepTimes, func(a time.Time, b time.Time) int { return a.Compare(b) })
+				completed++
+			case <-sweepDue:
+				n, err := sweepSvc.PurgeTerminated(ctx)
+				require.NoError(t, err)
+				removed += n
+				sweepTimes = sweepTimes[1:]
+			}
 		}
 		assert.Equal(t, len(ids), removed, "the sweeps should remove every terminated instance past its retention")
 
@@ -750,33 +778,44 @@ func (s *builtinWorkflow) assertClientRejected(t *testing.T, svc *actor.Service,
 }
 
 // awaitStatus polls an instance until it reaches the wanted status, and fails the test if it does not
-// It polls in the test's own goroutine rather than through require.Eventually so the last error is still available to report: an instance whose journal passed its retention reads as missing, which is a very different failure from one that is merely slow
 func (s *builtinWorkflow) awaitStatus(t *testing.T, svc *workflow.WorkflowService, id string, want workflow.Status) workflow.InstanceStatus {
 	t.Helper()
 
+	ctx, cancel := context.WithTimeout(t.Context(), eventuallyTimeout)
+	defer cancel()
+	status, err := waitForWorkflowStatus(ctx, svc, id, want)
+	require.NoError(t, err)
+	return status
+}
+
+// waitForWorkflowStatus returns the last status and error so a missing retained journal can be distinguished from an instance that is merely slow
+func waitForWorkflowStatus(ctx context.Context, svc *workflow.WorkflowService, id string, want workflow.Status) (workflow.InstanceStatus, error) {
 	var (
 		last    workflow.InstanceStatus
 		lastErr error
 	)
 
-	deadline := time.Now().Add(eventuallyTimeout)
-	for time.Now().Before(deadline) {
-		status, err := svc.GetStatus(t.Context(), id)
+	ticker := time.NewTicker(eventuallyTick)
+	defer ticker.Stop()
+	for {
+		status, err := svc.GetStatus(ctx, id)
 		if err != nil {
 			lastErr = err
 		} else {
 			last = status
 			lastErr = nil
 			if status.Status == want {
-				return last
+				return last, nil
 			}
 		}
-		time.Sleep(eventuallyTick)
-	}
 
-	require.FailNowf(t, "instance did not reach the wanted status",
-		"instance %s should reach %q, last status was %q on step %q (last error: %v)", id, want, last.Status, last.CurrentStep, lastErr)
-	return last
+		select {
+		case <-ctx.Done():
+			cause := errors.Join(lastErr, ctx.Err())
+			return last, fmt.Errorf("instance %s should reach %q, last status was %q on step %q: %w", id, want, last.Status, last.CurrentStep, cause)
+		case <-ticker.C:
+		}
+	}
 }
 
 // stepView returns one step of a status by name, so assertions read by name rather than by position

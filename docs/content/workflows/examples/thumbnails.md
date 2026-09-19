@@ -18,7 +18,7 @@ Three steps, three different costs when they fail:
 thumbnails, err := workflow.New("thumbnails",
 	workflow.WithTimeout(10*time.Minute),
 	workflow.WithRetention(workflow.RetentionPolicy{Completed: 24 * time.Hour, Failed: 72 * time.Hour}),
-	workflow.WithAutoPurge("@hourly"),
+	workflow.WithAutoPurgeCron("@hourly"),
 	// Encoding is the expensive part of a worker, so this is the number of encoders per host
 	workflow.WithConcurrency(runtime.NumCPU()),
 	workflow.WithSteps(

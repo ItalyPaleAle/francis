@@ -20,6 +20,8 @@ const (
 	defaultMaxDepth = 8
 	// defaultMaxIterations bounds how many times a loop repeats its body when WithMaxIterations is not set
 	defaultMaxIterations = 100
+	// defaultAutoPurgeInterval is how often terminated instances past their retention are swept when no custom schedule is set
+	defaultAutoPurgeInterval = 12 * time.Hour
 
 	// defaultMaxAttempts is how many attempts a forward task gets before it is failed
 	defaultMaxAttempts = 3
@@ -87,7 +89,10 @@ type options struct {
 	version                   int
 	timeout                   time.Duration
 	retention                 RetentionPolicy
+	autoPurgeInterval         time.Duration
+	autoPurgeIntervalSet      bool
 	autoPurgeCron             string
+	autoPurgeCronSet          bool
 	concurrency               int
 	compensateConcurrency     int
 	capabilities              []string
@@ -128,11 +133,21 @@ func WithRetention(p RetentionPolicy) Option {
 	}
 }
 
-// WithAutoPurge registers a cron job that sweeps terminated instances past their retention on the given schedule
-// The cron job is a cluster-wide singleton, so the sweep runs on one host per schedule however many hosts registered the workflow
-func WithAutoPurge(cronExpr string) Option {
+// WithAutoPurgeInterval sets how often the automatic sweep purges terminated instances past their retention, defaulting to 12 hours
+// It is mutually exclusive with WithAutoPurgeCron
+func WithAutoPurgeInterval(interval time.Duration) Option {
+	return func(o *options) {
+		o.autoPurgeInterval = interval
+		o.autoPurgeIntervalSet = true
+	}
+}
+
+// WithAutoPurgeCron sets the cron expression for the automatic sweep that purges terminated instances past their retention
+// It is mutually exclusive with WithAutoPurgeInterval
+func WithAutoPurgeCron(cronExpr string) Option {
 	return func(o *options) {
 		o.autoPurgeCron = cronExpr
+		o.autoPurgeCronSet = true
 	}
 }
 

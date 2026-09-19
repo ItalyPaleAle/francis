@@ -19,7 +19,7 @@ orders, err := workflow.New("order-fulfillment",
 		Cancelled: 7 * 24 * time.Hour,
 	}),
 	// Sweep terminated instances past their retention every night, cluster-wide on one host
-	workflow.WithAutoPurge("0 3 * * *"),
+	workflow.WithAutoPurgeCron("0 3 * * *"),
 	workflow.WithLogger(log),
 
 	workflow.WithSteps(
@@ -93,7 +93,8 @@ One call registers everything the workflow needs, including the actors that run 
 | `WithCapability(cap)` | Advertise a capability on this host. Repeatable. |
 | `WithOutput(step)` | The step whose output becomes the instance's output. Defaults to the last step that produced one. |
 | `WithRetention(policy)` | How long a terminated instance is kept, per terminal status. Defaults to 24 hours each. |
-| `WithAutoPurge(cron)` | Purge terminated instances past their retention on this schedule. |
+| `WithAutoPurgeInterval(d)` | Purge terminated instances past their retention at this interval. Defaults to 12 hours. |
+| `WithAutoPurgeCron(cron)` | Purge terminated instances past their retention on this cron schedule instead. |
 | `WithCompensationFailurePolicy(p)` | What a failing compensation costs the rest of the rollback. Defaults to `ContinueUnwinding`. |
 | `WithUnknownVersionPolicy(p)` | What to do with an instance no host can serve. Defaults to `ParkUnknownVersion`. |
 | `WithMaxDepth(n)` | How deep a chain of child instances may go. Defaults to `8`. |

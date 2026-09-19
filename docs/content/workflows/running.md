@@ -135,7 +135,7 @@ workflow.WithRetention(workflow.RetentionPolicy{
 })
 ```
 
-A **purge** removes a terminated instance: its children, the jobs it used, and its recorded history. Run it yourself, or let `WithAutoPurge` run it on a schedule. An instance that is never swept expires on its own as a backstop.
+A **purge** removes a terminated instance: its children, the jobs it used, and its recorded history. Every workflow automatically sweeps instances past their retention every 12 hours. An instance that is never swept expires on its own as a backstop.
 
 You can purge at three levels:
 
@@ -148,12 +148,15 @@ n, err := svc.PurgeTerminated(ctx)
 ```
 
 ```go
-// The same sweep on a schedule, as a cluster-wide singleton cron job
-workflow.WithAutoPurge("0 3 * * *")
+// Override the default with a fixed interval
+workflow.WithAutoPurgeInterval(6 * time.Hour)
+
+// Or use a cron schedule instead
+workflow.WithAutoPurgeCron("0 3 * * *")
 ```
 
 `Purge` refuses a running or suspended instance with `ErrInstanceActive`, and one that is already gone with `ErrInstanceNotFound`. It is idempotent, so an interrupted purge is safe to repeat. It also refuses an instance whose parent is still running.
 
-`PurgeTerminated` works through a backlog in pages. However many hosts registered the workflow, `WithAutoPurge` runs the sweep on **one** of them per schedule.
+`PurgeTerminated` works through a backlog in pages. However many hosts registered the workflow, automatic purging runs the sweep on **one** of them per schedule.
 
 Once an instance is purged, `GetStatus` reports not found. **An instance's history is an operational record, not an audit log.** If you need a permanent one, write it from a step, as the [thumbnails example](/workflows/examples/thumbnails) does.

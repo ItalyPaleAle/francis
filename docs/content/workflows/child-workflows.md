@@ -111,7 +111,7 @@ A parent's `Cancel` cancels its running children, and a parent's step timeout ca
 
 `Purge` on a parent purges its children first, recursively, and is safe to repeat.
 
-The auto-purge sweep **skips any instance whose parent is still running**, so a terminated child sticks around until its parent is purged. **Give a child definition its own `WithAutoPurge`, or make sure its parents are purged**, or terminated children accumulate.
+The auto-purge sweep skips any instance whose parent is still running, so a terminated child sticks around until its parent is purged. Every child definition has its own automatic sweep, but terminated children accumulate while their parents remain unpurged.
 
 ## Listing children
 

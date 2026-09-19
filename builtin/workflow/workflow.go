@@ -60,7 +60,7 @@ const (
 )
 
 // Workflow is a built-in workflow actor, returned by New and registered on a host with RegisterBuiltInActor
-// It registers the orchestrator type, the worker and undo types , the definition registry singleton, and, when WithAutoPurge is set, a cron job that sweeps terminated instances
+// It registers the orchestrator type, the worker and undo types, the definition registry singleton, and a cron job that sweeps terminated instances
 type Workflow struct {
 	name string
 	// baseType is the bare actor type of the orchestrator, and the prefix of every other type this workflow registers
@@ -70,7 +70,7 @@ type Workflow struct {
 	metrics  *engineMetrics
 	// registrations is every reserved actor type this workflow registers, with the orchestrator first
 	registrations []builtinactor.BuiltInActorRegistration
-	// purgeCron is the auto-purge cron job, when WithAutoPurge was set
+	// purgeCron is the auto-purge cron job
 	purgeCron *cronjob.CronJob
 
 	// boundService is the actor.Service the host handed to this workflow's factories, which is what the auto-purge cron job's handler runs against
@@ -172,6 +172,10 @@ func New(name string, opts ...Option) (*Workflow, error) {
 
 // applyDefaults fills in every option the caller left unset, so the rest of the engine never has to ask whether a value was configured
 func (o *options) applyDefaults() {
+	if !o.autoPurgeIntervalSet && !o.autoPurgeCronSet {
+		o.autoPurgeInterval = defaultAutoPurgeInterval
+		o.autoPurgeIntervalSet = true
+	}
 	if o.version <= 0 {
 		o.version = defaultVersion
 	}
@@ -594,7 +598,7 @@ func fingerprintValue(value string) string {
 }
 
 // buildRegistrations creates every reserved actor type the workflow registers on a host
-func (w *Workflow) buildRegistrations(o *options) error {
+func (w *Workflow) buildRegistrations(o *options) (err error) {
 	// Every worker queue of this workflow shares one strict per-host budget, keyed by the full base type so it never collides with another workflow's group
 	workerGroup := builtinactor.FullActorType(w.baseType) + workerTypeSuffix
 	undoGroup := builtinactor.FullActorType(w.baseType) + undoTypeSuffix
@@ -640,35 +644,42 @@ func (w *Workflow) buildRegistrations(o *options) error {
 		},
 	})
 
+	// Build the auto-purge schedule separately so the cron job can enforce that interval and cron options are mutually exclusive
+	purgeOpts := make([]cronjob.Option, 0, 4)
+	if o.autoPurgeIntervalSet {
+		purgeOpts = append(purgeOpts, cronjob.WithInterval(o.autoPurgeInterval))
+	}
+	if o.autoPurgeCronSet {
+		purgeOpts = append(purgeOpts, cronjob.WithCron(o.autoPurgeCron))
+	}
+
 	// The auto-purge sweep is an ordinary cron job built-in, registered alongside the workflow's own types so one call registers everything
-	if o.autoPurgeCron != "" {
-		var err error
-		w.purgeCron, err = cronjob.New(w.name+".purge",
-			cronjob.WithCron(o.autoPurgeCron),
-			cronjob.WithLogger(w.log),
-			cronjob.WithJob(func(ctx context.Context) error {
-				// The sweep runs against the service created for this workflow's actors
-				svc := w.boundService.Load()
-				if svc == nil {
-					// Should not have happened
-					return errors.New("the workflow is not bound to a host service yet")
-				}
+	purgeOpts = append(purgeOpts,
+		cronjob.WithLogger(w.log),
+		cronjob.WithJob(func(ctx context.Context) error {
+			// The sweep runs against the service created for this workflow's actors
+			svc := w.boundService.Load()
+			if svc == nil {
+				// Should not have happened
+				return errors.New("the workflow is not bound to a host service yet")
+			}
 
-				_, pErr := w.Service(svc).PurgeTerminated(ctx)
-				if pErr != nil {
-					return fmt.Errorf("failed to purge terminated workflows: %w", pErr)
-				}
-				return nil
-			}),
-		)
-		if err != nil {
-			return fmt.Errorf("failed to create the auto-purge cron job: %w", err)
-		}
+			_, pErr := w.Service(svc).PurgeTerminated(ctx)
+			if pErr != nil {
+				return fmt.Errorf("failed to purge terminated workflows: %w", pErr)
+			}
+			return nil
+		}),
+	)
 
-		// The cron job's own factory records the service too, so the sweep is bound even on a host that never activates an orchestrator
-		for _, reg := range builtinactor.RegistrationsFor(w.purgeCron) {
-			regs = append(regs, w.bindService(reg))
-		}
+	w.purgeCron, err = cronjob.New(w.name+".purge", purgeOpts...)
+	if err != nil {
+		return fmt.Errorf("failed to create the auto-purge cron job: %w", err)
+	}
+
+	// The cron job's own factory records the service too, so the sweep is bound even on a host that never activates an orchestrator
+	for _, reg := range builtinactor.RegistrationsFor(w.purgeCron) {
+		regs = append(regs, w.bindService(reg))
 	}
 
 	w.registrations = regs
@@ -733,7 +744,7 @@ func (w *Workflow) Singleton() bool {
 	return false
 }
 
-// Registrations returns every reserved actor type the workflow registers: the orchestrator, the worker and undo queues, the registry, and the auto-purge cron job when one is configured
+// Registrations returns every reserved actor type the workflow registers: the orchestrator, the worker and undo queues, the registry, and the auto-purge cron job
 func (w *Workflow) Registrations() []builtinactor.BuiltInActorRegistration {
 	return w.registrations
 }

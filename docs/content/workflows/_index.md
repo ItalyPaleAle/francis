@@ -70,7 +70,7 @@ Do **not** use one when:
 
 - The work is a single unit that either happens or does not. Use a durable [job](/docs/jobs).
 - You want a pool of independent long-running tasks with no ordering and no result. Use a [task pool](/builtin-actors/task-pool).
-- You need arbitrary control flow. A workflow is a declared graph: it repeats a body with [`Loop`](/workflows/steps#loops) and branches with `WithSkipIf`, but there is no jumping between steps.
+- You need arbitrary control flow beyond what is provided.
 
 ## Where to go next
 

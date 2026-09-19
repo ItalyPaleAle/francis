@@ -23,7 +23,7 @@ func TestRegistrationsCoverEveryReservedType(t *testing.T) {
 		WithConcurrency(4),
 		WithCompensateConcurrency(2),
 		WithCapability("gpu"),
-		WithAutoPurge("0 3 * * *"),
+		WithAutoPurgeCron("0 3 * * *"),
 		WithTimeout(time.Hour),
 		WithSteps(
 			Step("a", WithRun(noopRun), WithCompensate(noopCompensate), WithRequiredCapability("gpu")),
@@ -80,12 +80,39 @@ func TestRegistrationsCoverEveryReservedType(t *testing.T) {
 	// The auto-purge cron job is the cluster-wide singleton that runs the sweep on one host per schedule
 	assert.True(t, got["francis.builtin.cronjob.orders.purge"].Singleton)
 
-	// A workflow with no capabilities and no auto-purge registers only the base set
+	// A workflow with no capabilities still registers the default auto-purge cron job alongside the base set
 	plain, err := New("plain", WithSteps(Step("a", WithRun(noopRun))))
 	require.NoError(t, err)
-	assert.Len(t, plain.Registrations(), 4)
+	assert.Len(t, plain.Registrations(), 5)
 	assert.Equal(t, defaultVersion, plain.Version())
 	assert.Equal(t, "plain", plain.Name())
+
+	// The default schedule is a fixed 12-hour interval unless the caller configures another schedule
+	var opts options
+	opts.applyDefaults()
+	assert.True(t, opts.autoPurgeIntervalSet)
+	assert.False(t, opts.autoPurgeCronSet)
+	assert.Equal(t, defaultAutoPurgeInterval, opts.autoPurgeInterval)
+}
+
+// TestAutoPurgeAcceptsIntervalAndCronSchedules verifies both public schedule forms and rejects invalid or conflicting configuration during construction
+func TestAutoPurgeAcceptsIntervalAndCronSchedules(t *testing.T) {
+	step := WithSteps(Step("a", WithRun(noopRun)))
+
+	_, err := New("interval-purge", WithAutoPurgeInterval(6*time.Hour), step)
+	require.NoError(t, err)
+
+	_, err = New("cron-purge", WithAutoPurgeCron("0 3 * * *"), step)
+	require.NoError(t, err)
+
+	_, err = New("invalid-interval-purge", WithAutoPurgeInterval(0), step)
+	require.ErrorContains(t, err, "interval/period must be greater than zero")
+
+	_, err = New("invalid-cron-purge", WithAutoPurgeCron("not a cron expression"), step)
+	require.ErrorContains(t, err, "invalid cron expression")
+
+	_, err = New("conflicting-purge", WithAutoPurgeInterval(time.Hour), WithAutoPurgeCron("0 3 * * *"), step)
+	require.ErrorContains(t, err, "exactly one of WithInterval, WithPeriod, or WithCron is required")
 }
 
 // TestTheSingleTypeContractPointsAtTheOrchestrator pins the fallback a host uses when it registers a built-in actor by its own type rather than through Registrations
