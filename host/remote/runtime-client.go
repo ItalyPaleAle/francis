@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
+	"github.com/italypaleale/go-kit/utils"
 	"github.com/quic-go/webtransport-go"
 	"go.opentelemetry.io/otel/trace"
 	"k8s.io/utils/clock"
@@ -114,15 +115,9 @@ func newRuntimeClient(cfg runtimeClientConfig) *runtimeClient {
 	if cfg.clock == nil {
 		cfg.clock = &clock.RealClock{}
 	}
-	if cfg.requestTimeout <= 0 {
-		cfg.requestTimeout = 15 * time.Second
-	}
-	if cfg.minBackoff <= 0 {
-		cfg.minBackoff = 500 * time.Millisecond
-	}
-	if cfg.maxBackoff <= 0 {
-		cfg.maxBackoff = 10 * time.Second
-	}
+	cfg.requestTimeout = utils.PositiveOr(cfg.requestTimeout, 15*time.Second)
+	cfg.minBackoff = utils.PositiveOr(cfg.minBackoff, 500*time.Millisecond)
+	cfg.maxBackoff = utils.PositiveOr(cfg.maxBackoff, 10*time.Second)
 
 	return &runtimeClient{
 		cfg:       cfg,
@@ -966,9 +961,7 @@ func (rc *runtimeClient) snapshot() (*webtransport.Session, string, string) {
 
 // backoffDelay returns an exponential backoff with jitter, capped at the configured maximum
 func (rc *runtimeClient) backoffDelay(attempt int) time.Duration {
-	if attempt < 1 {
-		attempt = 1
-	}
+	attempt = utils.PositiveOr(attempt, 1)
 
 	// Exponential growth capped at maxBackoff, bounding the shift to avoid overflow
 	shift := min(attempt-1, 16)

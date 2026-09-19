@@ -20,6 +20,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/italypaleale/go-kit/utils"
+
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/builtinactor"
@@ -80,15 +82,8 @@ func New(name string, opts ...Option) (*Signal, error) {
 	}
 
 	// A signal with no idle timeout would keep one activation per signal ID in memory forever, so the default stands in for both zero and a negative value
-	idleTimeout := o.idleTimeout
-	if idleTimeout <= 0 {
-		idleTimeout = defaultIdleTimeout
-	}
-
-	maxPayloadSize := o.maxPayloadSize
-	if maxPayloadSize <= 0 {
-		maxPayloadSize = defaultMaxPayloadSize
-	}
+	idleTimeout := utils.PositiveOr(o.idleTimeout, defaultIdleTimeout)
+	maxPayloadSize := utils.PositiveOr(o.maxPayloadSize, defaultMaxPayloadSize)
 
 	bareType := signalActorTypePrefix + name
 	return &Signal{

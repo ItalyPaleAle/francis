@@ -224,6 +224,7 @@ github.com/go-openapi/runtime/server-middleware v0.30.0/go.mod h1:OYNT/TxNvB/VK5
 github.com/go-openapi/spec v0.22.9/go.mod h1:b/mNUYIOQOyIiUzUzXEE8xzyZqf93KvM9hQGP91yfl0=
 github.com/go-openapi/strfmt v0.27.0/go.mod h1:s/qhDqfY72irigXUGJmtgid2Rm+3tnz3k8hZaRmvWYc=
 github.com/go-openapi/swag v0.22.6/go.mod h1:Gl91UqO+btAM0plGGxHqJcQZ1ZTy6jbmridBTsDy8A0=
+github.com/go-openapi/swag/jsonname v0.25.5/go.mod h1:jNqqikyiAK56uS7n8sLkdaNY/uq6+D2m2LANat09pKU=
 github.com/go-openapi/validate v0.26.1/go.mod h1:B8UMgXiQiwwQWIbmuROlwJZDPGlikPuh7iHV1vPX9Oo=
 github.com/go-toolsmith/astcast v1.1.0/go.mod h1:qdcuFWeGGS2xX5bLM/c3U9lewg7+Zu4mr+xPwZIB4ZU=
 github.com/go-toolsmith/astcopy v1.1.0/go.mod h1:hXM6gan18VA1T/daUEHCFcYiW8Ai1tIwIzHY6srfEAw=
@@ -324,6 +325,7 @@ github.com/inetaf/tcpproxy v0.0.0-20250203165043-ded522cbd03f/go.mod h1:Di7LXRyU
 github.com/insomniacslk/dhcp v0.0.0-20240129002554-15c9b8791914/go.mod h1:3A9PQ1cunSDF/1rbTq99Ts4pVnycWg+vlPkfeD2NLFI=
 github.com/italypaleale/go-kit v0.0.0-20260620130522-3cb485fabbc9 h1:69qxkeq9KizYIV5PvBScUvhJxQu7ZFg+A2uCmhGPqh0=
 github.com/italypaleale/go-kit v0.0.0-20260620130522-3cb485fabbc9/go.mod h1:BSDA6tYbFSyg2YkH4jdhbJaEpKx83qaO6Kn51jeElA0=
+github.com/italypaleale/go-kit v1.1.2/go.mod h1:+Jwwwm1BwqLnerW3SnAGxfj8aN1Kgrok5uUllabDE6E=
 github.com/italypaleale/go-sql-utils v0.2.4 h1:6CN8y3qEdNzvYlS/JK6N65E8cL9F8a6OBCJjzaQIv3c=
 github.com/italypaleale/go-sql-utils v0.2.4/go.mod h1:BJStxMfB6fzYVcOe0oZQCjGIPZQu76UBmg1Wuy6Z/7I=
 github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99/go.mod h1:1lJo3i6rXxKeerYnT8Nvf0QmHCRC1n8sfWVwXF2Frvo=
@@ -685,6 +687,7 @@ sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd/go.mod h1:B8JuhiUyNFVKdsE8h6
 sigs.k8s.io/kind v0.30.0/go.mod h1:FSqriGaoTPruiXWfRnUXNykF8r2t+fHtK0P0m1AbGF8=
 sigs.k8s.io/kustomize/api v0.20.1/go.mod h1:t6hUFxO+Ph0VxIk1sKp1WS0dOjbPCtLJ4p8aADLwqjM=
 sigs.k8s.io/kustomize/kyaml v0.20.1/go.mod h1:0EmkQHRUsJxY8Ug9Niig1pUMSCGHxQ5RklbpV/Ri6po=
+sigs.k8s.io/structured-merge-diff/v4 v4.2.3/go.mod h1:qjx8mGObPmV2aSZepjQjbmb2ihdVs8cGKBraizNC69E=
 sigs.k8s.io/structured-merge-diff/v6 v6.2.0/go.mod h1:M3W8sfWvn2HhQDIbGWj3S099YozAsymCo/wrT5ohRUE=
 software.sslmate.com/src/go-pkcs12 v0.4.0/go.mod h1:Qiz0EyvDRJjjxGyUQa2cCNZn/wMyzrRJ/qcDXOQazLI=
 tailscale.com v1.98.4/go.mod h1:U23ZwbZlKJMNU7CScy+lCVVlece/S5n09q0nyudncBI=

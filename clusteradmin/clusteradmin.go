@@ -10,6 +10,8 @@ import (
 	"time"
 	"uuid"
 
+	"github.com/italypaleale/go-kit/utils"
+
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/providerfactory"
 )
@@ -74,15 +76,9 @@ func New(ctx context.Context, providerOptions components.ProviderOptions, opts O
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
 	}
-	if opts.HostHealthCheckDeadline <= 0 {
-		opts.HostHealthCheckDeadline = components.DefaultHostHealthCheckDeadline
-	}
-	if opts.ExclusiveLeaseDuration <= 0 {
-		opts.ExclusiveLeaseDuration = defaultExclusiveLeaseDuration
-	}
-	if opts.ExclusiveRenewInterval <= 0 {
-		opts.ExclusiveRenewInterval = defaultExclusiveRenewInterval
-	}
+	opts.HostHealthCheckDeadline = utils.PositiveOr(opts.HostHealthCheckDeadline, components.DefaultHostHealthCheckDeadline)
+	opts.ExclusiveLeaseDuration = utils.PositiveOr(opts.ExclusiveLeaseDuration, defaultExclusiveLeaseDuration)
+	opts.ExclusiveRenewInterval = utils.PositiveOr(opts.ExclusiveRenewInterval, defaultExclusiveRenewInterval)
 
 	// Build the provider from a config whose only meaningful value is the health check deadline
 	// The admin never registers hosts or runs alarms

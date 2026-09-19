@@ -4,6 +4,8 @@ import (
 	"errors"
 	"math"
 	"time"
+
+	"github.com/italypaleale/go-kit/utils"
 )
 
 const (
@@ -176,13 +178,8 @@ func (o *RegisterActorOptions) Validate() error {
 		return errors.New("option DeactivationTimeout must not be negative")
 	}
 
-	if o.MaxAttempts <= 0 {
-		o.MaxAttempts = defaultAlarmMaxAttempts
-	}
-
-	if o.InitialRetryDelay <= 0 {
-		o.InitialRetryDelay = defaultAlarmInitialRetryDelay
-	}
+	o.MaxAttempts = utils.PositiveOr(o.MaxAttempts, defaultAlarmMaxAttempts)
+	o.InitialRetryDelay = utils.PositiveOr(o.InitialRetryDelay, defaultAlarmInitialRetryDelay)
 
 	// For dead-lettered jobs:
 	// zero = default (30 days)

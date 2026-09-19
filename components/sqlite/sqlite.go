@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/italypaleale/go-kit/utils"
 	sqladapter "github.com/italypaleale/go-sql-utils/adapter/sql"
 	"github.com/italypaleale/go-sql-utils/cleanup"
 	sqlinstrument "github.com/italypaleale/go-sql-utils/instrument"
@@ -94,9 +95,7 @@ func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, provi
 	s.fetchUpcomingAlarmsWithConstraintsQuery = s.q(queryFetchUpcomingAlarmsWithConstraints)
 
 	// Set default values
-	if s.timeout <= 0 {
-		s.timeout = DefaultTimeout
-	}
+	s.timeout = utils.PositiveOr(s.timeout, DefaultTimeout)
 	if s.cleanupInterval == 0 {
 		// A zero value means the default
 		s.cleanupInterval = DefaultCleanupInterval

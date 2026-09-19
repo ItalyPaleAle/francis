@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/alphadose/haxmap"
+	"github.com/italypaleale/go-kit/utils"
 	"github.com/quic-go/webtransport-go"
 	"go.opentelemetry.io/otel/trace"
 
@@ -59,12 +60,8 @@ func NewClient(cfg ClientConfig) *Client {
 	if cfg.Log == nil {
 		cfg.Log = slog.New(slog.DiscardHandler)
 	}
-	if cfg.DialTimeout <= 0 {
-		cfg.DialTimeout = defaultDialTimeout
-	}
-	if cfg.IdleTimeout <= 0 {
-		cfg.IdleTimeout = defaultIdleTimeout
-	}
+	cfg.DialTimeout = utils.PositiveOr(cfg.DialTimeout, defaultDialTimeout)
+	cfg.IdleTimeout = utils.PositiveOr(cfg.IdleTimeout, defaultIdleTimeout)
 
 	return &Client{
 		// The dialer's QUIC idle timeout reclaims a session once it stops carrying traffic, while an active stream keeps it alive

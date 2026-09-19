@@ -8,7 +8,7 @@ A workflow definition lives in Go code on your hosts, and a running instance ref
 
 ## When to bump the version
 
-Francis records a **fingerprint** of each version the first time it sees it, covering the graph and every setting that governs how a step runs. A second, different definition under the same number is refused.
+Francis records a fingerprint of each version the first time it sees it, covering the graph and every setting that governs how a step runs. A second, different definition under the same number is refused.
 
 **Bump `WithVersion` for any of these:**
 

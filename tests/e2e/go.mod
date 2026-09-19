@@ -4,7 +4,7 @@ go 1.27.1
 
 require (
 	github.com/italypaleale/francis v0.0.0
-	github.com/italypaleale/go-kit v1.1.2
+	github.com/italypaleale/go-kit v1.2.3
 	github.com/stretchr/testify v1.12.1
 	k8s.io/api v0.34.0
 	k8s.io/apimachinery v0.34.0

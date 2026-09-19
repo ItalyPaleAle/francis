@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/italypaleale/go-kit/utils"
 	"github.com/quic-go/webtransport-go"
 	"go.opentelemetry.io/otel/trace"
 
@@ -71,15 +72,9 @@ func NewServer(cfg ServerConfig) *Server {
 	if cfg.Log == nil {
 		cfg.Log = slog.New(slog.DiscardHandler)
 	}
-	if cfg.IdleTimeout <= 0 {
-		cfg.IdleTimeout = defaultIdleTimeout
-	}
-	if cfg.MaxInFlightRequests <= 0 {
-		cfg.MaxInFlightRequests = defaultMaxInFlightRequests
-	}
-	if cfg.MaxRequestBodySize <= 0 {
-		cfg.MaxRequestBodySize = defaultMaxRequestBodySize
-	}
+	cfg.IdleTimeout = utils.PositiveOr(cfg.IdleTimeout, defaultIdleTimeout)
+	cfg.MaxInFlightRequests = utils.PositiveOr(cfg.MaxInFlightRequests, defaultMaxInFlightRequests)
+	cfg.MaxRequestBodySize = utils.PositiveOr(cfg.MaxRequestBodySize, defaultMaxRequestBodySize)
 
 	return &Server{
 		cfg: cfg,
