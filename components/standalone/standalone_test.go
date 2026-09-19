@@ -89,7 +89,7 @@ func TestStandaloneTablePrefix(t *testing.T) {
 			names := sqliteTables(t, p)
 			require.Contains(t, names, "francis_hosts")
 			require.Contains(t, names, "francis_alarms")
-			require.Contains(t, names, "francis_dead_jobs")
+			require.Contains(t, names, "francis_terminal_jobs")
 			require.Contains(t, names, "francis_metadata")
 			// No object should exist under its bare, unprefixed name
 			require.NotContains(t, names, "hosts")
@@ -105,7 +105,7 @@ func TestStandaloneTablePrefix(t *testing.T) {
 				require.Truef(t, strings.HasPrefix(name, "myapp_"), "table %q is not prefixed", name)
 			}
 			require.Contains(t, names, "myapp_hosts")
-			require.Contains(t, names, "myapp_dead_jobs")
+			require.Contains(t, names, "myapp_terminal_jobs")
 			require.Contains(t, names, "myapp_metadata")
 		})
 
@@ -149,7 +149,7 @@ func TestStandaloneTablePrefix(t *testing.T) {
 			require.Equal(t, "francis_", p.tablePrefix)
 
 			require.True(t, tableInSchema(t, p, "francis_hosts"))
-			require.True(t, tableInSchema(t, p, "francis_dead_jobs"))
+			require.True(t, tableInSchema(t, p, "francis_terminal_jobs"))
 			require.True(t, tableInSchema(t, p, "francis_metadata"))
 			// No object should exist under its bare, unprefixed name
 			require.False(t, tableInSchema(t, p, "hosts"))
@@ -1976,7 +1976,7 @@ func TestPersistHook_Rollback_DispatchAndLeaseJob(t *testing.T) {
 
 	// The job, placement, and lease are submitted as one persistence operation
 	jobRef := ref.NewAlarmRef("myactor", "actor1", "job-key")
-	jobID, lease, err := p.DispatchJob(t.Context(), jobRef, components.SetAlarmReq{
+	jobID, _, lease, err := p.DispatchJob(t.Context(), jobRef, components.SetAlarmReq{
 		DueTime:        p.Clock.Now().Add(time.Second),
 		Kind:           components.AlarmKindJob,
 		JobMethod:      "process",
@@ -2004,7 +2004,7 @@ func TestPersistHook_Rollback_DispatchAndLeaseJob(t *testing.T) {
 	// Retrying after persistence recovers creates the complete mutation once
 	mock.Reset()
 	mock.ErrFunc = nil
-	jobID, lease, err = p.DispatchJob(t.Context(), jobRef, components.SetAlarmReq{
+	jobID, _, lease, err = p.DispatchJob(t.Context(), jobRef, components.SetAlarmReq{
 		DueTime:        p.Clock.Now().Add(time.Second),
 		Kind:           components.AlarmKindJob,
 		JobMethod:      "process",

@@ -61,6 +61,9 @@ const (
 
 	// cronJobIdleTimeout keeps the singleton from lingering between occurrences
 	cronJobIdleTimeout = time.Minute
+
+	// cronCompletedJobRetention keeps a week of records of the occurrences that ran, for auditing
+	cronCompletedJobRetention = 7 * 24 * time.Hour
 )
 
 // New builds a cron job built-in actor identified by name
@@ -164,7 +167,8 @@ func New(name string, opts ...Option) (*CronJob, error) {
 			}
 		},
 		regOpts: actorcore.RegisterActorOptions{
-			IdleTimeout: cronJobIdleTimeout,
+			IdleTimeout:           cronJobIdleTimeout,
+			CompletedJobRetention: cronCompletedJobRetention,
 		},
 	}, nil
 }
@@ -333,7 +337,7 @@ func (a *cronJobScheduler) registerChain(ctx context.Context, state cronJobState
 			a.log.Info("Jitter was added; replacing the recurring job with a run chain", slog.String("oldJobID", state.JobID))
 		}
 
-		err = a.runner.CancelJob(ctx, state.JobID)
+		err = a.runner.DeleteJob(ctx, state.JobID)
 		if err != nil && !errors.Is(err, actor.ErrJobNotFound) {
 			// A job that is already gone is fine: we still want to register the chain
 			return fmt.Errorf("failed to cancel outdated cron job: %w", err)
@@ -345,7 +349,7 @@ func (a *cronJobScheduler) registerChain(ctx context.Context, state cronJobState
 		return err
 	}
 
-	// A live chain registered for the configured schedule is left alone, which is what makes bootstrapping from every host a no-op after the first
+	// A live chain registered for the configured schedule is left alone, so bootstrapping from every host is a no-op after the first
 	if len(live) > 0 && state.JobID == "" && state.ChainID != "" && state.ChainInterval == a.interval && state.ChainCron == a.cron {
 		if a.log != nil {
 			a.log.Info("Cron job already registered")
@@ -369,7 +373,7 @@ func (a *cronJobScheduler) registerChain(ctx context.Context, state cronJobState
 func (a *cronJobScheduler) registerChainNew(ctx context.Context, preserveDueTime time.Time) (err error) {
 	// The chain never runs at registration time, so WithImmediate gets a one-shot run of its own
 	if a.immediate {
-		_, err = a.runner.Dispatch(ctx, methodRun, nil, actor.WithIdempotencyKey(immediateJobIdempotencyKey))
+		_, _, err = a.runner.Dispatch(ctx, methodRun, nil, actor.WithIdempotencyKey(immediateJobIdempotencyKey))
 		if err != nil {
 			return fmt.Errorf("failed to dispatch immediate cron job occurrence: %w", err)
 		}
@@ -493,7 +497,7 @@ func (a *cronJobScheduler) reconcileSchedule(ctx context.Context, jobID string) 
 		a.log.Info("Cron job schedule changed; replacing recurring job", slog.String("oldJobID", jobID))
 	}
 
-	err = a.runner.CancelJob(ctx, jobID)
+	err = a.runner.DeleteJob(ctx, jobID)
 	if err != nil && !errors.Is(err, actor.ErrJobNotFound) {
 		// A job that is already gone is fine: we still want to register the new schedule
 		return fmt.Errorf("failed to cancel outdated cron job: %w", err)
@@ -510,7 +514,7 @@ func (a *cronJobScheduler) reconcileSchedule(ctx context.Context, jobID string) 
 // It is ignored when WithImmediate is set, since immediate execution takes priority
 func (a *cronJobScheduler) registerNew(ctx context.Context, preserveDueTime time.Time) error {
 	if a.immediate && a.cron != "" {
-		_, err := a.runner.Dispatch(ctx, methodRun, nil, actor.WithIdempotencyKey(immediateJobIdempotencyKey))
+		_, _, err := a.runner.Dispatch(ctx, methodRun, nil, actor.WithIdempotencyKey(immediateJobIdempotencyKey))
 		if err != nil {
 			return fmt.Errorf("failed to dispatch immediate cron job occurrence: %w", err)
 		}
@@ -526,7 +530,7 @@ func (a *cronJobScheduler) registerNew(ctx context.Context, preserveDueTime time
 		jobOpts = append(jobOpts, actor.WithJobDueTime(preserveDueTime))
 	}
 
-	jobID, err := a.runner.Dispatch(ctx, methodRun, nil, jobOpts...)
+	jobID, _, err := a.runner.Dispatch(ctx, methodRun, nil, jobOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to register recurring cron job: %w", err)
 	}
@@ -547,7 +551,7 @@ func (a *cronJobScheduler) registerNew(ctx context.Context, preserveDueTime time
 // trigger dispatches a one-shot immediate run to the runner
 // The fixed idempotency key collapses multiple pending triggers into a single run: while one run is still pending, further triggers return the same job instead of queuing another
 func (a *cronJobScheduler) trigger(ctx context.Context) error {
-	_, err := a.runner.Dispatch(ctx, methodRun, nil, actor.WithIdempotencyKey(triggerJobIdempotencyKey))
+	_, _, err := a.runner.Dispatch(ctx, methodRun, nil, actor.WithIdempotencyKey(triggerJobIdempotencyKey))
 	if err != nil {
 		return fmt.Errorf("failed to dispatch triggered cron job run: %w", err)
 	}
@@ -594,7 +598,7 @@ func (a *cronJobScheduler) unregister(ctx context.Context) error {
 	}
 
 	if state.JobID != "" {
-		err = a.runner.CancelJob(ctx, state.JobID)
+		err = a.runner.DeleteJob(ctx, state.JobID)
 		if err != nil && !errors.Is(err, actor.ErrJobNotFound) {
 			// A job that is already gone is fine: the end state (no recurring job) is what we want
 			return fmt.Errorf("failed to cancel recurring cron job: %w", err)
@@ -629,7 +633,7 @@ func (a *cronJobScheduler) liveScheduledRuns(ctx context.Context) ([]actor.JobIn
 
 	live := make([]actor.JobInfo, 0, 2)
 	for _, job := range jobs {
-		if job.Method == methodScheduledRun && job.Status != actor.JobStatusDeadLettered {
+		if job.Method == methodScheduledRun && !job.Status.IsTerminal() {
 			live = append(live, job)
 		}
 	}
@@ -659,7 +663,7 @@ func (a *cronJobScheduler) cancelScheduledRuns(ctx context.Context, live []actor
 			earliest = job.DueTime
 		}
 
-		err = a.runner.CancelJob(ctx, job.JobID)
+		err = a.runner.DeleteJob(ctx, job.JobID)
 		if err != nil && !errors.Is(err, actor.ErrJobNotFound) {
 			// A job that is already gone is fine: the end state (that occurrence not running) is what we want
 			return time.Time{}, fmt.Errorf("failed to cancel scheduled cron job run: %w", err)
@@ -756,7 +760,7 @@ func (a *cronJobRunner) run(ctx context.Context) error {
 func planRun(ctx context.Context, runner actor.Client[struct{}], nominal time.Time, jitter time.Duration, chainID string, key string) (time.Time, error) {
 	due := jitterDueTime(nominal, jitter)
 
-	_, err := runner.Dispatch(ctx, methodScheduledRun, scheduledRunPayload{ChainID: chainID, Nominal: nominal},
+	_, _, err := runner.Dispatch(ctx, methodScheduledRun, scheduledRunPayload{ChainID: chainID, Nominal: nominal},
 		actor.WithJobDueTime(due),
 		actor.WithIdempotencyKey(key),
 	)
@@ -767,7 +771,7 @@ func planRun(ctx context.Context, runner actor.Client[struct{}], nominal time.Ti
 	return due, nil
 }
 
-// jitterDueTime offsets t by a random amount in the range +/- jitter, which is what keeps cron jobs sharing a schedule from all firing at the same instant
+// jitterDueTime offsets t by a random amount in the range +/- jitter, so cron jobs sharing a schedule do not all fire at the same instant
 func jitterDueTime(t time.Time, jitter time.Duration) time.Time {
 	if jitter <= 0 {
 		return t

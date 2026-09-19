@@ -358,7 +358,7 @@ func (rt *Runtime) executeActiveAlarm(lease *ref.AlarmLease) {
 	case executeAlarmStatusCompleted:
 		rt.metrics.alarmsExecuted.Add(ctx, 1)
 		var compErr error
-		reEnqueue, compErr = rt.completeAlarm(ctx, lease, log)
+		reEnqueue, compErr = rt.completeAlarm(ctx, lease, jobInfo, log)
 		if compErr != nil {
 			log.Error("Error completing alarm", slog.Any("error", compErr))
 		}
@@ -369,12 +369,17 @@ func (rt *Runtime) executeActiveAlarm(lease *ref.AlarmLease) {
 	}
 }
 
-// jobExecInfo carries the job details captured during dispatch, used by the terminal-failure path to dead-letter the job and fire its JobFailed hook
+// jobExecInfo carries the job details captured during dispatch, used by the paths that end a job: dead-lettering it and firing its JobFailed hook, or recording that it completed
 type jobExecInfo struct {
 	isJob  bool
 	method string
 	data   []byte
 	props  ref.AlarmProperties
+	// recordCompleted says the actor type asked for a record of a successful run, and completedRetention is how long that record is kept, where zero never expires
+	recordCompleted    bool
+	completedRetention time.Duration
+	// deadLetteredRetention is how long a dead-lettered record of this type is kept, where zero never expires
+	deadLetteredRetention time.Duration
 }
 
 // dispatchAlarm resolves the owning host, rechecks the lease, sends ExecuteAlarm, and classifies the response
@@ -416,12 +421,24 @@ func (rt *Runtime) dispatchAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 	// Record the execution time before dispatch,  a successful response may refine it
 	lease.SetExecutionTime(rt.clock.Now())
 
-	// Capture the job details so the terminal-failure path can dead-letter the job
+	// Capture the job details so the paths that end a job can record it: dead-lettering a terminal failure, or recording a successful run its actor type asked to keep
 	if alarm.Kind == components.AlarmKindJob {
 		jobInfo.isJob = true
 		jobInfo.method = alarm.JobMethod
 		jobInfo.data = alarm.Data
 		jobInfo.props = alarm.AlarmProperties
+
+		// The retentions are a property of the actor type, read from the host that serves it, exactly as the retry budget is
+		// The two are independent: a type can keep its failures without keeping its successes
+		at, hasConfig := conn.actorTypeConfig(aRef.ActorType)
+		if hasConfig {
+			cfg := components.ActorHostType{
+				CompletedJobRetention:    time.Duration(at.CompletedJobRetentionMs) * time.Millisecond,
+				DeadLetteredJobRetention: time.Duration(at.DeadLetteredJobRetentionMs) * time.Millisecond,
+			}
+			jobInfo.recordCompleted, jobInfo.completedRetention = cfg.CompletedJobRecord()
+			jobInfo.deadLetteredRetention = cfg.DeadLetteredJobRecordRetention()
+		}
 	}
 
 	req, err := protocol.NewRequest(protocol.KindExecuteAlarm, protocol.ExecuteAlarmRequest{
@@ -493,8 +510,9 @@ func (rt *Runtime) classifyAlarmError(conn *hostConn, actorType string, lease *r
 // For a repeating job the recurrence is rescheduled in the same provider transaction, so a single failed occurrence does not stop the recurrence
 func (rt *Runtime) deadLetterJob(parentCtx context.Context, lease *ref.AlarmLease, info jobExecInfo, jobErr error, log *slog.Logger) {
 	req := components.DeadLetterAlarmReq{
-		Reason:   jobErr.Error(),
-		Attempts: lease.Attempts(),
+		Reason:    jobErr.Error(),
+		Attempts:  lease.Attempts(),
+		Retention: info.deadLetteredRetention,
 	}
 
 	// Keep a repeating job's recurrence alive by rescheduling its next occurrence as part of the dead-letter move
@@ -617,8 +635,9 @@ func (rt *Runtime) initialRetryDelay(actorType string) time.Duration {
 }
 
 // completeAlarm reschedules a repeating alarm or deletes a one-shot alarm after a successful execution
+// A job whose actor type asked for retention leaves a record behind instead of vanishing, so a successful run is visible afterwards
 // It returns true when the lease was kept for its next occurrence and must be re-enqueued by the caller once the active flag is cleared
-func (rt *Runtime) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, log *slog.Logger) (bool, error) {
+func (rt *Runtime) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, jobInfo jobExecInfo, log *slog.Logger) (bool, error) {
 	// Re-read the alarm to confirm the lease is still valid and to observe any edits the actor made
 	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
 	alarm, err := rt.provider.GetLeasedAlarm(ctx, lease)
@@ -638,13 +657,48 @@ func (rt *Runtime) completeAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 		return false, nil
 	}
 	if next.IsZero() {
-		log.Debug("Removing completed alarm")
 		ctx, cancel = context.WithTimeout(parentCtx, rt.providerRequestTimeout)
 		defer cancel()
+
+		// A retained job moves to the terminal-job store rather than being deleted, so the run it just made is still visible afterwards
+		if jobInfo.isJob && jobInfo.recordCompleted {
+			log.Debug("Recording completed job")
+
+			err = rt.provider.CompleteJob(ctx, lease, components.CompleteJobReq{
+				Attempts:  lease.Attempts() + 1,
+				Retention: jobInfo.completedRetention,
+			})
+			if err != nil && !errors.Is(err, components.ErrNoAlarm) {
+				return false, fmt.Errorf("error recording completed job in provider: %w", err)
+			}
+
+			return false, nil
+		}
+
+		log.Debug("Removing completed alarm")
 		err = rt.provider.DeleteLeasedAlarm(ctx, lease)
 		if err != nil && !errors.Is(err, components.ErrNoAlarm) {
 			return false, fmt.Errorf("error removing completed alarm in provider: %w", err)
 		}
+		return false, nil
+	}
+
+	// A repeating job that is retained records this occurrence and re-creates the recurrence in one transaction, rather than updating the row in place
+	if jobInfo.isJob && jobInfo.recordCompleted {
+		log.Debug("Recording completed job occurrence and rescheduling", slog.Any("due", next))
+
+		ctx, cancel = context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+		defer cancel()
+		err = rt.provider.CompleteJob(ctx, lease, components.CompleteJobReq{
+			Attempts:    lease.Attempts() + 1,
+			Retention:   jobInfo.completedRetention,
+			Reschedule:  true,
+			NextDueTime: next,
+		})
+		if err != nil && !errors.Is(err, components.ErrNoAlarm) {
+			return false, fmt.Errorf("error recording completed job in provider: %w", err)
+		}
+
 		return false, nil
 	}
 

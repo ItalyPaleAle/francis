@@ -54,7 +54,7 @@ func TestRoundTrip(t *testing.T) {
 		Kind:      "job",
 		JobMethod: "Send",
 	}
-	dead := &DeadJobRecord{
+	dead := &TerminalJobRecord{
 		JobID:       "0198d0aa-0000-7000-8000-000000000003",
 		ActorType:   "Worker",
 		ActorID:     "w-9",
@@ -62,7 +62,8 @@ func TestRoundTrip(t *testing.T) {
 		Data:        []byte("dead-payload"),
 		Attempts:    5,
 		LastError:   "boom",
-		FailedAt:    time.Date(2026, 7, 1, 15, 0, 0, 0, time.UTC),
+		Status:      "dead",
+		EndedAt:     time.Date(2026, 7, 1, 15, 0, 0, 0, time.UTC),
 		OriginalDue: time.Date(2026, 7, 1, 14, 0, 0, 0, time.UTC),
 	}
 
@@ -72,7 +73,7 @@ func TestRoundTrip(t *testing.T) {
 	require.NoError(t, w.WriteState(state))
 	require.NoError(t, w.WriteAlarm(alarm))
 	require.NoError(t, w.WriteAlarm(job))
-	require.NoError(t, w.WriteDeadJob(dead))
+	require.NoError(t, w.WriteTerminalJob(dead))
 
 	r, hdr, err := NewReader(&buf)
 	require.NoError(t, err)
@@ -102,14 +103,14 @@ func TestRoundTrip(t *testing.T) {
 	assert.Equal(t, "job", recs[2].Alarm.Kind)
 	assert.Equal(t, "Send", recs[2].Alarm.JobMethod)
 
-	require.Equal(t, RecordTypeDeadJob, recs[3].Type)
-	require.NotNil(t, recs[3].DeadJob)
-	assert.Equal(t, dead.JobID, recs[3].DeadJob.JobID)
-	assert.Equal(t, dead.Attempts, recs[3].DeadJob.Attempts)
-	assert.Equal(t, dead.LastError, recs[3].DeadJob.LastError)
-	assert.Equal(t, dead.Data, recs[3].DeadJob.Data)
-	assert.True(t, dead.FailedAt.Equal(recs[3].DeadJob.FailedAt))
-	assert.True(t, dead.OriginalDue.Equal(recs[3].DeadJob.OriginalDue))
+	require.Equal(t, RecordTypeTerminalJob, recs[3].Type)
+	require.NotNil(t, recs[3].TerminalJob)
+	assert.Equal(t, dead.JobID, recs[3].TerminalJob.JobID)
+	assert.Equal(t, dead.Attempts, recs[3].TerminalJob.Attempts)
+	assert.Equal(t, dead.LastError, recs[3].TerminalJob.LastError)
+	assert.Equal(t, dead.Data, recs[3].TerminalJob.Data)
+	assert.True(t, dead.EndedAt.Equal(recs[3].TerminalJob.EndedAt))
+	assert.True(t, dead.OriginalDue.Equal(recs[3].TerminalJob.OriginalDue))
 }
 
 func TestEmptyBackupHasHeaderOnly(t *testing.T) {

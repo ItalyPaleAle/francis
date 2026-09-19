@@ -44,7 +44,8 @@ func (h *Host) SetState(ctx context.Context, actorType string, actorID string, s
 	}
 
 	err = h.actorProvider.SetState(ctx, ref.NewActorRef(actorType, actorID), data, components.SetStateOpts{
-		TTL: ttl,
+		TTL:            ttl,
+		WorkflowLabels: opts.WorkflowLabels(),
 	})
 	if err != nil {
 		return fmt.Errorf("failed saving state: %w", err)
@@ -106,6 +107,7 @@ func (h *Host) ListStates(ctx context.Context, actorType string, opts *actor.Lis
 	}
 	if opts != nil {
 		req.IncludeData = opts.IncludeData
+		req.WorkflowLabels = opts.WorkflowLabels()
 		req.After = opts.After
 		req.Limit = opts.Limit
 	}

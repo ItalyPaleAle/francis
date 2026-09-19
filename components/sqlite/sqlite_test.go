@@ -561,7 +561,7 @@ func TestTablePrefix(t *testing.T) {
 		names := schemaObjects(t, s)
 		assert.Contains(t, names, "francis_hosts")
 		assert.Contains(t, names, "francis_alarms")
-		assert.Contains(t, names, "francis_dead_jobs")
+		assert.Contains(t, names, "francis_terminal_jobs")
 		assert.Contains(t, names, "francis_host_active_actor_count")
 		assert.Contains(t, names, "francis_metadata")
 		// No object should exist under its bare, unprefixed name
@@ -724,4 +724,102 @@ func TestActiveHostsList_HostForActorType(t *testing.T) {
 		}
 		assert.Nil(t, ahl.HostForActorType("typeA"))
 	})
+}
+
+// TestSQLiteWorkflowLabelIndexes verifies the migration's expression indexes exist and that a filtered listing actually uses them
+//
+// SQLite has no index for arbitrary JSON keys, but it does index expressions, and it only matches one when the query repeats the indexed expression verbatim
+// That coupling is what this test protects: the migration and ListStates must keep spelling the same json_extract path
+func TestSQLiteWorkflowLabelIndexes(t *testing.T) {
+	newProvider := func(t *testing.T) *SQLiteProvider {
+		t.Helper()
+
+		clock := clocktesting.NewFakeClock(time.Now())
+		log := slog.New(slog.DiscardHandler)
+		p, err := NewSQLiteProvider(log, SQLiteProviderOptions{
+			ConnectionString: testutil.SQLiteConnString(t),
+			CleanupInterval:  -1,
+			clock:            clock,
+		}, comptesting.GetProviderConfig())
+		require.NoError(t, err)
+		t.Cleanup(func() { assert.NoError(t, p.Close()) })
+		require.NoError(t, p.Init(t.Context()))
+		return p
+	}
+
+	t.Run("the migration creates one index per label field", func(t *testing.T) {
+		p := newProvider(t)
+
+		var names string
+		err := p.db.QueryRowContext(t.Context(),
+			`SELECT coalesce(group_concat(name), '') FROM sqlite_master WHERE type = 'index'`,
+		).Scan(&names)
+		require.NoError(t, err)
+
+		for _, field := range []string{components.WorkflowLabelStatus, components.WorkflowLabelVersion, components.WorkflowLabelParent} {
+			assert.Contains(t, names, "francis_actor_state_wf_"+field+"_idx")
+		}
+	})
+
+	t.Run("a filtered listing uses the index", func(t *testing.T) {
+		p := newProvider(t)
+
+		// Enough rows that the planner has a reason to prefer an index over walking the actor type
+		for i := range 400 {
+			id := fmt.Sprintf("actor-%03d", i)
+			status := "running"
+			if i == 7 {
+				status = "completed"
+			}
+			require.NoError(t, p.SetState(t.Context(), ref.NewActorRef("W", id), []byte("data"), components.SetStateOpts{
+				WorkflowLabels: &components.WorkflowLabels{Status: status, Version: 1},
+			}))
+		}
+		_, err := p.db.ExecContext(t.Context(), "ANALYZE")
+		require.NoError(t, err)
+
+		// The listing must name the index in its plan, which is the whole point of indexing the field
+		plan := queryPlan(t, p, "W", components.WorkflowLabelStatus, "completed")
+		assert.Contains(t, plan, "francis_actor_state_wf_status_idx", "plan was: %s", plan)
+
+		// And it must still return the right row
+		res, err := p.ListStates(t.Context(), components.ListStatesReq{ActorType: "W", WorkflowLabels: &components.WorkflowLabels{Status: "completed"}})
+		require.NoError(t, err)
+		require.Len(t, res.States, 1)
+		assert.Equal(t, "actor-007", res.States[0].ActorID)
+	})
+}
+
+// queryPlan returns SQLite's plan for a label-filtered listing, in the same shape ListStates builds it
+func queryPlan(t *testing.T, p *SQLiteProvider, actorType string, labelField string, labelValue string) string {
+	t.Helper()
+
+	// #nosec G202 -- the only concatenated values are the static table prefix and one of the closed set of label field names, not user input
+	rows, err := p.db.QueryContext(t.Context(),
+		`EXPLAIN QUERY PLAN
+		SELECT actor_id, actor_state_data
+		FROM `+p.tablePrefix+`actor_state
+		WHERE
+			actor_type = ?
+			AND actor_id > ?
+			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > ?)
+			AND workflow_labels IS NOT NULL
+			AND `+workflowLabelExtract(labelField)+` = ?
+		ORDER BY actor_id
+		LIMIT ?`,
+		actorType, "", p.clock.Now().UnixMilli(), labelValue, 101,
+	)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var plan strings.Builder
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		require.NoError(t, rows.Scan(&id, &parent, &notUsed, &detail))
+		plan.WriteString(detail)
+		plan.WriteString("; ")
+	}
+	require.NoError(t, rows.Err())
+	return plan.String()
 }

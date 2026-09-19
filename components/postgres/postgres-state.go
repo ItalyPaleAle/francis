@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -43,6 +45,17 @@ func (p *PostgresProvider) SetState(ctx context.Context, ref ref.ActorRef, data 
 		exp = &opts.TTL
 	}
 
+	var wfLabels *string
+	if opts.WorkflowLabels != nil {
+		j, err := opts.WorkflowLabels.JSON()
+		if err != nil {
+			return err
+		}
+		if j != "" {
+			wfLabels = &j
+		}
+	}
+
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
@@ -51,12 +64,13 @@ func (p *PostgresProvider) SetState(ctx context.Context, ref ref.ActorRef, data 
 	_, err := p.db.Exec(queryCtx,
 		// If exp is nil, now() + NULL will be NULL
 		`INSERT INTO `+p.tablePrefix+`actor_state
-			(actor_type, actor_id, actor_state_data, actor_state_expiration_time)
-		VALUES ($1, $2, $3, (now() AT TIME ZONE 'utc') + $4)
+			(actor_type, actor_id, actor_state_data, actor_state_expiration_time, workflow_labels)
+		VALUES ($1, $2, $3, (now() AT TIME ZONE 'utc') + $4, $5::jsonb)
 		ON CONFLICT (actor_type, actor_id) DO UPDATE SET
 			actor_state_data = EXCLUDED.actor_state_data,
-			actor_state_expiration_time = EXCLUDED.actor_state_expiration_time`,
-		ref.ActorType, ref.ActorID, data, exp,
+			actor_state_expiration_time = EXCLUDED.actor_state_expiration_time,
+			workflow_labels = EXCLUDED.workflow_labels`,
+		ref.ActorType, ref.ActorID, data, exp, wfLabels,
 	)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)
@@ -79,19 +93,43 @@ func (p *PostgresProvider) ListStates(ctx context.Context, req components.ListSt
 	// This avoids a second query just to compute HasMore
 	limit := req.EffectiveLimit()
 
+	// To use the index, each requested label field is matched as the same ->> expression its index was built on
+	var labelFields map[string]string
+	if req.WorkflowLabels != nil {
+		labelFields = req.WorkflowLabels.Fields()
+	}
+
+	// The size is known up front: the two fixed arguments, one per label field, and the limit
+	args := make([]any, 0, 3+len(labelFields))
+	args = append(args, req.ActorType, req.After)
+
+	var labelClauses strings.Builder
+	for field, v := range labelFields {
+		labelClauses.Grow(32 + len(field))
+		// #nosec G202 -- the only concatenated values are one of the closed set of label field names and a placeholder number
+		labelClauses.WriteString(` AND workflow_labels->>'`)
+		labelClauses.WriteString(field)
+		labelClauses.WriteString(`' = $`)
+		labelClauses.WriteString(strconv.Itoa(len(args) + 1))
+		args = append(args, v)
+	}
+	limitArg := strconv.Itoa(len(args) + 1)
+	args = append(args, limit+1)
+
 	// The (actor_type, actor_id) primary key serves both the range scan and the ordering, using the database's collation for actor_id
 	// An empty cursor selects the first page, since every actor ID sorts after the empty string
-	// #nosec G202 -- the only concatenated values are the static table prefix and a fixed column name, not user input
+	// #nosec G202 -- the only concatenated values are the static table prefix, a fixed column name, and placeholder numbers, not user input
 	rows, err := p.db.Query(queryCtx,
 		`SELECT actor_id, `+dataCol+`
 		FROM `+p.tablePrefix+`actor_state
 		WHERE
 			actor_type = $1
 			AND actor_id > $2
-			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > (now() AT TIME ZONE 'utc'))
+			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > (now() AT TIME ZONE 'utc'))`+
+			labelClauses.String()+`
 		ORDER BY actor_id
-		LIMIT $3`,
-		req.ActorType, req.After, limit+1,
+		LIMIT $`+limitArg,
+		args...,
 	)
 	if err != nil {
 		return components.ListStatesRes{}, fmt.Errorf("error executing query: %w", err)

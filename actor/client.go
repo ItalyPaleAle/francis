@@ -36,13 +36,14 @@ type Client[T any] interface {
 	// Note: invoking/peeking your own actor from within its own turn can deadlock on the turn lock.
 	Peek(ctx context.Context, actorType string, actorID string, method string, data any, opts ...InvokeOption) (Envelope, error)
 	// Dispatch sends a durable, fire-and-forget job to the current actor.
-	Dispatch(ctx context.Context, method string, input any, opts ...JobOption) (jobID string, err error)
-	// GetJob returns the information for a job by its ID, spanning both live and dead-lettered jobs.
+	// The returned created reports whether this call created the job, which one that coalesced onto a live job with the same idempotency key did not.
+	Dispatch(ctx context.Context, method string, input any, opts ...JobOption) (jobID string, created bool, err error)
+	// GetJob returns the information for a job by its ID, spanning both live and terminal jobs.
 	GetJob(ctx context.Context, jobID string) (JobInfo, error)
-	// ListJobs returns all live and dead-lettered jobs for the current actor.
+	// ListJobs returns all of the current actor's jobs: the live ones, and any terminal record still retained.
 	ListJobs(ctx context.Context) ([]JobInfo, error)
-	// CancelJob cancels a live job for the current actor.
-	CancelJob(ctx context.Context, jobID string) error
+	// DeleteJob removes one of the current actor's jobs, whatever state it is in.
+	DeleteJob(ctx context.Context, jobID string, opts ...DeleteJobOption) error
 	// RetryJob re-dispatches a dead-lettered job and returns the new job ID.
 	RetryJob(ctx context.Context, jobID string) (newJobID string, err error)
 	// Halt the current actor upon returning.
@@ -170,15 +171,20 @@ func (c *client[T]) DeleteState(ctx context.Context) error {
 		return ErrReadOnly
 	}
 
-	// We set "hasState" to indicate we have the cached state
-	// We need a lock for correctness, but it should not be possible for this method to be called concurrently
+	// Delete the state from the service first
+	err := c.service.deleteState(ctx, c.actorType, c.actorID)
+	if err != nil && !errors.Is(err, ErrStateNotFound) {
+		return err
+	}
+
+	// Publish the confirmed absence so subsequent reads do not serve deleted state
 	var zero T
 	c.stateMu.Lock()
 	c.hasState = true
 	c.state = zero
 	c.stateMu.Unlock()
 
-	return c.service.deleteState(ctx, c.actorType, c.actorID)
+	return err
 }
 
 // ListStates returns the actors of the current actor's type that have state stored.
@@ -265,12 +271,12 @@ func (c *client[T]) Peek(ctx context.Context, actorType string, actorID string, 
 }
 
 // Dispatch sends a durable, fire-and-forget job to the current actor.
-func (c *client[T]) Dispatch(ctx context.Context, method string, input any, opts ...JobOption) (jobID string, err error) {
+func (c *client[T]) Dispatch(ctx context.Context, method string, input any, opts ...JobOption) (jobID string, created bool, err error) {
 	if !c.canTarget(c.actorType) {
-		return "", ErrActorTypeReserved
+		return "", false, ErrActorTypeReserved
 	}
 	if types.IsReadOnly(ctx) {
-		return "", ErrReadOnly
+		return "", false, ErrReadOnly
 	}
 
 	return c.service.dispatch(ctx, c.actorType, c.actorID, method, input, opts...)
@@ -281,7 +287,7 @@ func (c *client[T]) GetJob(ctx context.Context, jobID string) (JobInfo, error) {
 	return c.service.GetJob(ctx, jobID)
 }
 
-// ListJobs returns all live and dead-lettered jobs for the current actor.
+// ListJobs returns all of the current actor's jobs,including running ones and any terminal record still retained.
 func (c *client[T]) ListJobs(ctx context.Context) ([]JobInfo, error) {
 	if !c.canTarget(c.actorType) {
 		return nil, ErrActorTypeReserved
@@ -290,13 +296,13 @@ func (c *client[T]) ListJobs(ctx context.Context) ([]JobInfo, error) {
 	return c.service.listJobs(ctx, c.actorType, c.actorID)
 }
 
-// CancelJob cancels a live job for the current actor.
-func (c *client[T]) CancelJob(ctx context.Context, jobID string) error {
+// DeleteJob removes one of the current actor's jobs, whatever state it is in.
+func (c *client[T]) DeleteJob(ctx context.Context, jobID string, opts ...DeleteJobOption) error {
 	if !c.canTarget(c.actorType) {
 		return ErrActorTypeReserved
 	}
 
-	return c.service.cancelJob(ctx, c.actorType, c.actorID, jobID)
+	return c.service.deleteJob(ctx, c.actorType, c.actorID, jobID, opts...)
 }
 
 // RetryJob re-dispatches a dead-lettered job and returns the new job ID.

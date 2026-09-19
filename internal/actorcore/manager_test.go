@@ -1095,8 +1095,6 @@ func waitForGoroutines(t *testing.T, want int32, counter *atomic.Int32) {
 }
 
 func TestIdleActorHandling(t *testing.T) {
-	clock := clocktesting.NewFakeClock(time.Now())
-
 	// Create logger to see re-enqueue logs
 	// We need to use a custom buffer that uses a lock to make "go test -race" work
 	logBuf := &testutil.ConcurrentBuffer{}
@@ -1104,7 +1102,15 @@ func TestIdleActorHandling(t *testing.T) {
 		Level: slog.LevelDebug,
 	}))
 
-	newHost := func() (*Manager, *components_mocks.MockActorProvider) {
+	// newHost returns a host with an idle processor of its own, along with the fake clock that drives it
+	//
+	// The clock is per-subtest, and the processor is closed when the subtest ends, because the two together are what keep the subtests independent
+	// A processor left running stays subscribed to its clock, so a shared clock would have one subtest's Step fire the idle timers of actors another subtest registered, whose mocks expect no call at all
+	newHost := func(t *testing.T) (*Manager, *components_mocks.MockActorProvider, *clocktesting.FakeClock) {
+		t.Helper()
+
+		clock := clocktesting.NewFakeClock(time.Now())
+
 		// Create a mocked actor provider
 		provider := components_mocks.NewMockActorProvider(t)
 
@@ -1125,15 +1131,16 @@ func TestIdleActorHandling(t *testing.T) {
 			ExecuteFn: host.HandleIdleActor,
 			Clock:     clock,
 		})
+		t.Cleanup(func() { assert.NoError(t, host.IdleProcessor.Close()) })
 
-		return host, provider
+		return host, provider, clock
 	}
 
 	t.Run("idle actor gets halted", func(t *testing.T) {
 		t.Cleanup(func() { logBuf.Reset() })
 
 		// Create a new host
-		host, provider := newHost()
+		host, provider, clock := newHost(t)
 
 		// Create and register an active actor with short idle timeout
 		actorRef := ref.NewActorRef("testactor", "idleActor1")
@@ -1156,11 +1163,9 @@ func TestIdleActorHandling(t *testing.T) {
 		// Update idle time to trigger processing
 		activeAct.UpdateIdleAt(0)
 
-		// Verify actor is in the processor queue by advancing time
-		clock.Step(idleTimeout + time.Second)
-
-		// Give the processor time to execute
+		// The clock is stepped inside the poll so a step can never race ahead of the processor registering the idle timer, which a fake clock would then never fire
 		assert.Eventually(t, func() bool {
+			clock.Step(idleTimeout + time.Second)
 			_, exists := host.Actors.Get(actorRef.String())
 			return !exists // Wait until actor is removed
 		}, 2*time.Second, 50*time.Millisecond, "Actor should be removed from host after idle processing")
@@ -1177,7 +1182,7 @@ func TestIdleActorHandling(t *testing.T) {
 		t.Cleanup(func() { logBuf.Reset() })
 
 		// Create a new host
-		host, provider := newHost()
+		host, provider, clock := newHost(t)
 
 		// Create and register an active actor
 		actorRef := ref.NewActorRef("testactor", "busyActor")
@@ -1242,7 +1247,7 @@ func TestIdleActorHandling(t *testing.T) {
 		t.Cleanup(func() { logBuf.Reset() })
 
 		// Create a new host
-		host, provider := newHost()
+		host, provider, clock := newHost(t)
 
 		// Create and register an active actor with zero idle timeout
 		// No deactivation expected since actor has no idle timeout
@@ -1276,7 +1281,7 @@ func TestIdleActorHandling(t *testing.T) {
 		t.Cleanup(func() { logBuf.Reset() })
 
 		// Create a new host
-		host, provider := newHost()
+		host, provider, clock := newHost(t)
 
 		// Create and register an active actor
 		actorRef := ref.NewActorRef("testactor", "errorActor")
@@ -1290,17 +1295,11 @@ func TestIdleActorHandling(t *testing.T) {
 		err := activeAct.Halt(false)
 		require.NoError(t, err)
 
-		// Update idle time to trigger processing
-		activeAct.UpdateIdleAt(0)
+		// What is under test is the error branch of HandleIdleActor, not the processor that normally calls it, so it is called here directly
+		// Going through the idle timer would put a fake clock and a background goroutine between the test and the one line it is asserting on, for no added coverage
+		host.HandleIdleActor(activeAct)
 
-		// Advance time to when the actor should be processed
-		clock.Step(idleTimeout + 1*time.Second)
-
-		// Verify error message was logged
-		assert.Eventually(t, func() bool {
-			logString := logBuf.String()
-			return strings.Contains(logString, "Failed to try locking idle actor for deactivation")
-		}, 1*time.Second, 50*time.Millisecond, "Should log TryLock error")
+		assert.Contains(t, logBuf.String(), "Failed to try locking idle actor for deactivation", "Should log TryLock error")
 
 		// The actor should remain halted
 		assert.True(t, activeAct.halted.Load(), "Actor should remain halted")
@@ -1314,7 +1313,7 @@ func TestIdleActorHandling(t *testing.T) {
 		t.Cleanup(func() { logBuf.Reset() })
 
 		// Create a new host
-		host, provider := newHost()
+		host, provider, clock := newHost(t)
 
 		// Create and register an active actor
 		actorRef := ref.NewActorRef("testactor", "haltErrorActor")
@@ -1335,17 +1334,13 @@ func TestIdleActorHandling(t *testing.T) {
 			Return(haltErr).
 			Once()
 
-		// Update idle time to trigger processing
-		activeAct.UpdateIdleAt(0)
+		// As above, the branch under test is HandleIdleActor's, so it is called directly
+		// The halt itself runs in a goroutine it starts, so the log line is the only thing worth waiting for
+		host.HandleIdleActor(activeAct)
 
-		// Advance time to when the actor should be processed
-		clock.Step(idleTimeout + 1*time.Second)
-
-		// Wait for the error to be logged
-		assert.Eventually(t, func() bool {
-			logString := logBuf.String()
-			return strings.Contains(logString, "Failed to deactivate idle actor")
-		}, 2*time.Second, 50*time.Millisecond, "Should log halt error")
+		require.Eventually(t, func() bool {
+			return strings.Contains(logBuf.String(), "Failed to deactivate idle actor")
+		}, 10*time.Second, 10*time.Millisecond, "Should log halt error")
 
 		// The actor should be marked as halted (halt succeeds even if provider fails)
 		assert.True(t, activeAct.halted.Load(), "Actor should be marked as halted")
@@ -1363,7 +1358,7 @@ func TestIdleActorHandling(t *testing.T) {
 		t.Cleanup(func() { logBuf.Reset() })
 
 		// Create a new host
-		host, provider := newHost()
+		host, provider, clock := newHost(t)
 
 		const numActors = 5
 		activeActors := make([]*ActiveActor, numActors)
@@ -1427,6 +1422,8 @@ func TestIdleActorHandling(t *testing.T) {
 		assert.Equal(t, uintptr(numActors), host.Actors.Len(), "Should have all actors initially")
 
 		// Advance time to when actors should be processed
+		// The step waits for the processor to have armed its timer, since a fake clock only fires the timers that exist when it is stepped and what follows polls a channel rather than the clock
+		require.Eventually(t, clock.HasWaiters, 2*time.Second, 10*time.Millisecond, "the idle processor did not arm its timer")
 		clock.Step(idleTimeout + 1*time.Second)
 
 		// Wait for all actors to start deactivation

@@ -26,6 +26,7 @@ func TestNew(t *testing.T) {
 		assert.Equal(t, cronJobActorTypePrefix+"nightly", b.ActorType())
 		assert.NotNil(t, b.Factory())
 		assert.Equal(t, cronJobIdleTimeout, b.RegisterOptions().IdleTimeout)
+		assert.Equal(t, 7*24*time.Hour, b.RegisterOptions().CompletedJobRetention)
 	})
 
 	t.Run("valid period", func(t *testing.T) {
@@ -989,9 +990,9 @@ func (f *fakeClient[T]) ListStates(context.Context, *actor.ListStatesOpts) (acto
 	return actor.TypedStateList[T]{}, nil
 }
 
-func (f *fakeClient[T]) Dispatch(_ context.Context, method string, input any, opts ...actor.JobOption) (string, error) {
+func (f *fakeClient[T]) Dispatch(_ context.Context, method string, input any, opts ...actor.JobOption) (string, bool, error) {
 	if f.dispatchErr != nil {
-		return "", f.dispatchErr
+		return "", false, f.dispatchErr
 	}
 
 	var p actor.JobProperties
@@ -999,15 +1000,7 @@ func (f *fakeClient[T]) Dispatch(_ context.Context, method string, input any, op
 		o(&p)
 	}
 	f.dispatches = append(f.dispatches, dispatchCall{method: method, input: input, props: p})
-	return f.dispatchID, nil
-}
-
-func (f *fakeClient[T]) CancelJob(_ context.Context, jobID string) error {
-	if f.cancelErr != nil {
-		return f.cancelErr
-	}
-	f.cancelled = append(f.cancelled, jobID)
-	return nil
+	return f.dispatchID, true, nil
 }
 
 // The remaining methods are part of the actor.Client interface but unused by the cron job scheduler
@@ -1037,6 +1030,14 @@ func (f *fakeClient[T]) ListJobs(context.Context) ([]actor.JobInfo, error) {
 
 func (f *fakeClient[T]) RetryJob(context.Context, string) (string, error) {
 	return "", nil
+}
+
+func (f *fakeClient[T]) DeleteJob(_ context.Context, jobID string, _ ...actor.DeleteJobOption) error {
+	if f.cancelErr != nil {
+		return f.cancelErr
+	}
+	f.cancelled = append(f.cancelled, jobID)
+	return nil
 }
 
 func (f *fakeClient[T]) Halt() {

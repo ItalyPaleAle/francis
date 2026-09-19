@@ -2,6 +2,7 @@ package standalone
 
 import (
 	"context"
+	"database/sql"
 	"embed"
 	"errors"
 	"fmt"
@@ -199,7 +200,7 @@ func (s *StandalonePostgresBacked) loadFromDB(ctx context.Context) error {
 	}
 
 	// Load dead jobs
-	err = s.loadDeadJobs(queryCtx)
+	err = s.loadTerminalJobs(queryCtx)
 	if err != nil {
 		return fmt.Errorf("failed to load dead jobs: %w", err)
 	}
@@ -354,13 +355,13 @@ func (s *StandalonePostgresBacked) loadAlarms(ctx context.Context) error {
 	return rows.Err()
 }
 
-func (s *StandalonePostgresBacked) loadDeadJobs(ctx context.Context) error {
+func (s *StandalonePostgresBacked) loadTerminalJobs(ctx context.Context) error {
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	rows, err := s.db.Query(ctx, `
 		SELECT
 			job_id, actor_type, actor_id, job_method, job_data,
-			attempts, last_error, failed_at, original_due, job_interval, job_cron
-		FROM `+s.tablePrefix+`dead_jobs
+			job_status, attempts, last_error, ended_at, original_due, job_interval, job_cron, expiration_time
+		FROM `+s.tablePrefix+`terminal_jobs
 	`)
 	if err != nil {
 		return err
@@ -369,16 +370,17 @@ func (s *StandalonePostgresBacked) loadDeadJobs(ctx context.Context) error {
 
 	for rows.Next() {
 		var (
-			d         internal.DeadJob
+			d         internal.TerminalJob
 			data      []byte
 			lastError *string
 			interval  *string
 			cron      *string
+			exp       *time.Time
 		)
 
 		err := rows.Scan(
 			&d.JobID, &d.ActorType, &d.ActorID, &d.Method, &data,
-			&d.Attempts, &lastError, &d.FailedAt, &d.OriginalDue, &interval, &cron,
+			&d.Status, &d.Attempts, &lastError, &d.EndedAt, &d.OriginalDue, &interval, &cron, &exp,
 		)
 		if err != nil {
 			return err
@@ -396,8 +398,11 @@ func (s *StandalonePostgresBacked) loadDeadJobs(ctx context.Context) error {
 		if cron != nil {
 			d.Cron = *cron
 		}
+		if exp != nil {
+			d.Expiration = new(*exp)
+		}
 
-		s.DeadJobs[d.JobID] = &d
+		s.TerminalJobs[d.JobID] = &d
 	}
 
 	return rows.Err()
@@ -405,7 +410,7 @@ func (s *StandalonePostgresBacked) loadDeadJobs(ctx context.Context) error {
 
 func (s *StandalonePostgresBacked) loadActorState(ctx context.Context) error {
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	rows, err := s.db.Query(ctx, "SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time FROM "+s.tablePrefix+"actor_state")
+	rows, err := s.db.Query(ctx, "SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time, workflow_labels FROM "+s.tablePrefix+"actor_state")
 	if err != nil {
 		return err
 	}
@@ -416,16 +421,18 @@ func (s *StandalonePostgresBacked) loadActorState(ctx context.Context) error {
 			actorType, actorID string
 			data               []byte
 			exp                *time.Time
+			labels             sql.NullString
 		)
 
-		err := rows.Scan(&actorType, &actorID, &data, &exp)
+		err := rows.Scan(&actorType, &actorID, &data, &exp, &labels)
 		if err != nil {
 			return err
 		}
 
 		entry := &internal.StateEntry{
-			Data:       data,
-			Expiration: exp,
+			Data:           data,
+			Expiration:     exp,
+			WorkflowLabels: decodeWorkflowLabels(labels),
 		}
 
 		key := internal.NewActorKey(actorType, actorID)
@@ -486,7 +493,7 @@ func (s *StandalonePostgresBacked) PersistChanges(ctx context.Context, changes *
 	}
 
 	// Process dead job changes
-	err = s.persistDeadJobChanges(queryCtx, tx, changes)
+	err = s.persistTerminalJobChanges(queryCtx, tx, changes)
 	if err != nil {
 		return err
 	}
@@ -675,18 +682,18 @@ func (s *StandalonePostgresBacked) persistAlarmChanges(ctx context.Context, tx p
 	return nil
 }
 
-func (s *StandalonePostgresBacked) persistDeadJobChanges(ctx context.Context, tx pgx.Tx, changes *internal.Changes) error {
+func (s *StandalonePostgresBacked) persistTerminalJobChanges(ctx context.Context, tx pgx.Tx, changes *internal.Changes) error {
 	// Deletes
-	for _, jobID := range changes.DeadJobs.Delete {
+	for _, jobID := range changes.TerminalJobs.Delete {
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-		_, err := tx.Exec(ctx, "DELETE FROM "+s.tablePrefix+"dead_jobs WHERE job_id = $1", jobID)
+		_, err := tx.Exec(ctx, "DELETE FROM "+s.tablePrefix+"terminal_jobs WHERE job_id = $1", jobID)
 		if err != nil {
-			return fmt.Errorf("failed to delete dead job %s: %w", jobID, err)
+			return fmt.Errorf("failed to delete terminal job %s: %w", jobID, err)
 		}
 	}
 
 	// Upserts
-	for _, dc := range changes.DeadJobs.Set {
+	for _, dc := range changes.TerminalJobs.Set {
 		d := dc.Value
 		var (
 			lastErrorVal         any
@@ -702,28 +709,35 @@ func (s *StandalonePostgresBacked) persistDeadJobChanges(ctx context.Context, tx
 			cronVal = d.Cron
 		}
 
+		var expVal any
+		if d.Expiration != nil {
+			expVal = d.Expiration.UTC()
+		}
+
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.Exec(ctx,
-			`INSERT INTO `+s.tablePrefix+`dead_jobs (
+			`INSERT INTO `+s.tablePrefix+`terminal_jobs (
 				job_id, actor_type, actor_id, job_method, job_data,
-				attempts, last_error, failed_at, original_due, job_interval, job_cron)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+				job_status, attempts, last_error, ended_at, original_due, job_interval, job_cron, expiration_time)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 			ON CONFLICT(job_id) DO UPDATE SET
 				actor_type = EXCLUDED.actor_type,
 				actor_id = EXCLUDED.actor_id,
 				job_method = EXCLUDED.job_method,
 				job_data = EXCLUDED.job_data,
+				job_status = EXCLUDED.job_status,
 				attempts = EXCLUDED.attempts,
 				last_error = EXCLUDED.last_error,
-				failed_at = EXCLUDED.failed_at,
+				ended_at = EXCLUDED.ended_at,
 				original_due = EXCLUDED.original_due,
 				job_interval = EXCLUDED.job_interval,
-				job_cron = EXCLUDED.job_cron`,
+				job_cron = EXCLUDED.job_cron,
+				expiration_time = EXCLUDED.expiration_time`,
 			d.JobID, d.ActorType, d.ActorID, d.Method, d.Data,
-			d.Attempts, lastErrorVal, d.FailedAt.UTC(), d.OriginalDue.UTC(), intervalVal, cronVal,
+			d.Status, d.Attempts, lastErrorVal, d.EndedAt.UTC(), d.OriginalDue.UTC(), intervalVal, cronVal, expVal,
 		)
 		if err != nil {
-			return fmt.Errorf("failed to upsert dead job %s: %w", d.JobID, err)
+			return fmt.Errorf("failed to upsert terminal job %s: %w", d.JobID, err)
 		}
 	}
 
@@ -754,12 +768,13 @@ func (s *StandalonePostgresBacked) persistActorStateChanges(ctx context.Context,
 
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.Exec(ctx,
-			`INSERT INTO `+s.tablePrefix+`actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time)
-			VALUES ($1, $2, $3, $4)
+			`INSERT INTO `+s.tablePrefix+`actor_state (actor_type, actor_id, actor_state_data, actor_state_expiration_time, workflow_labels)
+			VALUES ($1, $2, $3, $4, $5)
 			ON CONFLICT(actor_type, actor_id) DO UPDATE SET
 				actor_state_data = EXCLUDED.actor_state_data,
-				actor_state_expiration_time = EXCLUDED.actor_state_expiration_time`,
-			key.ActorType, key.ActorID, entry.Data, expVal,
+				actor_state_expiration_time = EXCLUDED.actor_state_expiration_time,
+				workflow_labels = EXCLUDED.workflow_labels`,
+			key.ActorType, key.ActorID, entry.Data, expVal, encodeWorkflowLabels(entry.WorkflowLabels),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to upsert actor state: %w", err)

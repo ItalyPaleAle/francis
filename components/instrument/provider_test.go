@@ -84,12 +84,13 @@ func TestWrapProviderReturnsImmediateJobLease(t *testing.T) {
 	base := components_mocks.NewMockActorProvider(t)
 	base.EXPECT().
 		DispatchJob(mock.Anything, jobRef, req).
-		Return("job-id", want, nil)
+		Return("job-id", true, want, nil)
 
 	p := WrapProvider(base, nil, components.OperationLogConfig{})
-	jobID, got, err := p.DispatchJob(t.Context(), jobRef, req)
+	jobID, created, got, err := p.DispatchJob(t.Context(), jobRef, req)
 	require.NoError(t, err)
 	assert.Equal(t, "job-id", jobID)
+	assert.True(t, created)
 	assert.Same(t, want, got)
 
 	span := spansByName(t, sr)["provider.DispatchJob"]

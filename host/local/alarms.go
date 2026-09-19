@@ -346,9 +346,18 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 
 	status, ok := statusAny.(executeAlarmStatus)
 	if !ok {
-		// If result was not executeAlarmStatus, it means that something failed getting the actor
-		// We'll retry
-		status = executeAlarmStatusRetryable
+		// If result was not executeAlarmStatus, it means that something failed getting or locking the actor, rather than the handler failing
+		// An actor that is halting, or is no longer active or placed here, says nothing about this occurrence: the placement we checked above has gone stale underneath us
+		// Handing the lease back has the next poll re-resolve and re-activate, which costs one poll interval instead of a full retry backoff and does not spend an attempt
+		// A workflow instance halts its activation the moment it terminates, so a job that arrives for it in that window (a parent unwinding a completed child, say) takes this path
+		switch {
+		case errors.Is(err, actor.ErrActorHalted),
+			errors.Is(err, actor.ErrActorNotActive),
+			errors.Is(err, actor.ErrActorNotHosted):
+			status = executeAlarmStatusReleased
+		default:
+			status = executeAlarmStatusRetryable
+		}
 	}
 	switch status {
 	case executeAlarmStatusAbandoned:
@@ -375,9 +384,9 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		return
 
 	case executeAlarmStatusReleased:
-		// The host declined this occurrence (capacity group full, or the handler returned ErrJobRejected)
-		// Hand it back so another host runs it, without counting an attempt or dead-lettering
-		log.Debug("Job occurrence released for re-routing", slog.Any("error", err))
+		// The host declined this occurrence (capacity group full, or the handler returned ErrJobRejected), or could not lock the actor because its placement went stale
+		// Hand it back so another host, or this one on a later poll, runs it without counting an attempt or dead-lettering
+		log.Debug("Alarm released for re-routing", slog.Any("error", err))
 		h.releaseForReroute(ctx, lease, aRef, log)
 		return
 
@@ -484,8 +493,9 @@ func (h *Host) executeJob(parentCtx context.Context, lease *ref.AlarmLease, act 
 // For a repeating job the recurrence is rescheduled in the same provider transaction, so a single failed occurrence does not stop the recurrence
 func (h *Host) deadLetterJob(ctx context.Context, lease *ref.AlarmLease, props ref.AlarmProperties, method string, data []byte, jobErr error, log *slog.Logger) {
 	req := components.DeadLetterAlarmReq{
-		Reason:   jobErr.Error(),
-		Attempts: lease.Attempts(),
+		Reason:    jobErr.Error(),
+		Attempts:  lease.Attempts(),
+		Retention: h.core.ActorsConfig[lease.ActorRef().ActorType].DeadLetteredJobRecordRetention(),
 	}
 
 	// Keep a repeating job's recurrence alive by rescheduling its next occurrence as part of the dead-letter move
@@ -614,12 +624,35 @@ func (h *Host) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, l
 		log.Error("Failed to compute next execution time for alarm; alarm will be kept", slog.Any("error", err))
 		return false, nil
 	}
+
+	// A job whose actor type asked to keep its successes leaves a record behind, so a successful run is visible afterwards
+	var (
+		record    bool
+		retention time.Duration
+	)
+	if alarm.Kind == components.AlarmKindJob {
+		record, retention = h.core.ActorsConfig[lease.ActorRef().ActorType].CompletedJobRecord()
+	}
+
 	if next.IsZero() {
+		ctx, cancel = context.WithTimeout(parentCtx, h.providerRequestTimeout)
+		defer cancel()
+
+		if record {
+			log.Debug("Recording completed job")
+			err = h.actorProvider.CompleteJob(ctx, lease, components.CompleteJobReq{
+				Attempts:  lease.Attempts() + 1,
+				Retention: retention,
+			})
+			if err != nil && !errors.Is(err, components.ErrNoAlarm) {
+				return false, fmt.Errorf("error recording completed job in provider: %w", err)
+			}
+			return false, nil
+		}
+
 		log.Debug("Removing completed alarm")
 
 		// Alarm doesn't repeat, delete it as it's completed
-		ctx, cancel = context.WithTimeout(parentCtx, h.providerRequestTimeout)
-		defer cancel()
 		err = h.actorProvider.DeleteLeasedAlarm(ctx, lease)
 		if err != nil && !errors.Is(err, components.ErrNoAlarm) {
 			// If we get ErrNoAlarm, the alarm was modified/deleted, or the lease was canceled for other reasons
@@ -628,6 +661,24 @@ func (h *Host) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, l
 		}
 
 		// We're done!
+		return false, nil
+	}
+
+	// A repeating job that is retained records this occurrence and re-creates the recurrence in one transaction, rather than updating the row in place
+	// That costs the lease it might otherwise have kept for a near occurrence, which the next poll picks up instead
+	if record {
+		log.Debug("Recording completed job occurrence and rescheduling", slog.Any("due", next))
+		ctx, cancel = context.WithTimeout(parentCtx, h.providerRequestTimeout)
+		defer cancel()
+		err = h.actorProvider.CompleteJob(ctx, lease, components.CompleteJobReq{
+			Attempts:    lease.Attempts() + 1,
+			Retention:   retention,
+			Reschedule:  true,
+			NextDueTime: next,
+		})
+		if err != nil && !errors.Is(err, components.ErrNoAlarm) {
+			return false, fmt.Errorf("error recording completed job in provider: %w", err)
+		}
 		return false, nil
 	}
 

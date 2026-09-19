@@ -6,13 +6,14 @@
 
 📚 **[Read the documentation](https://francis.italypaleale.me)**
 
-Francis is a framework and runtime for **Distributed Actors** (also known as _durable objects_) for Go apps.
+Francis is a framework and runtime for **Distributed Actors** (also known as _durable objects_) for Go apps, and a **durable workflow engine** built on them.
 
 With Francis, you can build **highly-available** apps that **scale horizontally** and/or use **microservices**. Unlike other actor frameworks, Francis is designed to be simpler to add to your solution and lower-maintenance: it only requires a relational database (PostgreSQL or SQLite) and can optionally run embedded in your apps too, without a separate control plane service.
 
 **What you can use Francis for:**
 
 - Build [**stateful services**](https://francis.italypaleale.me/docs/concepts/) where each entity (a user, a device, a shopping cart, a game session…) is an actor with its own durable state
+- Run [**multi-step workflows**](https://francis.italypaleale.me/workflows/) that survive restarts and undo the work that already succeeded when a later step fails
 - Run [**background work on a schedule**](https://francis.italypaleale.me/docs/alarms/) with durable alarms that survive restarts
 - Process a [**distributed pool of long-running tasks**](https://francis.italypaleale.me/builtin-actors/task-pool/) with a bounded number per host that scales out as you add hosts
 - Add resilience to **microservices** without standing up extra infrastructure beyond a database
@@ -27,6 +28,26 @@ func (c *Counter) Invoke(ctx context.Context, method string, data actor.Envelope
 }
 ```
 
+A workflow is a declared graph of steps, each one a plain Go function:
+
+```go
+checkout, _ := workflow.New("checkout",
+	workflow.WithSteps(
+		workflow.Step("reserve-inventory",
+			workflow.WithRun(reserveInventory),
+			workflow.WithCompensate(releaseInventory),
+		),
+		workflow.Step("charge",
+			workflow.WithRun(chargeCard),
+			workflow.WithCompensate(refundCharge),
+		),
+		workflow.Step("create-shipment", workflow.WithRun(createShipment)),
+	),
+)
+```
+
+If `create-shipment` fails, Francis runs `refundCharge` and then `releaseInventory`, and the instance terminates as failed.
+
 Francis is fully open source and released under a permissive MIT license.
 
 > If you're new to the distributed actors pattern, [this article](https://withblue.ink/2025/11/distributed-actors-model) provides a good starting point.
@@ -36,6 +57,7 @@ Francis is fully open source and released under a permissive MIT license.
 - **Virtual actors**: actors are addressed by type and ID, activated on demand, and run one invocation at a time (_turn-based concurrency_), so you never manage their lifecycle or worry about concurrent access to their state
 - **Durable state**: each actor has its own state, persisted in PostgreSQL or SQLite, which survives deactivation, restarts, and moving between hosts
 - **Durable alarms**: schedule one-off or repeating work that survives process restarts
+- **Durable workflows**: declare a multi-step process as a graph, with parallel steps, fan-out, child workflows, and a per-step undo that runs in reverse when the process fails
 - **Two topologies, same code**: run everything embedded in your app (_local_) with no extra services, or point your workers at a standalone runtime (_remote_) when you want a dedicated control plane
 - **Low-maintenance**: the only hard dependency is a relational database, no separate message broker or external coordination service
 - **Secure by default**: hosts authenticate each other with mTLS using certificates derived from a shared cluster key, with pluggable host bootstrap (pre-shared key or JWT)
@@ -89,6 +111,7 @@ Quick links:
 - [Topologies](https://francis.italypaleale.me/docs/topologies/) — local vs. remote, and choosing the right one
 - [Deploying the runtime](https://francis.italypaleale.me/docs/deploying-the-runtime/) — running the standalone control plane
 - [Built-in actors](https://francis.italypaleale.me/builtin-actors/) - framework-managed actors for common patterns
+- [Workflows](https://francis.italypaleale.me/workflows/) — durable multi-step processes, with parallelism, compensation, and child workflows
 
 You can also find runnable samples in the [`examples`](./examples) directory.
 

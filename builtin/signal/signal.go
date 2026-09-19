@@ -216,7 +216,7 @@ func (a *signalActor) Invoke(ctx context.Context, method string, data actor.Enve
 
 // load reads the signal's durable record into memory, the first time this activation needs it
 // Placement guarantees a single active instance per signal across the cluster, so once loaded this instance is authoritative for the rest of its life: any completion has to pass through it
-// That is what keeps a signal with thousands of waiters down to a single read
+// A signal with thousands of waiters then costs a single read
 // The caller must hold mu
 func (a *signalActor) load(ctx context.Context) error {
 	if a.loaded {

@@ -108,7 +108,7 @@ func (s *immediatePlacement) Run(t *testing.T) {
 
 		// Scheduling from the other host must still pre-lease the job for its current owner
 		before := shared.ProbeObserver.JobCount(actorID)
-		_, err = s.cluster.Service(dispatcher).Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobDelay(crossHostImmediateDelay))
+		_, _, err = s.cluster.Service(dispatcher).Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobDelay(crossHostImmediateDelay))
 		require.NoError(t, err)
 		require.Eventually(t, func() bool {
 			return shared.ProbeObserver.JobCount(actorID) > before

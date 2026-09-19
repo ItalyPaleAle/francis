@@ -35,8 +35,12 @@ func (p *Provider) SetState(ctx context.Context, r ref.ActorRef, data []byte, op
 	p.stateWriteMu.Lock()
 	defer p.stateWriteMu.Unlock()
 
+	// The labels passed in replace whatever the actor had, so a nil one simply leaves none behind
 	entry := &StateEntry{
 		Data: data,
+	}
+	if opts.WorkflowLabels != nil && !opts.WorkflowLabels.IsZero() {
+		entry.WorkflowLabels = new(*opts.WorkflowLabels)
 	}
 	if opts.TTL > 0 {
 		entry.Expiration = new(p.Clock.Now().Add(opts.TTL))
@@ -68,6 +72,11 @@ func (p *Provider) ListStates(ctx context.Context, req components.ListStatesReq)
 		}
 
 		if key.ActorID <= req.After {
+			continue
+		}
+
+		// A label filter narrows the listing to the actors whose labels match every field it sets, matching what the SQL providers do with an indexed equality
+		if !state.MatchesWorkflowLabels(req.WorkflowLabels) {
 			continue
 		}
 

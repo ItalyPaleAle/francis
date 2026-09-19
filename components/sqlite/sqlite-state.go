@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
@@ -41,6 +42,17 @@ func (s *SQLiteProvider) SetState(ctx context.Context, ref ref.ActorRef, data []
 		exp = new(s.clock.Now().Add(opts.TTL).UnixMilli())
 	}
 
+	var wfLabels *string
+	if opts.WorkflowLabels != nil {
+		j, jErr := opts.WorkflowLabels.JSON()
+		if jErr != nil {
+			return jErr
+		}
+		if j != "" {
+			wfLabels = &j
+		}
+	}
+
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
@@ -48,9 +60,9 @@ func (s *SQLiteProvider) SetState(ctx context.Context, ref ref.ActorRef, data []
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	_, err := s.db.ExecContext(queryCtx,
 		`REPLACE INTO `+s.tablePrefix+`actor_state
-			(actor_type, actor_id, actor_state_data, actor_state_expiration_time)
-		VALUES (?, ?, ?, ?)`,
-		ref.ActorType, ref.ActorID, data, exp,
+			(actor_type, actor_id, actor_state_data, actor_state_expiration_time, workflow_labels)
+		VALUES (?, ?, ?, ?, ?)`,
+		ref.ActorType, ref.ActorID, data, exp, wfLabels,
 	)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)
@@ -73,6 +85,31 @@ func (s *SQLiteProvider) ListStates(ctx context.Context, req components.ListStat
 	// This avoids a second query just to compute HasMore
 	limit := req.EffectiveLimit()
 
+	// Each requested label field is matched as the same json_extract expression its index was built on, which is required to use the index
+	var wfLabelFields map[string]string
+	if req.WorkflowLabels != nil {
+		wfLabelFields = req.WorkflowLabels.Fields()
+	}
+
+	args := make([]any, 0, 4+len(wfLabelFields))
+	args = append(args, req.ActorType, req.After, s.clock.Now().UnixMilli())
+
+	var labelClauses strings.Builder
+	if len(wfLabelFields) > 0 {
+		// json_extract needs well-formed JSON, so a row with no labels at all is excluded before it is reached
+		labelClauses.WriteString(` AND workflow_labels IS NOT NULL `)
+	}
+	for field, v := range wfLabelFields {
+		// #nosec G202 -- the only concatenated value is one of the closed set of label field names, not user input
+		fieldLabel := workflowLabelExtract(field)
+		labelClauses.Grow(10 + len(fieldLabel))
+		labelClauses.WriteString(` AND `)
+		labelClauses.WriteString(fieldLabel)
+		labelClauses.WriteString(` = ?`)
+		args = append(args, v)
+	}
+	args = append(args, limit+1)
+
 	// The (actor_type, actor_id) primary key serves both the range scan and the ordering
 	// An empty cursor selects the first page, since every actor ID sorts after the empty string
 	// #nosec G202 -- the only concatenated values are the static table prefix and a fixed column name, not user input
@@ -82,10 +119,11 @@ func (s *SQLiteProvider) ListStates(ctx context.Context, req components.ListStat
 		WHERE
 			actor_type = ?
 			AND actor_id > ?
-			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > ?)
+			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > ?)`+
+			labelClauses.String()+`
 		ORDER BY actor_id
 		LIMIT ?`,
-		req.ActorType, req.After, s.clock.Now().UnixMilli(), limit+1,
+		args...,
 	)
 	if err != nil {
 		return components.ListStatesRes{}, fmt.Errorf("error executing query: %w", err)

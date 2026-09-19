@@ -14,7 +14,7 @@ import (
 	"github.com/italypaleale/francis/internal/ref"
 )
 
-func (s *SQLiteProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) (string, *ref.AlarmLease, error) {
+func (s *SQLiteProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) (string, bool, *ref.AlarmLease, error) {
 	var (
 		interval *string
 		cron     *string
@@ -47,10 +47,11 @@ func (s *SQLiteProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req
 		return stored.alarmID, txErr
 	})
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to dispatch job: %w", err)
+		return "", false, nil, fmt.Errorf("failed to dispatch job: %w", err)
 	}
 
-	return jobID, nil, nil
+	// The insert proposed this call's own ID, so getting a different one back means a job already held the idempotency key
+	return jobID, jobID == alarmID, nil, nil
 }
 
 // insertJob creates a job when its idempotency key is new and always returns the stored job
@@ -86,7 +87,7 @@ func (s *SQLiteProvider) insertJob(ctx context.Context, q querier, aRef ref.Alar
 }
 
 // dispatchAndLeaseJob atomically stores a new idempotent job with any required actor placement and lease
-func (s *SQLiteProvider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq, alarmID string, interval *string, cron *string, ttl *int64) (string, *ref.AlarmLease, error) {
+func (s *SQLiteProvider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq, alarmID string, interval *string, cron *string, ttl *int64) (string, bool, *ref.AlarmLease, error) {
 	type dispatchResult struct {
 		jobID string
 		lease *ref.AlarmLease
@@ -146,16 +147,61 @@ func (s *SQLiteProvider) dispatchAndLeaseJob(ctx context.Context, aRef ref.Alarm
 		return dispatchResult{jobID: stored.alarmID, lease: lease}, nil
 	})
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to dispatch job: %w", err)
+		return "", false, nil, fmt.Errorf("failed to dispatch job: %w", err)
 	}
-	return res.jobID, res.lease, nil
+
+	// The insert proposed this call's own ID, so getting a different one back means a job already held the idempotency key
+	return res.jobID, res.jobID == alarmID, res.lease, nil
 }
 
 func (s *SQLiteProvider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLease, req components.DeadLetterAlarmReq) error {
-	now := s.clock.Now().UnixMilli()
+	return s.endJob(ctx, lease, endJobReq{
+		status:      components.JobStatusDeadLettered,
+		reason:      req.Reason,
+		attempts:    req.Attempts,
+		retention:   req.Retention,
+		reschedule:  req.Reschedule,
+		nextDueTime: req.NextDueTime,
+	})
+}
+
+func (s *SQLiteProvider) CompleteJob(ctx context.Context, lease *ref.AlarmLease, req components.CompleteJobReq) error {
+	return s.endJob(ctx, lease, endJobReq{
+		status:      components.JobStatusCompleted,
+		attempts:    req.Attempts,
+		retention:   req.Retention,
+		reschedule:  req.Reschedule,
+		nextDueTime: req.NextDueTime,
+	})
+}
+
+type endJobReq struct {
+	status      components.JobStatus
+	reason      string
+	attempts    int
+	retention   time.Duration
+	reschedule  bool
+	nextDueTime time.Time
+}
+
+// endJob atomically moves a leased job out of the alarms table and into the terminal-job store, optionally re-creating its recurrence in the same transaction
+func (s *SQLiteProvider) endJob(ctx context.Context, lease *ref.AlarmLease, req endJobReq) error {
+	nowTime := s.clock.Now()
+	now := nowTime.UnixMilli()
+
+	var exp *int64
+	if req.retention > 0 {
+		exp = new(nowTime.Add(req.retention).UnixMilli())
+	}
+
+	// A dead-lettered job records the error that ended it, while a completed one has none
+	var reason *string
+	if req.reason != "" {
+		reason = &req.reason
+	}
 
 	_, err := sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (struct{}, error) {
-		// Remove the leased job from the alarms table, capturing the row so it can be recorded as a dead job
+		// Remove the leased job from the alarms table, capturing the row so it can be recorded as a terminal job
 		var (
 			actorType, actorID, alarmName string
 			jobMethod                     *string
@@ -166,17 +212,27 @@ func (s *SQLiteProvider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLe
 		)
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		txErr := tx.
+			// Notes on the query:
+			// A job handler that halts its own actor is the common case for a worker, and deactivating an actor drops the leases of its alarms so another host can pick them up
+			// For the occurrence being finalized right now that release must not undo the finalization, so a lease this execution owns and a lease that was released both count
+			// A lease that merely expired keeps its id, and one another replica took holds its own id, so neither is matched here
+			// An unleased row is only this execution's occurrence while it still carries the due time this execution leased, since a recurrence's next occurrence is always scheduled later
 			QueryRowContext(ctx, `
 				DELETE FROM `+s.tablePrefix+`alarms
 				WHERE
 					alarm_id = ?
-					AND alarm_lease_id = ?
-					AND alarm_lease_expiration_time IS NOT NULL
-					AND alarm_lease_expiration_time >= ?
+					AND (
+						(
+							alarm_lease_id = ?
+							AND alarm_lease_expiration_time IS NOT NULL
+							AND alarm_lease_expiration_time >= ?
+						)
+						OR (alarm_lease_id IS NULL AND alarm_due_time = ?)
+					)
 				RETURNING
 					actor_type, actor_id, alarm_name, job_method, alarm_data,
 					alarm_due_time, alarm_interval, alarm_cron, alarm_ttl_time`,
-				lease.Key(), lease.LeaseID(), now,
+				lease.Key(), lease.LeaseID(), now, lease.DueTime().UnixMilli(),
 			).
 			Scan(&actorType, &actorID, &alarmName, &jobMethod, &data, &dueTime, &interval, &cron, &ttl)
 		if errors.Is(txErr, sql.ErrNoRows) {
@@ -187,25 +243,40 @@ func (s *SQLiteProvider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLe
 
 		method := derefString(jobMethod)
 
-		// Record the failed occurrence in the dead-letter store, preserving the original job ID
-		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-		_, txErr = tx.ExecContext(ctx, `
-			INSERT INTO `+s.tablePrefix+`dead_jobs
-				(job_id, actor_type, actor_id, job_method, job_data,
-				attempts, last_error, failed_at, original_due, job_interval, job_cron)
-			VALUES
-				(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			lease.Key(), actorType, actorID, method, data,
-			req.Attempts, req.Reason, now, dueTime, interval, cron,
-		)
-		if txErr != nil {
-			return struct{}{}, fmt.Errorf("error recording dead job: %w", txErr)
+		// A repeating job keeps one identity for the life of its schedule, so the occurrence that just ended is recorded under an ID of its own and the job ID goes back to the recurrence
+		// Callers hold that ID for as long as the schedule exists: a cron actor deletes and reconciles its recurrence by it, and re-minting it on every occurrence would orphan the schedule
+		// A one-shot job has no recurrence to carry it, so its record keeps the ID the caller already knows
+		occurrenceID := lease.Key()
+		if req.reschedule {
+			occurrenceID = uuid.NewV7().String()
 		}
 
-		// Re-create the recurrence for its next occurrence so a repeating job survives the dead-lettering of one occurrence
-		if req.Reschedule {
-			newID := uuid.NewV7().String()
+		// Only a dead job keeps its input, since that is what a replay needs and a completed one is never replayed
+		// A wide fan-out's retained records stay small this way, since the payload dwarfs the metadata around it
+		// The payload is dropped from the record rather than from the row it came out of, because a recurrence still needs it for its next occurrence
+		recordData := data
+		if req.status != components.JobStatusDeadLettered {
+			recordData = nil
+		}
 
+		// Record the ended occurrence in the terminal-job store
+		// A replaced record is possible when a one-shot job ends twice under the same ID, so the write is an upsert rather than a plain insert
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		_, txErr = tx.ExecContext(ctx, `
+			REPLACE INTO `+s.tablePrefix+`terminal_jobs
+				(job_id, actor_type, actor_id, job_method, job_data,
+				job_status, attempts, last_error, ended_at, original_due, job_interval, job_cron, expiration_time)
+			VALUES
+				(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			occurrenceID, actorType, actorID, method, recordData,
+			string(req.status), req.attempts, reason, now, dueTime, interval, cron, exp,
+		)
+		if txErr != nil {
+			return struct{}{}, fmt.Errorf("error recording terminal job: %w", txErr)
+		}
+
+		// Re-create the recurrence for its next occurrence, under the job ID it has always had, so a repeating job survives one occurrence ending
+		if req.reschedule {
 			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 			_, txErr = tx.ExecContext(ctx, `
 				INSERT INTO `+s.tablePrefix+`alarms
@@ -215,8 +286,8 @@ func (s *SQLiteProvider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLe
 					alarm_lease_id, alarm_lease_expiration_time)
 				VALUES
 					(?, ?, ?, ?, ?, ?, ?, ?, ?, 'job', ?, NULL, NULL)`,
-				newID, actorType, actorID, alarmName,
-				req.NextDueTime.UnixMilli(), interval, cron, ttl, data, method,
+				lease.Key(), actorType, actorID, alarmName,
+				req.nextDueTime.UnixMilli(), interval, cron, ttl, data, method,
 			)
 			if txErr != nil {
 				return struct{}{}, fmt.Errorf("error rescheduling repeating job: %w", txErr)
@@ -272,32 +343,35 @@ func (s *SQLiteProvider) GetJob(ctx context.Context, jobID string) (components.J
 			CreatedAt: components.JobCreatedAt(jobID),
 		}, nil
 	case errors.Is(err, sql.ErrNoRows):
-		// Fall through to the dead-letter store
+		// Fall through to the terminal-job store
 	default:
 		return components.JobInfo{}, fmt.Errorf("error querying live job: %w", err)
 	}
 
-	// Then look for a dead-lettered job
+	// Then look for a job that ended, whether it completed or dead-lettered
+	// An expired record is treated as gone before the collector gets to it, exactly as expired state is
 	var (
-		attempts     int
-		lastError    *string
-		originalDue  int64
-		deadInterval *string
-		deadCron     *string
+		status        string
+		attempts      int
+		lastError     *string
+		endedAt       int64
+		originalDue   int64
+		endedInterval *string
+		endedCron     *string
 	)
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	err = s.db.
 		QueryRowContext(queryCtx, `
-			SELECT actor_type, actor_id, job_method, attempts, last_error, original_due, job_interval, job_cron
-			FROM `+s.tablePrefix+`dead_jobs
-			WHERE job_id = ?`,
-			jobID,
+			SELECT actor_type, actor_id, job_method, job_status, attempts, last_error, ended_at, original_due, job_interval, job_cron
+			FROM `+s.tablePrefix+`terminal_jobs
+			WHERE job_id = ? AND (expiration_time IS NULL OR expiration_time > ?)`,
+			jobID, now,
 		).
-		Scan(&actorType, &actorID, &jobMethod, &attempts, &lastError, &originalDue, &deadInterval, &deadCron)
+		Scan(&actorType, &actorID, &jobMethod, &status, &attempts, &lastError, &endedAt, &originalDue, &endedInterval, &endedCron)
 	if errors.Is(err, sql.ErrNoRows) {
 		return components.JobInfo{}, components.ErrNoJob
 	} else if err != nil {
-		return components.JobInfo{}, fmt.Errorf("error querying dead job: %w", err)
+		return components.JobInfo{}, fmt.Errorf("error querying terminal job: %w", err)
 	}
 
 	return components.JobInfo{
@@ -305,13 +379,14 @@ func (s *SQLiteProvider) GetJob(ctx context.Context, jobID string) (components.J
 		ActorType: actorType,
 		ActorID:   actorID,
 		Method:    derefString(jobMethod),
-		Status:    components.JobStatusDeadLettered,
+		Status:    jobStatusFromText(status),
 		DueTime:   time.UnixMilli(originalDue),
-		Interval:  derefString(deadInterval),
-		Cron:      derefString(deadCron),
+		Interval:  derefString(endedInterval),
+		Cron:      derefString(endedCron),
 		Attempts:  attempts,
 		LastError: derefString(lastError),
 		CreatedAt: components.JobCreatedAt(jobID),
+		EndedAt:   time.UnixMilli(endedAt),
 	}, nil
 }
 
@@ -321,22 +396,22 @@ func (s *SQLiteProvider) ListJobs(ctx context.Context, actorType string, actorID
 
 	now := s.clock.Now().UnixMilli()
 
-	// Live jobs (alarm rows) and dead-lettered jobs are disjoint by construction, so UNION ALL avoids an extra round-trip without any risk of duplicates
-	// Each branch projects into a common shape: the live branch derives the status and supplies zero attempts and no error, while the dead branch reports its recorded attempts and last error
+	// Live jobs (alarm rows) and terminal ones can never overlap, so UNION ALL avoids an extra round-trip without any risk of duplicates
+	// Each branch projects into a common shape: the live branch derives the status and supplies zero attempts, no error and no end time, while the terminal branch reports what it recorded
 	// #nosec G202 -- the only concatenated values are static table prefixes, not user input
 	rows, err := s.db.QueryContext(queryCtx, `
 		SELECT alarm_id, job_method, alarm_due_time, alarm_interval, alarm_cron,
 			CASE WHEN alarm_lease_id IS NOT NULL AND alarm_lease_expiration_time IS NOT NULL AND alarm_lease_expiration_time >= ?
 				THEN 'active' ELSE 'pending' END,
-			0, NULL
+			0, NULL, NULL
 		FROM `+s.tablePrefix+`alarms
 		WHERE actor_type = ? AND actor_id = ? AND alarm_kind = 'job'
 		UNION ALL
-		SELECT job_id, job_method, original_due, job_interval, job_cron,
-			'dead', attempts, last_error
-		FROM `+s.tablePrefix+`dead_jobs
-		WHERE actor_type = ? AND actor_id = ?`,
-		now, actorType, actorID, actorType, actorID,
+		SELECT
+			job_id, job_method, original_due, job_interval, job_cron, job_status, attempts, last_error, ended_at
+		FROM `+s.tablePrefix+`terminal_jobs
+		WHERE actor_type = ? AND actor_id = ? AND (expiration_time IS NULL OR expiration_time > ?)`,
+		now, actorType, actorID, actorType, actorID, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("error querying jobs: %w", err)
@@ -353,13 +428,14 @@ func (s *SQLiteProvider) ListJobs(ctx context.Context, actorType string, actorID
 			status         string
 			attempts       int
 			lastError      *string
+			endedAt        *int64
 		)
-		err = rows.Scan(&jobID, &jobMethod, &dueTime, &interval, &cron, &status, &attempts, &lastError)
+		err = rows.Scan(&jobID, &jobMethod, &dueTime, &interval, &cron, &status, &attempts, &lastError, &endedAt)
 		if err != nil {
 			return nil, fmt.Errorf("error scanning job: %w", err)
 		}
 
-		res = append(res, components.JobInfo{
+		info := components.JobInfo{
 			JobID:     jobID,
 			ActorType: actorType,
 			ActorID:   actorID,
@@ -371,7 +447,12 @@ func (s *SQLiteProvider) ListJobs(ctx context.Context, actorType string, actorID
 			Attempts:  attempts,
 			LastError: derefString(lastError),
 			CreatedAt: components.JobCreatedAt(jobID),
-		})
+		}
+		if endedAt != nil {
+			info.EndedAt = time.UnixMilli(*endedAt)
+		}
+
+		res = append(res, info)
 	}
 	err = rows.Err()
 	if err != nil {
@@ -381,23 +462,48 @@ func (s *SQLiteProvider) ListJobs(ctx context.Context, actorType string, actorID
 	return res, nil
 }
 
-func (s *SQLiteProvider) CancelJob(ctx context.Context, actorType string, actorID string, jobID string) error {
+func (s *SQLiteProvider) DeleteJob(ctx context.Context, actorType string, actorID string, jobID string, req components.DeleteJobReq) error {
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	res, err := s.db.ExecContext(queryCtx, `
-		DELETE FROM `+s.tablePrefix+`alarms
-		WHERE actor_type = ? AND actor_id = ? AND alarm_id = ? AND alarm_kind = 'job'`,
-		actorType, actorID, jobID,
-	)
-	if err != nil {
-		return fmt.Errorf("error executing query: %w", err)
-	}
+	// A job lives in one of two tables depending on whether it has ended, and the caller does not have to know which
+	// Both deletions run in one transaction so the removal is a single, indivisible outcome whichever table held it
+	affected, err := sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (int64, error) {
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		liveRes, txErr := tx.ExecContext(queryCtx,
+			`DELETE FROM `+s.tablePrefix+`alarms WHERE alarm_id = ? AND alarm_kind = 'job' AND actor_type = ? AND actor_id = ?`,
+			jobID, actorType, actorID,
+		)
+		if txErr != nil {
+			return 0, fmt.Errorf("error removing live job: %w", txErr)
+		}
+		live, txErr := liveRes.RowsAffected()
+		if txErr != nil {
+			return 0, fmt.Errorf("error counting affected rows: %w", txErr)
+		}
 
-	affected, err := res.RowsAffected()
+		// A cancellation only removes the live row, and the delete itself is what decides that: a job that finalizes concurrently simply is not there to delete
+		if req.LiveOnly {
+			return live, nil
+		}
+
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		termRes, txErr := tx.ExecContext(queryCtx,
+			`DELETE FROM `+s.tablePrefix+`terminal_jobs WHERE job_id = ? AND actor_type = ? AND actor_id = ?`,
+			jobID, actorType, actorID,
+		)
+		if txErr != nil {
+			return 0, fmt.Errorf("error removing terminal job: %w", txErr)
+		}
+		term, txErr := termRes.RowsAffected()
+		if txErr != nil {
+			return 0, fmt.Errorf("error counting affected rows: %w", txErr)
+		}
+
+		return live + term, nil
+	})
 	if err != nil {
-		return fmt.Errorf("error counting affected rows: %w", err)
+		return err
 	}
 	if affected == 0 {
 		return components.ErrNoJob
@@ -406,60 +512,45 @@ func (s *SQLiteProvider) CancelJob(ctx context.Context, actorType string, actorI
 	return nil
 }
 
-func (s *SQLiteProvider) GetDeadJob(ctx context.Context, jobID string) (components.GetDeadJobRes, error) {
+func (s *SQLiteProvider) GetTerminalJob(ctx context.Context, jobID string) (components.GetTerminalJobRes, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
 	var (
-		res            components.GetDeadJobRes
+		res            components.GetTerminalJobRes
+		status         string
 		lastError      *string
 		interval, cron *string
-		failedAt       int64
+		endedAt        int64
 		originalDue    int64
+		exp            *int64
 	)
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	err := s.db.
 		QueryRowContext(queryCtx, `
-			SELECT actor_type, actor_id, job_method, job_data, attempts, last_error, failed_at, original_due, job_interval, job_cron
-			FROM `+s.tablePrefix+`dead_jobs
-			WHERE job_id = ?`,
-			jobID,
+			SELECT actor_type, actor_id, job_method, job_data, job_status, attempts, last_error, ended_at, original_due, job_interval, job_cron, expiration_time
+			FROM `+s.tablePrefix+`terminal_jobs
+			WHERE job_id = ? AND (expiration_time IS NULL OR expiration_time > ?)`,
+			jobID, s.clock.Now().UnixMilli(),
 		).
-		Scan(&res.ActorType, &res.ActorID, &res.Method, &res.Data, &res.Attempts, &lastError, &failedAt, &originalDue, &interval, &cron)
+		Scan(&res.ActorType, &res.ActorID, &res.Method, &res.Data, &status, &res.Attempts, &lastError, &endedAt, &originalDue, &interval, &cron, &exp)
 	if errors.Is(err, sql.ErrNoRows) {
-		return components.GetDeadJobRes{}, components.ErrNoJob
+		return components.GetTerminalJobRes{}, components.ErrNoJob
 	} else if err != nil {
-		return components.GetDeadJobRes{}, fmt.Errorf("error executing query: %w", err)
+		return components.GetTerminalJobRes{}, fmt.Errorf("error executing query: %w", err)
 	}
 
 	res.JobID = jobID
+	res.Status = jobStatusFromText(status)
 	res.LastError = derefString(lastError)
-	res.FailedAt = time.UnixMilli(failedAt)
+	res.EndedAt = time.UnixMilli(endedAt)
 	res.OriginalDue = time.UnixMilli(originalDue)
 	res.Interval = derefString(interval)
 	res.Cron = derefString(cron)
+	if exp != nil {
+		res.Expiration = new(time.UnixMilli(*exp).UTC())
+	}
 	return res, nil
-}
-
-func (s *SQLiteProvider) DeleteDeadJob(ctx context.Context, jobID string) error {
-	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
-
-	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	res, err := s.db.ExecContext(queryCtx, `DELETE FROM `+s.tablePrefix+`dead_jobs WHERE job_id = ?`, jobID)
-	if err != nil {
-		return fmt.Errorf("error executing query: %w", err)
-	}
-
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("error counting affected rows: %w", err)
-	}
-	if affected == 0 {
-		return components.ErrNoJob
-	}
-
-	return nil
 }
 
 func (s *SQLiteProvider) RetryDeadJob(ctx context.Context, jobID string) (string, error) {
@@ -473,9 +564,16 @@ func (s *SQLiteProvider) RetryDeadJob(ctx context.Context, jobID string) (string
 			actorType, actorID, method string
 			data                       []byte
 		)
+		// A record past its expiration is treated as absent here too, since reads already hide it and re-dispatching what a caller can no longer see would be a surprise
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		txErr := tx.
-			QueryRowContext(ctx, `DELETE FROM `+s.tablePrefix+`dead_jobs WHERE job_id = ? RETURNING actor_type, actor_id, job_method, job_data`, jobID).
+			QueryRowContext(ctx, `
+				DELETE FROM `+s.tablePrefix+`terminal_jobs
+				WHERE
+					job_id = ?
+					AND job_status = 'dead'
+					AND (expiration_time IS NULL OR expiration_time > ?)
+				RETURNING actor_type, actor_id, job_method, job_data`, jobID, now).
 			Scan(&actorType, &actorID, &method, &data)
 		if errors.Is(txErr, sql.ErrNoRows) {
 			return "", components.ErrNoJob
@@ -522,6 +620,8 @@ func jobStatusFromText(s string) components.JobStatus {
 	switch s {
 	case "active":
 		return components.JobStatusActive
+	case "completed":
+		return components.JobStatusCompleted
 	case "dead":
 		return components.JobStatusDeadLettered
 	default:

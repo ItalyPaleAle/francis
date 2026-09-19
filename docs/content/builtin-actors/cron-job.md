@@ -78,6 +78,20 @@ At startup each host bootstraps the cron job's scheduler (the cluster-wide singl
 
 Because the actor is a single cluster-wide instance with turn-based execution, concurrent registrations from multiple hosts are automatically collapsed to a single recurring job. It is safe to re-register the actor on every instance in the cluster.
 
+## Seeing what ran
+
+Occurrences keep a record for **7 days**. You can invoke `ListJobs` to report completed jobs alongside dead-lettered ones.
+
+```go
+jobs, err := host.Service().ListJobs(ctx, "<runner actor type>", "<runner actor ID>")
+for _, j := range jobs {
+	// j.Status is pending, active, completed, or dead-lettered
+	// j.EndedAt is when a run that has ended did so
+}
+```
+
+See [jobs](../docs/jobs) for the retention mechanism.
+
 ## Triggering a run on demand
 
 The on-demand operations are bound to an `actor.Service` via `Service(...)`, which you obtain from a host with `host.Service()`
