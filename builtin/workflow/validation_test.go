@@ -337,3 +337,114 @@ func TestStepSpecReuseDoesNotMutateBuiltDefinition(t *testing.T) {
 	first.def.setFingerprint()
 	assert.Equal(t, originalFingerprint, first.def.fingerprint, "the graph changed behind its previously published fingerprint")
 }
+
+func TestNewRejectsAnInvalidLoop(t *testing.T) {
+	tests := []struct {
+		name    string
+		spec    StepSpec
+		wantErr string
+	}{
+		{
+			name:    "no body",
+			spec:    Loop("poll").With(WithUntil("check", true)),
+			wantErr: "requires at least one step in its body",
+		},
+		{
+			name:    "no condition",
+			spec:    Loop("poll", Step("check", WithRun(noopRun))),
+			wantErr: "requires WithUntil",
+		},
+		{
+			name:    "condition outside the body",
+			spec:    Loop("poll", Step("check", WithRun(noopRun))).With(WithUntil("elsewhere", true)),
+			wantErr: `names "elsewhere" in WithUntil, which is not a step of its body`,
+		},
+		{
+			name:    "negative bound",
+			spec:    Loop("poll", Step("check", WithRun(noopRun))).With(WithUntil("check", true), WithMaxIterations(-1)),
+			wantErr: "negative WithMaxIterations",
+		},
+		{
+			name: "parallel group in the body",
+			spec: Loop("poll",
+				Parallel("group", Step("m1", WithRun(noopRun)), Step("m2", WithRun(noopRun))),
+			).With(WithUntil("group", true)),
+			wantErr: "may only contain plain, child, or wait steps",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New("looped", WithSteps(tt.spec))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestNewRejectsLoopOptionsOnOtherKinds(t *testing.T) {
+	tests := []struct {
+		name    string
+		spec    StepSpec
+		wantErr string
+	}{
+		{
+			name:    "WithUntil on a plain step",
+			spec:    Step("a", WithRun(noopRun), WithUntil("a", true)),
+			wantErr: "cannot use WithUntil on a step node",
+		},
+		{
+			name:    "WithMaxIterations on a plain step",
+			spec:    Step("a", WithRun(noopRun), WithMaxIterations(3)),
+			wantErr: "cannot use WithMaxIterations on a step node",
+		},
+		{
+			name:    "WithStepTimeout on a loop",
+			spec:    Loop("poll", Step("check", WithRun(noopRun))).With(WithUntil("check", true), WithStepTimeout(time.Minute)),
+			wantErr: "cannot use WithStepTimeout on a loop node",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New("looped", WithSteps(tt.spec))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestLoopDefaultsItsIterationBound(t *testing.T) {
+	wf, err := New("looped", WithSteps(
+		Loop("poll", Step("check", WithRun(noopRun))).With(WithUntil("check", true)),
+	))
+	require.NoError(t, err)
+
+	// The bound is resolved when the declaration is flattened, so the fingerprint carries the number the engine enforces
+	assert.Equal(t, defaultMaxIterations, wf.def.byName["poll"].maxIterations)
+}
+
+func TestLoopBodyChangesTheFingerprint(t *testing.T) {
+	base, err := New("looped", WithSteps(
+		Loop("poll", Step("check", WithRun(noopRun))).With(WithUntil("check", true), WithMaxIterations(4)),
+	))
+	require.NoError(t, err)
+
+	tests := []struct {
+		name string
+		spec StepSpec
+	}{
+		{name: "another bound", spec: Loop("poll", Step("check", WithRun(noopRun))).With(WithUntil("check", true), WithMaxIterations(5))},
+		{name: "another condition value", spec: Loop("poll", Step("check", WithRun(noopRun))).With(WithUntil("check", false), WithMaxIterations(4))},
+		{name: "another body", spec: Loop("poll", Step("check", WithRun(noopRun)), Step("pause", WithRun(noopRun))).With(WithUntil("check", true), WithMaxIterations(4))},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Everything the engine reads while running an instance is in the fingerprint, so two hosts cannot serve one version and then repeat a body differently
+			other, err := New("looped", WithSteps(tt.spec))
+			require.NoError(t, err)
+			assert.NotEqual(t, base.def.fingerprint, other.def.fingerprint)
+		})
+	}
+}

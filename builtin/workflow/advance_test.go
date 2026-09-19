@@ -1556,3 +1556,148 @@ func TestLateSuccessDoesNotRepeatAClosedCompensation(t *testing.T) {
 	assert.NotNil(t, st.step("effects").task(1).Comp)
 	assert.False(t, st.step("effects").task(1).Comp.Done)
 }
+
+func TestAdvanceLoopRepeatsUntilItsConditionHolds(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "polling", WithSteps(
+		Step("prepare", WithRun(noopRun)),
+		Loop("poll",
+			Step("check", WithRun(noopRun)),
+			Step("pause", WithRun(noopRun)),
+		).With(WithUntil("check", true), WithMaxIterations(5)),
+		Step("finish", WithRun(noopRun)),
+	))
+
+	// A loop's body is flattened into the graph, so its steps are ordinary steps that run before the loop node
+	require.Len(t, def.steps, 5)
+	names := make([]string, len(def.steps))
+	for i, d := range def.steps {
+		names[i] = d.name
+	}
+	assert.Equal(t, []string{"prepare", "check", "pause", "poll", "finish"}, names)
+
+	st := startJournal(t, def, now)
+	reportSuccess(t, st, def, "prepare", 0, nil, now)
+	advance(st, def, "inst-1", now)
+	assert.Equal(t, StepRunning, stepStatus(t, st, "check"))
+
+	// The condition is read only after the body has run, so the first iteration always happens
+	reportSuccess(t, st, def, "check", 0, false, now)
+	advance(st, def, "inst-1", now)
+	assert.Equal(t, StepRunning, stepStatus(t, st, "pause"))
+
+	reportSuccess(t, st, def, "pause", 0, nil, now)
+	advance(st, def, "inst-1", now)
+
+	// The condition did not hold, so the body opened again rather than the loop settling
+	assert.Equal(t, StepRunning, stepStatus(t, st, "check"))
+	assert.Equal(t, StepPending, stepStatus(t, st, "poll"))
+	assert.Equal(t, 1, st.step("check").Iteration)
+	require.Len(t, st.step("check").Tasks, 2)
+	assert.Equal(t, 1, st.step("check").Tasks[1].Index, "a body step's task index is its iteration, which is what keeps every iteration's worker distinct")
+
+	reportSuccess(t, st, def, "check", 1, true, now)
+	advance(st, def, "inst-1", now)
+	reportSuccess(t, st, def, "pause", 1, nil, now)
+	advance(st, def, "inst-1", now)
+
+	assert.Equal(t, StepCompleted, stepStatus(t, st, "poll"))
+	assert.Equal(t, 2, st.step("poll").Iteration)
+	assert.Equal(t, StepRunning, stepStatus(t, st, "finish"))
+	assert.JSONEq(t, `true`, string(def.byName["check"].stepOutput(st.step("check"))), "a later step reads what the last iteration produced")
+}
+
+func TestAdvanceLoopFailsWhenTheConditionNeverHolds(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "stubborn", WithSteps(
+		Loop("poll",
+			Step("check", WithRun(noopRun)),
+		).With(WithUntil("check", true), WithMaxIterations(2)),
+	))
+
+	st := startJournal(t, def, now)
+	reportSuccess(t, st, def, "check", 0, false, now)
+	advance(st, def, "inst-1", now)
+	assert.Equal(t, StepRunning, stepStatus(t, st, "check"))
+
+	reportSuccess(t, st, def, "check", 1, false, now)
+	advance(st, def, "inst-1", now)
+
+	// The bound is what keeps a condition that never holds from running the instance to its timeout instead
+	assert.Equal(t, StepFailed, stepStatus(t, st, "poll"))
+	assert.Contains(t, st.step("poll").Error, "within 2 iterations")
+	assert.Equal(t, StatusFailed, st.Status)
+}
+
+func TestAdvanceLoopUndoesEveryIteration(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "looped-saga", WithSteps(
+		Loop("attempts",
+			Step("charge", WithRun(noopRun), WithCompensate(noopCompensate)),
+		).With(WithUntil("charge", true), WithMaxIterations(5)),
+		Step("finish", WithRun(noopRun)),
+	))
+
+	st := startJournal(t, def, now)
+	reportSuccess(t, st, def, "charge", 0, false, now)
+	advance(st, def, "inst-1", now)
+	reportSuccess(t, st, def, "charge", 1, true, now)
+	advance(st, def, "inst-1", now)
+	require.Equal(t, StepCompleted, stepStatus(t, st, "attempts"))
+
+	reportFailure(t, st, def, "finish", 0, "boom", false, now)
+	advance(st, def, "inst-1", now)
+
+	// Both iterations really charged, so the unwind has to undo both rather than only the last
+	require.Equal(t, StatusCompensating, st.Status)
+	sr := st.step("charge")
+	require.Len(t, sr.Tasks, 2)
+	assert.Len(t, compensableTasks(sr, def.byName["charge"]), 2)
+}
+
+func TestAdvanceLoopWaitStepWaitsForItsOwnEventEachIteration(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "gated-loop", WithSteps(
+		Loop("rounds",
+			WaitForEvent("tick", WithEventTimeout(time.Hour)),
+			Step("done", WithRun(noopRun)),
+		).With(WithUntil("done", true), WithMaxIterations(3)),
+	))
+
+	st := startJournal(t, def, now)
+	assert.Equal(t, StepRunning, stepStatus(t, st, "tick"))
+
+	dup := apply(st, def, &event{kind: evRaise, raise: &eventPayload{Name: "tick", Payload: json.RawMessage(`1`)}}, now)
+	require.False(t, dup)
+	advance(st, def, "inst-1", now)
+	assert.Equal(t, StepRunning, stepStatus(t, st, "done"))
+
+	reportSuccess(t, st, def, "done", 0, false, now)
+	advance(st, def, "inst-1", now)
+
+	// The next iteration's wait starts empty, so it parks for an event of its own rather than settling on the one already recorded
+	assert.Equal(t, StepRunning, stepStatus(t, st, "tick"))
+	assert.Nil(t, st.step("tick").Event)
+}
+
+func TestAdvanceLoopWhoseBodyAlwaysSkipsStillEndsAtItsBound(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "skipping", WithSteps(
+		Step("gate", WithRun(noopRun)),
+		Loop("poll",
+			Step("check", WithRun(noopRun), WithSkipIf("gate", false)),
+		).With(WithUntil("check", true), WithMaxIterations(4)),
+	))
+
+	st := startJournal(t, def, now)
+
+	// A skipped body step settles without a task, so every iteration of this loop runs inside one turn
+	reportSuccess(t, st, def, "gate", 0, false, now)
+	advance(st, def, "inst-1", now)
+
+	// The loop's own bound is what ends it, which is what keeps the fixed-point walk from stopping short and leaving the instance to its timeout
+	assert.Equal(t, StepSkipped, stepStatus(t, st, "check"))
+	assert.Equal(t, StepFailed, stepStatus(t, st, "poll"))
+	assert.Equal(t, 4, st.step("poll").Iteration)
+	assert.Equal(t, StatusFailed, st.Status)
+}

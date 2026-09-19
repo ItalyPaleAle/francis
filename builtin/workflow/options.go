@@ -18,6 +18,8 @@ const (
 	defaultParkInterval = 10 * time.Minute
 	// defaultMaxDepth bounds the parent chain of child instances, to prevent infinite recursion
 	defaultMaxDepth = 8
+	// defaultMaxIterations bounds how many times a loop repeats its body when WithMaxIterations is not set
+	defaultMaxIterations = 100
 
 	// defaultMaxAttempts is how many attempts a forward task gets before it is failed
 	defaultMaxAttempts = 3

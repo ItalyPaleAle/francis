@@ -453,6 +453,8 @@ type StepStatusView struct {
 	Attempts int
 	// Error is the reason the step failed, once it has
 	Error string
+	// Iteration is how many times a loop has repeated the step, counting from zero, and stays zero for every step outside a loop body
+	Iteration int
 	// ChildIDs are the instance IDs of the children a child step or a child fan-out started
 	ChildIDs []string
 	// Children retains the terminal status and compensation outcome each child reported
@@ -536,6 +538,7 @@ func stepStatusView(sr *stepRecord) StepStatusView {
 		Status:      sr.Status,
 		Tasks:       len(sr.Tasks),
 		Error:       sr.Error,
+		Iteration:   sr.Iteration,
 		StartedAt:   sr.StartedAt,
 		CompletedAt: sr.CompletedAt,
 	}

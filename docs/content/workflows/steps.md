@@ -17,6 +17,7 @@ Steps are identified by name, not by position. Renaming one is a change of graph
 | Fan-out | `workflow.ForEach(name, opts...)` | one per item, sized at runtime | Items come from an upstream step's output |
 | Child workflow | `workflow.Child(name, opts...)` | 1 (a child instance) | Runs another registered definition |
 | Wait for event | `workflow.WaitForEvent(name, opts...)` | 0 | Parks the instance until `RaiseEvent` or a deadline |
+| Loop | `workflow.Loop(name, steps...)` | 0 | Repeats its body until a condition holds |
 
 ## The handler contract
 
@@ -199,3 +200,29 @@ workflow.Step("verify",
 ```
 
 A step whose condition recorded nothing, because it failed or was skipped itself, is **not** skipped.
+
+## Loops
+
+`workflow.Loop` repeats a body until a condition holds. The condition is a body step that returns a boolean, exactly as `WithSkipIf` is:
+
+```go
+workflow.Loop("poll",
+	workflow.Step("check", workflow.WithRun(checkReady)),
+	workflow.Step("pause", workflow.WithRun(waitABit)),
+).With(
+	workflow.WithUntil("check", true),
+	workflow.WithMaxIterations(20),
+)
+```
+
+The body steps are ordinary steps of the workflow. They appear in a status query under their own names, and the step after the loop can read what they produced.
+
+A few things to know:
+
+- The condition is read **after** the body, so the body always runs at least once.
+- The **whole body** runs every iteration. To skip part of it on the round that ends the loop, put `WithSkipIf` on that step, as in `WithSkipIf("check", true)` on `pause` above.
+- A loop reports the output of the step its condition named, so the step after a loop reads the loop itself rather than a body step.
+- `WithMaxIterations` defaults to 100. A loop whose condition has not held by the last iteration **fails**, which is what keeps a condition that never becomes true from running the instance to its timeout. `WithOptional` and `WithSkipOnFailure` decide what that costs, exactly as for any other step.
+- Every iteration's work is **compensated**. A body step that ran five times and succeeded each time has five effects to undo, and the unwind undoes all of them.
+- A body holds plain, child, and wait steps, because a loop runs one task at a time. For a parallel group or a fan-out inside a loop, put it in a [child workflow](/workflows/child-workflows) the body starts.
+- A body step reads the outputs of the steps before it **in the graph**, not from the previous iteration. Carry state across iterations through the instance input or your own store.

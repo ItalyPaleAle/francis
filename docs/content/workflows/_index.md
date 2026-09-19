@@ -48,6 +48,7 @@ If `create-shipment` fails, Francis runs `refundCharge` and then `releaseInvento
 ## What you get
 
 - **Sequences, parallel groups, and dynamic fan-out** over a list sized at runtime.
+- **Loops**, repeating a body until a condition holds.
 - **Compensation**: a per-step callback that undoes a step that succeeded, run in reverse order when the workflow fails or is cancelled.
 - **Child workflows**, each with its own history.
 - **Waiting on external events**, such as a human approval (_human in the loop_).
@@ -69,7 +70,7 @@ Do **not** use one when:
 
 - The work is a single unit that either happens or does not. Use a durable [job](/docs/jobs).
 - You want a pool of independent long-running tasks with no ordering and no result. Use a [task pool](/builtin-actors/task-pool).
-- You need arbitrary control flow, such as loops over a changing condition. A workflow is a declared graph.
+- You need arbitrary control flow. A workflow is a declared graph: it repeats a body with [`Loop`](/workflows/steps#loops) and branches with `WithSkipIf`, but there is no jumping between steps.
 
 ## Where to go next
 

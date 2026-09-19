@@ -688,3 +688,87 @@ func TestChildWorkflow(t *testing.T) {
 	require.NoError(t, status.DecodeOutput(&verified))
 	assert.Equal(t, "tenant", verified)
 }
+
+// TestLoopRepeatsItsBodyUntilTheConditionHolds runs a loop end to end on a host, which is where the per-iteration worker actors and jobs are exercised
+func TestLoopRepeatsItsBodyUntilTheConditionHolds(t *testing.T) {
+	var (
+		checks atomic.Int32
+		pauses atomic.Int32
+	)
+
+	wf, err := workflow.New("polling",
+		workflow.WithTimeout(time.Minute),
+		workflow.WithSteps(
+			workflow.Loop("poll",
+				workflow.Step("check", workflow.WithRun(func(ctx context.Context, tk workflow.Task) (any, error) {
+					// The third attempt is the one that finds the work ready, so the body runs three times
+					return checks.Add(1) >= 3, nil
+				})),
+				// A loop runs its whole body every iteration, so the wait between polls is skipped on the one that ends it
+				workflow.Step("pause",
+					workflow.WithRun(func(ctx context.Context, tk workflow.Task) (any, error) {
+						pauses.Add(1)
+						return nil, nil
+					}),
+					workflow.WithSkipIf("check", true),
+				),
+			).With(workflow.WithUntil("check", true), workflow.WithMaxIterations(10)),
+			workflow.Step("finish", workflow.WithRun(func(ctx context.Context, tk workflow.Task) (any, error) {
+				// The step after a loop reads the loop itself, which reports the output of the body step its condition named
+				var ready bool
+				rErr := tk.DecodeOutput("poll", &ready)
+				if rErr != nil {
+					return nil, errors.Join(actor.ErrJobPermanentFailure, rErr)
+				}
+				return map[string]any{"ready": ready, "rounds": checks.Load()}, nil
+			})),
+		),
+	)
+	require.NoError(t, err)
+
+	host := startHost(t, wf)
+	svc := wf.Service(host.Service())
+
+	id, _, err := svc.Start(t.Context(), nil)
+	require.NoError(t, err)
+
+	status := awaitStatus(t, svc, id, workflow.StatusCompleted)
+	assert.Equal(t, workflow.StepCompleted, stepView(t, status, "poll").Status)
+	assert.Equal(t, 3, stepView(t, status, "poll").Iteration, "a status query reports how many times the loop repeated")
+	assert.Equal(t, 3, stepView(t, status, "check").Tasks, "a body step keeps a task per iteration, which is what the unwind undoes")
+	assert.Equal(t, int32(3), checks.Load())
+	assert.Equal(t, int32(2), pauses.Load(), "the condition is re-read every iteration, so the skip applies only to the one that ended the loop")
+
+	// A step after the loop reads what the last iteration produced, not the first
+	var out map[string]any
+	require.NoError(t, status.DecodeOutput(&out))
+	assert.Equal(t, true, out["ready"])
+}
+
+// TestLoopFailsWhenItsConditionNeverHolds verifies the iteration bound ends an instance that would otherwise run to its timeout
+func TestLoopFailsWhenItsConditionNeverHolds(t *testing.T) {
+	var checks atomic.Int32
+
+	wf, err := workflow.New("stubborn",
+		workflow.WithTimeout(time.Minute),
+		workflow.WithSteps(
+			workflow.Loop("poll",
+				workflow.Step("check", workflow.WithRun(func(ctx context.Context, tk workflow.Task) (any, error) {
+					checks.Add(1)
+					return false, nil
+				})),
+			).With(workflow.WithUntil("check", true), workflow.WithMaxIterations(3)),
+		),
+	)
+	require.NoError(t, err)
+
+	host := startHost(t, wf)
+	svc := wf.Service(host.Service())
+
+	id, _, err := svc.Start(t.Context(), nil)
+	require.NoError(t, err)
+
+	status := awaitStatus(t, svc, id, workflow.StatusFailed)
+	assert.Equal(t, int32(3), checks.Load(), "the body runs exactly as many times as the bound allows")
+	assert.Contains(t, status.Cause, "within 3 iterations")
+}

@@ -157,6 +157,10 @@ func (d *stepDef) stepOutput(sr *stepRecord) json.RawMessage {
 	case KindWait:
 		return sr.Event
 
+	case KindLoop:
+		// A loop reports what ended it, so the step after one reads the last iteration's result without having to name a body step
+		return sr.Output
+
 	case KindParallel:
 		// A group's output is an object keyed by member name, so a later step reads one member without knowing its position
 		obj := map[string]json.RawMessage{}
@@ -186,10 +190,11 @@ func (d *stepDef) stepOutput(sr *stepRecord) json.RawMessage {
 		return enc
 
 	default:
+		// A loop body step keeps every iteration's task, and what a later step and a loop condition read is the one the last iteration produced
 		if len(sr.Tasks) == 0 {
 			return nil
 		}
-		return sr.Tasks[0].taskOutput()
+		return sr.Tasks[len(sr.Tasks)-1].taskOutput()
 	}
 }
 

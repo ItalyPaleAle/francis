@@ -21,6 +21,8 @@ const (
 	KindChild Kind = "child"
 	// KindWait is a step that parks the instance until an event arrives or its timeout elapses
 	KindWait Kind = "wait"
+	// KindLoop is a control node that repeats the steps of its body until a condition holds
+	KindLoop Kind = "loop"
 )
 
 // FailurePolicy decides what a failing task costs a parallel group or a fan-out
@@ -114,6 +116,15 @@ type stepDef struct {
 	compensateOnFailure bool
 	// capability routes this step's tasks to the queue only hosts advertising it serve
 	capability string
+
+	// body names the steps a loop repeats, in order, and is filled when the declaration is flattened into the graph
+	body []string
+	// untilStep and untilValue end a loop when the named body step's output equals the value, keeping the decision a recorded output rather than a predicate the journal cannot show
+	untilStep  string
+	untilValue bool
+	hasUntil   bool
+	// maxIterations bounds how many times a loop repeats its body before it fails
+	maxIterations int
 }
 
 // StepSpec is one node of a workflow's graph, produced by Step, Parallel, ForEach, Child, or WaitForEvent and passed to WithSteps
@@ -144,8 +155,8 @@ func (d *stepDef) validateOptions(member bool) error {
 	// Group members are single tasks, so conditions and policies that govern a whole step must be declared on the group
 	workerKinds := []Kind{KindStep, KindForEach}
 	taskKinds := []Kind{KindStep, KindForEach, KindChild}
-	stepKinds := []Kind{KindStep, KindForEach, KindChild, KindParallel}
-	allKinds := []Kind{KindStep, KindForEach, KindChild, KindParallel, KindWait}
+	stepKinds := []Kind{KindStep, KindForEach, KindChild, KindParallel, KindLoop}
+	allKinds := []Kind{KindStep, KindForEach, KindChild, KindParallel, KindWait, KindLoop}
 	rules := []struct {
 		name       string
 		configured bool
@@ -158,7 +169,7 @@ func (d *stepDef) validateOptions(member bool) error {
 		{"WithRetryBackoff", d.retryInitial != 0 || d.retryMax != 0, taskKinds, true},
 		{"WithCompensateMaxAttempts", d.compMaxAttempt != 0, taskKinds, true},
 		{"WithCompensateBackoff", d.compInitial != 0 || d.compMax != 0, taskKinds, true},
-		{"WithStepTimeout", d.stepTimeout != 0, stepKinds, false},
+		{"WithStepTimeout", d.stepTimeout != 0, []Kind{KindStep, KindForEach, KindChild, KindParallel}, false},
 		{"WithEventTimeout", d.eventTimeout != 0, []Kind{KindWait}, false},
 		{"WithEventName", d.eventName != "", []Kind{KindWait}, false},
 		{"WithOptional", d.optional, stepKinds, false},
@@ -171,6 +182,8 @@ func (d *stepDef) validateOptions(member bool) error {
 		{"WithMaxParallel", d.maxParallel != 0, []Kind{KindForEach}, false},
 		{"WithCompensateOnFailure", d.compensateOnFailure, taskKinds, true},
 		{"WithRequiredCapability", d.capability != "", workerKinds, true},
+		{"WithUntil", d.hasUntil, []Kind{KindLoop}, false},
+		{"WithMaxIterations", d.maxIterations != 0, []Kind{KindLoop}, false},
 	}
 	for _, rule := range rules {
 		if !rule.configured {
@@ -203,6 +216,7 @@ func (d *stepDef) clone() *stepDef {
 	out := *d
 	out.inputFrom = append([]string(nil), d.inputFrom...)
 	out.skipOnFailure = append([]string(nil), d.skipOnFailure...)
+	out.body = append([]string(nil), d.body...)
 	out.members = make([]*stepDef, len(d.members))
 	for i := range d.members {
 		out.members[i] = d.members[i].clone()
@@ -246,6 +260,29 @@ func Parallel(name string, steps ...StepSpec) StepSpec {
 	d := &stepDef{
 		name:    name,
 		kind:    KindParallel,
+		members: make([]*stepDef, len(steps)),
+	}
+	for i, s := range steps {
+		d.members[i] = s.d
+	}
+	return StepSpec{d: d}
+}
+
+// Loop declares a control node that repeats the steps of its body until a condition holds
+// The body runs in order, one task at a time, and every step of it is an ordinary step of the workflow: a later step can read what the last iteration produced, and the graph shows the body rather than hiding it inside the loop
+// The condition and the iteration bound are set with the returned spec's With method, since the body takes the variadic slot
+//
+//	Loop("poll",
+//		Step("check", WithRun(checkReady)),
+//		Step("pause", WithRun(pause)),
+//	).With(WithUntil("check", true), WithMaxIterations(20))
+//
+// A body holds plain, child, and wait steps, because a loop runs one task at a time
+// A parallel group or a fan-out inside a loop belongs in a child workflow the body starts
+func Loop(name string, steps ...StepSpec) StepSpec {
+	d := &stepDef{
+		name:    name,
+		kind:    KindLoop,
 		members: make([]*stepDef, len(steps)),
 	}
 	for i, s := range steps {
@@ -359,6 +396,25 @@ func WithSkipIf(step string, value bool) StepOption {
 		d.skipIfStep = step
 		d.skipIfValue = value
 		d.hasSkipIf = true
+	}
+}
+
+// WithUntil ends a loop once the named step of its body has output the given value, and is required on a loop
+// The condition is a step that returns a boolean rather than a predicate the orchestrator evaluates, exactly as WithSkipIf is, so what ended the loop is a recorded output the journal can show
+// It is read after every iteration, so a loop always runs its body at least once
+func WithUntil(step string, value bool) StepOption {
+	return func(d *stepDef) {
+		d.untilStep = step
+		d.untilValue = value
+		d.hasUntil = true
+	}
+}
+
+// WithMaxIterations bounds how many times a loop repeats its body, defaulting to 100
+// A loop whose condition has not held after the last iteration fails, which is what keeps a condition that never becomes true from running the instance to its timeout
+func WithMaxIterations(n int) StepOption {
+	return func(d *stepDef) {
+		d.maxIterations = n
 	}
 }
 

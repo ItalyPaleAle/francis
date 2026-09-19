@@ -146,8 +146,14 @@ type stepRecord struct {
 	Tasks  []taskRecord `msgpack:"tasks,omitempty"`
 	// Remaining counts the tasks that have not reported, so checking a wide fan-out for completion is O(1)
 	Remaining int `msgpack:"remaining"`
+	// Iteration is how many times a loop has repeated the step, counting from zero, and stays zero for every step outside a loop body
+	// A loop body step runs one task per iteration, so its task index is also its iteration, which is what keeps every iteration's worker and undo actor distinct
+	Iteration int `msgpack:"iteration,omitempty"`
 	// Event holds the payload a WaitForEvent step was completed with
 	Event json.RawMessage `msgpack:"event,omitempty"`
+	// Output is what a loop node reports as its own output, copied from the body step its condition named when the loop settles
+	// A loop node runs no task of its own, so without this the step after a loop would read nothing from the step preceding it
+	Output json.RawMessage `msgpack:"output,omitempty"`
 	// Error is the reason the step failed, once it has
 	Error       string    `msgpack:"error,omitempty"`
 	StartedAt   time.Time `msgpack:"startedAt,omitzero"`

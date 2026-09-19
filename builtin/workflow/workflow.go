@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -237,16 +238,61 @@ func (o *options) validatePolicies() error {
 	return nil
 }
 
+// flattenSteps expands every loop declaration into its body steps followed by the loop node itself
+// A loop's body steps are ordinary steps of the workflow, which is what lets a later step read what the last iteration produced and keeps the linear walk over the graph unchanged
+func flattenSteps(specs []StepSpec) ([]*stepDef, error) {
+	out := make([]*stepDef, 0, len(specs))
+	for i, spec := range specs {
+		d := spec.d.clone()
+		if d == nil {
+			return nil, fmt.Errorf("step at index %d is uninitialized", i)
+		}
+		if d.kind != KindLoop {
+			out = append(out, d)
+			continue
+		}
+
+		// The bound is resolved here so the fingerprint carries the number the engine actually enforces
+		if d.maxIterations < 0 {
+			return nil, fmt.Errorf("loop %q has a negative WithMaxIterations", d.name)
+		}
+		if d.maxIterations == 0 {
+			d.maxIterations = defaultMaxIterations
+		}
+
+		// The body is emitted before the loop node, so the walk reaches the condition only once an iteration has finished
+		d.body = make([]string, len(d.members))
+		for j, m := range d.members {
+			if m == nil {
+				return nil, fmt.Errorf("loop %q has an uninitialized step at index %d", d.name, j)
+			}
+			d.body[j] = m.name
+			out = append(out, m)
+		}
+
+		// The members are steps of the graph from here on, and the loop node refers to them by name
+		d.members = nil
+		out = append(out, d)
+	}
+	return out, nil
+}
+
 // newDefinition assembles the graph and validates every rule a definition has to satisfy before it can run
 func (o *options) newDefinition(name string) (*definition, error) {
 	if len(o.steps) == 0 {
 		return nil, errors.New("WithSteps is required, with at least one step")
 	}
 
+	// A loop declares its body inline, so the declaration is flattened into the step list before anything is indexed and the graph the engine walks stays a flat sequence
+	steps, err := flattenSteps(o.steps)
+	if err != nil {
+		return nil, err
+	}
+
 	def := &definition{
 		name:                      name,
 		version:                   o.version,
-		steps:                     make([]*stepDef, len(o.steps)),
+		steps:                     steps,
 		byName:                    map[string]*stepDef{},
 		order:                     map[string]int{},
 		timeout:                   o.timeout,
@@ -262,15 +308,10 @@ func (o *options) newDefinition(name string) (*definition, error) {
 
 	// Index every step and member by name, which is also where duplicate names and duplicate event names are caught
 	eventNames := map[string]string{}
-	for i, spec := range o.steps {
-		d := spec.d.clone()
-		if d == nil {
-			return nil, fmt.Errorf("step at index %d is uninitialized", i)
-		}
-		def.steps[i] = d
+	for i, d := range def.steps {
 		def.order[d.name] = i
 
-		err := def.indexStep(d, eventNames)
+		err = def.indexStep(d, eventNames)
 		if err != nil {
 			return nil, err
 		}
@@ -278,7 +319,7 @@ func (o *options) newDefinition(name string) (*definition, error) {
 
 	// Validate each step against the indexed graph, now that every name is known
 	for i, d := range def.steps {
-		err := def.validateStep(d, i)
+		err = def.validateStep(d, i)
 		if err != nil {
 			return nil, err
 		}
@@ -390,6 +431,27 @@ func (def *definition) validateStep(d *stepDef, index int) error {
 		if d.run != nil {
 			return fmt.Errorf("wait step %q cannot have a handler, since it is completed by RaiseEvent rather than run", d.name)
 		}
+	case KindLoop:
+		if len(d.body) == 0 {
+			return fmt.Errorf("loop %q requires at least one step in its body", d.name)
+		}
+		if !d.hasUntil {
+			return fmt.Errorf("loop %q requires WithUntil", d.name)
+		}
+		if !slices.Contains(d.body, d.untilStep) {
+			return fmt.Errorf("loop %q names %q in WithUntil, which is not a step of its body", d.name, d.untilStep)
+		}
+		for _, member := range d.body {
+			m := def.byName[member]
+			if m == nil {
+				return fmt.Errorf("loop %q names %q in its body, which is not a step of this workflow", d.name, member)
+			}
+
+			// A loop runs one task at a time, so a group or a fan-out inside one would make an iteration that is not a single unit of work
+			if m.kind != KindStep && m.kind != KindChild && m.kind != KindWait {
+				return fmt.Errorf("loop %q may only contain plain, child, or wait steps, but %q is a %s", d.name, member, m.kind)
+			}
+		}
 	default:
 		return fmt.Errorf("step %q has unknown kind %q", d.name, d.kind)
 	}
@@ -499,6 +561,9 @@ func (def *stepDef) writeStepFingerprint(w io.Writer) {
 	)
 	if def.hasSkipIf {
 		fmt.Fprintf(w, ";skipIf=%s=%t", fingerprintValue(def.skipIfStep), def.skipIfValue)
+	}
+	if def.kind == KindLoop {
+		fmt.Fprintf(w, ";body=%s;until=%s=%t;maxIterations=%d", fingerprintList(def.body), fingerprintValue(def.untilStep), def.untilValue, def.maxIterations)
 	}
 	if def.child != nil {
 		fmt.Fprintf(w, ";child=%s@%d", fingerprintValue(def.child.def.name), def.child.def.version)

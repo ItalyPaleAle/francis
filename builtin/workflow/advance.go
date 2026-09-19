@@ -14,7 +14,14 @@ const minAdvanceIterations = 16
 // Each iteration opens or settles at least one step, and a step is opened once and settled once going forward and again while unwinding, so four passes over the graph is more than the transitions a journal can make in one turn
 // A fixed bound would silently stop short on a graph longer than it, leaving pending steps with nothing left to open them: the instance would then run to its timeout rather than to its end
 func advanceIterations(def *definition) int {
-	return 4*len(def.steps) + minAdvanceIterations
+	// A loop repeats its body, and a body whose steps all settle without a task can run every iteration inside one turn, so its repeats are counted here too
+	work := len(def.steps)
+	for _, d := range def.steps {
+		if d.kind == KindLoop {
+			work += d.maxIterations * len(d.body)
+		}
+	}
+	return 4*work + minAdvanceIterations
 }
 
 // eventKind discriminates the things that drive a Workflow turn
@@ -675,7 +682,8 @@ func settleSteps(st *instanceState, def *definition, now time.Time) bool {
 func stepOutcome(sr *stepRecord, d *stepDef) (StepStatus, string) {
 	switch d.kind {
 	case KindStep, KindChild:
-		tr := sr.task(0)
+		// A loop body step keeps the tasks of the iterations that already ran, so what decides the step is the one the current iteration produced
+		tr := currentTask(sr)
 		if tr != nil && tr.Error != "" {
 			return StepFailed, tr.Error
 		}
@@ -695,7 +703,7 @@ func stepOutcome(sr *stepRecord, d *stepDef) (StepStatus, string) {
 
 // firstFailedTask returns the index into Tasks of the first task that failed for good, or -1 when none has
 func firstFailedTask(sr *stepRecord) int {
-	for i := range sr.Tasks {
+	for i := currentTasksFrom(sr); i < len(sr.Tasks); i++ {
 		if sr.Tasks[i].Done && sr.Tasks[i].Error != "" {
 			return i
 		}
@@ -838,13 +846,19 @@ func openStep(st *instanceState, def *definition, sr *stepRecord, instanceID str
 		return true
 	}
 
+	// A loop is a control node rather than work: it settles or rewinds its body here and never has a task in flight
+	if d.kind == KindLoop {
+		return openLoop(st, def, sr, d, now)
+	}
+
 	sr.StartedAt = now
 	sr.Status = StepRunning
 
 	switch d.kind {
 	case KindStep, KindChild:
-		sr.Tasks = []taskRecord{newTask(0, nil)}
-		def.configureTaskActors(d, &sr.Tasks[0], instanceID, sr.Name)
+		// A step outside a loop opens once, so this is its only task, while a loop body step appends one per iteration and its index is that iteration
+		sr.Tasks = append(sr.Tasks, newTask(len(sr.Tasks), nil))
+		def.configureTaskActors(d, &sr.Tasks[len(sr.Tasks)-1], instanceID, sr.Name)
 		sr.Remaining = 1
 	case KindParallel:
 		sr.Tasks = make([]taskRecord, len(d.members))
@@ -889,12 +903,44 @@ func newTask(index int, item json.RawMessage) taskRecord {
 
 // conditionMatches reports whether the step named by WithSkipIf recorded the output the condition skips on
 func conditionMatches(st *instanceState, def *definition, d *stepDef) bool {
-	sr := st.step(d.skipIfStep)
+	return stepOutputIs(st, def, d.skipIfStep, d.skipIfValue)
+}
+
+// loopSatisfied reports whether the body step named by WithUntil recorded the output the loop ends on
+// A body step that failed or was skipped has no output to end the loop with, so the loop repeats rather than finishing on a step that did not decide anything
+func loopSatisfied(st *instanceState, def *definition, d *stepDef) bool {
+	return stepOutputIs(st, def, d.untilStep, d.untilValue)
+}
+
+// loopResult returns what a settled loop reports as its own output, which is the output of the body step its condition named
+func loopResult(st *instanceState, def *definition, d *stepDef) json.RawMessage {
+	sr := st.step(d.untilStep)
+	if sr == nil {
+		return nil
+	}
+
+	until := def.byName[d.untilStep]
+	if until == nil {
+		return nil
+	}
+	return until.stepOutput(sr)
+}
+
+// stepOutputIs reports whether a named step completed with a boolean output equal to want
+// It is how both WithSkipIf and WithUntil read their decision, which keeps a condition a recorded output rather than a predicate the journal cannot show
+// An absent or unreadable output is not a match, so a step that never produced one simply leaves the decision unmade
+func stepOutputIs(st *instanceState, def *definition, stepName string, want bool) bool {
+	sr := st.step(stepName)
 	if sr == nil || sr.Status != StepCompleted {
 		return false
 	}
 
-	out := def.byName[sr.Name].stepOutput(sr)
+	d := def.byName[sr.Name]
+	if d == nil {
+		return false
+	}
+
+	out := d.stepOutput(sr)
 	if len(out) == 0 {
 		return false
 	}
@@ -904,7 +950,74 @@ func conditionMatches(st *instanceState, def *definition, d *stepDef) bool {
 	if err != nil {
 		return false
 	}
-	return v == d.skipIfValue
+	return v == want
+}
+
+// openLoop settles a loop or rewinds its body for another iteration, which is the whole of what a loop node does
+// It runs once per iteration, after the body has settled, because the loop node sits after its body in the graph
+func openLoop(st *instanceState, def *definition, sr *stepRecord, d *stepDef, now time.Time) bool {
+	sr.Iteration++
+
+	// The condition is read only after the body has run, so a loop always runs its body at least once
+	if loopSatisfied(st, def, d) {
+		sr.StartedAt = now
+		sr.Output = loopResult(st, def, d)
+		completeStep(st, sr, d, now)
+		return true
+	}
+
+	// A condition that never holds would otherwise run the instance to its timeout, so the bound fails the loop instead, and WithOptional and WithSkipOnFailure decide what that costs exactly as they would for any other step
+	if sr.Iteration >= d.maxIterations {
+		sr.StartedAt = now
+		failStep(st, def, sr, d, fmt.Sprintf("the condition did not hold within %d iterations", d.maxIterations), now)
+		return true
+	}
+
+	// The body goes back to pending, and the loop node with it, so the walk over the graph opens the body's first step again and reaches this node once more after it
+	rewindLoopBody(st, d)
+	sr.Status = StepPending
+	sr.Remaining = 0
+	sr.CompletedAt = time.Time{}
+	return true
+}
+
+// rewindLoopBody puts every step of a loop's body back to pending so the walk over the graph opens them for the next iteration
+// The tasks of the iterations that already ran are kept, because their effects are real and an unwind has to undo every one of them
+func rewindLoopBody(st *instanceState, d *stepDef) {
+	for _, name := range d.body {
+		sr := st.step(name)
+		if sr == nil {
+			continue
+		}
+
+		sr.Status = StepPending
+		sr.Remaining = 0
+		sr.Error = ""
+		sr.StartedAt = time.Time{}
+		sr.CompletedAt = time.Time{}
+		sr.Iteration++
+
+		// A wait step is settled by its event, so the next iteration has to wait for one of its own
+		sr.Event = nil
+	}
+}
+
+// currentTask returns the task of the step's current iteration, or nil when it has none
+// A step outside a loop body opens once and has only this task, and a body step appends one per iteration, so the current one is always the last
+func currentTask(sr *stepRecord) *taskRecord {
+	if len(sr.Tasks) == 0 {
+		return nil
+	}
+	return &sr.Tasks[len(sr.Tasks)-1]
+}
+
+// currentTasksFrom returns the index into Tasks where the current iteration's tasks begin
+// Scoping to the current iteration is what stops a failure an earlier iteration recorded from settling the step while this one is still in flight
+func currentTasksFrom(sr *stepRecord) int {
+	if sr.Iteration == 0 || len(sr.Tasks) == 0 {
+		return 0
+	}
+	return len(sr.Tasks) - 1
 }
 
 // fanOutItems reads the elements a fan-out iterates from the output of the step named by WithItemsFrom
