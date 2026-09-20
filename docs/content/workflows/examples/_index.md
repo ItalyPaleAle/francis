@@ -2,10 +2,9 @@
 title: "Examples"
 nav_title: "Overview"
 weight: 110
-description: "Three complete workflows, with every handler and what happens when they go wrong"
 ---
 
-Three workflows that between them exercise every feature. Each one is complete: the definition, every handler, and what happens when it goes wrong.
+This section contains some example workflows, including common patterns.
 
 | Example | What it shows |
 |---------|---------------|

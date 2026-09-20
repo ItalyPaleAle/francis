@@ -85,7 +85,7 @@ func (w *worker) Job(ctx context.Context, method string, data actor.Envelope) er
 	if p.DefinitionFingerprint != "" {
 		if p.Version != w.def.version || p.DefinitionFingerprint != w.def.fingerprint {
 			if p.Version == w.def.version {
-				w.wf.recordDefinitionConflict(ctx, p.Version, w.def.fingerprint, registerResponse{Fingerprint: p.DefinitionFingerprint})
+				w.wf.recordDefinitionConflict(ctx, p.Version)
 			}
 			return actor.ErrJobRejected
 		}

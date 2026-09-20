@@ -1,12 +1,11 @@
 ---
 title: "Tenant provisioning"
 weight: 30
-description: "Waiting on an approval, conditional steps, and a parallel group of child workflows"
 ---
 
-A new tenant is requested, a manager approves it, and three subsystems are provisioned in parallel before the tenant is verified and welcomed. Two of the three are complex enough to be workflows of their own. If anything fails after approval, everything provisioned so far is torn down, including whatever the children built.
+This is an example of an IT workflow. When a new tenant is requested, a manager has to approve it, and three subsystems are provisioned in parallel before the tenant is verified and welcomed. Two of the three are complex enough to be workflows of their own. If anything fails after approval, everything provisioned so far is torn down, including whatever the children built.
 
-## The child definitions
+## Children workflow definitions
 
 Each child keeps its own status, compensation stack, and timers. `WithOutput` names the step whose output the parent reads back.
 
@@ -38,7 +37,7 @@ provisionStorage, err := workflow.New("provision-storage",
 )
 ```
 
-## The parent
+## Parent workflow definition
 
 ```go
 onboarding, err := workflow.New("tenant-onboarding",
@@ -85,7 +84,7 @@ err = host.RegisterBuiltInActor(provisionStorage)
 err = host.RegisterBuiltInActor(onboarding)
 ```
 
-## The handlers
+## Handlers
 
 `readApproval` turns the event payload into the boolean the condition reads:
 
@@ -128,7 +127,7 @@ func verifyTenant(ctx context.Context, t workflow.Task) (any, error) {
 }
 ```
 
-## Driving it
+## Starting and driving the workflow
 
 ```go
 svc := onboarding.Service(host.Service())
@@ -137,31 +136,35 @@ svc := onboarding.Service(host.Service())
 id, _, err := svc.Start(ctx, tenantRequest{Name: name, Plan: plan}, workflow.WithInstanceID(tenantID))
 ```
 
-The approval arrives from outside, as a single call:
+When the workflow waits for the external approval, notify the manager in some ways (e.g. an email, a Slack/Teams notification, etc). The approval arrives from outside, as a single call, for example through a webhook that's invoked from the Slack/Teams message:
 
 ```go
 err = svc.RaiseEvent(ctx, tenantID, "approval", approvalPayload{Approved: true, By: user, Note: note})
 ```
 
-## What happens when it goes wrong
+## Example failures
 
-**Nobody approves within three days.** The event timeout elapses. The stack holds one entry, `request-review`, so `closeReviewTicket` runs with the cause `event "approval" timed out` and the instance terminates `failed`. Nothing was provisioned.
+Example failures and how they are handled:
 
-**The manager rejects.** `RaiseEvent` carries `Approved: false`, the wait completes, `readApproval` returns `false`, and `WithSkipIf` skips `verify`. The provision group still runs, since in this graph a rejected tenant is provisioned in a sandbox, and the instance completes with `verify` recorded as `skipped`.
+- Nobody approves within three days.  
+   The event timeout elapses. The stack holds one entry, `request-review`, so `closeReviewTicket` runs with the cause `event "approval" timed out` and the instance terminates `failed`. Nothing was provisioned.
+- The manager rejects.  
+   `RaiseEvent` carries `Approved: false`, the wait completes, `readApproval` returns `false`, and `WithSkipIf` skips `verify`. The provision group still runs, since in this graph a rejected tenant is provisioned in a sandbox, and the instance completes with `verify` recorded as `skipped`.
+- Storage's `policy` step fails permanently after the database child has completed.  
+   The storage child deletes its bucket and reports failure, and `FailFast` fails the `provision` group.
+- The parent's stack holds the group and `request-review`.  
+   Rolling back the group asks the completed database child to undo itself, which revokes its credentials and deletes its cluster, and runs `deleteDNS` at the same time. The ticket is closed last. The parent is `failed` with `compensation: completed`.
 
-**Storage's `policy` step fails permanently after the database child has completed.** The storage child deletes its bucket and reports failure, and `FailFast` fails the `provision` group.
+   ```go
+   // Both children, in their terminal states
+   page, err := dbSvc.List(ctx, &workflow.ListOptions{Parent: tenantID})
+   ```
 
-The parent's stack holds the group and `request-review`. Rolling back the group asks the completed database child to undo itself, which revokes its credentials and deletes its cluster, and runs `deleteDNS` at the same time. The ticket is closed last. The parent is `failed` with `compensation: completed`.
+- The cloud API is under maintenance mid-provisioning.  
+   An operator suspends the parent:
 
-```go
-// Both children, in their terminal states
-page, err := dbSvc.List(ctx, &workflow.ListOptions{Parent: tenantID})
-```
+   ```go
+   err = svc.Suspend(ctx, tenantID, "cloud maintenance")
+   ```
 
-**The cloud API is under maintenance mid-provisioning.** An operator suspends the parent:
-
-```go
-err = svc.Suspend(ctx, tenantID, "cloud maintenance")
-```
-
-That stops it starting anything new. The children keep running, and their results wait. The seven-day instance timeout is paused, and `Resume` continues where the instance left off.
+   That stops it starting anything new. The children keep running, and their results wait. The seven-day instance timeout is paused, and `Resume` continues where the instance left off.

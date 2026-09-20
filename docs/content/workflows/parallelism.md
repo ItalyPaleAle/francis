@@ -30,10 +30,14 @@ A member may be a plain step or a [child step](/workflows/child-workflows). Ever
 Options for the group as a whole go on its `With` method:
 
 ```go
-workflow.Parallel("notify",
-	workflow.Step("email", workflow.WithRun(sendEmail), workflow.WithMaxAttempts(5)),
-	workflow.Step("sms", workflow.WithRun(sendSMS)),
-).With(workflow.WithFailurePolicy(workflow.TolerateFailures)),
+workflow.
+	Parallel("notify",
+		workflow.Step("email", workflow.WithRun(sendEmail), workflow.WithMaxAttempts(5)),
+		workflow.Step("sms", workflow.WithRun(sendSMS)),
+	).
+	With(
+		workflow.WithFailurePolicy(workflow.TolerateFailures),
+	),
 ```
 
 ## Dynamic fan-out
@@ -66,13 +70,13 @@ func generateThumbnail(ctx context.Context, t workflow.Task) (any, error) {
 
 The item list is fixed once the upstream step reports, so it never changes underneath a running fan-out.
 
-The items are always a step's **whole** output: there is no selector for one field of something larger. Write a small step that returns the list, as `plan` does above.
+The items are always a step's whole output: there is no selector for one field of something larger. Write a small step that returns the list, as `plan` does above.
 
 ### Bounding a fan-out
 
-`WithMaxParallel(n)` bounds how many of a fan-out's tasks are in flight **per instance**, as a sliding window in index order.
+`WithMaxParallel(n)` bounds how many of a fan-out's tasks are in flight per instance, as a sliding window in index order.
 
-`WithConcurrency` is separate: it limits how much work a host accepts across **all** instances. A fan-out of 500 with `WithMaxParallel(8)`, on four hosts each running `WithConcurrency(4)`, has at most 8 in flight for that instance and 16 across the cluster.
+`WithConcurrency` is separate: it limits how much work a host accepts across all instances. A fan-out of 500 with `WithMaxParallel(8)`, on four hosts each running `WithConcurrency(4)`, has at most 8 in flight for that instance and 16 across the cluster.
 
 Asking for more in-flight tasks than the cluster can run does not fail the fan-out. The surplus waits, and the step takes longer.
 
@@ -86,19 +90,12 @@ A group or a fan-out declares what one failing task costs the step:
 | `workflow.CollectFailures` | Every task runs to completion, then the step fails if any of them failed. Use when the tasks are independent and partial progress is worth having before unwinding. |
 | `workflow.TolerateFailures` | Every task runs to completion and the step succeeds regardless. Failures are visible in the step's output, and it is the next step's business what to do about them. |
 
-`TolerateFailures` suits a thumbnail pipeline: an image that cannot be encoded is recorded as failed and does not stop the run.
-
-```go
-var results []json.RawMessage
-err := t.DecodeOutput("generate", &results)
-// A failed slot carries {"error": "..."} in place of the value
-```
-
-A task that has already started is **never interrupted**, under any policy. A handler that wants to bail out early should watch its context for host shutdown. If a task succeeds after its step has already failed, the result is still recorded and still compensated.
+A task that has already started is never interrupted under any policy. A handler that wants to bail out early should watch its context for host shutdown. If a task succeeds after its step has already failed, the result is still recorded and still compensated.
 
 ## Capabilities
 
-A step can require a capability, and it is then only ever run on a host that advertises it:
+A step can require a capability, and it is then only ever run on a host that advertises it.  
+A step with no requirement runs anywhere.
 
 ```go
 // On every host: the step declares what it needs
@@ -114,7 +111,7 @@ wf, err := workflow.New("documents",
 )
 ```
 
-A step with no requirement runs anywhere. A step's **compensation runs on a host with the same capability**.
+A step's compensation runs on a host with the same capability.
 
 ## Capacity
 
@@ -122,5 +119,5 @@ A step with no requirement runs anywhere. A step's **compensation runs on a host
 
 Two things to watch for:
 
-- **Every step shares one budget.** A step that waits on a remote server holds a slot an image encode could have used. Give it a required capability to get a budget of its own.
-- **`WithConcurrency` is per host.** The cluster's total is the sum across the hosts that registered the workflow.
+- Every step shares one budget. A step that waits on a remote server holds a slot an image encode could have used. Give it a required capability to get a budget of its own.
+- `WithConcurrency` is per host. The cluster's total is the sum across the hosts that registered the workflow.

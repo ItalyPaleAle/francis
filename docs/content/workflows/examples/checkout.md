@@ -1,12 +1,11 @@
 ---
 title: "Checkout with compensations"
 weight: 20
-description: "The compensation stack, idempotent handlers, and per-step retry policies"
 ---
 
 A checkout reserves inventory, charges a card, creates a shipment, and confirms. Every step that takes money or holds stock can be undone, and any failure after the charge must refund it.
 
-## The definition
+## Workflow definition
 
 ```go
 checkout, err := workflow.New("checkout",
@@ -52,9 +51,9 @@ checkout, err := workflow.New("checkout",
 )
 ```
 
-## The handlers
+## Handlers
 
-The charge is the one to get right. It uses the instance ID and step name as the payment provider's idempotency key, so an attempt that succeeded but could not report does not charge twice when it runs again. It returns the charge ID, which is what the refund needs:
+The charge is the most critical task. It uses the instance ID and step name as the payment provider's idempotency key, so an attempt that succeeded but could not report does not charge twice when it runs again. It returns the charge ID, which is what the refund needs:
 
 ```go
 type chargeResult struct {
@@ -134,7 +133,7 @@ func releaseInventory(ctx context.Context, c workflow.Compensation) error {
 
 `createShipment` books the carrier and returns the booking reference, and `cancelShipment` cancels by that reference. `validateCart` has no side effects and no compensation.
 
-## Starting one
+## Starting the workflow
 
 ```go
 svc := checkout.Service(host.Service())
@@ -149,14 +148,17 @@ if !created {
 }
 ```
 
-## What happens when it goes wrong
+## Example failures
 
-**The card is declined.** `charge` reports a permanent failure on its first attempt. The stack holds one entry, `reserve-inventory`, so `releaseInventory` runs and the instance terminates `failed` with `compensation: completed`. Nothing was charged, so nothing is refunded.
+Example failures and how they are handled:
 
-**The carrier times out for six minutes.** `create-shipment` fails six retryable attempts, five seconds to two minutes apart, and the sixth fails the step. The rollback pops `charge` first, running `refundCharge`, then `reserve-inventory`. The instance is `failed` with `compensation: completed`, and **the customer was refunded before the stock was released**.
-
-**The refund keeps failing because the payment provider is down.** `refundCharge` is retried up to twenty times over about two hours. If it never succeeds, `ContinueUnwinding` still releases the inventory and the instance terminates `failed` with `compensation: partial`. That is the status to alert on, and `GetStatus` still has the charge ID.
-
-**A host dies after the charge succeeded and before it reported.** The attempt is retried on another host, the handler runs again with the same idempotency key, and the provider returns the existing charge. One charge.
-
-**The customer cancels while the shipment is being created.** `Cancel` moves the instance to `compensating`. The shipment attempt in flight is not interrupted, and if it succeeds its result is recorded and then compensated by `cancelShipment`, along with the refund and the release. The instance is `cancelled`.
+- The card is declined.  
+   `charge` reports a permanent failure on its first attempt. The stack holds one entry, `reserve-inventory`, so `releaseInventory` runs and the instance terminates `failed` with `compensation: completed`. Nothing was charged, so nothing is refunded.
+- The carrier times out for six minutes.  
+   `create-shipment` fails six retryable attempts, five seconds to two minutes apart, and the sixth fails the step. The rollback pops `charge` first, running `refundCharge`, then `reserve-inventory`. The instance is `failed` with `compensation: completed`, and the customer was refunded before the stock was released.
+- The refund keeps failing because the payment provider is down.  
+   `refundCharge` is retried up to twenty times over about two hours. If it never succeeds, `ContinueUnwinding` still releases the inventory and the instance terminates `failed` with `compensation: partial`. That is the status to alert on, and `GetStatus` still has the charge ID.
+- A host dies after the charge succeeded and before it reported.  
+   The attempt is retried on another host, the handler runs again with the same idempotency key, and the provider returns the existing charge. One charge.
+- The customer cancels while the shipment is being created.  
+   `Cancel` moves the instance to `compensating`. The shipment attempt in flight is not interrupted, and if it succeeds its result is recorded and then compensated by `cancelShipment`, along with the refund and the release. The instance is `cancelled`.

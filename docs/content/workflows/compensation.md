@@ -1,10 +1,10 @@
 ---
 title: "Compensation"
 weight: 40
-description: "Undoing what already succeeded, in reverse order"
+description: "Rolling back a workflow and undoing its actions"
 ---
 
-A **compensation** is a per-step callback that undoes the effect of a task that completed successfully. When the workflow cannot finish, the work it already did is rolled back.
+A compensation is a per-step callback that undoes the effect of a task that completed successfully. When the workflow cannot finish, the work it already did is rolled back.
 
 ```go
 workflow.Step("charge",
@@ -13,9 +13,11 @@ workflow.Step("charge",
 ),
 ```
 
+If we consider workflows as "distributed transactions", compensations allow defining the operations that need to be performed in the case of a "rollback". For example, in an ecommerce workflow, failure to ship the item can require refunding the charge on the credit card.
+
 ## The stack
 
-Compensation is a **stack**. Every task that completes successfully is pushed onto it in completion order, as long as its step declares `WithCompensate` or is a child workflow. The stack is then popped in reverse.
+Compensation is a stack. Every task that completes successfully is pushed onto it in completion order, as long as its step declares `WithCompensate` or is a child workflow. When running a compensation, the stack is popped in reverse order.
 
 ```
 forward:      charge-card ──► reserve-stock ──► ship[0] ship[1] ship[2] ──► ✗ confirm
@@ -25,28 +27,26 @@ unwind:       refund-card ◄── release-stock ◄── unwind ship[0..2]
                                                (parallel, all at once)
 ```
 
-Three ordering rules:
-
-- **Steps unwind in reverse order.** The customer is refunded before the stock is released, because the stock was held first.
-- **Within one step, compensations run concurrently.**
-- **A step is fully compensated before the next one starts.**
+- Steps unwind in reverse order. The customer is refunded before the stock is released, because the stock was held first.
+- Within one step, compensations run concurrently.
+- A step is fully compensated before the next one starts.
 
 A compensation is a task like any other, with its own attempts and timeout, and its progress is visible in `GetStatus`.
 
 ## What triggers an unwind
 
-- A step fails terminally under the default policy (not `WithOptional` or `WithSkipOnFailure`).
-- A group or fan-out fails under `FailFast` or `CollectFailures`.
-- `Service.Cancel` is called on a running or suspended instance.
-- The instance timeout elapses.
-- A `WaitForEvent` step's own timeout elapses without the event.
-- A parent instance unwinds a [child step](/workflows/child-workflows).
+- A step fails terminally under the default policy (not `WithOptional` or `WithSkipOnFailure`)
+- A group or fan-out fails under `FailFast` or `CollectFailures`
+- `Service.Cancel` is called on a running or suspended instance
+- The instance timeout elapses
+- A `WaitForEvent` step's own timeout elapses without the event
+- A parent instance unwinds a [child step](/workflows/child-workflows)
 
-Francis records the **cause** in every case, and each compensation receives it through `Cause()`. Use it when the undo differs by reason, such as writing a different audit record for a payment failure and a customer cancellation.
+Francis records the cause in every case, and each compensation receives it through `Cause()`. Use it when the undo differs by reason, such as writing a different audit record for a payment failure and a customer cancellation.
 
-## Writing one
+## Writing a compensation
 
-A compensation receives the same input and item the forward task had, plus the **output that task produced**:
+A compensation receives the same input and item the forward task had, plus the output that task produced:
 
 ```go
 type chargeResult struct {
@@ -86,14 +86,13 @@ func refundCharge(ctx context.Context, c workflow.Compensation) error {
 }
 ```
 
-Compensations are **at-least-once**, so `refundCharge` must tolerate being called twice for the same charge. Key the undo on the forward operation's identifier.
+Just like other tasks, compensations are executed at-least-once, so `refundCharge` must handle the possibility of being called twice for the same charge. Key the undo on the forward operation's identifier.
 
 Compensations have their own attempt policy: `WithCompensateMaxAttempts` (default 10) and `WithCompensateBackoff` (default 10s doubling to 10 minutes). The defaults are more generous than the forward ones.
 
-## The failing step itself
+## Compensating the failing step
 
-By default, a step that **failed** is not compensated, on the assumption that a step which did not complete did not take effect. That is not a guarantee: a step can fail after its side effect landed.
-
+By default, a step that failed is not compensated, on the assumption that a step which did not complete did not take effect.  
 `WithCompensateOnFailure()` compensates a step even when it failed:
 
 ```go
@@ -105,9 +104,9 @@ workflow.Step("write-ledger",
 ),
 ```
 
-Write such a compensation defensively: it may be undoing something that never happened.
+When writing the compensation function, keep in mind that it may be undoing something that happened or not.
 
-## When a compensation fails
+## Handling compensation failures
 
 `WithCompensationFailurePolicy` chooses what happens next:
 
@@ -116,7 +115,7 @@ Write such a compensation defensively: it may be undoing something that never ha
 | `workflow.ContinueUnwinding` *(default)* | Record the failure and keep unwinding the remaining steps. The instance terminates as `failed` with `compensation: partial`. |
 | `workflow.AbortUnwinding` | Stop at the step that failed. The instance terminates as `failed` with `compensation: failed`, and `GetStatus` names exactly which steps were not unwound. |
 
-`ContinueUnwinding` is the default, because stopping at the first problem usually strands **more** state than carrying on. Either way the outcome is explicit in the status, which is what to alert on.
+`ContinueUnwinding` is the default, because stopping at the first problem usually leaves more incomplete work than carrying on.
 
 ```go
 status, err := svc.GetStatus(ctx, id)

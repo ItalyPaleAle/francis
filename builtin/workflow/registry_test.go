@@ -1,9 +1,11 @@
 package workflow
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -541,13 +543,14 @@ func TestLegacyJournalBindsToTheRegisteredGraph(t *testing.T) {
 }
 
 func TestDefinitionConflictsRemainObservable(t *testing.T) {
+	var logs bytes.Buffer
 	reader := sdkmetric.NewManualReader()
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	t.Cleanup(func() {
 		err := provider.Shutdown(context.Background())
 		require.NoError(t, err)
 	})
-	wf, err := New("identity-metrics", WithMeter(provider.Meter("identity")), WithSteps(Step("work", WithRun(noopRun))))
+	wf, err := New("identity-metrics", WithLogger(slog.New(slog.NewTextHandler(&logs, nil))), WithMeter(provider.Meter("identity")), WithSteps(Step("work", WithRun(noopRun))))
 	require.NoError(t, err)
 	h := newFakeHost()
 	h.registryResponse = registerResponse{Found: true, OK: false, Fingerprint: "registered-graph", Generation: 2}
@@ -563,6 +566,9 @@ func TestDefinitionConflictsRemainObservable(t *testing.T) {
 	require.ErrorIs(t, w.Job(t.Context(), methodRun, &payloadEnvelope{value: p}), actor.ErrJobRejected)
 	require.Equal(t, int64(2), int64MetricTotal(t, reader, "francis.workflow.definition.conflicts"))
 	assert.Len(t, h.invokes, 1)
+	assert.Contains(t, logs.String(), "version=1")
+	assert.NotContains(t, logs.String(), "registered-graph")
+	assert.NotContains(t, logs.String(), "Fingerprint")
 }
 
 func TestChildStartCarriesAuthorizedIdentity(t *testing.T) {

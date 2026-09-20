@@ -87,7 +87,7 @@ func (o *orchestrator) authorizeStart(ctx context.Context, p *startPayload) erro
 		return errVersionNotServed
 	}
 	if p.DefinitionFingerprint != "" && p.DefinitionFingerprint != o.def.fingerprint {
-		o.wf.recordDefinitionConflict(ctx, o.def.version, o.def.fingerprint, registerResponse{Fingerprint: p.DefinitionFingerprint})
+		o.wf.recordDefinitionConflict(ctx, o.def.version)
 		return errVersionNotServed
 	}
 	if p.DefinitionFingerprint != "" && p.RegistryGeneration > 0 {
@@ -355,7 +355,7 @@ func (o *orchestrator) turn(ctx context.Context, ev *event) (err error) {
 	st = st.clone()
 
 	if st.Version == o.def.version && st.DefinitionFingerprint != "" && st.DefinitionFingerprint != o.def.fingerprint {
-		o.wf.recordDefinitionConflict(ctx, o.def.version, o.def.fingerprint, registerResponse{Fingerprint: st.DefinitionFingerprint})
+		o.wf.recordDefinitionConflict(ctx, o.def.version)
 	}
 	run, err := o.admits(&st, ev)
 	if err != nil || !run {

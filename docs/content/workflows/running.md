@@ -10,21 +10,20 @@ The operations are bound to an `actor.Service` via `Service(...)`, which you obt
 svc := orders.Service(host.Service())
 ```
 
-**Authorization is your application's responsibility**, as it is for every other actor invocation in Francis. There is no hook for it, so check permissions before calling these.
-
 ## Starting
 
 ```go
-// Without WithInstanceID, the engine mints a UUIDv7, which sorts by creation time
+// Without WithInstanceID, the engine generates a UUIDv7
 id, created, err := svc.Start(ctx, OrderInput{OrderID: "A-91", Total: 4999})
 
 // Use a natural key to make starting idempotent
 id, created, err = svc.Start(ctx, input, workflow.WithInstanceID("order-A-91"))
 ```
 
-`Start` returns as soon as the instance is durable, and the work then survives a restart of the process.
+`Start` returns after the workflow is scheduled, and does not wait for the workflow to complete.
 
-A second `Start` with an instance ID that already exists finds the first: `created` comes back `false` and the second call's input is discarded. An instance ID that has already **terminated** is not restarted, so re-driving a failed run needs a fresh ID.
+A second `Start` with an instance ID that already exists finds the first: `created` comes back `false` and the second call's input is discarded.  
+An instance ID that has already terminated is not restarted, so re-driving a failed run needs a fresh ID.
 
 The input is JSON-encoded and capped by `WithMaxInputSize` (64 KiB by default). An oversized input returns `ErrInputTooLarge`.
 
@@ -58,7 +57,7 @@ type InstanceStatus struct {
 }
 ```
 
-**The output** is the output of the step named with `WithOutput`, or of the last step otherwise. It is set once the instance completes and readable for as long as the instance is retained. Decode it with `DecodeOutput`:
+The output is the output of the step named with `WithOutput`, or of the last step otherwise. It is set once the instance completes and readable for as long as the instance is retained. Decode it with `DecodeOutput`:
 
 ```go
 var result CheckoutResult
@@ -69,7 +68,7 @@ It is empty for any instance that has not completed, and `DecodeOutput` then lea
 
 A caller never sees `completed` before every step has finished, including the optional ones.
 
-The statuses are:
+The possible statuses are:
 
 | Status | Meaning |
 |--------|---------|
@@ -77,9 +76,9 @@ The statuses are:
 | `running` | executing its steps |
 | `suspended` | paused by `Suspend` |
 | `compensating` | unwinding its compensation stack |
-| `completed` | terminal: ran to the end |
-| `failed` | terminal: could not |
-| `cancelled` | terminal: cancelled and unwound |
+| `completed` | ran to the end successfully (terminal) |
+| `failed` | could not complete (terminal) |
+| `cancelled` | cancelled and unwound (terminal) |
 
 ## Listing
 
@@ -100,7 +99,11 @@ Because the default instance ID is a UUIDv7, a listing is in creation order. Pag
 ```go
 var cursor string
 for {
-	page, err := svc.List(ctx, &workflow.ListOptions{Status: workflow.StatusFailed, After: cursor, Limit: 100})
+	page, err := svc.List(ctx, &workflow.ListOptions{
+		Status: workflow.StatusFailed,
+		After: cursor,
+		Limit: 100,
+	})
 	if err != nil {
 		return err
 	}
@@ -135,7 +138,7 @@ workflow.WithRetention(workflow.RetentionPolicy{
 })
 ```
 
-A **purge** removes a terminated instance: its children, the jobs it used, and its recorded history. Every workflow automatically sweeps instances past their retention every 12 hours. An instance that is never swept expires on its own as a backstop.
+A purge removes a terminated instance: its children, the jobs it used, and its recorded history. Every workflow automatically sweeps instances past their retention every 12 hours. An instance that is never swept expires on its own as a backstop.
 
 You can purge at three levels:
 
@@ -155,8 +158,8 @@ workflow.WithAutoPurgeInterval(6 * time.Hour)
 workflow.WithAutoPurgeCron("0 3 * * *")
 ```
 
-`Purge` refuses a running or suspended instance with `ErrInstanceActive`, and one that is already gone with `ErrInstanceNotFound`. It is idempotent, so an interrupted purge is safe to repeat. It also refuses an instance whose parent is still running.
+`Purge` refuses a running or suspended instance with `ErrInstanceActive`. It is idempotent, so an interrupted purge is safe to repeat. It also refuses an instance whose parent is still running.
 
-`PurgeTerminated` works through a backlog in pages. However many hosts registered the workflow, automatic purging runs the sweep on **one** of them per schedule.
+`PurgeTerminated` works through a backlog in pages. However many hosts registered the workflow, automatic purging runs the sweep on one of them per schedule.
 
-Once an instance is purged, `GetStatus` reports not found. **An instance's history is an operational record, not an audit log.** If you need a permanent one, write it from a step, as the [thumbnails example](/workflows/examples/thumbnails) does.
+Once an instance is purged, `GetStatus` reports not found. An instance's history is an operational record, not an audit log. If you need a permanent one, write it from a step, as the [thumbnails example](/workflows/examples/thumbnails) does.

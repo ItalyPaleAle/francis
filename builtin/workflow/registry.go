@@ -308,7 +308,7 @@ func (w *Workflow) confirmDefinition(ctx context.Context, svc *actor.Service, re
 		return registerResponse{}, fmt.Errorf("failed to decode the definition authorization: %w", err)
 	}
 	if !resp.OK {
-		w.recordDefinitionConflict(ctx, req.Version, req.Fingerprint, resp)
+		w.recordDefinitionConflict(ctx, req.Version)
 		return resp, ErrDefinitionConflict
 	}
 	if resp.Generation == 0 {
@@ -369,22 +369,19 @@ func (w *Workflow) askRegistry(ctx context.Context, svc *actor.Service, version 
 		return true, nil
 	}
 
-	w.recordDefinitionConflict(ctx, version, w.def.fingerprint, resp)
+	w.recordDefinitionConflict(ctx, version)
 	return false, nil
 }
 
-// recordDefinitionConflict preserves deployment diagnostics for both registry decisions and local graph fences
-func (w *Workflow) recordDefinitionConflict(ctx context.Context, version int, localFingerprint string, resp registerResponse) {
+// recordDefinitionConflict records the actionable workflow and version without exposing internal graph hashes
+func (w *Workflow) recordDefinitionConflict(ctx context.Context, version int) {
 	w.metrics.definitionConflicts.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("workflow", w.name),
 		attribute.Int("version", version),
 	))
 	if w.log != nil {
-		w.log.ErrorContext(ctx, "Workflow definition conflicts with the one registered for this version; declining its jobs",
+		w.log.ErrorContext(ctx, "Workflow definition conflicts with the one registered for this version, bump the version in WithVersion",
 			slog.Int("version", version),
-			slog.String("registeredFingerprint", resp.Fingerprint),
-			slog.String("localFingerprint", localFingerprint),
-			slog.Time("firstSeenAt", resp.FirstSeenAt),
 		)
 	}
 }

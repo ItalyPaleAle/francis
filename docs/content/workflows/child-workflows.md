@@ -1,10 +1,10 @@
 ---
 title: "Child workflows"
 weight: 60
-description: "Running one workflow from another, and what crosses between them"
+description: "Running one workflow from another"
 ---
 
-A **child workflow** is a step whose task is a whole instance of another registered definition. The child has its own status, compensation stack, timers, and attempts. Only its result reaches the parent.
+A child workflow is a step whose task is a whole instance of another registered definition. The child has its own status, compensation stack, timers, and attempts. Only its result reaches the parent.
 
 ```go
 // A step that runs one child instance
@@ -25,22 +25,19 @@ err = host.RegisterBuiltInActor(provisionDatabase)
 err = host.RegisterBuiltInActor(onboarding)
 ```
 
-## Why reach for one
+Common uses for child workflows include:
 
-There are two reasons, and they are different:
+- Composition: a subsystem complex enough to be a workflow on its own becomes a child, and the parent treats it as one step. The parent's graph stays readable and the child is reusable.
+- Keeping a wide fan-out small. Every task's output is recorded in its instance, so a fan-out of several hundred large outputs runs into `WithMaxJournalSize` (see [steps and data flow](/workflows/steps#what-a-step-outputs)). A per-batch child splits that across instances.
 
-**Composition.** A subsystem complex enough to be a workflow on its own becomes a child, and the parent treats it as one step. The parent's graph stays readable and the child is reusable.
+## Passing data between parents and children
 
-**Keeping a wide fan-out small.** Every task's output is recorded in its instance, so a fan-out of several hundred large outputs runs into `WithMaxJournalSize` (see [steps and data flow](/workflows/steps#what-a-step-outputs)). A child per batch splits that across instances.
-
-## What crosses between them
-
-For each child task, the parent records the child's instance ID and, once it terminates, its output or its failure and compensation outcome. Nothing else crosses.
+For each child task, the parent records the child's instance ID and, once it terminates, its output or its failure and compensation outcome.
 
 The child's input is what the task would have received:
 
-- a child of a **fan-out** gets its **item**, so "one child per element" reads the way it looks;
-- any other child gets the **preceding step's output**, falling back to the parent's own input when there is none.
+- A child of a fan-out gets its item, so "one child per element" reads the way it looks
+- Any other child gets the preceding step's output, falling back to the parent's own input when there is none
 
 ```go
 func shipOne(ctx context.Context, t workflow.Task) (any, error) {
@@ -51,7 +48,7 @@ func shipOne(ctx context.Context, t workflow.Task) (any, error) {
 }
 ```
 
-The child's output is the output of its last step, or of the step named by `WithOutput` on the **child's** definition:
+The child's output is the output of its last step, or of the step named by `WithOutput` on the _child's_ definition:
 
 ```go
 provisionDatabase, err := workflow.New("provision-database",
@@ -73,19 +70,19 @@ err := t.DecodeOutput("provision-database", &creds)
 
 ## Instance IDs
 
-A child's instance ID is derived from its parent's:
+A child's instance ID is derived from its parent's, so a retry can never start a second child for the same task. The parent's ID is also a prefix of the child's, which helps when reading logs.
 
-```
+```text
 <parentID>|<step>|<index>
 ```
-
-The ID is derived rather than random, so a retry can never start a second child for the same task. The parent's ID is also a prefix of the child's, which helps when grepping logs.
 
 `WithMaxDepth` (default 8) bounds how deep a chain of children may go.
 
 ## Failure
 
-A child that terminates `failed` or `cancelled` **fails the parent's task**. The parent's own step policy decides what that costs: the default rolls back, `WithOptional` does not, and a fan-out's `TolerateFailures` records it and carries on.
+A child that terminates `failed` or `cancelled` fails the parent's task.
+
+The parent's own step policy decides what to do next: it rolls back by default, and `WithOptional` continues the execution. A fan-out's `TolerateFailures` records it and carries on.
 
 A child's terminal `compensation: partial` is surfaced on the parent even when the parent carries on.
 
@@ -93,8 +90,8 @@ A child's terminal `compensation: partial` is surfaced on the parent even when t
 
 Compensating a child step means asking the child to undo itself:
 
-- A child that is still **running** receives a cancel, rolls back its own stack, and reports when it terminates.
-- A child that already **completed** is asked to undo itself. It moves back to `compensating` and pops its stack in reverse. This is why a completed child is kept for as long as its parent is running.
+- A child that is still running receives a cancel, rolls back its own stack, and reports when it terminates.
+- A child that already completed is asked to undo itself. It moves back to `compensating` and pops its stack in reverse. This is why a completed child is kept for as long as its parent is running.
 
 ```
 parent:  provision ──────────────────────► ✗ verify
@@ -105,7 +102,11 @@ unwind:  unwind(database) ∥ unwind(storage)   then   close-review-ticket
            └─ revoke creds, delete cluster
 ```
 
-A parent's `Cancel` cancels its running children, and a parent's step timeout cancels the child it was waiting for. A parent's `Suspend` does **not** propagate.
+## Cancellation and suspension
+
+A parent's `Cancel` cancels its running children, and a parent's step timeout cancels the child it was waiting for.
+
+Calling `Suspend` on the parent does _not_ propagate to its children.
 
 ## Lifetime
 
