@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"log/slog"
 	"net"
@@ -19,6 +20,7 @@ import (
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/standalone"
 	"github.com/italypaleale/francis/internal/bootstrapauth"
+	"github.com/italypaleale/francis/internal/ca"
 	"github.com/italypaleale/francis/internal/channelbind"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/wt"
@@ -98,6 +100,13 @@ func dialRuntime(t *testing.T, ctx context.Context, addr string) *webtransport.S
 		NextProtos:         []string{http3.NextProtoH3},
 		InsecureSkipVerify: true, //nolint:gosec // G402: test-only dialer exercises the unauthenticated bootstrap path
 	}
+	return dialRuntimeWithTLS(t, ctx, addr, cliTLS)
+}
+
+// dialRuntimeWithTLS dials the runtime with the supplied TLS identity, retrying until the server is accepting connections
+func dialRuntimeWithTLS(t *testing.T, ctx context.Context, addr string, cliTLS *tls.Config) *webtransport.Session {
+	t.Helper()
+
 	dialer := wt.NewDialer(cliTLS)
 	t.Cleanup(func() {
 		_ = dialer.Close()
@@ -126,6 +135,13 @@ func dialRuntime(t *testing.T, ctx context.Context, addr string) *webtransport.S
 // registerOnSession runs the PSK bootstrap handshake on the session's first stream and returns the runtime's response
 func registerOnSession(t *testing.T, ctx context.Context, session *webtransport.Session) protocol.RegisterHostResponse {
 	t.Helper()
+	out, _ := registerOnSessionWithKey(t, ctx, session)
+	return out
+}
+
+// registerOnSessionWithKey runs the PSK bootstrap handshake and returns both the runtime's response and the private key matching the issued certificate
+func registerOnSessionWithKey(t *testing.T, ctx context.Context, session *webtransport.Session) (protocol.RegisterHostResponse, ed25519.PrivateKey) {
+	t.Helper()
 
 	stream, err := session.OpenStreamSync(ctx)
 	require.NoError(t, err)
@@ -153,7 +169,7 @@ func registerOnSession(t *testing.T, ctx context.Context, session *webtransport.
 	require.True(t, psk.VerifyServerProof(cb, clientNonce, challenge.ServerNonce, challenge.ServerProof))
 
 	// Generate a workload key the runtime signs into a certificate
-	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
 	proof := psk.ClientProof(cb, clientNonce, challenge.ServerNonce)
 
@@ -173,7 +189,79 @@ func registerOnSession(t *testing.T, ctx context.Context, session *webtransport.
 	var out protocol.RegisterHostResponse
 	err = resp.DecodePayload(&out)
 	require.NoError(t, err)
+	return out, priv
+}
+
+// reconnectOnSession performs an mTLS registration using the identity presented by the session
+func reconnectOnSession(t *testing.T, ctx context.Context, session *webtransport.Session, previousHostID string, pub ed25519.PublicKey) protocol.RegisterHostResponse {
+	t.Helper()
+
+	stream, err := session.OpenStreamSync(ctx)
+	require.NoError(t, err)
+	defer stream.Close()
+
+	req, err := protocol.NewRequest(protocol.KindRegisterHost, protocol.RegisterHostRequest{
+		PreviousHostID: previousHostID,
+		Address:        "10.9.0.1:1",
+		ActorTypes:     []protocol.ActorHostType{{ActorType: "T", IdleTimeoutMs: 60000}},
+		WorkloadPubKey: pub,
+	})
+	require.NoError(t, err)
+
+	resp, err := protocol.RoundTrip(ctx, stream, req)
+	require.NoError(t, err)
+	perr, isErr := resp.AsError()
+	require.False(t, isErr, "registration should succeed: %v", perr)
+
+	var out protocol.RegisterHostResponse
+	err = resp.DecodePayload(&out)
+	require.NoError(t, err)
 	return out
+}
+
+func TestRegisterIssuesCertificateOnlyAfterIdentityReset(t *testing.T) {
+	_, prov, addr := runRuntimeServer(t)
+
+	// Bootstrap once to obtain the identity used for both reconnects
+	bootstrapSession := dialRuntime(t, t.Context(), addr)
+	registered, priv := registerOnSessionWithKey(t, t.Context(), bootstrapSession)
+	leaf, err := x509.ParseCertificate(registered.WorkloadCertDER)
+	require.NoError(t, err)
+	pub, ok := leaf.PublicKey.(ed25519.PublicKey)
+	require.True(t, ok)
+	clientCert := tls.Certificate{Certificate: [][]byte{registered.WorkloadCertDER}, PrivateKey: priv, Leaf: leaf}
+	clientTLS := &tls.Config{
+		MinVersion:         tls.VersionTLS13,
+		NextProtos:         []string{http3.NextProtoH3},
+		Certificates:       []tls.Certificate{clientCert},
+		InsecureSkipVerify: true, //nolint:gosec // G402: this test exercises client-certificate behavior, not runtime-certificate verification
+	}
+
+	// Reattaching the live registration keeps the certificate already held by the host
+	reattachSession := dialRuntimeWithTLS(t, t.Context(), addr, clientTLS)
+	reattached := reconnectOnSession(t, t.Context(), reattachSession, registered.HostID, pub)
+	assert.True(t, reattached.Reattached)
+	assert.Equal(t, registered.HostID, reattached.HostID)
+	assert.Empty(t, reattached.WorkloadCertDER)
+
+	// Removing the registration makes the same authenticated reconnect receive a new identity
+	err = prov.UnregisterHost(t.Context(), registered.HostID)
+	require.NoError(t, err)
+	resetSession := dialRuntimeWithTLS(t, t.Context(), addr, clientTLS)
+	reset := reconnectOnSession(t, t.Context(), resetSession, registered.HostID, pub)
+	assert.False(t, reset.Reattached)
+	assert.NotEqual(t, registered.HostID, reset.HostID)
+	require.NotEmpty(t, reset.WorkloadCertDER)
+
+	// The replacement certificate binds the existing key to the newly assigned host identity
+	resetLeaf, err := x509.ParseCertificate(reset.WorkloadCertDER)
+	require.NoError(t, err)
+	resetHostID, err := ca.HostIDFromCert(resetLeaf)
+	require.NoError(t, err)
+	assert.Equal(t, reset.HostID, resetHostID)
+	resetPub, ok := resetLeaf.PublicKey.(ed25519.PublicKey)
+	require.True(t, ok)
+	assert.Equal(t, pub, resetPub)
 }
 
 // pskBootstrap runs the PSK challenge-response on the session and sends a registration carrying the given previous host ID and address

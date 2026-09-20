@@ -377,23 +377,48 @@ func (rc *runtimeClient) bootstrap(ctx context.Context, session *webtransport.Se
 
 // reconnect re-registers a host that already holds a workload certificate, identified by the client certificate the TLS layer presented
 func (rc *runtimeClient) reconnect(ctx context.Context, stream protocol.Stream) (protocol.RegisterHostResponse, error) {
+	// Reuse the current key so an identity reset needs only a replacement certificate, not an unrelated key rotation
+	cert := rc.cfg.holder.Certificate()
+	if cert == nil || cert.Leaf == nil {
+		return protocol.RegisterHostResponse{}, errors.New("workload certificate is not available for reconnect")
+	}
+	priv, ok := cert.PrivateKey.(ed25519.PrivateKey)
+	if !ok {
+		return protocol.RegisterHostResponse{}, errors.New("workload certificate does not use an Ed25519 private key")
+	}
+	pub, ok := cert.Leaf.PublicKey.(ed25519.PublicKey)
+	if !ok {
+		return protocol.RegisterHostResponse{}, errors.New("workload certificate does not use an Ed25519 public key")
+	}
+
 	// PreviousHostID lets the runtime reattach us, and it is cross-checked against our certificate identity
 	out, err := rc.sendRegister(ctx, stream, protocol.RegisterHostRequest{
 		PreviousHostID: rc.HostID(),
 		Address:        rc.cfg.peerAddress,
 		ActorTypes:     rc.cfg.actorTypes,
+		WorkloadPubKey: pub,
 	})
 	if err != nil {
 		return protocol.RegisterHostResponse{}, err
 	}
 
-	// Refresh the trust bundle so a root rotation that happened while we were away is picked up
-	if len(out.CABundlePEM) > 0 {
-		pool, poolErr := ca.PoolFromPEM(out.CABundlePEM)
-		if poolErr != nil {
-			return protocol.RegisterHostResponse{}, fmt.Errorf("failed to parse trust bundle: %w", poolErr)
+	// A successful reattach keeps the current certificate and only refreshes the trust bundle
+	if out.Reattached {
+		if len(out.CABundlePEM) == 0 {
+			return out, nil
+		}
+		pool, err := ca.PoolFromPEM(out.CABundlePEM)
+		if err != nil {
+			return protocol.RegisterHostResponse{}, fmt.Errorf("failed to parse trust bundle: %w", err)
 		}
 		rc.cfg.holder.SetRoots(pool)
+		return out, nil
+	}
+
+	// Install the replacement certificate for the new host ID before publishing the reconnected session
+	err = rc.installIdentity(priv, out.WorkloadCertDER, out.CABundlePEM)
+	if err != nil {
+		return protocol.RegisterHostResponse{}, err
 	}
 	return out, nil
 }

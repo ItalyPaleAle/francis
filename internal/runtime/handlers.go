@@ -237,7 +237,7 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "registration is missing the host address"))
 	}
 
-	// Authenticate the host and decide whether a fresh workload certificate must be issued
+	// Authenticate the host and require a fresh workload certificate for every bootstrap
 	// A PSK challenge already authenticated the session, while JWT and mTLS reconnect are authenticated here
 	var (
 		joinToken          string
@@ -262,8 +262,6 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 				return req.ErrorReply(protocol.NewError(protocol.ErrCodeUnauthorized, "client certificate authentication failed"))
 			}
 			reattachID = hostID
-			// Mint a fresh certificate only when the host sent a new public key, otherwise it keeps the one it has
-			issueCert = len(payload.WorkloadPubKey) > 0
 		default:
 			return req.ErrorReply(protocol.NewError(protocol.ErrCodeUnauthorized, "unsupported bootstrap method"))
 		}
@@ -295,6 +293,11 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 	} else if err != nil {
 		rt.log.ErrorContext(ctx, "Failed to register host", slog.Any("error", err))
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to register host"))
+	}
+
+	// An mTLS reconnect needs a replacement certificate only when the provider assigned a new identity
+	if reattachID != "" && !res.Reattached {
+		issueCert = true
 	}
 
 	// Record the host identity and session on the connection
@@ -329,7 +332,7 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 		CABundlePEM:           rt.caBundlePEM(),
 	}
 
-	// Issue a workload certificate when the host needs one, which is every bootstrap and any reconnect that rotated its key
+	// Issue a workload certificate for every bootstrap and any reconnect that received a new identity
 	if issueCert {
 		if len(payload.WorkloadPubKey) == 0 {
 			return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "registration is missing the workload public key"))

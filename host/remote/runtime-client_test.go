@@ -271,6 +271,107 @@ func TestRuntimeClientCanReconnect(t *testing.T) {
 	})
 }
 
+// TestRuntimeClientReconnectIdentity verifies that an mTLS reconnect keeps its key and replaces its certificate only when the host identity changes
+// A provider may replace an expired host registration instead of reattaching it, so retaining the old certificate would make every later reconnect fail authentication
+func TestRuntimeClientReconnectIdentity(t *testing.T) {
+	cas, err := ca.CABundle([][]byte{testRuntimePSK})
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name       string
+		hostID     string
+		reattached bool
+	}{
+		{name: "reattach keeps certificate", hostID: "old-host", reattached: true},
+		{name: "identity reset replaces certificate", hostID: "new-host", reattached: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldPub, oldPriv, keyErr := ed25519.GenerateKey(rand.Reader)
+			require.NoError(t, keyErr)
+			oldDER, issueErr := cas[0].IssueWorkloadCert(ca.HostURI("old-host"), oldPub, time.Hour)
+			require.NoError(t, issueErr)
+			oldLeaf, parseErr := x509.ParseCertificate(oldDER)
+			require.NoError(t, parseErr)
+
+			oldCert := &tls.Certificate{
+				Certificate: [][]byte{oldDER},
+				PrivateKey:  oldPriv,
+				Leaf:        oldLeaf,
+			}
+			holder := certholder.New(oldCert, ca.NewCertPool(cas))
+			rc := newRuntimeClient(runtimeClientConfig{
+				peerAddress: "127.0.0.1:7002",
+				actorTypes:  []protocol.ActorHostType{{ActorType: "T", IdleTimeoutMs: 60000}},
+				holder:      holder,
+				log:         slog.New(slog.DiscardHandler),
+			})
+			rc.hostID = "old-host"
+
+			var registration protocol.RegisterHostRequest
+			hostStream, runtimeStream := net.Pipe()
+			defer hostStream.Close()
+			defer runtimeStream.Close()
+			serve := func() error {
+				req, serveErr := protocol.ReadMessage(runtimeStream)
+				if serveErr != nil {
+					return serveErr
+				}
+				serveErr = req.DecodePayload(&registration)
+				if serveErr != nil {
+					return serveErr
+				}
+
+				resp := protocol.RegisterHostResponse{
+					HostID:     tc.hostID,
+					Reattached: tc.reattached,
+					CABundlePEM: [][]byte{
+						cas[0].CertPEM(),
+					},
+				}
+				if !tc.reattached {
+					resp.WorkloadCertDER, serveErr = cas[0].IssueWorkloadCert(ca.HostURI(tc.hostID), registration.WorkloadPubKey, time.Hour)
+					if serveErr != nil {
+						return serveErr
+					}
+				}
+				response, serveErr := req.ReplyWith(protocol.KindRegisterHostResponse, resp)
+				if serveErr != nil {
+					return serveErr
+				}
+				return protocol.WriteMessage(runtimeStream, response)
+			}
+			serverErr := make(chan error, 1)
+			go func() {
+				serverErr <- serve()
+			}()
+
+			out, reconnectErr := rc.reconnect(t.Context(), hostStream)
+			require.NoError(t, reconnectErr)
+			require.NoError(t, <-serverErr)
+			assert.Equal(t, tc.hostID, out.HostID)
+			assert.Equal(t, tc.reattached, out.Reattached)
+			assert.Equal(t, "old-host", registration.PreviousHostID)
+			assert.Equal(t, oldPub, ed25519.PublicKey(registration.WorkloadPubKey))
+
+			installed := holder.Certificate()
+			require.NotNil(t, installed)
+			require.NotNil(t, installed.Leaf)
+			installedHostID, hostIDErr := ca.HostIDFromCert(installed.Leaf)
+			require.NoError(t, hostIDErr)
+			assert.Equal(t, tc.hostID, installedHostID)
+			installedPub, ok := installed.Leaf.PublicKey.(ed25519.PublicKey)
+			require.True(t, ok)
+			assert.Equal(t, oldPub, installedPub)
+			assert.Equal(t, oldPriv, installed.PrivateKey)
+			if tc.reattached {
+				assert.Same(t, oldCert, installed)
+			} else {
+				assert.NotSame(t, oldCert, installed)
+			}
+		})
+	}
+}
+
 // TestRuntimeClientFailsFastOnPermanentRegistrationRejection verifies that a permanent registration rejection stops the reconnect loop instead of spinning forever
 func TestRuntimeClientFailsFastOnPermanentRegistrationRejection(t *testing.T) {
 	addr := startRejectingRuntime(t)
