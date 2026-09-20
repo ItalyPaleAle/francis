@@ -184,7 +184,7 @@ Subcommands (including `print-ca`, `healthcheck`, `backup`, and `restore`) resol
 | `bootstrap.method` | How hosts authenticate when joining: `psk` or `jwt`. **Required.** |
 | `bootstrap.hostPSK` | The shared host bootstrap secret, for `method: psk`. |
 | `bootstrap.jwt.issuer` / `audience` / `jwksURL` / `staticJWKS` | JWT validation settings, for `method: jwt`. |
-| `provider.connectionString` | Connection string for the data store; the backend is inferred from its scheme. `postgres://…` or `postgresql://…` for PostgreSQL, `memory` for the non-durable in-memory store, anything else is a SQLite file path or DSN. **Required.** |
+| `provider.connectionString` | Connection string for the data store; the backend is inferred from its scheme. `postgres://…` or `postgresql://…` selects the standard PostgreSQL provider, `memory` selects the non-durable in-memory provider, and anything else selects the standard SQLite provider. Prefix the same values with `standalone:` to use the single-runtime provider with in-memory reads and optional PostgreSQL or SQLite persistence. **Required.** |
 | `provider.queryLog.enabled` | Log every SQL statement at Debug level with its duration when the provider opens the connection. Default `false`. |
 | `provider.queryLog.includeParameters` | Include parameter values as `db.query.parameter.<name-or-position>` attributes in traces and in SQL logs that include query text. This may expose sensitive data. Default `false`. |
 | `provider.queryLog.slowThreshold` | Log a Warn record for every SQL statement that reaches this duration (e.g. `"250ms"`). At Info level the warning omits SQL text and parameters. Warnings are disabled by default or when the value is zero. |
@@ -281,5 +281,8 @@ The runtime stores all state and alarms in its configured provider, selected by 
 - **SQLite** works well when a single runtime owns the database. Set `connectionString` to a file path, e.g. `data.db`.  
   Do **not** place the SQLite file on a networked filesystem like NFS/SMB.
 - **In-memory** is non-durable and intended for testing only. Set `connectionString: memory`.
+- **Standalone with persistence** keeps the working set in memory while persisting every change to PostgreSQL or SQLite. Use `standalone:postgres://…`, `standalone:postgresql://…`, or prefix a SQLite path or DSN with `standalone:`. This provider supports only one runtime replica.
+
+`standalone:memory` and `standalone:memory://` are aliases for `memory`.
 
 To export the data store to a portable file (for backups or to migrate between backends) see [Backup and restore](/docs/backup-and-restore).

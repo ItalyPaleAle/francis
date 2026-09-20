@@ -118,10 +118,12 @@ Both topologies persist state and alarms through a **provider**. The available p
 | SQLite | `WithSQLiteProvider` | a file path, e.g. `data.db` | Best for single-node and development. Must not live on a networked filesystem (NFS/SMB). |
 | PostgreSQL | `WithPostgresProvider` | `postgres://…` | For multi-node clusters that share one database. |
 | In-memory | `WithStandaloneMemoryProvider` | `memory` | Non-durable, for tests and single-node ephemeral setups. State is lost on restart. |
+| Standalone SQLite | `WithStandaloneSQLiteProvider` | `standalone:data.db` | Keeps data in memory and persists changes to SQLite. Supports one runtime replica. |
+| Standalone PostgreSQL | `WithStandalonePostgresProvider` | `standalone:postgres://…` | Keeps data in memory and persists changes to PostgreSQL. Supports one runtime replica. |
 
-The runtime infers the backend from the `provider.connectionString` scheme: `postgres://` (or `postgresql://`) for PostgreSQL, `memory` for in-memory, and anything else as a SQLite file path or DSN.
+The runtime infers the backend from `provider.connectionString`: `postgres://` (or `postgresql://`) for PostgreSQL, `memory` for in-memory, and anything else as a SQLite file path or DSN. The `standalone:` prefix selects the corresponding standalone variant; `standalone:memory` and `standalone:memory://` remain aliases for `memory`.
 
-The local host also offers standalone provider variants (`WithStandaloneSQLiteProvider`, `WithStandalonePostgresProvider`) that wrap an existing database connection you supply.
+The local host standalone provider variants can wrap an existing database connection or open one from a connection string.
 
 > **SQLite vs PostgreSQL for clusters:** a single SQLite file can't be shared safely across machines, so multi-node clusters should use PostgreSQL (or, in the remote topology, let the single runtime own a SQLite file while workers stay stateless).
 

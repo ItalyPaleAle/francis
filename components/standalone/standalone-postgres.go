@@ -9,8 +9,11 @@ import (
 	"log/slog"
 	"path"
 	"slices"
+	"sync/atomic"
 	"time"
 
+	sqlinstrument "github.com/italypaleale/go-sql-utils/instrument"
+	postgresinstrument "github.com/italypaleale/go-sql-utils/instrument/postgres"
 	"github.com/italypaleale/go-sql-utils/migrations"
 	postgresmigrations "github.com/italypaleale/go-sql-utils/migrations/postgres"
 	"github.com/jackc/pgx/v5"
@@ -24,28 +27,32 @@ import (
 //go:embed migrations/postgres/*.sql
 var postgresMigrations embed.FS
 
-// StandalonePostgresBacked is an in-memory provider backed by PostgreSQL for persistence.
-// All data is kept in memory for fast access, but changes are persisted to PostgreSQL
-// so that state survives process restarts.
+// StandalonePostgresBacked keeps working data in memory and persists changes to PostgreSQL
+// Persisted state survives process restarts
 type StandalonePostgresBacked struct {
 	*internal.Provider
 
 	db          *pgxpool.Pool
+	ownsDB      bool
+	closed      atomic.Bool
 	timeout     time.Duration
 	log         *slog.Logger
 	tablePrefix string
 }
 
-// StandalonePostgresOptions contains options for creating a StandalonePostgresBacked provider.
+// StandalonePostgresOptions contains options for creating a StandalonePostgresBacked provider
 type StandalonePostgresOptions struct {
 	components.ProviderOptions
 
-	// DB is the PostgreSQL database connection pool.
-	// Required.
+	// ConnectionString allows the provider to establish and own a PostgreSQL connection pool
+	ConnectionString string
+
+	// DB is an existing caller-owned PostgreSQL connection pool
+	// Either DB or ConnectionString is required
 	DB *pgxpool.Pool
 
-	// Timeout for database queries.
-	// Default is 5 seconds.
+	// Timeout sets the limit for database queries
+	// The default is 5 seconds
 	Timeout time.Duration
 
 	// Clock, used to pass a mock one for testing
@@ -61,6 +68,10 @@ type StandalonePostgresOptions struct {
 	// Defaults to "francis" when empty
 	TablePrefix string
 
+	// QueryLog controls optional SQL statement logging when this constructor opens the connection pool
+	// Callers that pass DB are responsible for configuring its statement tracing and logging
+	QueryLog components.QueryLogConfig
+
 	// OperationLog is applied by the host and runtime provider factory
 	// Direct callers of this low-level constructor can apply it explicitly with instrument.WrapProvider
 	OperationLog components.OperationLogConfig
@@ -68,10 +79,10 @@ type StandalonePostgresOptions struct {
 
 const defaultPostgresTimeout = 5 * time.Second
 
-// NewStandalonePostgresBacked creates a new in-memory ActorProvider backed by PostgreSQL.
+// NewStandalonePostgresBacked creates a new in-memory ActorProvider backed by PostgreSQL
 func NewStandalonePostgresBacked(log *slog.Logger, opts StandalonePostgresOptions, providerConfig components.ProviderConfig) (*StandalonePostgresBacked, error) {
-	if opts.DB == nil {
-		return nil, errors.New("DB is required")
+	if opts.DB == nil && opts.ConnectionString == "" {
+		return nil, errors.New("DB or ConnectionString is required")
 	}
 
 	timeout := opts.Timeout
@@ -86,19 +97,58 @@ func NewStandalonePostgresBacked(log *slog.Logger, opts StandalonePostgresOption
 		tablePrefix: resolveTablePrefix(opts.TablePrefix),
 	}
 
+	// Open an instrumented pool when the caller supplied a connection string
+	if s.db == nil {
+		cfg, err := pgxpool.ParseConfig(opts.ConnectionString)
+		if err != nil {
+			return nil, fmt.Errorf("connection string for Postgres is not valid: %w", err)
+		}
+		cfg.ConnConfig.Tracer = postgresinstrument.NewTracer(&sqlinstrument.Options{
+			Log:               log,
+			QueryLog:          opts.QueryLog.Enabled,
+			IncludeParameters: opts.QueryLog.IncludeParameters,
+			SlowThreshold:     opts.QueryLog.SlowThreshold,
+		}, cfg.ConnConfig.Tracer)
+
+		connCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		s.db, err = pgxpool.NewWithConfig(connCtx, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to Postgres database: %w", err)
+		}
+		s.ownsDB = true
+	}
+
 	// Create the core provider with this as the persistence hook
 	p, err := internal.NewProvider(log, internal.ProviderOptions{
 		ProviderOptions: opts.ProviderOptions,
 		Clock:           opts.Clock,
 		CleanupInterval: opts.CleanupInterval,
-		PersistHook:     s, // StandalonePostgresBacked implements PersistHook
+		PersistHook:     s,
 	}, providerConfig)
 	if err != nil {
+		if s.ownsDB {
+			s.db.Close()
+		}
 		return nil, err
 	}
 	s.Provider = p
 
 	return s, nil
+}
+
+// Close releases the connection pool established by this provider
+func (s *StandalonePostgresBacked) Close() error {
+	if !s.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	if !s.ownsDB || s.db == nil {
+		return nil
+	}
+
+	// Close only an internally-created pool because injected pools remain caller-owned
+	s.db.Close()
+	return nil
 }
 
 func (s *StandalonePostgresBacked) Init(ctx context.Context) error {

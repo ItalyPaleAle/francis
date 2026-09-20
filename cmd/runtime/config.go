@@ -61,6 +61,9 @@ type providerConfig struct {
 	// The backend is inferred from the connection string scheme:
 	// - "postgres://" or "postgresql://" for PostgreSQL
 	// - "memory" (or "memory://") for the non-durable in-memory store
+	// - "standalone:memory" (or "standalone:memory://") for the same non-durable in-memory store
+	// - "standalone:postgres://" or "standalone:postgresql://" for the standalone provider with PostgreSQL persistence
+	// - any other "standalone:" value for the standalone provider with SQLite persistence
 	// - anything else is treated as a SQLite file path or DSN
 	ConnectionString string `yaml:"connectionString"`
 

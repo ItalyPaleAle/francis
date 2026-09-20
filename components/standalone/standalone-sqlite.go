@@ -9,10 +9,14 @@ import (
 	"log/slog"
 	"path"
 	"slices"
+	"sync/atomic"
 	"time"
 
+	sqlinstrument "github.com/italypaleale/go-sql-utils/instrument"
+	sqliteinstrument "github.com/italypaleale/go-sql-utils/instrument/sqlite"
 	"github.com/italypaleale/go-sql-utils/migrations"
 	sqlitemigrations "github.com/italypaleale/go-sql-utils/migrations/sqlite"
+	gosqlsqlite "github.com/italypaleale/go-sql-utils/sqlite"
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/components"
@@ -22,28 +26,32 @@ import (
 //go:embed migrations/sqlite/*.sql
 var sqliteMigrations embed.FS
 
-// StandaloneSQLiteBacked is an in-memory provider backed by SQLite for persistence.
-// All data is kept in memory for fast access, but changes are persisted to SQLite
-// so that state survives process restarts.
+// StandaloneSQLiteBacked keeps working data in memory and persists changes to SQLite
+// Persisted state survives process restarts
 type StandaloneSQLiteBacked struct {
 	*internal.Provider
 
 	db          *sql.DB
+	ownsDB      bool
+	closed      atomic.Bool
 	timeout     time.Duration
 	log         *slog.Logger
 	tablePrefix string
 }
 
-// StandaloneSQLiteOptions contains options for creating a StandaloneSQLiteBacked provider.
+// StandaloneSQLiteOptions contains options for creating a StandaloneSQLiteBacked provider
 type StandaloneSQLiteOptions struct {
 	components.ProviderOptions
 
-	// DB is the SQL database connection.
-	// Required.
+	// ConnectionString allows the provider to establish and own a SQLite database connection
+	ConnectionString string
+
+	// DB is an existing caller-owned SQL database connection
+	// Either DB or ConnectionString is required
 	DB *sql.DB
 
-	// Timeout for database queries.
-	// Default is 5 seconds.
+	// Timeout sets the limit for database queries
+	// The default is 5 seconds
 	Timeout time.Duration
 
 	// Clock, used to pass a mock one for testing
@@ -59,6 +67,10 @@ type StandaloneSQLiteOptions struct {
 	// Defaults to "francis" when empty
 	TablePrefix string
 
+	// QueryLog controls optional SQL statement logging when this constructor opens the database connection
+	// Callers that pass DB are responsible for configuring its statement tracing and logging
+	QueryLog components.QueryLogConfig
+
 	// OperationLog is applied by the host and runtime provider factory
 	// Direct callers of this low-level constructor can apply it explicitly with instrument.WrapProvider
 	OperationLog components.OperationLogConfig
@@ -66,10 +78,10 @@ type StandaloneSQLiteOptions struct {
 
 const defaultSQLiteTimeout = 5 * time.Second
 
-// NewStandaloneSQLiteBacked creates a new in-memory ActorProvider backed by SQLite.
+// NewStandaloneSQLiteBacked creates a new in-memory ActorProvider backed by SQLite
 func NewStandaloneSQLiteBacked(log *slog.Logger, opts StandaloneSQLiteOptions, providerConfig components.ProviderConfig) (*StandaloneSQLiteBacked, error) {
-	if opts.DB == nil {
-		return nil, errors.New("DB is required")
+	if opts.DB == nil && opts.ConnectionString == "" {
+		return nil, errors.New("DB or ConnectionString is required")
 	}
 
 	timeout := opts.Timeout
@@ -84,6 +96,28 @@ func NewStandaloneSQLiteBacked(log *slog.Logger, opts StandaloneSQLiteOptions, p
 		tablePrefix: resolveTablePrefix(opts.TablePrefix),
 	}
 
+	// Open an instrumented connection when the caller supplied a connection string
+	if s.db == nil {
+		connector, err := gosqlsqlite.NewConnector(gosqlsqlite.ConnectOpts{
+			ConnString: opts.ConnectionString,
+			Logger:     log,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("connection string for SQLite is not valid: %w", err)
+		}
+
+		s.db, err = sqliteinstrument.Open(connector, &sqlinstrument.Options{
+			Log:               log,
+			QueryLog:          opts.QueryLog.Enabled,
+			IncludeParameters: opts.QueryLog.IncludeParameters,
+			SlowThreshold:     opts.QueryLog.SlowThreshold,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to open SQLite database: %w", err)
+		}
+		s.ownsDB = true
+	}
+
 	// Create the core provider with this as the persistence hook
 	p, err := internal.NewProvider(log, internal.ProviderOptions{
 		ProviderOptions: opts.ProviderOptions,
@@ -92,6 +126,9 @@ func NewStandaloneSQLiteBacked(log *slog.Logger, opts StandaloneSQLiteOptions, p
 		PersistHook:     s,
 	}, providerConfig)
 	if err != nil {
+		if s.ownsDB {
+			_ = s.db.Close()
+		}
 		return nil, err
 	}
 	s.Provider = p
@@ -99,8 +136,26 @@ func NewStandaloneSQLiteBacked(log *slog.Logger, opts StandaloneSQLiteOptions, p
 	return s, nil
 }
 
+// Close releases the database connection established by this provider
+func (s *StandaloneSQLiteBacked) Close() error {
+	if !s.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	if !s.ownsDB || s.db == nil {
+		return nil
+	}
+
+	// Close only an internally-created connection because injected connections remain caller-owned
+	err := s.db.Close()
+	if err != nil {
+		return fmt.Errorf("failed to close SQLite database: %w", err)
+	}
+
+	return nil
+}
+
 func (s *StandaloneSQLiteBacked) Init(ctx context.Context) error {
-	// Validate that the injected DB has the required pragma settings
+	// Validate the foreign-key setting before migrations and persistence rely on it
 	err := s.validateConnection(ctx)
 	if err != nil {
 		return err

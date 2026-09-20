@@ -12,6 +12,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/components/postgres"
+	"github.com/italypaleale/francis/components/sqlite"
+	"github.com/italypaleale/francis/components/standalone"
 	"github.com/italypaleale/francis/internal/ref"
 )
 
@@ -76,6 +79,97 @@ func TestLoadConfigParsesMonitoringThresholds(t *testing.T) {
 	}
 }
 
+func TestProviderOptionsFromConnectionString(t *testing.T) {
+	queryLog := components.QueryLogConfig{
+		Enabled:           true,
+		IncludeParameters: true,
+		SlowThreshold:     250 * time.Millisecond,
+	}
+	operationLog := components.OperationLogConfig{
+		Enabled:       true,
+		SlowThreshold: time.Second,
+	}
+	tests := []struct {
+		name             string
+		connectionString string
+		want             components.ProviderOptions
+	}{
+		{
+			name:             "memory",
+			connectionString: "memory",
+			want: standalone.StandaloneMemoryOptions{
+				OperationLog: operationLog,
+			},
+		},
+		{
+			name:             "Postgres",
+			connectionString: "postgres://user:pass@host/database",
+			want: postgres.PostgresProviderOptions{
+				ConnectionString: "postgres://user:pass@host/database",
+				QueryLog:         queryLog,
+				OperationLog:     operationLog,
+			},
+		},
+		{
+			name:             "SQLite",
+			connectionString: "file:data.db?_pragma=foreign_keys(1)",
+			want: sqlite.SQLiteProviderOptions{
+				ConnectionString: "file:data.db?_pragma=foreign_keys(1)",
+				QueryLog:         queryLog,
+				OperationLog:     operationLog,
+			},
+		},
+		{
+			name:             "standalone memory literal",
+			connectionString: "standalone:memory",
+			want: standalone.StandaloneMemoryOptions{
+				OperationLog: operationLog,
+			},
+		},
+		{
+			name:             "standalone memory scheme",
+			connectionString: "standalone:memory://",
+			want: standalone.StandaloneMemoryOptions{
+				OperationLog: operationLog,
+			},
+		},
+		{
+			name:             "standalone Postgres",
+			connectionString: "standalone:postgres://user:pass@host/database",
+			want: standalone.StandalonePostgresOptions{
+				ConnectionString: "postgres://user:pass@host/database",
+				QueryLog:         queryLog,
+				OperationLog:     operationLog,
+			},
+		},
+		{
+			name:             "standalone PostgreSQL",
+			connectionString: "standalone:postgresql://user:pass@host/database",
+			want: standalone.StandalonePostgresOptions{
+				ConnectionString: "postgresql://user:pass@host/database",
+				QueryLog:         queryLog,
+				OperationLog:     operationLog,
+			},
+		},
+		{
+			name:             "standalone SQLite",
+			connectionString: "standalone:file:data.db?_pragma=foreign_keys(1)",
+			want: standalone.StandaloneSQLiteOptions{
+				ConnectionString: "file:data.db?_pragma=foreign_keys(1)",
+				QueryLog:         queryLog,
+				OperationLog:     operationLog,
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := providerOptionsFromConnectionString(test.connectionString, queryLog, operationLog)
+			assert.Equal(t, test.want, got)
+		})
+	}
+}
+
 func TestBuildProviderAppliesOperationLoggingToMemoryBackend(t *testing.T) {
 	var output bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -95,6 +189,42 @@ func TestBuildProviderAppliesOperationLoggingToMemoryBackend(t *testing.T) {
 	require.ErrorIs(t, err, components.ErrNoState)
 	assert.Contains(t, output.String(), "Executed provider operation")
 	assert.Contains(t, output.String(), "method=GetState")
+}
+
+func TestBuildProviderPersistsStandaloneSQLiteState(t *testing.T) {
+	connectionString := "standalone:" + filepath.Join(t.TempDir(), "provider.db")
+	first, err := buildProvider(providerConfig{
+		ConnectionString: connectionString,
+	}, testProviderConfig(), slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeErr := first.Close()
+		assert.NoError(t, closeErr)
+	})
+
+	err = first.Init(t.Context())
+	require.NoError(t, err)
+	actorRef := ref.NewActorRef("test", "standalone-sqlite")
+	want := []byte("persisted")
+	err = first.SetState(t.Context(), actorRef, want, components.SetStateOpts{})
+	require.NoError(t, err)
+	err = first.Close()
+	require.NoError(t, err)
+
+	second, err := buildProvider(providerConfig{
+		ConnectionString: connectionString,
+	}, testProviderConfig(), slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		closeErr := second.Close()
+		assert.NoError(t, closeErr)
+	})
+
+	err = second.Init(t.Context())
+	require.NoError(t, err)
+	got, err := second.GetState(t.Context(), actorRef)
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
 }
 
 func TestBuildProviderAppliesQueryParameterLoggingToSQLite(t *testing.T) {

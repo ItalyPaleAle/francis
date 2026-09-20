@@ -209,12 +209,49 @@ func buildProvider(cfg providerConfig, providerCfg components.ProviderConfig, lo
 		SlowThreshold: cfg.OperationLog.GetSlowThreshold(),
 	}
 
+	opts := providerOptionsFromConnectionString(connString, queryLog, operationLog)
+
+	// The factory also wraps the provider so every provider method call is traced
+	return providerfactory.New(log, opts, providerCfg)
+}
+
+// providerOptionsFromConnectionString selects a provider and preserves the configured connection string for that provider
+func providerOptionsFromConnectionString(connString string, queryLog components.QueryLogConfig, operationLog components.OperationLogConfig) components.ProviderOptions {
 	connStringLC := strings.ToLower(connString)
-	var opts components.ProviderOptions
+	const standalonePrefix = "standalone:"
+	if strings.HasPrefix(connStringLC, standalonePrefix) {
+		standaloneConnString := connString[len(standalonePrefix):]
+		standaloneConnStringLC := connStringLC[len(standalonePrefix):]
+
+		switch {
+		// The standalone memory aliases select the same non-durable provider as the unprefixed values
+		case standaloneConnStringLC == "memory", strings.HasPrefix(standaloneConnStringLC, "memory://"):
+			return standalone.StandaloneMemoryOptions{
+				OperationLog: operationLog,
+			}
+
+		// A standalone-prefixed Postgres connection uses the single-runtime in-memory provider with PostgreSQL persistence
+		case strings.HasPrefix(standaloneConnStringLC, "postgres://"), strings.HasPrefix(standaloneConnStringLC, "postgresql://"):
+			return standalone.StandalonePostgresOptions{
+				ConnectionString: standaloneConnString,
+				QueryLog:         queryLog,
+				OperationLog:     operationLog,
+			}
+
+		// Every other standalone-prefixed value uses the single-runtime in-memory provider with SQLite persistence
+		default:
+			return standalone.StandaloneSQLiteOptions{
+				ConnectionString: standaloneConnString,
+				QueryLog:         queryLog,
+				OperationLog:     operationLog,
+			}
+		}
+	}
+
 	switch {
 	// Postgres connection strings begin with "postgres://" or "postgresql://"
 	case strings.HasPrefix(connStringLC, "postgres://"), strings.HasPrefix(connStringLC, "postgresql://"):
-		opts = postgres.PostgresProviderOptions{
+		return postgres.PostgresProviderOptions{
 			ConnectionString: connString,
 			QueryLog:         queryLog,
 			OperationLog:     operationLog,
@@ -222,19 +259,16 @@ func buildProvider(cfg providerConfig, providerCfg components.ProviderConfig, lo
 
 	// The non-durable in-memory store is selected with the literal "memory" or the "memory://" scheme
 	case connStringLC == "memory", strings.HasPrefix(connStringLC, "memory://"):
-		opts = standalone.StandaloneMemoryOptions{
+		return standalone.StandaloneMemoryOptions{
 			OperationLog: operationLog,
 		}
 
 	// Anything else is treated as a SQLite file path or DSN
 	default:
-		opts = sqlite.SQLiteProviderOptions{
+		return sqlite.SQLiteProviderOptions{
 			ConnectionString: connString,
 			QueryLog:         queryLog,
 			OperationLog:     operationLog,
 		}
 	}
-
-	// The factory also wraps the provider so every provider method call is traced
-	return providerfactory.New(log, opts, providerCfg)
 }

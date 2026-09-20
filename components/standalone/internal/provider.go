@@ -137,10 +137,9 @@ func (p *Provider) Run(ctx context.Context) error {
 	return nil
 }
 
-// Close releases the resources owned by the provider.
+// Close releases the resources owned by the in-memory provider core
 func (p *Provider) Close() error {
-	// This is a no-op
-	// The standalone providers keep all data in memory and require any database connection to be passed in through their options, so there is nothing for them to release: the caller owns the connection it supplied
+	// The core keeps all data in memory while persistence wrappers manage their own database resources
 	return nil
 }
 
