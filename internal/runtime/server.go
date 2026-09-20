@@ -376,7 +376,7 @@ const requestReadTimeout = 30 * time.Second
 
 // handleStream reads a single request from a stream, dispatches it, and writes the response
 func (rt *Runtime) handleStream(ctx context.Context, c *hostConn, stream *webtransport.Stream) {
-	defer stream.Close()
+	defer wt.CloseStream(stream)
 
 	req, err := protocol.ReadMessageWithTimeout(stream, requestReadTimeout)
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/italypaleale/francis/internal/tracing"
+	"github.com/italypaleale/francis/internal/wt"
 	"github.com/italypaleale/francis/protocol"
 )
 
@@ -120,7 +121,7 @@ func (c *hostConn) sendRequest(ctx context.Context, env *protocol.Envelope) (res
 	if err != nil {
 		return nil, fmt.Errorf("failed to open stream to host: %w", err)
 	}
-	defer stream.Close()
+	defer wt.CloseStream(stream)
 
 	resp, err = protocol.RoundTrip(ctx, stream, env)
 	return resp, err

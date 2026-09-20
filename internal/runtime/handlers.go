@@ -16,6 +16,7 @@ import (
 	"github.com/italypaleale/francis/internal/channelbind"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/tracing"
+	"github.com/italypaleale/francis/internal/wt"
 	"github.com/italypaleale/francis/protocol"
 )
 
@@ -39,7 +40,7 @@ func (rt *Runtime) handleRegistration(ctx context.Context, c *hostConn) bool {
 	if err != nil {
 		return false
 	}
-	defer stream.Close()
+	defer wt.CloseStream(stream)
 
 	// Compute the channel binding once, used to verify a PSK challenge-response is bound to this exact TLS session
 	cb, err := channelbind.Export(c.session)

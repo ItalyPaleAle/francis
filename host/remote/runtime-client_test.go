@@ -138,6 +138,14 @@ func TestRuntimeClientIntegration(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []byte("hello"), st.Data)
 
+	// Exceed the runtime's initial QUIC stream allowance to prove completed requests return their stream credit
+	streamCtx, streamCancel := context.WithTimeout(ctx, 30*time.Second)
+	for range 520 {
+		st, err = rc.GetState(streamCtx, protocol.GetStateRequest{ActorRef: protocol.ActorRef{ActorType: "T", ActorID: "a1"}})
+		require.NoError(t, err)
+	}
+	streamCancel()
+
 	// A lookup resolves to this host's peer address
 	lk, err := rc.LookupActor(reqCtx, protocol.LookupActorRequest{ActorType: "T", ActorID: "a1"})
 	require.NoError(t, err)

@@ -312,7 +312,7 @@ func (rc *runtimeClient) register(ctx context.Context, session *webtransport.Ses
 	if err != nil {
 		return protocol.RegisterHostResponse{}, fmt.Errorf("failed to open registration stream: %w", err)
 	}
-	defer stream.Close()
+	defer wt.CloseStream(stream)
 
 	if rc.canReconnect() {
 		return rc.reconnect(ctx, stream)
@@ -646,7 +646,7 @@ func (rc *runtimeClient) serveInbound(ctx context.Context, session *webtransport
 		select {
 		case sem <- struct{}{}:
 		default:
-			_ = stream.Close()
+			wt.CloseStream(stream)
 			continue
 		}
 
@@ -667,7 +667,7 @@ const inboundReadTimeout = 30 * time.Second
 
 // handleInbound reads one runtime request from a stream, dispatches it, and writes the response
 func (rc *runtimeClient) handleInbound(ctx context.Context, stream *webtransport.Stream) {
-	defer stream.Close()
+	defer wt.CloseStream(stream)
 
 	// Read the runtime's request off the stream
 	req, err := protocol.ReadMessageWithTimeout(stream, inboundReadTimeout)
@@ -804,7 +804,7 @@ func (rc *runtimeClient) doRequest(ctx context.Context, kind string, payload any
 	if err != nil {
 		return fmt.Errorf("failed to open stream to runtime: %w", err)
 	}
-	defer stream.Close()
+	defer wt.CloseStream(stream)
 
 	// Send the request and wait for the correlated response
 	resp, err := protocol.RoundTrip(ctx, stream, req)
@@ -844,7 +844,7 @@ func (rc *runtimeClient) sendUnregister(session *webtransport.Session, hostID st
 	if err != nil {
 		return
 	}
-	defer stream.Close()
+	defer wt.CloseStream(stream)
 
 	_, _ = protocol.RoundTrip(ctx, stream, req)
 }

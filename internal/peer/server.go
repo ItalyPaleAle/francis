@@ -194,7 +194,7 @@ const (
 // handleStream reads one invocation from a stream, validates it, and dispatches by invocation mode
 // inFlight bounds concurrent invocation handling for the session: a stream that cannot claim a slot is rejected with a retryable overloaded error
 func (s *Server) handleStream(ctx context.Context, stream *webtransport.Stream, inFlight chan struct{}) {
-	defer stream.Close()
+	defer wt.CloseStream(stream)
 
 	// Read the invocation metadata frame
 	// For stream invocation the request body follows it on the same stream
