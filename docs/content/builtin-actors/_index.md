@@ -1,7 +1,7 @@
 ---
 title: "Built-in actors"
 nav_title: "Overview"
-weight: 28
+weight: 29
 description: "Framework-managed actors you register on a host"
 aliases:
   - /docs/builtin-actors/

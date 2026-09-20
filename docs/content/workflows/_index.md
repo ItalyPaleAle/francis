@@ -1,11 +1,15 @@
 ---
 title: "Workflows"
 nav_title: "Overview"
-weight: 29
-description: "Durable multi-step processes, with parallelism, compensation, and child workflows"
+weight: 28
+description: "Durable workflow orchestration"
 ---
 
-A workflow is a durable multi-step process: a declared graph of named steps, plus the Go functions that implement them. It runs as a built-in actor, so it survives restarts and host loss, and its steps are spread across the cluster. Steps that fail with transient errors can be retried automatically.
+A workflow is a durable multi-step process: a declared graph of named steps, plus the Go functions that implement them. Using workflows allows implementing "distributed transactions", with support for compensations.
+
+In Francis, a workflow runs as a built-in actor, so it survives restarts and host loss, and its steps are spread across the cluster. Steps that fail with transient errors can be retried automatically.
+
+## Workflows at a glance
 
 Define a workflow:
 
@@ -60,7 +64,7 @@ If `create-shipment` fails, Francis runs `refundCharge` and then `releaseInvento
 
 A step's handler is an ordinary function. Francis does not replay your code, so there are no determinism rules: a handler may read the clock, do I/O, use randomness, and start goroutines.
 
-**Handlers must be idempotent**. Delivery is at-least-once, so a handler could run twice.
+> Handlers must be idempotent. Delivery is at-least-once, so a handler could run twice.
 
 ## When to reach for one
 
