@@ -102,9 +102,11 @@ func TestProviderOptionsFromConnectionString(t *testing.T) {
 			},
 		},
 		{
-			name:             "Postgres",
+			name: "Postgres",
+			// #nosec G101 -- not a real credential
 			connectionString: "postgres://user:pass@host/database",
 			want: postgres.PostgresProviderOptions{
+				// #nosec G101 -- not a real credential
 				ConnectionString: "postgres://user:pass@host/database",
 				QueryLog:         queryLog,
 				OperationLog:     operationLog,
@@ -134,18 +136,22 @@ func TestProviderOptionsFromConnectionString(t *testing.T) {
 			},
 		},
 		{
-			name:             "standalone Postgres",
+			name: "standalone Postgres",
+			// #nosec G101 -- not a real credential
 			connectionString: "standalone:postgres://user:pass@host/database",
 			want: standalone.StandalonePostgresOptions{
+				// #nosec G101 -- not a real credential
 				ConnectionString: "postgres://user:pass@host/database",
 				QueryLog:         queryLog,
 				OperationLog:     operationLog,
 			},
 		},
 		{
-			name:             "standalone PostgreSQL",
+			name: "standalone PostgreSQL",
+			// #nosec G101 -- not a real credential
 			connectionString: "standalone:postgresql://user:pass@host/database",
 			want: standalone.StandalonePostgresOptions{
+				// #nosec G101 -- not a real credential
 				ConnectionString: "postgresql://user:pass@host/database",
 				QueryLog:         queryLog,
 				OperationLog:     operationLog,
