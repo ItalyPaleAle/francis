@@ -461,15 +461,25 @@ func (p *PostgresProvider) DeleteLeasedAlarm(ctx context.Context, lease *ref.Ala
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
+	// Note on the query:
+	// A job handler that halts its own actor is the common case for a worker, and deactivating an actor drops the leases of its alarms so another host can pick them up
+	// For the occurrence being finalized right now that release must not undo the finalization, so a lease this execution owns and a lease that was released both count
+	// A lease that merely expired keeps its id, and one another replica took holds its own id, so neither is matched here
+	// An unleased row is only this execution's occurrence while it still carries the due time this execution leased, since a repeating alarm's next occurrence is always scheduled later
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := p.db.Exec(queryCtx, `
 		DELETE FROM `+p.tablePrefix+`alarms
 		WHERE
 			alarm_id = $1
-			AND alarm_lease_id = $2
-			AND alarm_lease_expiration_time IS NOT NULL
-			AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')`,
-		lease.Key(), lease.LeaseID(),
+			AND (
+				(
+					alarm_lease_id = $2
+					AND alarm_lease_expiration_time IS NOT NULL
+					AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')
+				)
+				OR (alarm_lease_id IS NULL AND alarm_due_time = $3)
+			)`,
+		lease.Key(), lease.LeaseID(), lease.DueTime().UTC(),
 	)
 	if err != nil {
 		return fmt.Errorf("error executing query: %w", err)

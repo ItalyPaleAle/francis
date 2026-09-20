@@ -13,17 +13,17 @@ import (
 	"time"
 	"uuid"
 
+	"github.com/italypaleale/go-kit/utils"
 	postgresadapter "github.com/italypaleale/go-sql-utils/adapter/postgres"
 	"github.com/italypaleale/go-sql-utils/cleanup"
+	sqlinstrument "github.com/italypaleale/go-sql-utils/instrument"
+	postgresinstrument "github.com/italypaleale/go-sql-utils/instrument/postgres"
 	"github.com/italypaleale/go-sql-utils/migrations"
 	postgresmigrations "github.com/italypaleale/go-sql-utils/migrations/postgres"
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"k8s.io/utils/clock"
-
-	sqlinstrument "github.com/italypaleale/go-sql-utils/instrument"
-	postgresinstrument "github.com/italypaleale/go-sql-utils/instrument/postgres"
 
 	"github.com/italypaleale/francis/components"
 )
@@ -78,9 +78,7 @@ func NewPostgresProvider(log *slog.Logger, postgresOpts PostgresProviderOptions,
 	}
 
 	// Set default values
-	if p.timeout <= 0 {
-		p.timeout = DefaultTimeout
-	}
+	p.timeout = utils.PositiveOr(p.timeout, DefaultTimeout)
 	if p.cleanupInterval == 0 {
 		// A zero value means the default
 		p.cleanupInterval = DefaultCleanupInterval
@@ -266,6 +264,17 @@ func (p *PostgresProvider) initGC() (err error) {
 				WHERE
 					actor_state_expiration_time IS NOT NULL
 					AND actor_state_expiration_time < (now() AT TIME ZONE 'utc')
+				`
+				return q, func() []any {
+					return nil
+				}
+			},
+			"terminal_jobs": func() (string, func() []any) {
+				q := `
+				DELETE FROM ` + p.tablePrefix + `terminal_jobs
+				WHERE
+					expiration_time IS NOT NULL
+					AND expiration_time < (now() AT TIME ZONE 'utc')
 				`
 				return q, func() []any {
 					return nil

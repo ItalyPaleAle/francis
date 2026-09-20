@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/italypaleale/go-kit/utils"
 	"github.com/quic-go/webtransport-go"
 	"go.opentelemetry.io/otel/trace"
 
@@ -71,15 +72,9 @@ func NewServer(cfg ServerConfig) *Server {
 	if cfg.Log == nil {
 		cfg.Log = slog.New(slog.DiscardHandler)
 	}
-	if cfg.IdleTimeout <= 0 {
-		cfg.IdleTimeout = defaultIdleTimeout
-	}
-	if cfg.MaxInFlightRequests <= 0 {
-		cfg.MaxInFlightRequests = defaultMaxInFlightRequests
-	}
-	if cfg.MaxRequestBodySize <= 0 {
-		cfg.MaxRequestBodySize = defaultMaxRequestBodySize
-	}
+	cfg.IdleTimeout = utils.PositiveOr(cfg.IdleTimeout, defaultIdleTimeout)
+	cfg.MaxInFlightRequests = utils.PositiveOr(cfg.MaxInFlightRequests, defaultMaxInFlightRequests)
+	cfg.MaxRequestBodySize = utils.PositiveOr(cfg.MaxRequestBodySize, defaultMaxRequestBodySize)
 
 	return &Server{
 		cfg: cfg,
@@ -199,7 +194,7 @@ const (
 // handleStream reads one invocation from a stream, validates it, and dispatches by invocation mode
 // inFlight bounds concurrent invocation handling for the session: a stream that cannot claim a slot is rejected with a retryable overloaded error
 func (s *Server) handleStream(ctx context.Context, stream *webtransport.Stream, inFlight chan struct{}) {
-	defer stream.Close()
+	defer wt.CloseStream(stream)
 
 	// Read the invocation metadata frame
 	// For stream invocation the request body follows it on the same stream

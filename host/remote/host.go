@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/italypaleale/go-kit/ttlcache"
+	"github.com/italypaleale/go-kit/utils"
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/actor"
@@ -138,16 +139,10 @@ func newHost(options *newHostOptions) (*Host, error) {
 		if options.BindAddress == "" {
 			options.BindAddress = addrHost
 		}
-		if options.BindPort <= 0 {
-			options.BindPort = addrPort
-		}
+		options.BindPort = utils.PositiveOr(options.BindPort, addrPort)
 	}
-	if options.ShutdownGracePeriod <= 0 {
-		options.ShutdownGracePeriod = defaultShutdownGracePeriod
-	}
-	if options.RequestTimeout <= 0 {
-		options.RequestTimeout = defaultRequestTimeout
-	}
+	options.ShutdownGracePeriod = utils.PositiveOr(options.ShutdownGracePeriod, defaultShutdownGracePeriod)
+	options.RequestTimeout = utils.PositiveOr(options.RequestTimeout, defaultRequestTimeout)
 
 	// Init a real clock if none is passed
 	if options.clock == nil {

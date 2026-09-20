@@ -8,6 +8,7 @@ import (
 	"github.com/robfig/cron/v3"
 
 	timeutils "github.com/italypaleale/francis/internal/time"
+	"github.com/italypaleale/francis/internal/types"
 )
 
 // JobStatus is the lifecycle stage of a dispatched job.
@@ -18,7 +19,9 @@ const (
 	JobStatusPending JobStatus = iota
 	// JobStatusActive indicates the job is currently being executed (it holds a lease)
 	JobStatusActive
-	// JobStatusDeadLettered indicates the job exhausted its retries (or failed permanently) and was recorded in the dead-letter store
+	// JobStatusCompleted indicates the job ran successfully and its record was retained
+	JobStatusCompleted
+	// JobStatusDeadLettered indicates the job exhausted its retries (or failed permanently) and was recorded in the terminal job store
 	JobStatusDeadLettered
 )
 
@@ -29,6 +32,8 @@ func (s JobStatus) String() string {
 		return "pending"
 	case JobStatusActive:
 		return "active"
+	case JobStatusCompleted:
+		return "completed"
 	case JobStatusDeadLettered:
 		return "dead-lettered"
 	default:
@@ -36,8 +41,13 @@ func (s JobStatus) String() string {
 	}
 }
 
-// JobInfo describes a dispatched job, spanning both live (pending/active) and dead-lettered jobs.
-// Attempts and LastError are only populated once the job has been dead-lettered.
+// IsTerminal reports whether the job has ended, whether by completing or by dead-lettering.
+func (s JobStatus) IsTerminal() bool {
+	return s == JobStatusCompleted || s == JobStatusDeadLettered
+}
+
+// JobInfo describes a dispatched job, spanning both live (pending/active) and terminal (completed/dead-lettered) jobs.
+// Attempts is only populated once the job has ended, and LastError only for one that dead-lettered.
 // Live retry counters are kept in-memory on the lease and are not persisted.
 type JobInfo struct {
 	JobID     string
@@ -51,6 +61,9 @@ type JobInfo struct {
 	Attempts  int
 	LastError string
 	CreatedAt time.Time
+	// EndedAt is when the job reached its terminal status
+	// It's zero for a live job
+	EndedAt time.Time
 }
 
 // JobProperties contains the resolved scheduling options for a dispatched job.
@@ -192,5 +205,16 @@ func (p JobProperties) EffectiveDueTime(now time.Time) time.Time {
 		return sched.Next(now)
 	default:
 		return now
+	}
+}
+
+// DeleteJobOption configures a DeleteJob call.
+type DeleteJobOption func(*types.DeleteJobOpts)
+
+// WithLiveJobsOnly restricts the deletion to a job that has not ended yet, so the record a completed or dead-lettered job left behind is kept.
+// It is what a cancellation needs: the scope is applied inside the removal itself, so a job that finalizes concurrently is reported as missing rather than having its record destroyed.
+func WithLiveJobsOnly() DeleteJobOption {
+	return func(o *types.DeleteJobOpts) {
+		o.LiveOnly = true
 	}
 }

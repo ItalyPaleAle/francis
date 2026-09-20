@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/italypaleale/go-kit/utils"
 	sqladapter "github.com/italypaleale/go-sql-utils/adapter/sql"
 	"github.com/italypaleale/go-sql-utils/cleanup"
 	sqlinstrument "github.com/italypaleale/go-sql-utils/instrument"
@@ -94,9 +95,7 @@ func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, provi
 	s.fetchUpcomingAlarmsWithConstraintsQuery = s.q(queryFetchUpcomingAlarmsWithConstraints)
 
 	// Set default values
-	if s.timeout <= 0 {
-		s.timeout = DefaultTimeout
-	}
+	s.timeout = utils.PositiveOr(s.timeout, DefaultTimeout)
 	if s.cleanupInterval == 0 {
 		// A zero value means the default
 		s.cleanupInterval = DefaultCleanupInterval
@@ -192,6 +191,13 @@ func (s *SQLiteProvider) Init(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// workflowLabelExtract renders the json_extract expression for one workflow label field
+// SQLite only uses an expression index when the query repeats the indexed expression exactly as-is, so this is the single place that spells the path, and the migration's indexes spell the same one
+func workflowLabelExtract(field string) string {
+	// The field name always comes from the closed set of components.WorkflowLabel* constants, so there is nothing here to escape
+	return `json_extract(workflow_labels, '$.` + field + `')`
 }
 
 func (s *SQLiteProvider) Run(ctx context.Context) error {
@@ -347,6 +353,20 @@ func (s *SQLiteProvider) initGC() (err error) {
 				WHERE
 					actor_state_expiration_time IS NOT NULL
 					AND actor_state_expiration_time < ?
+				`
+				return q, func() []any {
+					now := s.clock.Now()
+					return []any{
+						now.UnixMilli(),
+					}
+				}
+			},
+			"terminal_jobs": func() (string, func() []any) {
+				q := `
+				DELETE FROM ` + s.tablePrefix + `terminal_jobs
+				WHERE
+					expiration_time IS NOT NULL
+					AND expiration_time < ?
 				`
 				return q, func() []any {
 					now := s.clock.Now()

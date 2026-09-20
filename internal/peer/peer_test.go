@@ -215,6 +215,20 @@ func TestPeerInvocationIntegration(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "hello peer", got)
 
+	// Exceed the server's initial QUIC stream allowance to prove completed invocations return their stream credit
+	for range defaultMaxInFlightRequests + inFlightStreamBuffer + 10 {
+		reqCtx, reqCancel := context.WithTimeout(ctx, 2*time.Second)
+		_, perr = pc.InvokeObject(reqCtx, addr, protocol.InvokeActorRequest{
+			TargetHostID: "host-b",
+			ActorType:    "T",
+			ActorID:      "a1",
+			Method:       "echo",
+			Data:         arg,
+		})
+		reqCancel()
+		require.Nil(t, perr)
+	}
+
 	// An invocation aimed at a stale placement is rejected with a retryable host mismatch
 	reqCtx, reqCancel := context.WithTimeout(ctx, 2*time.Second)
 	_, perr = pc.InvokeObject(reqCtx, addr, protocol.InvokeActorRequest{

@@ -17,6 +17,7 @@ Jobs and [alarms](/docs/alarms) both ride on the same durable scheduling engine,
 | Keyed by | name (set replaces on collision) | server-issued JobID (each dispatch is distinct) |
 | Dispatching N | N alarms with the same name coalesce to one | N dispatches run N times |
 | On permanent failure | the alarm is deleted | the job is dead-lettered |
+| On success | the alarm is deleted | the job is either deleted or retained for auditing, if the actor type asks for it |
 
 Use an **alarm** for a self-scheduled reminder or timer that an actor owns (one per name). Use a **job** to dispatch background work to an actor, especially when you need each dispatch to run and failures to be recorded rather than dropped.
 
@@ -49,16 +50,16 @@ Use the client (from inside an actor) to dispatch to the current actor:
 
 ```go
 payload := map[string]any{"to": "user@example.com"}
-jobID, err := w.client.Dispatch(ctx, "send-email", payload)
+jobID, created, err := w.client.Dispatch(ctx, "send-email", payload)
 ```
 
 From outside an actor, use the service, which targets any actor:
 
 ```go
-jobID, err := service.Dispatch(ctx, "worker", "worker-7", "send-email", payload)
+jobID, created, err := service.Dispatch(ctx, "worker", "worker-7", "send-email", payload)
 ```
 
-`Dispatch` returns a server-issued `jobID` that is globally unique. Each call dispatches a distinct job: dispatching the same method twice runs it twice, unless you supply an idempotency key (see below).
+`Dispatch` returns a server-issued `jobID` that is globally unique. Each call dispatches a distinct job: dispatching the same method twice runs it twice, unless you supply an idempotency key (in which case only the call that created the job gets `created` as true) - see below.
 
 ### Job options
 
@@ -75,10 +76,10 @@ Scheduling is controlled with `actor.JobOption` values:
 
 ```go
 // Run in 5 minutes
-jobID, err := w.client.Dispatch(ctx, "reconcile", payload, actor.WithJobDelay(5*time.Minute))
+jobID, _, err := w.client.Dispatch(ctx, "reconcile", payload, actor.WithJobDelay(5*time.Minute))
 
 // Run every weekday at 9am
-jobID, err := w.client.Dispatch(ctx, "daily-report", nil, actor.WithJobCron("0 9 * * 1-5"))
+jobID, _, err := w.client.Dispatch(ctx, "daily-report", nil, actor.WithJobCron("0 9 * * 1-5"))
 ```
 
 ### Idempotency keys
@@ -86,16 +87,45 @@ jobID, err := w.client.Dispatch(ctx, "daily-report", nil, actor.WithJobCron("0 9
 A job ID is server-issued and always unique. An idempotency key is caller-supplied and scoped to the actor: dispatching twice with the same key produces a single job (the first wins), so a retry of the dispatch itself does not enqueue duplicate work.
 
 ```go
-// Re-dispatching with the same key returns the same job
+// Re-dispatching with the same key returns the same job, and only the first call reports created
 // The work runs once
-jobID, err := w.client.Dispatch(ctx, "charge", payload, actor.WithIdempotencyKey("order-42"))
+jobID, created, err := w.client.Dispatch(ctx, "charge", payload, actor.WithIdempotencyKey("order-42"))
 ```
 
 Without a key, every dispatch is a distinct job: this is the anti-coalescing guarantee that distinguishes jobs from alarms.
 
-## Dead-letter and failure handling
+## When a job ends
 
-When a job exhausts its retries, or returns `actor.ErrJobPermanentFailure`, it is moved to a durable dead-letter store rather than dropped. You can inspect, replay, or delete dead jobs (see below).
+A job that ends (whether it completed or failed terminally) can leave a record behind. Both kinds of record live in the same store and are read back with the same calls.
+
+When a job exhausts its retries, or returns `actor.ErrJobPermanentFailure`, it is dead-lettered. You can inspect, replay, or delete dead jobs (see below).
+
+The two kinds are retained independently, because they are worth keeping for different reasons and for different lengths of time:
+
+```go
+host.RegisterActor("worker", newWorker,
+	// Keep a record of the runs that succeeded for a day
+	local.WithCompletedJobRetention(24*time.Hour),
+	// And the record of one that failed for a quarter
+	local.WithDeadLetteredJobRetention(90*24*time.Hour),
+)
+```
+
+| Option | Default | What the default means |
+|--------|---------|------------------------|
+| `WithCompletedJobRetention` | `0` | A completed job leaves nothing behind by default |
+| `WithDeadLetteredJobRetention` | 30 days | A dead-lettered job is recorded and readable for 30 days |
+
+A dead-lettered job is always recorded — dropping a failure silently is never useful — so its option only decides for how long.  
+A completed job is recorded only when you ask, since only you know whether a successful run's history is worth storing.  
+Either option takes a negative duration to mean "keep the record with no expiry at all".
+
+A completed record carries the job's metadata but not its payload. Only a dead job is ever replayed, so only a dead job keeps the data a replay would need.
+
+> Built-in actors keep their successes by default.  
+> Every built-in gets 24 hours unless it asks for its own window, while a [cron job](../builtin-actors/cron-job) keeps 7 days.  
+> Their dead-lettered records take the same 30-day default as anything else.  
+> This is for built-in actors only: an application actor still defaults to keeping none of its successes.
 
 Optionally, an actor can react to a dead-lettering by implementing `actor.ActorJobFailed`:
 
@@ -113,24 +143,27 @@ For a _repeating_ job, a single terminally-failing occurrence is dead-lettered w
 
 ## Managing jobs
 
-`GetJob`, `ListJobs`, `CancelJob`, and `RetryJob` are available on both the client (self-bound) and the service (for any actor):
+`GetJob`, `ListJobs`, `DeleteJob`, and `RetryJob` are available on both the client (self-bound) and the service (for any actor):
 
 ```go
-// Inspect a job, spanning both live and dead-lettered jobs
+// Inspect a job, spanning live and ended jobs alike
 info, err := service.GetJob(ctx, jobID)
-// info.Status is one of actor.JobStatusPending, JobStatusActive, JobStatusDeadLettered
+// info.Status is one of actor.JobStatusPending, JobStatusActive, JobStatusCompleted, JobStatusDeadLettered
+// info.Status.IsTerminal() reports whether the job has ended
 
-// List all live and dead-lettered jobs for an actor
+// List an actor's jobs: the live ones, plus any retained record
 jobs, err := service.ListJobs(ctx, "worker", "worker-7")
 
-// Cancel a live (pending or active) job
-err = service.CancelJob(ctx, "worker", "worker-7", jobID)
+// Remove a job, whatever state it is in
+// One still scheduled is cancelled before it runs
+// One that has ended has its record removed
+err = service.DeleteJob(ctx, "worker", "worker-7", jobID)
 
 // Re-dispatch a dead-lettered job (runs as soon as possible) and remove the dead record
 newJobID, err := service.RetryJob(ctx, jobID)
 ```
 
-`GetJob` returns `actor.JobInfo`; `Attempts` and `LastError` are populated only once a job has been dead-lettered. Missing jobs are reported as `actor.ErrJobNotFound`.
+`GetJob` returns `actor.JobInfo`. `Attempts` and `EndedAt` are populated only once a job has ended, and `LastError` only for one that dead-lettered. Missing jobs are reported as `actor.ErrJobNotFound`.
 
 ## Delivery semantics
 
@@ -148,7 +181,7 @@ func (w *Worker) Invoke(ctx context.Context, method string, data actor.Envelope)
 	case "enqueue-report":
 		// Dispatch background work to self
 		// It runs immediately on whatever host serves this actor
-		jobID, err := w.client.Dispatch(ctx, "report", map[string]any{"day": "today"})
+		jobID, _, err := w.client.Dispatch(ctx, "report", map[string]any{"day": "today"})
 		if err != nil {
 			return nil, err
 		}

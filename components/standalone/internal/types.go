@@ -3,6 +3,8 @@ package internal
 import (
 	"slices"
 	"time"
+
+	"github.com/italypaleale/francis/components"
 )
 
 type Host struct {
@@ -11,7 +13,7 @@ type Host struct {
 	LastHealthCheck time.Time
 }
 
-// Clone creates a deep copy of the Host.
+// Clone creates a deep copy of the Host
 func (h *Host) Clone() *Host {
 	return &Host{
 		ID:              h.ID,
@@ -27,7 +29,7 @@ type HostActorType struct {
 	ConcurrencyLimit int32
 }
 
-// Clone creates a deep copy of the HostActorType.
+// Clone creates a deep copy of the HostActorType
 func (h *HostActorType) Clone() *HostActorType {
 	return &HostActorType{
 		HostID:           h.HostID,
@@ -57,7 +59,7 @@ type ActiveActor struct {
 	Activation  time.Time
 }
 
-// Clone creates a deep copy of the ActiveActor.
+// Clone creates a deep copy of the ActiveActor
 func (a *ActiveActor) Clone() *ActiveActor {
 	return &ActiveActor{
 		ActorType:   a.ActorType,
@@ -124,9 +126,16 @@ func (a *Alarm) EqualProperties(b AlarmProperties) bool {
 		((a.Data == nil && b.Data == nil) || (a.Data != nil && b.Data != nil && slices.Equal(a.Data, b.Data)))
 }
 
-// HasValidLease returns true if the alarm has a valid lease matching the given lease ID.
+// HasValidLease returns true if the alarm has a valid lease matching the given lease ID
 func (a *Alarm) HasValidLease(leaseID any, now time.Time) bool {
 	return a.LeaseID != nil && *a.LeaseID == leaseID && a.LeaseExpiration != nil && !a.LeaseExpiration.Before(now)
+}
+
+// CanFinalize reports whether an execution holding this lease may finalize the occurrence, by completing, dead-lettering, or deleting it
+// An unleased row is accepted because deactivating an actor drops the leases of its alarms, which is the common case for a worker that halts itself, but only when it is still the occurrence this execution leased
+// The due time is what says so: a recurrence's next occurrence is always scheduled later, so a stale execution can never finalize the one that replaced it
+func (a *Alarm) CanFinalize(leaseID any, dueTime time.Time, now time.Time) bool {
+	return a.HasValidLease(leaseID, now) || (a.LeaseID == nil && a.DueTime.Equal(dueTime))
 }
 
 // Clone creates a deep copy of the Alarm.
@@ -158,41 +167,53 @@ func (a *Alarm) Clone() *Alarm {
 	return clone
 }
 
-// DeadJob is a job that exhausted its retries or failed permanently.
-type DeadJob struct {
+// TerminalJob is a job that ended, either by completing or by exhausting its retries
+// Expiration is nil when the record is kept until something removes it
+type TerminalJob struct {
 	JobID       string
 	ActorType   string
 	ActorID     string
 	Method      string
 	Data        []byte
+	Status      string
 	Attempts    int
 	LastError   string
-	FailedAt    time.Time
+	EndedAt     time.Time
 	OriginalDue time.Time
 	Interval    string
 	Cron        string
+	Expiration  *time.Time
 }
 
-func (d *DeadJob) GetActorKey() ActorKey {
+// HasExpired reports whether the record's retention has elapsed, so it reads as gone even before the collector removes it
+func (d *TerminalJob) HasExpired(now time.Time) bool {
+	return d.Expiration != nil && d.Expiration.Before(now)
+}
+
+func (d *TerminalJob) GetActorKey() ActorKey {
 	return ActorKey{
 		ActorType: d.ActorType,
 		ActorID:   d.ActorID,
 	}
 }
 
-// Clone creates a deep copy of the DeadJob.
-func (d *DeadJob) Clone() *DeadJob {
-	clone := &DeadJob{
+// Clone creates a deep copy of the TerminalJob.
+func (d *TerminalJob) Clone() *TerminalJob {
+	clone := &TerminalJob{
 		JobID:       d.JobID,
 		ActorType:   d.ActorType,
 		ActorID:     d.ActorID,
 		Method:      d.Method,
+		Status:      d.Status,
 		Attempts:    d.Attempts,
 		LastError:   d.LastError,
-		FailedAt:    d.FailedAt,
+		EndedAt:     d.EndedAt,
 		OriginalDue: d.OriginalDue,
 		Interval:    d.Interval,
 		Cron:        d.Cron,
+	}
+	if d.Expiration != nil {
+		clone.Expiration = new(*d.Expiration)
 	}
 	if d.Data != nil {
 		clone.Data = make([]byte, len(d.Data))
@@ -211,6 +232,30 @@ type AlarmProperties struct {
 type StateEntry struct {
 	Data       []byte
 	Expiration *time.Time
+	// WorkflowLabels is the workflow engine's label object for this row, nil for a row that has none
+	WorkflowLabels *components.WorkflowLabels
+}
+
+// MatchesWorkflowLabels returns true when the entry's labels match every field the filter sets
+func (s *StateEntry) MatchesWorkflowLabels(want *components.WorkflowLabels) bool {
+	// A nil filter matches every entry
+	if want == nil || want.IsZero() {
+		return true
+	}
+	if s.WorkflowLabels == nil {
+		return false
+	}
+
+	got := *s.WorkflowLabels
+	switch {
+	case want.Status != "" && want.Status != got.Status:
+		return false
+	case want.Version != 0 && want.Version != got.Version:
+		return false
+	case want.Parent != "" && want.Parent != got.Parent:
+		return false
+	}
+	return true
 }
 
 // IsExpired returns true if the state has an expiration and it's in the past
@@ -227,6 +272,9 @@ func (s *StateEntry) Clone() *StateEntry {
 	}
 	if s.Expiration != nil {
 		clone.Expiration = s.Expiration
+	}
+	if s.WorkflowLabels != nil {
+		clone.WorkflowLabels = new(*s.WorkflowLabels)
 	}
 	return clone
 }

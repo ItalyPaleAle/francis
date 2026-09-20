@@ -16,9 +16,9 @@ import (
 
 // BackupContents is a decoded backup stream, keyed for order-independent comparison
 type BackupContents struct {
-	States   map[string]backup.StateRecord
-	Alarms   map[string]backup.AlarmRecord
-	DeadJobs map[string]backup.DeadJobRecord
+	States       map[string]backup.StateRecord
+	Alarms       map[string]backup.AlarmRecord
+	TerminalJobs map[string]backup.TerminalJobRecord
 }
 
 // DecodeBackup reads a whole backup stream into a BackupContents
@@ -29,9 +29,9 @@ func DecodeBackup(t testing.TB, data []byte) BackupContents {
 	require.NoError(t, err)
 
 	out := BackupContents{
-		States:   map[string]backup.StateRecord{},
-		Alarms:   map[string]backup.AlarmRecord{},
-		DeadJobs: map[string]backup.DeadJobRecord{},
+		States:       map[string]backup.StateRecord{},
+		Alarms:       map[string]backup.AlarmRecord{},
+		TerminalJobs: map[string]backup.TerminalJobRecord{},
 	}
 	for rec, err := range r.All() {
 		require.NoError(t, err)
@@ -41,8 +41,8 @@ func DecodeBackup(t testing.TB, data []byte) BackupContents {
 			out.States[rec.State.ActorType+"/"+rec.State.ActorID] = *rec.State
 		case backup.RecordTypeAlarm:
 			out.Alarms[rec.Alarm.ID] = *rec.Alarm
-		case backup.RecordTypeDeadJob:
-			out.DeadJobs[rec.DeadJob.JobID] = *rec.DeadJob
+		case backup.RecordTypeTerminalJob:
+			out.TerminalJobs[rec.TerminalJob.JobID] = *rec.TerminalJob
 		default:
 			t.Fatalf("unexpected record type %q", rec.Type)
 		}
@@ -61,6 +61,7 @@ func AssertBackupContentsEqual(t testing.TB, want, got BackupContents) {
 		g, ok := got.States[k]
 		require.Truef(t, ok, "missing state %q", k)
 		assert.Truef(t, bytes.Equal(w.Data, g.Data), "state %q data", k)
+		assert.Equalf(t, w.WorkflowLabels, g.WorkflowLabels, "state %q workflow labels", k)
 		assertTimePtrEqual(t, w.Expiration, g.Expiration, "state "+k+" expiration")
 	}
 
@@ -80,20 +81,22 @@ func AssertBackupContentsEqual(t testing.TB, want, got BackupContents) {
 		assertTimePtrEqual(t, w.TTL, g.TTL, "alarm "+k+" ttl")
 	}
 
-	require.Len(t, got.DeadJobs, len(want.DeadJobs), "dead job count mismatch")
-	for k, w := range want.DeadJobs {
-		g, ok := got.DeadJobs[k]
-		require.Truef(t, ok, "missing dead job %q", k)
-		assert.Equalf(t, w.ActorType, g.ActorType, "dead job %q actorType", k)
-		assert.Equalf(t, w.ActorID, g.ActorID, "dead job %q actorID", k)
-		assert.Equalf(t, w.Method, g.Method, "dead job %q method", k)
-		assert.Equalf(t, w.Attempts, g.Attempts, "dead job %q attempts", k)
-		assert.Equalf(t, w.LastError, g.LastError, "dead job %q lastError", k)
-		assert.Equalf(t, w.Interval, g.Interval, "dead job %q interval", k)
-		assert.Equalf(t, w.Cron, g.Cron, "dead job %q cron", k)
-		assert.Truef(t, bytes.Equal(w.Data, g.Data), "dead job %q data", k)
-		assertTimeEqual(t, w.FailedAt, g.FailedAt, "dead job "+k+" failedAt")
-		assertTimeEqual(t, w.OriginalDue, g.OriginalDue, "dead job "+k+" originalDue")
+	require.Len(t, got.TerminalJobs, len(want.TerminalJobs), "terminal job count mismatch")
+	for k, w := range want.TerminalJobs {
+		g, ok := got.TerminalJobs[k]
+		require.Truef(t, ok, "missing terminal job %q", k)
+		assert.Equalf(t, w.ActorType, g.ActorType, "terminal job %q actorType", k)
+		assert.Equalf(t, w.ActorID, g.ActorID, "terminal job %q actorID", k)
+		assert.Equalf(t, w.Method, g.Method, "terminal job %q method", k)
+		assert.Equalf(t, w.Status, g.Status, "terminal job %q status", k)
+		assert.Equalf(t, w.Attempts, g.Attempts, "terminal job %q attempts", k)
+		assert.Equalf(t, w.LastError, g.LastError, "terminal job %q lastError", k)
+		assert.Equalf(t, w.Interval, g.Interval, "terminal job %q interval", k)
+		assert.Equalf(t, w.Cron, g.Cron, "terminal job %q cron", k)
+		assert.Truef(t, bytes.Equal(w.Data, g.Data), "terminal job %q data", k)
+		assertTimeEqual(t, w.EndedAt, g.EndedAt, "terminal job "+k+" endedAt")
+		assertTimeEqual(t, w.OriginalDue, g.OriginalDue, "terminal job "+k+" originalDue")
+		assertTimePtrEqual(t, w.Expiration, g.Expiration, "terminal job "+k+" expiration")
 	}
 }
 
@@ -130,7 +133,10 @@ func SeedBackupSample(t testing.TB, ctx context.Context, p components.ActorProvi
 	require.NoError(t, err)
 
 	// Actor state, without expiration so the values do not depend on the provider clock
-	err = p.SetState(ctx, ref.NewActorRef(actorType, "state-1"), []byte("state-data-1"), components.SetStateOpts{})
+	// One entry carries workflow labels and one carries none, so the round-trip covers both
+	err = p.SetState(ctx, ref.NewActorRef(actorType, "state-1"), []byte("state-data-1"), components.SetStateOpts{
+		WorkflowLabels: &components.WorkflowLabels{Status: "running", Version: 2, Parent: "parent-1"},
+	})
 	require.NoError(t, err)
 	err = p.SetState(ctx, ref.NewActorRef(actorType, "state-2"), []byte("state-data-2"), components.SetStateOpts{})
 	require.NoError(t, err)
@@ -147,7 +153,7 @@ func SeedBackupSample(t testing.TB, ctx context.Context, p components.ActorProvi
 	require.NoError(t, err)
 
 	// A live job, due far in the future so the fetcher leaves it alone
-	_, _, err = p.DispatchJob(ctx, ref.NewAlarmRef(actorType, "job-actor", "live-job"), components.SetAlarmReq{
+	_, _, _, err = p.DispatchJob(ctx, ref.NewAlarmRef(actorType, "job-actor", "live-job"), components.SetAlarmReq{
 		DueTime:   now.Add(time.Hour),
 		Data:      []byte("live-job-data"),
 		Kind:      components.AlarmKindJob,
@@ -156,7 +162,7 @@ func SeedBackupSample(t testing.TB, ctx context.Context, p components.ActorProvi
 	require.NoError(t, err)
 
 	// A dead job: dispatch a job due now, lease it through the fetcher, then dead-letter it
-	deadJobID, _, err := p.DispatchJob(ctx, ref.NewAlarmRef(actorType, "dead-actor", "dead-job"), components.SetAlarmReq{
+	deadJobID, _, _, err := p.DispatchJob(ctx, ref.NewAlarmRef(actorType, "dead-actor", "dead-job"), components.SetAlarmReq{
 		DueTime:   now,
 		Data:      []byte("dead-job-data"),
 		Kind:      components.AlarmKindJob,

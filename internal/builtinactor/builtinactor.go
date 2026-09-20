@@ -6,6 +6,7 @@ package builtinactor
 
 import (
 	"context"
+	"time"
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/actorcore"
@@ -57,20 +58,36 @@ type MultiBuiltInActor interface {
 	Registrations() []BuiltInActorRegistration
 }
 
+// DefaultCompletedJobRetention is how long a built-in actor's jobs keep a record of a successful run
+const DefaultCompletedJobRetention = 24 * time.Hour
+
 // RegistrationsFor returns the actor-type registrations a host must create for a built-in actor
 // It returns every type from a MultiBuiltInActor, or the single type of a plain BuiltInActor, so hosts have one code path for both
 func RegistrationsFor(b BuiltInActor) []BuiltInActorRegistration {
 	multi, ok := b.(MultiBuiltInActor)
 	if ok {
-		return multi.Registrations()
+		regs := multi.Registrations()
+		for i := range regs {
+			if regs[i].RegisterOptions.CompletedJobRetention == 0 {
+				// Enforce the default job retention if unset
+				regs[i].RegisterOptions.CompletedJobRetention = DefaultCompletedJobRetention
+			}
+		}
+		return regs
 	}
 
-	return []BuiltInActorRegistration{{
+	reg := BuiltInActorRegistration{
 		ActorType:       b.ActorType(),
 		Factory:         b.Factory(),
 		RegisterOptions: b.RegisterOptions(),
 		Singleton:       b.Singleton(),
-	}}
+	}
+	if reg.RegisterOptions.CompletedJobRetention == 0 {
+		// Enforce the default job retention if unset
+		reg.RegisterOptions.CompletedJobRetention = DefaultCompletedJobRetention
+	}
+
+	return []BuiltInActorRegistration{reg}
 }
 
 // FullActorType returns the reserved actor type a built-in actor is registered under, by prefixing its bare type
@@ -99,4 +116,13 @@ func InvokeActor(ctx context.Context, svc *actor.Service, bareActorType string, 
 	fullType := FullActorType(bareActorType)
 	client := actor.NewBuiltInActorClient[any](builtinkey.Key{}, fullType, actorID, svc)
 	return client.Invoke(ctx, fullType, actorID, method, payload)
+}
+
+// Peek performs a read-only invocation of a specific instance of a built-in actor through the privileged client, returning the response envelope
+// It is the read-side counterpart of InvokeActor: concurrent peeks of the same actor run at the same time, and only ever queue behind a write turn
+// bareActorType is the actor's bare type, without the reserved prefix
+func Peek(ctx context.Context, svc *actor.Service, bareActorType string, actorID string, method string, payload any) (actor.Envelope, error) {
+	fullType := FullActorType(bareActorType)
+	client := actor.NewBuiltInActorClient[any](builtinkey.Key{}, fullType, actorID, svc)
+	return client.Peek(ctx, fullType, actorID, method, payload)
 }

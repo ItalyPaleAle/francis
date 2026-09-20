@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/alphadose/haxmap"
+	"github.com/italypaleale/go-kit/utils"
 	"github.com/quic-go/webtransport-go"
 	"go.opentelemetry.io/otel/trace"
 
@@ -59,12 +60,8 @@ func NewClient(cfg ClientConfig) *Client {
 	if cfg.Log == nil {
 		cfg.Log = slog.New(slog.DiscardHandler)
 	}
-	if cfg.DialTimeout <= 0 {
-		cfg.DialTimeout = defaultDialTimeout
-	}
-	if cfg.IdleTimeout <= 0 {
-		cfg.IdleTimeout = defaultIdleTimeout
-	}
+	cfg.DialTimeout = utils.PositiveOr(cfg.DialTimeout, defaultDialTimeout)
+	cfg.IdleTimeout = utils.PositiveOr(cfg.IdleTimeout, defaultIdleTimeout)
 
 	return &Client{
 		// The dialer's QUIC idle timeout reclaims a session once it stops carrying traffic, while an active stream keeps it alive
@@ -118,7 +115,7 @@ func (c *Client) InvokeObject(ctx context.Context, address string, req protocol.
 		// The session may have died, in which case the next invocation's session() will detect and replace it
 		return protocol.InvokeActorResponse{}, protocol.NewErrorf(protocol.ErrCodeRetryLater, "failed to open stream to peer %s: %v", address, err)
 	}
-	defer stream.Close()
+	defer wt.CloseStream(stream)
 
 	// Build the invocation envelope carrying the encoded argument and target identity
 	env, err := protocol.NewRequest(protocol.KindInvokeActor, req)
@@ -252,7 +249,7 @@ func (c *Client) InvokeStream(ctx context.Context, address string, req protocol.
 	// Send the invocation metadata frame
 	env, err := protocol.NewRequest(protocol.KindInvokeActor, req)
 	if err != nil {
-		_ = stream.Close()
+		wt.CloseStream(stream)
 		return "", nil, protocol.NewErrorf(protocol.ErrCodeInternal, "failed to encode invocation: %v", err)
 	}
 
@@ -261,7 +258,7 @@ func (c *Client) InvokeStream(ctx context.Context, address string, req protocol.
 
 	err = protocol.WriteMessage(stream, env)
 	if err != nil {
-		_ = stream.Close()
+		wt.CloseStream(stream)
 		return "", nil, protocol.NewErrorf(protocol.ErrCodeRetryLater, "failed to send invocation to peer %s: %v", address, err)
 	}
 
@@ -269,7 +266,7 @@ func (c *Client) InvokeStream(ctx context.Context, address string, req protocol.
 	if body != nil {
 		_, err = io.Copy(stream, body)
 		if err != nil {
-			_ = stream.Close()
+			wt.CloseStream(stream)
 			return "", nil, protocol.NewErrorf(protocol.ErrCodeRetryLater, "failed to stream request body to peer %s: %v", address, err)
 		}
 	}

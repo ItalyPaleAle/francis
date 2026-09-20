@@ -3,6 +3,7 @@ package comptesting
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -37,6 +38,7 @@ func (s Suite) RunTests(t *testing.T) {
 
 	t.Run("actor state", s.TestState)
 	t.Run("list actor states", s.TestListStates)
+	t.Run("workflow labels", s.TestWorkflowLabels)
 
 	t.Run("get alarm", s.TestGetAlarm)
 	t.Run("set alarm", s.TestSetAlarm)
@@ -2143,7 +2145,7 @@ func (s Suite) TestConcurrentDispatchJobs(t *testing.T) {
 		for range workers {
 			wg.Go(func() {
 				<-start
-				jobID, lease, dispatchErr := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+				jobID, _, lease, dispatchErr := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
 					DueTime:        s.p.Now().Add(time.Second),
 					Kind:           components.AlarmKindJob,
 					JobMethod:      "process",
@@ -2199,7 +2201,7 @@ func (s Suite) TestConcurrentDispatchJobs(t *testing.T) {
 		for range workers {
 			wg.Go(func() {
 				<-start
-				jobID, lease, dispatchErr := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+				jobID, _, lease, dispatchErr := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
 					DueTime:   s.p.Now().Add(time.Hour),
 					Kind:      components.AlarmKindJob,
 					JobMethod: "process",
@@ -2808,6 +2810,142 @@ func (s Suite) TestListStates(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, res.States, components.DefaultListStatesLimit+1)
 		assert.False(t, res.HasMore)
+	})
+}
+
+func (s Suite) TestWorkflowLabels(t *testing.T) {
+	// setState stores state and workflow labels for an actor of the given type
+	// A nil labels argument stores none, which is how the write clears whatever the row had
+	setState := func(t *testing.T, ctx context.Context, actorType string, actorID string, labels *components.WorkflowLabels) {
+		t.Helper()
+		err := s.p.SetState(ctx, ref.ActorRef{ActorType: actorType, ActorID: actorID}, []byte("data"), components.SetStateOpts{WorkflowLabels: labels})
+		require.NoError(t, err)
+	}
+
+	// listIDs returns the actor IDs in a page, so tests can assert on the ordering without repeating the mapping
+	listIDs := func(t *testing.T, ctx context.Context, req components.ListStatesReq) []string {
+		t.Helper()
+		res, err := s.p.ListStates(ctx, req)
+		require.NoError(t, err)
+
+		ids := make([]string, len(res.States))
+		for i, state := range res.States {
+			ids[i] = state.ActorID
+		}
+		return ids
+	}
+
+	// Seed with empty database
+	require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+
+	t.Run("filters a listing on one field", func(t *testing.T) {
+		ctx := t.Context()
+
+		setState(t, ctx, "LabelFilter", "actor-01", &components.WorkflowLabels{Status: "running", Version: 1})
+		setState(t, ctx, "LabelFilter", "actor-02", &components.WorkflowLabels{Status: "done", Version: 1})
+		setState(t, ctx, "LabelFilter", "actor-03", &components.WorkflowLabels{Status: "running", Version: 1})
+
+		ids := listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelFilter", WorkflowLabels: &components.WorkflowLabels{Status: "running"}})
+		assert.Equal(t, []string{"actor-01", "actor-03"}, ids)
+	})
+
+	t.Run("requires every field the filter sets to match", func(t *testing.T) {
+		ctx := t.Context()
+
+		setState(t, ctx, "LabelMulti", "actor-01", &components.WorkflowLabels{Status: "running", Version: 1})
+		setState(t, ctx, "LabelMulti", "actor-02", &components.WorkflowLabels{Status: "running", Version: 2})
+		setState(t, ctx, "LabelMulti", "actor-03", &components.WorkflowLabels{Status: "done", Version: 2})
+
+		ids := listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelMulti", WorkflowLabels: &components.WorkflowLabels{Status: "running", Version: 2}})
+		assert.Equal(t, []string{"actor-02"}, ids)
+
+		// A field the row does not carry at all excludes it, just like a mismatched value
+		ids = listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelMulti", WorkflowLabels: &components.WorkflowLabels{Parent: "nobody"}})
+		assert.Empty(t, ids)
+	})
+
+	t.Run("filters on the parent of a child instance", func(t *testing.T) {
+		ctx := t.Context()
+
+		setState(t, ctx, "LabelParent", "child-01", &components.WorkflowLabels{Status: "running", Version: 1, Parent: "p1"})
+		setState(t, ctx, "LabelParent", "child-02", &components.WorkflowLabels{Status: "running", Version: 1, Parent: "p2"})
+		setState(t, ctx, "LabelParent", "top-01", &components.WorkflowLabels{Status: "running", Version: 1})
+
+		ids := listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelParent", WorkflowLabels: &components.WorkflowLabels{Parent: "p1"}})
+		assert.Equal(t, []string{"child-01"}, ids)
+	})
+
+	t.Run("an unfiltered listing returns every actor regardless of labels", func(t *testing.T) {
+		ctx := t.Context()
+
+		setState(t, ctx, "LabelUnfiltered", "actor-01", &components.WorkflowLabels{Status: "running", Version: 1})
+		setState(t, ctx, "LabelUnfiltered", "actor-02", nil)
+
+		ids := listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelUnfiltered"})
+		assert.Equal(t, []string{"actor-01", "actor-02"}, ids)
+
+		// A filter with no field set is the same as no filter at all, rather than matching nothing
+		ids = listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelUnfiltered", WorkflowLabels: &components.WorkflowLabels{}})
+		assert.Equal(t, []string{"actor-01", "actor-02"}, ids)
+	})
+
+	t.Run("a later write replaces the previous labels", func(t *testing.T) {
+		ctx := t.Context()
+
+		setState(t, ctx, "LabelReplace", "actor-01", &components.WorkflowLabels{Status: "running", Version: 1})
+		setState(t, ctx, "LabelReplace", "actor-01", &components.WorkflowLabels{Status: "done", Version: 1})
+
+		assert.Empty(t, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelReplace", WorkflowLabels: &components.WorkflowLabels{Status: "running"}}))
+		assert.Equal(t, []string{"actor-01"}, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelReplace", WorkflowLabels: &components.WorkflowLabels{Status: "done"}}))
+
+		// Writing with no labels at all clears what the row had
+		setState(t, ctx, "LabelReplace", "actor-01", nil)
+		assert.Empty(t, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelReplace", WorkflowLabels: &components.WorkflowLabels{Status: "done"}}))
+		assert.Equal(t, []string{"actor-01"}, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelReplace"}))
+	})
+
+	t.Run("labels do not outlive the state they describe", func(t *testing.T) {
+		ctx := t.Context()
+
+		setState(t, ctx, "LabelDeleted", "actor-01", &components.WorkflowLabels{Status: "running", Version: 1})
+		require.NoError(t, s.p.DeleteState(ctx, ref.ActorRef{ActorType: "LabelDeleted", ActorID: "actor-01"}))
+
+		// The state is gone, so a filtered listing must not resurrect it
+		assert.Empty(t, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelDeleted", WorkflowLabels: &components.WorkflowLabels{Status: "running"}}))
+
+		// And writing the actor again with no labels must not inherit the old ones
+		setState(t, ctx, "LabelDeleted", "actor-01", nil)
+		assert.Empty(t, listIDs(t, ctx, components.ListStatesReq{ActorType: "LabelDeleted", WorkflowLabels: &components.WorkflowLabels{Status: "running"}}))
+	})
+
+	t.Run("a filtered listing pages in actor-ID order", func(t *testing.T) {
+		ctx := t.Context()
+
+		for i := 1; i <= 6; i++ {
+			labels := &components.WorkflowLabels{Status: "done", Version: 1}
+			if i%2 == 1 {
+				labels = &components.WorkflowLabels{Status: "running", Version: 1}
+			}
+			setState(t, ctx, "LabelPaged", fmt.Sprintf("actor-%02d", i), labels)
+		}
+
+		var (
+			seen   []string
+			cursor string
+		)
+		for {
+			res, err := s.p.ListStates(ctx, components.ListStatesReq{ActorType: "LabelPaged", WorkflowLabels: &components.WorkflowLabels{Status: "running"}, After: cursor, Limit: 2})
+			require.NoError(t, err)
+			for _, state := range res.States {
+				seen = append(seen, state.ActorID)
+			}
+
+			if !res.HasMore || len(res.States) == 0 {
+				break
+			}
+			cursor = res.States[len(res.States)-1].ActorID
+		}
+		assert.Equal(t, []string{"actor-01", "actor-03", "actor-05"}, seen)
 	})
 }
 
@@ -5119,41 +5257,72 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 		require.ErrorIs(t, err, components.ErrNoAlarm)
 	})
 
-	t.Run("returns ErrNoAlarm for alarm with no lease", func(t *testing.T) {
+	// An alarm with no lease is one whose actor deactivated, which is what an actor halting itself from its own handler does
+	// Finalizing the occurrence that execution just ran has to survive that, or it is left behind to be leased and delivered again
+	// It is safe to accept because the lease still names the occurrence it executed: the alarm ID, since replacing an alarm by name mints a new one, and the due time, since a recurrence's next occurrence is always scheduled later
+	t.Run("deletes an alarm whose lease its own actor released", func(t *testing.T) {
 		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
 
-		// Create a custom test spec with an unleased alarm
-		customSpec := Spec{
-			Hosts: []HostSpec{
-				{HostID: SpecHostH1, Address: "127.0.0.1:4001", LastHealthAgo: 2 * time.Second},
-			},
-			HostActorTypes: []HostActorTypeSpec{
-				{HostID: SpecHostH1, ActorType: "TestType", ActorIdleTimeout: 5 * time.Minute, ActorConcurrencyLimit: 0},
-			},
-			Alarms: []AlarmSpec{
-				{
-					AlarmID:   "944f30d6-bbc4-474c-9d6a-734a6bb92577",
-					ActorType: "TestType",
-					ActorID:   "test-actor",
-					Name:      "test-alarm",
-					DueIn:     time.Second,
-					Data:      []byte("test-data"),
-				},
-			},
-		}
+		leases, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{SpecHostH1},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, leases)
+		lease := leases[0]
 
-		// Seed with custom data
-		require.NoError(t, s.p.Seed(ctx, customSpec))
+		// The actor halting itself from its own handler is what releases the lease
+		err = s.p.ReleaseAlarmLease(ctx, lease)
+		require.NoError(t, err)
 
-		// Try to delete an alarm that was never leased
-		fakeLease := ref.NewAlarmLease(ref.NewAlarmRef("at", "aid", "name"), "944f30d6-bbc4-474c-9d6a-734a6bb92577", s.p.Now(), "e362bf50-a974-4927-b3c6-06ec45ed4c32")
-		err := s.p.DeleteLeasedAlarm(ctx, fakeLease)
+		err = s.p.DeleteLeasedAlarm(ctx, lease)
+		require.NoError(t, err)
+
+		_, err = s.p.GetAlarm(ctx, lease.AlarmRef())
+		require.ErrorIs(t, err, components.ErrNoAlarm, "the finalized occurrence must be gone")
+	})
+
+	// A released lease no longer pins the occurrence, so another host can take it, run it, and reschedule the recurrence under the same alarm ID
+	// The stale execution must not finalize what replaced it, which the due time is what says: the occurrence it ran is not the one now scheduled
+	t.Run("returns ErrNoAlarm for a released lease on an occurrence that has moved on", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		leases, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{SpecHostH1},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, leases)
+		lease := leases[0]
+
+		// Another execution moves the occurrence on and leaves the row unleased, which is what rescheduling a recurrence does
+		err = s.p.UpdateLeasedAlarm(ctx, lease, components.UpdateLeasedAlarmReq{DueTime: s.p.Now().Add(time.Hour)})
+		require.NoError(t, err)
+
+		err = s.p.DeleteLeasedAlarm(ctx, lease)
 		require.ErrorIs(t, err, components.ErrNoAlarm)
 
-		// Verify the unleased alarm still exists via GetAlarm
-		alarmRef := ref.AlarmRef{ActorType: "TestType", ActorID: "test-actor", Name: "test-alarm"}
-		_, err = s.p.GetAlarm(ctx, alarmRef)
-		require.NoError(t, err, "unleased alarm should still exist")
+		_, err = s.p.GetAlarm(ctx, lease.AlarmRef())
+		require.NoError(t, err, "the occurrence that replaced it must survive")
+	})
+
+	// A lease that merely expired keeps its id, so it names an occurrence this execution no longer owns and must not remove
+	t.Run("returns ErrNoAlarm for an expired lease", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, GetSpec()))
+
+		leases, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{SpecHostH1},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, leases)
+		lease := leases[0]
+
+		// Past the lease duration the alarm is another host's to take, and this execution may no longer finalize it
+		_ = s.p.AdvanceClock(2 * time.Minute) //nolint:errcheck
+
+		err = s.p.DeleteLeasedAlarm(ctx, lease)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
 	})
 
 	t.Run("returns ErrNoAlarm for wrong lease ID", func(t *testing.T) {
@@ -5290,8 +5459,9 @@ func (s Suite) TestJobs(t *testing.T) {
 	// dispatch creates a job and returns its ID
 	dispatch := func(t *testing.T, ctx context.Context, actorID string, name string, method string, props ref.AlarmProperties, data []byte) string {
 		t.Helper()
+
 		props.Data = data
-		jobID, _, err := s.p.DispatchJob(ctx, ref.NewAlarmRef("JOB", actorID, name), components.SetAlarmReq{
+		jobID, _, _, err := s.p.DispatchJob(ctx, ref.NewAlarmRef("JOB", actorID, name), components.SetAlarmReq{
 			AlarmProperties: props,
 			Kind:            components.AlarmKindJob,
 			JobMethod:       method,
@@ -5304,13 +5474,18 @@ func (s Suite) TestJobs(t *testing.T) {
 	// leaseFor dispatches the actor's alarms via the fetcher and returns the lease whose ID matches jobID
 	leaseFor := func(t *testing.T, ctx context.Context, jobID string) *ref.AlarmLease {
 		t.Helper()
-		leases, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{Hosts: []string{jobHost}})
+
+		leases, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{jobHost},
+		})
 		require.NoError(t, err)
+
 		for _, l := range leases {
 			if l.Key() == jobID {
 				return l
 			}
 		}
+
 		t.Fatalf("did not lease the dispatched job %q", jobID)
 		return nil
 	}
@@ -5339,7 +5514,7 @@ func (s Suite) TestJobs(t *testing.T) {
 		jobRef := ref.NewAlarmRef("JOB", "preleased", "key")
 		dueTime := s.p.Now().Add(time.Second)
 		ttl := s.p.Now().Add(2 * time.Hour)
-		jobID, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+		jobID, _, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
 			DueTime:        dueTime,
 			Interval:       "PT1H",
 			TTL:            &ttl,
@@ -5364,12 +5539,14 @@ func (s Suite) TestJobs(t *testing.T) {
 		assert.WithinDuration(t, ttl, *stored.TTL, time.Second)
 		assert.Equal(t, []byte("payload"), stored.Data)
 		assert.Equal(t, "process", stored.JobMethod)
-		placement, err := s.p.LookupActor(ctx, jobRef.ActorRef(), components.LookupActorOpts{ActiveOnly: true})
+		placement, err := s.p.LookupActor(ctx, jobRef.ActorRef(), components.LookupActorOpts{
+			ActiveOnly: true,
+		})
 		require.NoError(t, err)
 		assert.Equal(t, jobHost, placement.HostID)
 
 		// Re-dispatching the idempotency key preserves the first job and does not return its live lease twice
-		duplicateID, duplicateLease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+		duplicateID, _, duplicateLease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
 			DueTime:        dueTime.Add(time.Second),
 			Kind:           components.AlarmKindJob,
 			JobMethod:      "different",
@@ -5389,7 +5566,7 @@ func (s Suite) TestJobs(t *testing.T) {
 		// Create the idempotent job without offering a host for immediate scheduling
 		jobRef := ref.NewAlarmRef("JOB", "existing-unleased", "key")
 		dueTime := s.p.Now().Add(time.Second)
-		jobID, initialLease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+		jobID, _, initialLease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
 			DueTime:   dueTime,
 			Kind:      components.AlarmKindJob,
 			JobMethod: "original",
@@ -5399,7 +5576,7 @@ func (s Suite) TestJobs(t *testing.T) {
 		require.Nil(t, initialLease)
 
 		// Re-dispatching can acquire its lease but must retain the first dispatch's properties
-		duplicateID, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+		duplicateID, _, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
 			DueTime:        dueTime.Add(time.Second),
 			Kind:           components.AlarmKindJob,
 			JobMethod:      "replacement",
@@ -5425,7 +5602,7 @@ func (s Suite) TestJobs(t *testing.T) {
 		// Store an upcoming occurrence without offering an immediate host
 		jobRef := ref.NewAlarmRef("JOB", "incoming-future", "key")
 		dueTime := s.p.Now().Add(time.Second)
-		jobID, initialLease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+		jobID, _, initialLease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
 			DueTime:   dueTime,
 			Kind:      components.AlarmKindJob,
 			JobMethod: "original",
@@ -5435,7 +5612,7 @@ func (s Suite) TestJobs(t *testing.T) {
 		require.Nil(t, initialLease)
 
 		// A duplicate request outside fetch-ahead avoids the transactional lease path even though the stored row is earlier
-		duplicateID, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+		duplicateID, _, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
 			DueTime:        s.p.Now().Add(time.Hour),
 			Kind:           components.AlarmKindJob,
 			JobMethod:      "replacement",
@@ -5462,7 +5639,7 @@ func (s Suite) TestJobs(t *testing.T) {
 		// The first dispatch establishes a future schedule that an idempotency conflict cannot replace
 		jobRef := ref.NewAlarmRef("JOB", "existing-future", "key")
 		dueTime := s.p.Now().Add(time.Hour)
-		jobID, initialLease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+		jobID, _, initialLease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
 			DueTime:   dueTime,
 			Kind:      components.AlarmKindJob,
 			JobMethod: "original",
@@ -5471,7 +5648,7 @@ func (s Suite) TestJobs(t *testing.T) {
 		require.Nil(t, initialLease)
 
 		// An immediate duplicate request must not lease or place the retained future occurrence
-		duplicateID, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+		duplicateID, _, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
 			DueTime:        s.p.Now(),
 			Kind:           components.AlarmKindJob,
 			JobMethod:      "replacement",
@@ -5501,7 +5678,7 @@ func (s Suite) TestJobs(t *testing.T) {
 		require.Equal(t, jobHost, placement.HostID)
 
 		// Dispatching reuses the placement while acquiring the job lease
-		jobID, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+		jobID, _, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
 			DueTime:        s.p.Now().Add(time.Second),
 			Kind:           components.AlarmKindJob,
 			JobMethod:      "process",
@@ -5529,7 +5706,7 @@ func (s Suite) TestJobs(t *testing.T) {
 
 		// The offered host cannot execute this actor type, so only the durable job is created
 		jobRef := ref.NewAlarmRef("JOB", "no-host", "key")
-		jobID, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+		jobID, _, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
 			DueTime:        s.p.Now().Add(time.Second),
 			Kind:           components.AlarmKindJob,
 			JobMethod:      "process",
@@ -5566,7 +5743,7 @@ func (s Suite) TestJobs(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, jobHost, placement.HostID)
 
-		jobID, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+		jobID, _, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
 			DueTime:        s.p.Now().Add(time.Second),
 			Kind:           components.AlarmKindJob,
 			JobMethod:      "process",
@@ -5588,7 +5765,7 @@ func (s Suite) TestJobs(t *testing.T) {
 
 		// Acquire the first lease while the original host is healthy
 		jobRef := ref.NewAlarmRef("JOB", "expired-lease", "key")
-		jobID, originalLease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+		jobID, _, originalLease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
 			DueTime:        s.p.Now().Add(time.Second),
 			Kind:           components.AlarmKindJob,
 			JobMethod:      "process",
@@ -5610,7 +5787,7 @@ func (s Suite) TestJobs(t *testing.T) {
 		require.NoError(t, err)
 
 		// The same occurrence gets a fresh lease rather than a new durable identity
-		duplicateID, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+		duplicateID, _, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
 			DueTime:        s.p.Now(),
 			Kind:           components.AlarmKindJob,
 			JobMethod:      "replacement",
@@ -5634,7 +5811,7 @@ func (s Suite) TestJobs(t *testing.T) {
 
 		jobRef := ref.NewAlarmRef("JOB", "future", "key")
 		dueTime := s.p.Now().Add(time.Hour)
-		jobID, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
+		jobID, _, lease, err := s.p.DispatchJob(ctx, jobRef, components.SetAlarmReq{
 			DueTime:        dueTime,
 			Kind:           components.AlarmKindJob,
 			JobMethod:      "process",
@@ -5681,20 +5858,131 @@ func (s Suite) TestJobs(t *testing.T) {
 		assert.ElementsMatch(t, []string{id1, id2}, ids)
 	})
 
-	t.Run("cancel removes a live job", func(t *testing.T) {
+	t.Run("delete removes a live job", func(t *testing.T) {
 		ctx := t.Context()
 		require.NoError(t, s.p.Seed(ctx, jobSeed()))
 
 		jobID := dispatch(t, ctx, "cancel-actor", "c1", "process", ref.AlarmProperties{DueTime: s.p.Now().Add(time.Hour)}, nil)
 
-		err := s.p.CancelJob(ctx, "JOB", "cancel-actor", jobID)
+		err := s.p.DeleteJob(ctx, "JOB", "cancel-actor", jobID, components.DeleteJobReq{})
 		require.NoError(t, err)
 
 		_, err = s.p.GetJob(ctx, jobID)
 		require.ErrorIs(t, err, components.ErrNoJob)
 
-		// Cancelling again reports the job is gone
-		err = s.p.CancelJob(ctx, "JOB", "cancel-actor", jobID)
+		// Deleting again reports the job is gone
+		err = s.p.DeleteJob(ctx, "JOB", "cancel-actor", jobID, components.DeleteJobReq{})
+		require.ErrorIs(t, err, components.ErrNoJob)
+	})
+
+	t.Run("delete is scoped to the actor that owns the job", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		jobID := dispatch(t, ctx, "scope-actor", "s1", "process", ref.AlarmProperties{DueTime: s.p.Now().Add(time.Hour)}, nil)
+
+		// Another actor's ID must not reach this job
+		err := s.p.DeleteJob(ctx, "JOB", "other-actor", jobID, components.DeleteJobReq{})
+		require.ErrorIs(t, err, components.ErrNoJob)
+
+		_, err = s.p.GetJob(ctx, jobID)
+		require.NoError(t, err, "the job must survive a deletion scoped to a different actor")
+	})
+
+	t.Run("one delete verb removes a job that has ended", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		// The caller uses the same verb whether the job is still scheduled or has already ended
+		jobID := dispatch(t, ctx, "unified-actor", "u1", "process", ref.AlarmProperties{DueTime: s.p.Now()}, nil)
+		lease := leaseFor(t, ctx, jobID)
+		err := s.p.DeadLetterAlarm(ctx, lease, components.DeadLetterAlarmReq{Reason: "boom", Attempts: 3})
+		require.NoError(t, err)
+
+		err = s.p.DeleteJob(ctx, "JOB", "unified-actor", jobID, components.DeleteJobReq{})
+		require.NoError(t, err)
+
+		_, err = s.p.GetJob(ctx, jobID)
+		require.ErrorIs(t, err, components.ErrNoJob)
+	})
+
+	t.Run("a completed job is retained when the dispatch asked for it", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		jobID := dispatch(t, ctx, "done-actor", "dn1", "process", ref.AlarmProperties{DueTime: s.p.Now()}, []byte("done-payload"))
+		lease := leaseFor(t, ctx, jobID)
+
+		err := s.p.CompleteJob(ctx, lease, components.CompleteJobReq{Attempts: 1, Retention: time.Hour})
+		require.NoError(t, err)
+
+		// The record reports the run as completed rather than failed, and carries no error
+		info, err := s.p.GetJob(ctx, jobID)
+		require.NoError(t, err)
+		assert.Equal(t, components.JobStatusCompleted, info.Status)
+		assert.Equal(t, 1, info.Attempts)
+		assert.Empty(t, info.LastError)
+		assert.False(t, info.EndedAt.IsZero(), "a terminal job records when it ended")
+
+		// A completed record drops the input, which is only ever needed to replay a dead job
+		done, err := s.p.GetTerminalJob(ctx, jobID)
+		require.NoError(t, err)
+		assert.Equal(t, components.JobStatusCompleted, done.Status)
+		assert.Empty(t, done.Data, "a completed record should not carry the job payload")
+		require.NotNil(t, done.Expiration)
+
+		// It appears in the actor's listing alongside any live job
+		jobs, err := s.p.ListJobs(ctx, "JOB", "done-actor")
+		require.NoError(t, err)
+		require.Len(t, jobs, 1)
+		assert.Equal(t, components.JobStatusCompleted, jobs[0].Status)
+
+		// The live alarm row is gone, so the lease no longer resolves
+		_, err = s.p.GetLeasedAlarm(ctx, lease)
+		require.ErrorIs(t, err, components.ErrNoAlarm)
+
+		// A completed job has nothing to retry
+		_, err = s.p.RetryDeadJob(ctx, jobID)
+		require.ErrorIs(t, err, components.ErrNoJob)
+
+		// The same delete verb removes it
+		err = s.p.DeleteJob(ctx, "JOB", "done-actor", jobID, components.DeleteJobReq{})
+		require.NoError(t, err)
+		_, err = s.p.GetJob(ctx, jobID)
+		require.ErrorIs(t, err, components.ErrNoJob)
+	})
+
+	t.Run("a terminal record reads as gone once its retention has elapsed", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		jobID := dispatch(t, ctx, "expire-actor", "e1", "process", ref.AlarmProperties{DueTime: s.p.Now()}, nil)
+		lease := leaseFor(t, ctx, jobID)
+
+		err := s.p.CompleteJob(ctx, lease, components.CompleteJobReq{Attempts: 1, Retention: time.Second})
+		require.NoError(t, err)
+
+		// It is readable while the retention holds
+		_, err = s.p.GetJob(ctx, jobID)
+		require.NoError(t, err)
+
+		// Past the retention it reads as gone, whether or not the collector has run yet
+		_ = s.p.AdvanceClock(2 * time.Second) //nolint:errcheck
+
+		_, err = s.p.GetJob(ctx, jobID)
+		require.ErrorIs(t, err, components.ErrNoJob)
+
+		_, err = s.p.GetTerminalJob(ctx, jobID)
+		require.ErrorIs(t, err, components.ErrNoJob)
+
+		jobs, err := s.p.ListJobs(ctx, "JOB", "expire-actor")
+		require.NoError(t, err)
+		assert.Empty(t, jobs)
+
+		// The collector then removes it for good
+		err = s.p.CleanupExpired(ctx)
+		require.NoError(t, err)
+		_, err = s.p.GetJob(ctx, jobID)
 		require.ErrorIs(t, err, components.ErrNoJob)
 	})
 
@@ -5702,7 +5990,8 @@ func (s Suite) TestJobs(t *testing.T) {
 		ctx := t.Context()
 		require.NoError(t, s.p.Seed(ctx, jobSeed()))
 
-		jobID := dispatch(t, ctx, "dead-actor", "d1", "process", ref.AlarmProperties{DueTime: s.p.Now()}, []byte("dead-payload"))
+		due := s.p.Now()
+		jobID := dispatch(t, ctx, "dead-actor", "d1", "process", ref.AlarmProperties{DueTime: due}, []byte("dead-payload"))
 		lease := leaseFor(t, ctx, jobID)
 
 		err := s.p.DeadLetterAlarm(ctx, lease, components.DeadLetterAlarmReq{Reason: "boom", Attempts: 3})
@@ -5716,17 +6005,27 @@ func (s Suite) TestJobs(t *testing.T) {
 		assert.Equal(t, "boom", info.LastError)
 
 		// The dead job carries its input so it can be replayed
-		dead, err := s.p.GetDeadJob(ctx, jobID)
+		dead, err := s.p.GetTerminalJob(ctx, jobID)
 		require.NoError(t, err)
+		assert.Equal(t, jobID, dead.JobID)
+		assert.Equal(t, "JOB", dead.ActorType)
+		assert.Equal(t, "dead-actor", dead.ActorID)
 		assert.Equal(t, "process", dead.Method)
 		assert.Equal(t, []byte("dead-payload"), dead.Data)
+		assert.Equal(t, components.JobStatusDeadLettered, dead.Status)
+		assert.Equal(t, 3, dead.Attempts)
+		assert.Equal(t, "boom", dead.LastError)
+		assert.False(t, dead.EndedAt.IsZero(), "a terminal record says when the job ended")
+
+		// The occurrence's own due time is kept, which is what tells an operator when the run that failed was meant to happen
+		assert.WithinDuration(t, due, dead.OriginalDue, time.Millisecond)
 
 		// The live alarm row is gone, so the lease no longer resolves
 		_, err = s.p.GetLeasedAlarm(ctx, lease)
 		require.ErrorIs(t, err, components.ErrNoAlarm)
 
 		// Deleting the dead job removes it entirely
-		err = s.p.DeleteDeadJob(ctx, jobID)
+		err = s.p.DeleteJob(ctx, "JOB", "dead-actor", jobID, components.DeleteJobReq{})
 		require.NoError(t, err)
 		_, err = s.p.GetJob(ctx, jobID)
 		require.ErrorIs(t, err, components.ErrNoJob)
@@ -5760,6 +6059,100 @@ func (s Suite) TestJobs(t *testing.T) {
 		require.ErrorIs(t, err, components.ErrNoJob)
 	})
 
+	// A caller needs to tell starting work from finding it already under way, and the insert is the only place that can say so: a status read before it would race the job that is being created
+	t.Run("dispatch reports whether it created the job", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		jobRef := ref.NewAlarmRef("JOB", "created-flag", "key")
+		req := components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{DueTime: s.p.Now().Add(time.Hour)},
+			Kind:            components.AlarmKindJob,
+			JobMethod:       "process",
+		}
+
+		jobID, created, _, err := s.p.DispatchJob(ctx, jobRef, req)
+		require.NoError(t, err)
+		require.NotEmpty(t, jobID)
+		assert.True(t, created, "the first dispatch under an idempotency key creates the job")
+
+		// A second dispatch coalesces onto the job that already holds the key, and gets its ID rather than a new one
+		duplicateID, created, _, err := s.p.DispatchJob(ctx, jobRef, req)
+		require.NoError(t, err)
+		assert.Equal(t, jobID, duplicateID)
+		assert.False(t, created)
+
+		// A job due inside fetch-ahead takes the leasing path, which has to answer the same way
+		immediateRef := ref.NewAlarmRef("JOB", "created-flag", "immediate")
+		immediateReq := components.SetAlarmReq{
+			AlarmProperties: ref.AlarmProperties{DueTime: s.p.Now()},
+			Kind:            components.AlarmKindJob,
+			JobMethod:       "process",
+			LeaseImmediate:  []string{jobHost},
+		}
+
+		immediateID, created, _, err := s.p.DispatchJob(ctx, immediateRef, immediateReq)
+		require.NoError(t, err)
+		require.NotEmpty(t, immediateID)
+		assert.True(t, created)
+
+		duplicateID, created, _, err = s.p.DispatchJob(ctx, immediateRef, immediateReq)
+		require.NoError(t, err)
+		assert.Equal(t, immediateID, duplicateID)
+		assert.False(t, created)
+	})
+
+	// A cancellation only ever removes work that has not run, so the record a finished job left behind has to survive it
+	// The scope belongs inside the deletion rather than in a status check before it, since a job that finalizes in between would otherwise have its record destroyed
+	t.Run("a live-only delete leaves a terminal record alone", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		// A job that has not run yet is what a cancellation is for
+		pending := dispatch(t, ctx, "live-only", "p1", "process", ref.AlarmProperties{DueTime: s.p.Now().Add(time.Hour)}, nil)
+		err := s.p.DeleteJob(ctx, "JOB", "live-only", pending, components.DeleteJobReq{LiveOnly: true})
+		require.NoError(t, err)
+		_, err = s.p.GetJob(ctx, pending)
+		require.ErrorIs(t, err, components.ErrNoJob)
+
+		// A job that has already completed is not the cancellation's to remove
+		done := dispatch(t, ctx, "live-only", "p2", "process", ref.AlarmProperties{DueTime: s.p.Now()}, nil)
+		lease := leaseFor(t, ctx, done)
+		require.NoError(t, s.p.CompleteJob(ctx, lease, components.CompleteJobReq{Attempts: 1, Retention: time.Hour}))
+
+		err = s.p.DeleteJob(ctx, "JOB", "live-only", done, components.DeleteJobReq{LiveOnly: true})
+		require.ErrorIs(t, err, components.ErrNoJob)
+
+		info, err := s.p.GetJob(ctx, done)
+		require.NoError(t, err, "the completed record must survive a cancellation")
+		assert.Equal(t, components.JobStatusCompleted, info.Status)
+
+		// Without the scope the same call removes the record, which is what an operator asking to delete a job means
+		err = s.p.DeleteJob(ctx, "JOB", "live-only", done, components.DeleteJobReq{})
+		require.NoError(t, err)
+		_, err = s.p.GetJob(ctx, done)
+		require.ErrorIs(t, err, components.ErrNoJob)
+	})
+
+	// A record past its retention is already invisible to reads, so replaying it would re-dispatch work a caller can no longer see
+	t.Run("retry treats a dead job past its retention as missing", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		jobID := dispatch(t, ctx, "expired-actor", "ex1", "process", ref.AlarmProperties{DueTime: s.p.Now()}, []byte("payload"))
+		lease := leaseFor(t, ctx, jobID)
+		require.NoError(t, s.p.DeadLetterAlarm(ctx, lease, components.DeadLetterAlarmReq{Reason: "boom", Attempts: 3, Retention: time.Minute}))
+
+		// Cleanup runs on its own interval, so a record can outlive its retention in the table while reads already hide it
+		_ = s.p.AdvanceClock(2 * time.Minute) //nolint:errcheck
+
+		_, err := s.p.GetJob(ctx, jobID)
+		require.ErrorIs(t, err, components.ErrNoJob)
+
+		_, err = s.p.RetryDeadJob(ctx, jobID)
+		require.ErrorIs(t, err, components.ErrNoJob)
+	})
+
 	t.Run("dead-letter a repeating occurrence keeps the recurrence", func(t *testing.T) {
 		ctx := t.Context()
 		require.NoError(t, s.p.Seed(ctx, jobSeed()))
@@ -5771,26 +6164,305 @@ func (s Suite) TestJobs(t *testing.T) {
 		err := s.p.DeadLetterAlarm(ctx, lease, components.DeadLetterAlarmReq{Reason: "boom", Attempts: 1, Reschedule: true, NextDueTime: next})
 		require.NoError(t, err)
 
-		// The failed occurrence is dead-lettered under the original ID
+		// The job ID still resolves to the recurrence, due at its next occurrence: a schedule keeps one identity for its whole life, so a caller that holds the ID can still reconcile or delete it
 		info, err := s.p.GetJob(ctx, jobID)
 		require.NoError(t, err)
-		assert.Equal(t, components.JobStatusDeadLettered, info.Status)
+		assert.NotEqual(t, components.JobStatusDeadLettered, info.Status)
+		assert.WithinDuration(t, next, info.DueTime, time.Millisecond)
 
-		// The recurrence continues as a new live job for the same actor
+		// The failed occurrence is recorded alongside it, under an ID of its own
 		jobs, err := s.p.ListJobs(ctx, "JOB", "repeat-actor")
 		require.NoError(t, err)
-		var live, dead int
+		var (
+			live, dead   int
+			occurrenceID string
+		)
 		for _, j := range jobs {
 			switch j.Status {
 			case components.JobStatusDeadLettered:
 				dead++
+				occurrenceID = j.JobID
+				assert.NotEqual(t, jobID, j.JobID, "the ended occurrence must have an ID of its own")
 			default:
 				live++
-				assert.NotEqual(t, jobID, j.JobID, "the recurrence must have a fresh job ID")
+				assert.Equal(t, jobID, j.JobID, "the recurrence must keep the job ID")
 			}
 		}
 		assert.Equal(t, 1, live, "the recurrence should still have one live job")
 		assert.Equal(t, 1, dead, "the failed occurrence should be dead-lettered")
+
+		// The record keeps the schedule the occurrence belonged to, so a reader can tell a recurrence's occurrence from a one-shot after the fact
+		require.NotEmpty(t, occurrenceID)
+		occurrence, err := s.p.GetTerminalJob(ctx, occurrenceID)
+		require.NoError(t, err)
+		assert.Equal(t, "PT1H", occurrence.Interval)
+		assert.Empty(t, occurrence.Cron, "an interval schedule carries no cron expression")
+	})
+
+	t.Run("a completed repeating occurrence is recorded and the recurrence continues", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		// The cadence is short so the next occurrence can be leased back without moving the clock past the host's health check deadline
+		jobID := dispatch(t, ctx, "done-repeat-actor", "dr1", "process", ref.AlarmProperties{DueTime: s.p.Now(), Interval: "PT1S"}, []byte("payload"))
+		lease := leaseFor(t, ctx, jobID)
+
+		next := s.p.Now().Add(time.Second)
+		err := s.p.CompleteJob(ctx, lease, components.CompleteJobReq{Attempts: 1, Retention: time.Hour, Reschedule: true, NextDueTime: next})
+		require.NoError(t, err)
+
+		// The job ID still resolves to the recurrence, due at its next occurrence
+		info, err := s.p.GetJob(ctx, jobID)
+		require.NoError(t, err)
+		assert.False(t, info.Status.IsTerminal())
+		assert.WithinDuration(t, next, info.DueTime, time.Millisecond)
+
+		// The occurrence that ran is recorded under an ID of its own, so each occurrence leaves its own record without stopping the schedule or changing its identity
+		jobs, err := s.p.ListJobs(ctx, "JOB", "done-repeat-actor")
+		require.NoError(t, err)
+		var live, completed int
+		for _, j := range jobs {
+			if j.Status.IsTerminal() {
+				completed++
+				assert.NotEqual(t, jobID, j.JobID, "the ended occurrence must have an ID of its own")
+				continue
+			}
+			live++
+			assert.Equal(t, jobID, j.JobID, "the recurrence must keep the job ID")
+		}
+		assert.Equal(t, 1, live, "the recurrence should still have one live job")
+		assert.Equal(t, 1, completed, "the occurrence that ran should be recorded")
+
+		// The next occurrence still has the input every occurrence is delivered with
+		// Only the record of the occurrence that ended drops the payload, never the row it was read out of
+		_ = s.p.AdvanceClock(time.Second) //nolint:errcheck
+
+		nextLease := leaseFor(t, ctx, jobID)
+		alarm, err := s.p.GetLeasedAlarm(ctx, nextLease)
+		require.NoError(t, err)
+		assert.Equal(t, "process", alarm.JobMethod)
+		assert.Equal(t, []byte("payload"), alarm.Data)
+		assert.Equal(t, "PT1S", alarm.Interval)
+	})
+
+	// A worker halts itself once it has reported, and deactivating an actor releases the leases of its alarms
+	// The occurrence being finalized must survive that, or it is left behind to be leased and delivered again on the next poll, forever
+	t.Run("a job can be finalized after its own actor released the lease", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			finalize func(t *testing.T, ctx context.Context, lease *ref.AlarmLease)
+		}{
+			{
+				name: "completed",
+				finalize: func(t *testing.T, ctx context.Context, lease *ref.AlarmLease) {
+					err := s.p.CompleteJob(ctx, lease, components.CompleteJobReq{
+						Attempts:  1,
+						Retention: time.Hour,
+					})
+					require.NoError(t, err)
+				},
+			},
+			{
+				name: "dead-lettered",
+				finalize: func(t *testing.T, ctx context.Context, lease *ref.AlarmLease) {
+					err := s.p.DeadLetterAlarm(ctx, lease, components.DeadLetterAlarmReq{
+						Reason:   "boom",
+						Attempts: 3,
+					})
+					require.NoError(t, err)
+				},
+			},
+			{
+				name: "deleted",
+				finalize: func(t *testing.T, ctx context.Context, lease *ref.AlarmLease) {
+					err := s.p.DeleteLeasedAlarm(ctx, lease)
+					require.NoError(t, err)
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx := t.Context()
+				require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+				actorID := "halt-" + tc.name
+				jobID := dispatch(t, ctx, actorID, "h1", "process", ref.AlarmProperties{DueTime: s.p.Now()}, nil)
+				lease := leaseFor(t, ctx, jobID)
+
+				// The actor halting itself from its own handler is what releases the lease
+				err := s.p.RemoveActor(ctx, ref.NewActorRef("JOB", actorID))
+				require.NoError(t, err)
+
+				tc.finalize(t, ctx, lease)
+
+				// Whatever the outcome, the occurrence must no longer be live, or the next poll runs it again
+				info, err := s.p.GetJob(ctx, jobID)
+				if errors.Is(err, components.ErrNoJob) {
+					return
+				}
+
+				require.NoError(t, err)
+				assert.True(t, info.Status.IsTerminal(), "a finalized occurrence must not be live, got %q", info.Status)
+			})
+		}
+	})
+
+	// A repeating job keeps one ID for the life of its schedule, so the alarm ID alone cannot tell one occurrence from the next
+	// An execution whose lease was released must therefore not finalize the occurrence that replaced it: that would record work that never ran and reschedule the recurrence from a stale time
+	t.Run("a released lease cannot finalize a later occurrence of a recurring job", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			finalize func(ctx context.Context, lease *ref.AlarmLease) error
+		}{
+			{
+				name: "CompleteJob",
+				finalize: func(ctx context.Context, lease *ref.AlarmLease) error {
+					return s.p.CompleteJob(ctx, lease, components.CompleteJobReq{
+						Attempts:    1,
+						Retention:   time.Hour,
+						Reschedule:  true,
+						NextDueTime: s.p.Now().Add(2 * time.Hour),
+					})
+				},
+			},
+			{
+				name: "DeadLetterAlarm",
+				finalize: func(ctx context.Context, lease *ref.AlarmLease) error {
+					return s.p.DeadLetterAlarm(ctx, lease, components.DeadLetterAlarmReq{
+						Reason:      "boom",
+						Attempts:    3,
+						Reschedule:  true,
+						NextDueTime: s.p.Now().Add(2 * time.Hour),
+					})
+				},
+			},
+			{
+				name: "DeleteLeasedAlarm",
+				finalize: func(ctx context.Context, lease *ref.AlarmLease) error {
+					return s.p.DeleteLeasedAlarm(ctx, lease)
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ctx := t.Context()
+				require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+				actorID := "stale-" + tc.name
+				jobID := dispatch(t, ctx, actorID, "recurring", "process", ref.AlarmProperties{DueTime: s.p.Now(), Interval: "PT1H"}, []byte("payload"))
+				stale := leaseFor(t, ctx, jobID)
+
+				// Another host takes the occurrence this execution is still running and completes it, which records the occurrence and moves the recurrence on
+				err := s.p.CompleteJob(ctx, stale, components.CompleteJobReq{
+					Attempts:    1,
+					Retention:   time.Hour,
+					Reschedule:  true,
+					NextDueTime: s.p.Now().Add(time.Hour),
+				})
+				require.NoError(t, err)
+
+				// The stale execution's own finalization now names an occurrence that has already been accounted for
+				err = tc.finalize(ctx, stale)
+				require.ErrorIs(t, err, components.ErrNoAlarm)
+
+				// The recurrence is still live and still due where the other host left it
+				info, err := s.p.GetJob(ctx, jobID)
+				require.NoError(t, err)
+				assert.Equal(t, components.JobStatusPending, info.Status, "the occurrence that replaced it must survive")
+				assert.WithinDuration(t, s.p.Now().Add(time.Hour), info.DueTime, time.Second, "the stale execution must not reschedule the recurrence")
+			})
+		}
+	})
+
+	// The lease predicate the three finalizers share accepts a lease the job's own actor released, which is the case above
+	// This pins what it must still reject, because a finalizer that ended an occurrence on a lease it does not hold would end work another host is running
+	t.Run("a finalizer rejects a lease it does not hold", func(t *testing.T) {
+		finalizers := []struct {
+			name     string
+			finalize func(ctx context.Context, lease *ref.AlarmLease) error
+		}{
+			{
+				name: "CompleteJob",
+				finalize: func(ctx context.Context, lease *ref.AlarmLease) error {
+					return s.p.CompleteJob(ctx, lease, components.CompleteJobReq{Attempts: 1, Retention: time.Hour})
+				},
+			},
+			{
+				name: "DeadLetterAlarm",
+				finalize: func(ctx context.Context, lease *ref.AlarmLease) error {
+					return s.p.DeadLetterAlarm(ctx, lease, components.DeadLetterAlarmReq{Reason: "boom", Attempts: 3})
+				},
+			},
+			{
+				name: "DeleteLeasedAlarm",
+				finalize: func(ctx context.Context, lease *ref.AlarmLease) error {
+					return s.p.DeleteLeasedAlarm(ctx, lease)
+				},
+			},
+		}
+
+		cases := []struct {
+			name string
+			// lease returns the lease to attempt the finalization with, given the one the row actually holds
+			lease func(t *testing.T, ctx context.Context, held *ref.AlarmLease) *ref.AlarmLease
+			// stillLive says whether the occurrence should survive the rejected attempt, which it does unless the case removed it
+			stillLive bool
+		}{
+			{
+				name: "a lease ID another host holds",
+				lease: func(t *testing.T, ctx context.Context, held *ref.AlarmLease) *ref.AlarmLease {
+					return ref.NewAlarmLease(held.AlarmRef(), held.Key(), held.DueTime(), "e731a719-0c1c-4c41-9c92-a44e0e8ef681")
+				},
+				stillLive: true,
+			},
+			{
+				name: "a lease that has expired",
+				lease: func(t *testing.T, ctx context.Context, held *ref.AlarmLease) *ref.AlarmLease {
+					// Past the lease duration the occurrence is another host's to take, so this execution may no longer end it
+					_ = s.p.AdvanceClock(2 * time.Minute) //nolint:errcheck
+					return held
+				},
+				stillLive: true,
+			},
+			{
+				name: "an alarm that is already gone",
+				lease: func(t *testing.T, ctx context.Context, held *ref.AlarmLease) *ref.AlarmLease {
+					err := s.p.DeleteLeasedAlarm(ctx, held)
+					require.NoError(t, err)
+					return held
+				},
+				stillLive: false,
+			},
+		}
+
+		for _, f := range finalizers {
+			t.Run(f.name, func(t *testing.T) {
+				for i, tc := range cases {
+					t.Run(tc.name, func(t *testing.T) {
+						ctx := t.Context()
+						require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+						actorID := fmt.Sprintf("reject-%s-%d", f.name, i)
+						jobID := dispatch(t, ctx, actorID, "r1", "process", ref.AlarmProperties{DueTime: s.p.Now()}, []byte("payload"))
+						held := leaseFor(t, ctx, jobID)
+
+						err := f.finalize(ctx, tc.lease(t, ctx, held))
+						require.ErrorIs(t, err, components.ErrNoAlarm)
+
+						info, err := s.p.GetJob(ctx, jobID)
+						if !tc.stillLive {
+							require.ErrorIs(t, err, components.ErrNoJob)
+							return
+						}
+
+						// The rejected attempt must leave the occurrence exactly as it was: still live, and with nothing recorded as having ended
+						require.NoError(t, err)
+						assert.False(t, info.Status.IsTerminal(), "a rejected finalization must leave the occurrence live, got %q", info.Status)
+
+						_, err = s.p.GetTerminalJob(ctx, jobID)
+						require.ErrorIs(t, err, components.ErrNoJob, "a rejected finalization must not record a terminal job")
+					})
+				}
+			})
+		}
 	})
 
 	t.Run("get and delete report missing jobs", func(t *testing.T) {
@@ -5800,10 +6472,10 @@ func (s Suite) TestJobs(t *testing.T) {
 		_, err := s.p.GetJob(ctx, "11111111-1111-7111-8111-111111111111")
 		require.ErrorIs(t, err, components.ErrNoJob)
 
-		_, err = s.p.GetDeadJob(ctx, "11111111-1111-7111-8111-111111111111")
+		_, err = s.p.GetTerminalJob(ctx, "11111111-1111-7111-8111-111111111111")
 		require.ErrorIs(t, err, components.ErrNoJob)
 
-		err = s.p.DeleteDeadJob(ctx, "11111111-1111-7111-8111-111111111111")
+		err = s.p.DeleteJob(ctx, "JOB", "missing-actor", "11111111-1111-7111-8111-111111111111", components.DeleteJobReq{})
 		require.ErrorIs(t, err, components.ErrNoJob)
 	})
 }
@@ -5824,7 +6496,7 @@ func (s Suite) TestBackupRestore(t *testing.T) {
 		setA := DecodeBackup(t, bufA.Bytes())
 		require.NotEmpty(t, setA.States, "expected actor state in the backup")
 		require.GreaterOrEqual(t, len(setA.Alarms), 2, "expected a plain alarm and a live job in the backup")
-		require.NotEmpty(t, setA.DeadJobs, "expected a dead job in the backup")
+		require.NotEmpty(t, setA.TerminalJobs, "expected a terminal job in the backup")
 
 		// Add records that are absent from the snapshot, so a correct restore must remove them
 		AddExtraBackupData(t, ctx, s.p, s.p.Now())

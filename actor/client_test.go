@@ -71,8 +71,8 @@ func (f *fakeHost) DeleteAlarm(context.Context, string, string, string) error {
 	return nil
 }
 
-func (f *fakeHost) Dispatch(context.Context, string, string, string, any, JobProperties) (string, error) {
-	return "", nil
+func (f *fakeHost) Dispatch(context.Context, string, string, string, any, JobProperties) (string, bool, error) {
+	return "", false, nil
 }
 
 func (f *fakeHost) GetJob(context.Context, string) (JobInfo, error) {
@@ -83,12 +83,12 @@ func (f *fakeHost) ListJobs(context.Context, string, string) ([]JobInfo, error) 
 	return nil, nil
 }
 
-func (f *fakeHost) CancelJob(context.Context, string, string, string) error {
-	return nil
-}
-
 func (f *fakeHost) RetryJob(context.Context, string) (string, error) {
 	return "", nil
+}
+
+func (f *fakeHost) DeleteJob(context.Context, string, string, string, ...DeleteJobOption) error {
+	return nil
 }
 
 func (f *fakeHost) SetState(context.Context, string, string, any, *SetStateOpts) error { return nil }
@@ -110,6 +110,57 @@ func (f *fakeHost) GetState(_ context.Context, _ string, _ string, dest any) err
 }
 
 func (f *fakeHost) DeleteState(context.Context, string, string) error { return nil }
+
+type failingDeleteStateHost struct {
+	*fakeHost
+	deleteErr   error
+	deleteCalls int
+}
+
+func (h *failingDeleteStateHost) DeleteState(context.Context, string, string) error {
+	h.deleteCalls++
+	return h.deleteErr
+}
+
+func TestClientDeleteStatePreservesCacheUntilDeletionIsConfirmed(t *testing.T) {
+	host := &failingDeleteStateHost{fakeHost: &fakeHost{getStateValue: 42}, deleteErr: errors.New("provider unavailable")}
+	c := NewActorClient[int]("test", "instance", NewService(host))
+
+	// Load the committed value before a transient deletion failure
+	value, err := c.GetState(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 42, value)
+	err = c.DeleteState(t.Context())
+	require.ErrorIs(t, err, host.deleteErr)
+	value, err = c.GetState(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 42, value)
+	require.EqualValues(t, 1, host.getStateCalls.Load())
+
+	// A successful retry publishes absence without requiring another provider read
+	host.deleteErr = nil
+	err = c.DeleteState(t.Context())
+	require.NoError(t, err)
+	value, err = c.GetState(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, value)
+	require.Equal(t, 2, host.deleteCalls)
+	require.EqualValues(t, 1, host.getStateCalls.Load())
+}
+
+func TestClientDeleteStateClearsCacheWhenProviderConfirmsNotFound(t *testing.T) {
+	host := &failingDeleteStateHost{fakeHost: &fakeHost{getStateValue: 42}, deleteErr: ErrStateNotFound}
+	c := NewActorClient[int]("test", "instance", NewService(host))
+	_, err := c.GetState(t.Context())
+	require.NoError(t, err)
+
+	// A missing provider record is authoritative even when the activation had cached an older value
+	err = c.DeleteState(t.Context())
+	require.ErrorIs(t, err, ErrStateNotFound)
+	value, err := c.GetState(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, value)
+}
 
 func (f *fakeHost) ListStates(_ context.Context, actorType string, opts *ListStatesOpts) (StateList, error) {
 	f.listStatesType = actorType
@@ -152,7 +203,7 @@ func TestClientRejectsBuiltInTarget(t *testing.T) {
 	err = c.DeleteAlarm(ctx, "a")
 	require.ErrorIs(t, err, ErrActorTypeReserved)
 
-	_, dispatchErr := c.Dispatch(ctx, "run", nil)
+	_, _, dispatchErr := c.Dispatch(ctx, "run", nil)
 	require.ErrorIs(t, dispatchErr, ErrActorTypeReserved)
 
 	_, listErr := c.ListJobs(ctx)
@@ -161,7 +212,7 @@ func TestClientRejectsBuiltInTarget(t *testing.T) {
 	_, listStatesErr := c.ListStates(ctx, nil)
 	require.ErrorIs(t, listStatesErr, ErrActorTypeReserved)
 
-	err = c.CancelJob(ctx, "job")
+	err = c.DeleteJob(ctx, "job")
 	require.ErrorIs(t, err, ErrActorTypeReserved)
 
 	// Invoking a built-in target is rejected regardless of which actor the client is bound to
@@ -193,7 +244,7 @@ func TestClientReadOnlyGuards(t *testing.T) {
 	err = c.DeleteAlarm(ctx, "a")
 	require.ErrorIs(t, err, ErrReadOnly)
 
-	_, err = c.Dispatch(ctx, "run", nil)
+	_, _, err = c.Dispatch(ctx, "run", nil)
 	require.ErrorIs(t, err, ErrReadOnly)
 
 	// GetState is always allowed, even under a read-only context

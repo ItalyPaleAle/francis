@@ -123,6 +123,12 @@ func NewDialer(tlsConfig *tls.Config, opts ...Option) *webtransport.Transport {
 	}
 }
 
+// CloseStream closes both directions of a WebTransport stream so the session can release its stream credit
+func CloseStream(stream *webtransport.Stream) {
+	_ = stream.Close()
+	stream.CancelRead(0)
+}
+
 // IsServeError returns true if an error returned by a webtransport.Server serve method is an error to report, usually during initialization
 // It ignores the ErrServerClosed errors
 func IsServeError(err error) bool {

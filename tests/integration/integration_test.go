@@ -26,6 +26,7 @@ import (
 	_ "github.com/italypaleale/francis/tests/integration/suites/builtin/ratelimit"
 	_ "github.com/italypaleale/francis/tests/integration/suites/builtin/signal"
 	_ "github.com/italypaleale/francis/tests/integration/suites/builtin/taskpool"
+	_ "github.com/italypaleale/francis/tests/integration/suites/builtin/workflow"
 	_ "github.com/italypaleale/francis/tests/integration/suites/clientinvoke"
 	_ "github.com/italypaleale/francis/tests/integration/suites/clusteradmin"
 	_ "github.com/italypaleale/francis/tests/integration/suites/crosshost"

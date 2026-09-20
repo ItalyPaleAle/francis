@@ -17,6 +17,7 @@ import (
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/actorcore"
 	components_mocks "github.com/italypaleale/francis/internal/mocks/components"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/testutil"
@@ -637,6 +638,136 @@ func TestDeleteAlarm(t *testing.T) {
 		require.NoError(t, err3)
 
 		// Assert expectations
+		provider.AssertExpectations(t)
+	})
+}
+
+// TestCompleteAlarmRetainsAJobWhoseTypeAsksForIt covers the local topology's own completion path, which is separate from the runtime's and has to record a retained job the same way
+func TestCompleteAlarmRetainsAJobWhoseTypeAsksForIt(t *testing.T) {
+	clock := clocktesting.NewFakeClock(time.Now())
+
+	newHost := func(t *testing.T, completed time.Duration, deadLettered time.Duration) (*Host, *components_mocks.MockActorProvider) {
+		t.Helper()
+
+		provider := components_mocks.NewMockActorProvider(t)
+		core := actorcore.NewManager(actorcore.Options{Clock: clock})
+		core.ActorsConfig["T"] = components.ActorHostType{ActorType: "T", CompletedJobRetention: completed, DeadLetteredJobRetention: deadLettered}
+
+		return &Host{
+			actorProvider:          provider,
+			core:                   core,
+			log:                    slog.New(slog.DiscardHandler),
+			clock:                  clock,
+			providerRequestTimeout: 30 * time.Second,
+			alarmsPollInterval:     time.Second,
+		}, provider
+	}
+
+	aRef := ref.NewAlarmRef("T", "a1", "run")
+	newLease := func() *ref.AlarmLease {
+		lease := ref.NewAlarmLease(aRef, "11111111-1111-7111-8111-111111111111", clock.Now(), "lease-1")
+		lease.SetExecutionTime(clock.Now())
+		return lease
+	}
+
+	t.Run("a completed job is recorded when its type asks for retention", func(t *testing.T) {
+		host, provider := newHost(t, time.Hour, time.Hour)
+		lease := newLease()
+
+		provider.
+			On("GetLeasedAlarm", mock.MatchedBy(testutil.MatchContextInterface), lease).
+			Return(components.GetLeasedAlarmRes{Kind: components.AlarmKindJob, JobMethod: "process"}, nil).
+			Once()
+		provider.
+			On("CompleteJob", mock.MatchedBy(testutil.MatchContextInterface), lease,
+				mock.MatchedBy(func(req components.CompleteJobReq) bool {
+					return req.Retention == time.Hour && !req.Reschedule
+				}),
+			).
+			Return(nil).
+			Once()
+
+		reEnqueue, err := host.completeAlarm(t.Context(), lease, slog.New(slog.DiscardHandler))
+		require.NoError(t, err)
+		assert.False(t, reEnqueue)
+		provider.AssertExpectations(t)
+	})
+
+	t.Run("a completed job is deleted when its type asks for none", func(t *testing.T) {
+		host, provider := newHost(t, 0, 30*24*time.Hour)
+		lease := newLease()
+
+		provider.
+			On("GetLeasedAlarm", mock.MatchedBy(testutil.MatchContextInterface), lease).
+			Return(components.GetLeasedAlarmRes{Kind: components.AlarmKindJob, JobMethod: "process"}, nil).
+			Once()
+		provider.
+			On("DeleteLeasedAlarm", mock.MatchedBy(testutil.MatchContextInterface), lease).
+			Return(nil).
+			Once()
+
+		_, err := host.completeAlarm(t.Context(), lease, slog.New(slog.DiscardHandler))
+		require.NoError(t, err)
+		provider.AssertExpectations(t)
+	})
+
+	t.Run("a dead-lettered window alone does not retain a completed job", func(t *testing.T) {
+		// The two windows are set independently, so a type that only asked to keep its failures must still have its successes deleted
+		host, provider := newHost(t, 0, 90*24*time.Hour)
+		lease := newLease()
+
+		provider.
+			On("GetLeasedAlarm", mock.MatchedBy(testutil.MatchContextInterface), lease).
+			Return(components.GetLeasedAlarmRes{Kind: components.AlarmKindJob, JobMethod: "process"}, nil).
+			Once()
+		provider.
+			On("DeleteLeasedAlarm", mock.MatchedBy(testutil.MatchContextInterface), lease).
+			Return(nil).
+			Once()
+
+		_, err := host.completeAlarm(t.Context(), lease, slog.New(slog.DiscardHandler))
+		require.NoError(t, err)
+		provider.AssertExpectations(t)
+	})
+
+	t.Run("a negative completed window records a job with no expiry", func(t *testing.T) {
+		// A provider expresses "never expires" as a zero retention, which is why the host cannot pass the configured value through unchanged
+		host, provider := newHost(t, -1, 30*24*time.Hour)
+		lease := newLease()
+
+		provider.
+			On("GetLeasedAlarm", mock.MatchedBy(testutil.MatchContextInterface), lease).
+			Return(components.GetLeasedAlarmRes{Kind: components.AlarmKindJob, JobMethod: "process"}, nil).
+			Once()
+		provider.
+			On("CompleteJob", mock.MatchedBy(testutil.MatchContextInterface), lease,
+				mock.MatchedBy(func(req components.CompleteJobReq) bool {
+					return req.Retention == 0
+				}),
+			).
+			Return(nil).
+			Once()
+
+		_, err := host.completeAlarm(t.Context(), lease, slog.New(slog.DiscardHandler))
+		require.NoError(t, err)
+		provider.AssertExpectations(t)
+	})
+
+	t.Run("a plain alarm is deleted even when the type sets a retention", func(t *testing.T) {
+		host, provider := newHost(t, time.Hour, time.Hour)
+		lease := newLease()
+
+		provider.
+			On("GetLeasedAlarm", mock.MatchedBy(testutil.MatchContextInterface), lease).
+			Return(components.GetLeasedAlarmRes{Kind: components.AlarmKindAlarm}, nil).
+			Once()
+		provider.
+			On("DeleteLeasedAlarm", mock.MatchedBy(testutil.MatchContextInterface), lease).
+			Return(nil).
+			Once()
+
+		_, err := host.completeAlarm(t.Context(), lease, slog.New(slog.DiscardHandler))
+		require.NoError(t, err)
 		provider.AssertExpectations(t)
 	})
 }

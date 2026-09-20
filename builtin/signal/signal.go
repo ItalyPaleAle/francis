@@ -20,6 +20,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/italypaleale/go-kit/utils"
+
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/builtinactor"
@@ -80,15 +82,8 @@ func New(name string, opts ...Option) (*Signal, error) {
 	}
 
 	// A signal with no idle timeout would keep one activation per signal ID in memory forever, so the default stands in for both zero and a negative value
-	idleTimeout := o.idleTimeout
-	if idleTimeout <= 0 {
-		idleTimeout = defaultIdleTimeout
-	}
-
-	maxPayloadSize := o.maxPayloadSize
-	if maxPayloadSize <= 0 {
-		maxPayloadSize = defaultMaxPayloadSize
-	}
+	idleTimeout := utils.PositiveOr(o.idleTimeout, defaultIdleTimeout)
+	maxPayloadSize := utils.PositiveOr(o.maxPayloadSize, defaultMaxPayloadSize)
 
 	bareType := signalActorTypePrefix + name
 	return &Signal{
@@ -216,7 +211,7 @@ func (a *signalActor) Invoke(ctx context.Context, method string, data actor.Enve
 
 // load reads the signal's durable record into memory, the first time this activation needs it
 // Placement guarantees a single active instance per signal across the cluster, so once loaded this instance is authoritative for the rest of its life: any completion has to pass through it
-// That is what keeps a signal with thousands of waiters down to a single read
+// A signal with thousands of waiters then costs a single read
 // The caller must hold mu
 func (a *signalActor) load(ctx context.Context) error {
 	if a.loaded {

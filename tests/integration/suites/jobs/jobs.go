@@ -5,11 +5,13 @@
 // - immediate, delayed, interval, and cron jobs
 // - idempotency-key dedup
 // - dead-lettering on exhausted retries and on permanent failure with the JobFailed hook
-// - GetJob/ListJobs/CancelJob/RetryJob
+// - GetJob/ListJobs/DeleteJob/RetryJob
 // - a repeating job whose one failing occurrence dead-letters while the recurrence continues
+// - a completed job retained by an actor type that asked for it
 package jobs
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -39,6 +41,11 @@ const (
 	eventuallyTick    = 100 * time.Millisecond
 	// stabilizeWindow is how long a count must hold steady to count as settled
 	stabilizeWindow = pollInterval * 4
+
+	// retainedProbeActorType is a second probe registration whose jobs keep a record once they end, which is what exercises the retention path end to end
+	retainedProbeActorType = "probe-retained"
+	// jobRetention is long enough that a retained record cannot expire mid-scenario
+	jobRetention = time.Hour
 )
 
 // matrix is the representative set of topology/provider combinations the job scenarios run against
@@ -82,6 +89,16 @@ func (s *jobs) Setup(t *testing.T) []framework.Option {
 				actorcore.WithMaxAttempts(maxAttempts),
 				actorcore.WithInitialRetryDelay(initialRetryDelay),
 			),
+			{
+				Type:    retainedProbeActorType,
+				Factory: shared.NewProbeActor,
+				Opts: []actorcore.RegisterActorOption{
+					actorcore.WithIdleTimeout(time.Minute),
+					actorcore.WithMaxAttempts(maxAttempts),
+					actorcore.WithInitialRetryDelay(initialRetryDelay),
+					actorcore.WithCompletedJobRetention(jobRetention),
+				},
+			},
 		},
 		AlarmsPollInterval: pollInterval,
 	})
@@ -97,7 +114,7 @@ func (s *jobs) Run(t *testing.T) {
 	// An immediate job runs once and then quiesces
 	t.Run("immediate job runs once", func(t *testing.T) {
 		actorID := "immediate-1-" + string(s.kind) + "-" + string(s.variant)
-		_, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil)
+		_, _, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil)
 		require.NoError(t, err)
 
 		got := settleJob(t, actorID, 1)
@@ -107,7 +124,7 @@ func (s *jobs) Run(t *testing.T) {
 	// A job delivers its input and method to the actor
 	t.Run("carries method and data", func(t *testing.T) {
 		actorID := "data-1-" + string(s.kind) + "-" + string(s.variant)
-		_, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "send", "hello")
+		_, _, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "send", "hello")
 		require.NoError(t, err)
 
 		settleJob(t, actorID, 1)
@@ -120,7 +137,7 @@ func (s *jobs) Run(t *testing.T) {
 	// A delayed job does not run before its delay elapses, then runs
 	t.Run("delayed job runs after the delay", func(t *testing.T) {
 		actorID := "delayed-1-" + string(s.kind) + "-" + string(s.variant)
-		_, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobDelay(800*time.Millisecond))
+		_, _, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobDelay(800*time.Millisecond))
 		require.NoError(t, err)
 
 		got := settleJob(t, actorID, 1)
@@ -130,7 +147,7 @@ func (s *jobs) Run(t *testing.T) {
 	// An interval job runs repeatedly until it is cancelled
 	t.Run("interval job repeats", func(t *testing.T) {
 		actorID := "interval-" + string(s.kind) + "-" + string(s.variant)
-		jobID, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobInterval(shared.ISOInterval(300*time.Millisecond)))
+		jobID, _, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobInterval(shared.ISOInterval(300*time.Millisecond)))
 		require.NoError(t, err)
 
 		require.Eventually(t, func() bool {
@@ -138,7 +155,7 @@ func (s *jobs) Run(t *testing.T) {
 		}, eventuallyTimeout, eventuallyTick, "an interval job should run multiple times")
 
 		// Stop further executions so the count cannot grow into later subtests
-		err = svc.CancelJob(ctx, shared.ProbeActorType, actorID, jobID)
+		err = svc.DeleteJob(ctx, shared.ProbeActorType, actorID, jobID)
 		require.NoError(t, err)
 	})
 
@@ -146,7 +163,7 @@ func (s *jobs) Run(t *testing.T) {
 	// Standard cron has minute granularity, so delivery timing is covered by the interval scenario rather than waited on here
 	t.Run("cron job is scheduled", func(t *testing.T) {
 		actorID := "cron-1-" + string(s.kind) + "-" + string(s.variant)
-		jobID, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobCron("*/5 * * * *"))
+		jobID, _, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobCron("*/5 * * * *"))
 		require.NoError(t, err)
 
 		info, err := svc.GetJob(ctx, jobID)
@@ -155,18 +172,22 @@ func (s *jobs) Run(t *testing.T) {
 		assert.NotEqual(t, actor.JobStatusDeadLettered, info.Status)
 
 		// Clean up so it does not fire during the run
-		err = svc.CancelJob(ctx, shared.ProbeActorType, actorID, jobID)
+		err = svc.DeleteJob(ctx, shared.ProbeActorType, actorID, jobID)
 		require.NoError(t, err)
 	})
 
 	// Dispatching twice while the first idempotent job is live yields a single execution
 	t.Run("idempotency key dedups", func(t *testing.T) {
 		actorID := "idem-1-" + string(s.kind) + "-" + string(s.variant)
-		id1, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobDelay(2*time.Second), actor.WithIdempotencyKey("k"))
+		id1, created1, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobDelay(2*time.Second), actor.WithIdempotencyKey("k"))
 		require.NoError(t, err)
-		id2, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobDelay(2*time.Second), actor.WithIdempotencyKey("k"))
+		id2, created2, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobDelay(2*time.Second), actor.WithIdempotencyKey("k"))
 		require.NoError(t, err)
 		assert.Equal(t, id1, id2, "re-dispatching with the same key returns the same job")
+
+		// Both calls get the same job back, and only the first one created it
+		assert.True(t, created1)
+		assert.False(t, created2)
 
 		got := settleJob(t, actorID, 1)
 		assert.Equal(t, 1, got, "an idempotency key must coalesce to a single execution")
@@ -175,11 +196,15 @@ func (s *jobs) Run(t *testing.T) {
 	// Without a key, N dispatches yield N executions
 	t.Run("without a key each dispatch runs", func(t *testing.T) {
 		actorID := "nokey-1-" + string(s.kind) + "-" + string(s.variant)
-		id1, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil)
+		id1, created1, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil)
 		require.NoError(t, err)
-		id2, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil)
+		id2, created2, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil)
 		require.NoError(t, err)
 		assert.NotEqual(t, id1, id2, "each dispatch without a key is a distinct job")
+
+		// With no key there is nothing to coalesce onto, so every dispatch creates its own job
+		assert.True(t, created1)
+		assert.True(t, created2)
 
 		got := settleJob(t, actorID, 2)
 		assert.GreaterOrEqual(t, got, 2, "two keyless dispatches should run twice")
@@ -189,7 +214,7 @@ func (s *jobs) Run(t *testing.T) {
 	t.Run("dead-letters after exhausting retries", func(t *testing.T) {
 		actorID := "deadretry-1-" + string(s.kind) + "-" + string(s.variant)
 		shared.ProbeObserver.SetJobFault(actorID, -1)
-		jobID, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil)
+		jobID, _, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil)
 		require.NoError(t, err)
 
 		got := settleJob(t, actorID, maxAttempts)
@@ -207,7 +232,7 @@ func (s *jobs) Run(t *testing.T) {
 	t.Run("dead-letters on permanent failure", func(t *testing.T) {
 		actorID := "deadperm-1-" + string(s.kind) + "-" + string(s.variant)
 		shared.ProbeObserver.SetJobPermanentFailure(actorID)
-		jobID, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil)
+		jobID, _, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil)
 		require.NoError(t, err)
 
 		got := settleJob(t, actorID, 1)
@@ -223,13 +248,13 @@ func (s *jobs) Run(t *testing.T) {
 	// Cancelling a not-yet-due job prevents it from ever running
 	t.Run("cancel before due prevents running", func(t *testing.T) {
 		actorID := "cancel-1-" + string(s.kind) + "-" + string(s.variant)
-		jobID, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobDelay(time.Hour))
+		jobID, _, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobDelay(time.Hour))
 		require.NoError(t, err)
-		err = svc.CancelJob(ctx, shared.ProbeActorType, actorID, jobID)
+		err = svc.DeleteJob(ctx, shared.ProbeActorType, actorID, jobID)
 		require.NoError(t, err)
 
 		// Cancelling a job that no longer exists reports the public not-found error
-		err = svc.CancelJob(ctx, shared.ProbeActorType, actorID, jobID)
+		err = svc.DeleteJob(ctx, shared.ProbeActorType, actorID, jobID)
 		require.ErrorIs(t, err, actor.ErrJobNotFound)
 
 		got := settleJob(t, actorID, 0)
@@ -240,7 +265,7 @@ func (s *jobs) Run(t *testing.T) {
 	t.Run("retry re-dispatches a dead job", func(t *testing.T) {
 		actorID := "retry-1-" + string(s.kind) + "-" + string(s.variant)
 		shared.ProbeObserver.SetJobPermanentFailure(actorID)
-		jobID, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil)
+		jobID, _, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil)
 		require.NoError(t, err)
 
 		// Wait until the job is dead-lettered
@@ -266,7 +291,7 @@ func (s *jobs) Run(t *testing.T) {
 	t.Run("repeating job dead-letters one occurrence and continues", func(t *testing.T) {
 		actorID := "repeat-dead-" + string(s.kind) + "-" + string(s.variant)
 		shared.ProbeObserver.SetJobPermanentFailure(actorID)
-		_, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobInterval(shared.ISOInterval(300*time.Millisecond)))
+		_, _, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil, actor.WithJobInterval(shared.ISOInterval(300*time.Millisecond)))
 		require.NoError(t, err)
 
 		// The first occurrence is dead-lettered
@@ -289,11 +314,56 @@ func (s *jobs) Run(t *testing.T) {
 				continue
 			}
 			live++
-			err = svc.CancelJob(ctx, shared.ProbeActorType, actorID, j.JobID)
+			err = svc.DeleteJob(ctx, shared.ProbeActorType, actorID, j.JobID)
 			require.NoError(t, err)
 		}
 		assert.GreaterOrEqual(t, dead, 1, "the failed occurrence should be in the dead-letter store")
 		assert.GreaterOrEqual(t, live, 1, "the recurrence should still have a live job")
+	})
+
+	// A job dispatched to a type that asked for retention leaves a record behind once it has run
+	t.Run("a completed job is retained when its actor type asks for it", func(t *testing.T) {
+		actorID := "retained-1-" + string(s.kind) + "-" + string(s.variant)
+		jobID, _, err := svc.Dispatch(ctx, retainedProbeActorType, actorID, "process", nil)
+		require.NoError(t, err)
+
+		settleJob(t, actorID, 1)
+
+		// The record survives the run, reporting the job as completed rather than as missing
+		require.Eventually(t, func() bool {
+			info, gErr := svc.GetJob(ctx, jobID)
+			return gErr == nil && info.Status == actor.JobStatusCompleted
+		}, eventuallyTimeout, eventuallyTick, "a completed job should leave a record when its type asks for one")
+
+		info, err := svc.GetJob(ctx, jobID)
+		require.NoError(t, err)
+		assert.Equal(t, "process", info.Method)
+		assert.False(t, info.EndedAt.IsZero(), "a terminal job records when it ended")
+
+		// It is listed alongside the actor's live jobs, so a successful run is visible afterwards
+		list, err := svc.ListJobs(ctx, retainedProbeActorType, actorID)
+		require.NoError(t, err)
+		require.Len(t, list, 1)
+		assert.Equal(t, actor.JobStatusCompleted, list[0].Status)
+
+		// The same verb removes a record as removes a live job
+		require.NoError(t, svc.DeleteJob(ctx, retainedProbeActorType, actorID, jobID))
+		_, err = svc.GetJob(ctx, jobID)
+		require.ErrorIs(t, err, actor.ErrJobNotFound)
+	})
+
+	// Without a retention, the default, a completed job leaves nothing behind
+	t.Run("a completed job leaves no record by default", func(t *testing.T) {
+		actorID := "unretained-1-" + string(s.kind) + "-" + string(s.variant)
+		jobID, _, err := svc.Dispatch(ctx, shared.ProbeActorType, actorID, "process", nil)
+		require.NoError(t, err)
+
+		settleJob(t, actorID, 1)
+
+		require.Eventually(t, func() bool {
+			_, gErr := svc.GetJob(ctx, jobID)
+			return errors.Is(gErr, actor.ErrJobNotFound)
+		}, eventuallyTimeout, eventuallyTick, "a completed job should be deleted when its type asked for no retention")
 	})
 
 	// GetJob reports the public not-found error for an unknown job

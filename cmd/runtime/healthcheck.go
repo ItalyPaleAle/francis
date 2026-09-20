@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/italypaleale/go-kit/utils"
 	"github.com/quic-go/quic-go/http3"
 
 	"github.com/italypaleale/francis/internal/ca"
@@ -39,9 +40,7 @@ func runHealthcheck(args []string) int {
 	fs.BoolVar(&verbose, "verbose", false, "Print a message when the healthcheck succeeds")
 	_ = fs.Parse(args)
 
-	if timeout <= 0 {
-		timeout = defaultHealthcheckTimeout
-	}
+	timeout = utils.PositiveOr(timeout, defaultHealthcheckTimeout)
 
 	// The config resolves the bind address (unless -addr is set) and the CA used to verify the runtime (unless -insecure-skip-verify is set)
 	var cfg *config

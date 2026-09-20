@@ -19,6 +19,7 @@ import (
 	"github.com/italypaleale/go-kit/eventqueue"
 	"github.com/italypaleale/go-kit/servicerunner"
 	"github.com/italypaleale/go-kit/ttlcache"
+	"github.com/italypaleale/go-kit/utils"
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/actor"
@@ -180,15 +181,9 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 	if options.BindAddress == "" {
 		options.BindAddress = addrHost
 	}
-	if options.BindPort <= 0 {
-		options.BindPort = addrPort
-	}
-	if options.ShutdownGracePeriod <= 0 {
-		options.ShutdownGracePeriod = defaultShutdownGracePeriod
-	}
-	if options.ProviderRequestTimeout <= 0 {
-		options.ProviderRequestTimeout = defaultProviderRequestTimeout
-	}
+	options.BindPort = utils.PositiveOr(options.BindPort, addrPort)
+	options.ShutdownGracePeriod = utils.PositiveOr(options.ShutdownGracePeriod, defaultShutdownGracePeriod)
+	options.ProviderRequestTimeout = utils.PositiveOr(options.ProviderRequestTimeout, defaultProviderRequestTimeout)
 	if options.HostHealthCheckDeadline < time.Second {
 		options.HostHealthCheckDeadline = defaultHostHealthCheckDeadline
 	}
@@ -201,9 +196,7 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 	if options.AlarmsFetchAheadInterval < 100*time.Millisecond {
 		options.AlarmsFetchAheadInterval = defaultAlarmsFetchAheadInterval
 	}
-	if options.AlarmsFetchAheadBatchSize <= 0 {
-		options.AlarmsFetchAheadBatchSize = defaultAlarmsFetchAheadBatch
-	}
+	options.AlarmsFetchAheadBatchSize = utils.PositiveOr(options.AlarmsFetchAheadBatchSize, defaultAlarmsFetchAheadBatch)
 
 	// Init a real clock if none is passed
 	if options.clock == nil {

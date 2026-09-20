@@ -759,7 +759,7 @@ func (p *Provider) DeleteLeasedAlarm(ctx context.Context, lease *ref.AlarmLease)
 
 	p.Mu.RLock()
 	a, ok := p.AlarmsByID[lease.Key()]
-	valid := ok && a.HasValidLease(lease.LeaseID(), p.Clock.Now())
+	valid := ok && a.CanFinalize(lease.LeaseID(), lease.DueTime(), p.Clock.Now())
 	var (
 		key AlarmKey
 		id  string

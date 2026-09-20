@@ -8,6 +8,8 @@ import (
 	"io"
 	"time"
 
+	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/builtinkey"
 	timeutils "github.com/italypaleale/francis/internal/time"
 	"github.com/italypaleale/francis/internal/types"
 )
@@ -27,10 +29,10 @@ type Host interface {
 	SetAlarm(ctx context.Context, actorType string, actorID string, name string, properties AlarmProperties) error
 	DeleteAlarm(ctx context.Context, actorType string, actorID string, name string) error
 
-	Dispatch(ctx context.Context, actorType string, actorID string, method string, data any, properties JobProperties) (jobID string, err error)
+	Dispatch(ctx context.Context, actorType string, actorID string, method string, data any, properties JobProperties) (jobID string, created bool, err error)
 	GetJob(ctx context.Context, jobID string) (JobInfo, error)
 	ListJobs(ctx context.Context, actorType string, actorID string) ([]JobInfo, error)
-	CancelJob(ctx context.Context, actorType string, actorID string, jobID string) error
+	DeleteJob(ctx context.Context, actorType string, actorID string, jobID string, opts ...DeleteJobOption) error
 	RetryJob(ctx context.Context, jobID string) (newJobID string, err error)
 
 	SetState(ctx context.Context, actorType string, actorID string, state any, opts *SetStateOpts) error
@@ -43,6 +45,24 @@ type Host interface {
 type SetStateOpts struct {
 	// Optional TTL for the state
 	TTL time.Duration
+
+	// Labels for the workflow engine
+	// These are not part of the public API contract
+	workflowLabels *components.WorkflowLabels
+}
+
+// SetWorkflowLabels attaches the workflow engine's labels to this write, replacing whatever the row had.
+// It is reserved for Francis' own built-in actors (the key argument is a private type)
+func (o *SetStateOpts) SetWorkflowLabels(_ builtinkey.Key, labels components.WorkflowLabels) {
+	o.workflowLabels = &labels
+}
+
+// WorkflowLabels returns the labels attached with SetWorkflowLabels, or nil when none were.
+func (o *SetStateOpts) WorkflowLabels() *components.WorkflowLabels {
+	if o == nil {
+		return nil
+	}
+	return o.workflowLabels
 }
 
 // ListStatesOpts is the options for the ListStates method
@@ -54,6 +74,24 @@ type ListStatesOpts struct {
 	// Maximum number of states to return
 	// If empty, requests the default page size
 	Limit int
+
+	// workflowLabels restricts the listing to rows whose workflow labels match every field it sets
+	// As with SetStateOpts, this is not part of the public surface
+	workflowLabels *components.WorkflowLabels
+}
+
+// SetWorkflowLabels restricts the listing to rows whose workflow labels match every field of labels that is set.
+// It is reserved for Francis' own built-in actors.
+func (o *ListStatesOpts) SetWorkflowLabels(_ builtinkey.Key, labels components.WorkflowLabels) {
+	o.workflowLabels = &labels
+}
+
+// WorkflowLabels returns the filter set with SetWorkflowLabels, or nil when the listing filters on none.
+func (o *ListStatesOpts) WorkflowLabels() *components.WorkflowLabels {
+	if o == nil {
+		return nil
+	}
+	return o.workflowLabels
 }
 
 // StateList is a page of actor states returned by ListStates.

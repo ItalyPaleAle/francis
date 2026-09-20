@@ -4,6 +4,8 @@ import (
 	"errors"
 	"math"
 	"time"
+
+	"github.com/italypaleale/go-kit/utils"
 )
 
 const (
@@ -11,6 +13,7 @@ const (
 	defaultActorDeactivationTimeout = 5 * time.Second
 	defaultAlarmMaxAttempts         = 3
 	defaultAlarmInitialRetryDelay   = 2 * time.Second
+	defaultDeadLetteredJobRetention = 30 * 24 * time.Hour
 )
 
 // LockMode selects how the framework serializes the invocations of an actor type
@@ -54,6 +57,14 @@ type RegisterActorOptions struct {
 	// Initial retry delay after failed invocation attempts
 	// Defaults to 2s
 	InitialRetryDelay time.Duration
+	// CompletedJobRetention is how long a job dispatched to this actor type keeps a record after it completes successfully
+	// When set, a completed job leaves a record that ListJobs and GetJob report until the retention elapses
+	// Defaults to 0, which keeps no record of a completed job, and a negative value keeps one that never expires
+	CompletedJobRetention time.Duration
+	// DeadLetteredJobRetention is how long a job dispatched to this actor type keeps its record after it is dead-lettered
+	// Defaults to 30 days
+	// A value <= 0 disables automatic deletion of records
+	DeadLetteredJobRetention time.Duration
 	// CapacityGroup, when set, places this actor type into a named host-local capacity group
 	// Every actor type registered on this host with the same group name shares a single strict concurrency budget, enforced in-process when their jobs execute
 	// It is the exact per-host guarantee that complements the best-effort, cluster-wide ConcurrencyLimit placement hint
@@ -100,6 +111,23 @@ func WithConcurrencyLimit(n int) RegisterActorOption {
 func WithMaxAttempts(n int) RegisterActorOption {
 	return func(o *RegisterActorOptions) {
 		o.MaxAttempts = n
+	}
+}
+
+// WithCompletedJobRetention sets how long a job dispatched to this actor type keeps a record after it completes successfully
+// A completed job leaves no record at all unless this is set, and a negative duration keeps one that never expires
+func WithCompletedJobRetention(d time.Duration) RegisterActorOption {
+	return func(o *RegisterActorOptions) {
+		o.CompletedJobRetention = d
+	}
+}
+
+// WithDeadLetteredJobRetention sets how long a job dispatched to this actor type keeps its record after it is dead-lettered
+// Defaults to 30 days
+// Set to <= 0 to disable automatic deletion of records
+func WithDeadLetteredJobRetention(d time.Duration) RegisterActorOption {
+	return func(o *RegisterActorOptions) {
+		o.DeadLetteredJobRetention = d
 	}
 }
 
@@ -150,12 +178,26 @@ func (o *RegisterActorOptions) Validate() error {
 		return errors.New("option DeactivationTimeout must not be negative")
 	}
 
-	if o.MaxAttempts <= 0 {
-		o.MaxAttempts = defaultAlarmMaxAttempts
+	o.MaxAttempts = utils.PositiveOr(o.MaxAttempts, defaultAlarmMaxAttempts)
+	o.InitialRetryDelay = utils.PositiveOr(o.InitialRetryDelay, defaultAlarmInitialRetryDelay)
+
+	// For dead-lettered jobs:
+	// zero = default (30 days)
+	// positive = keep for specified duration
+	// negative = do not automatically delete
+	switch {
+	case o.DeadLetteredJobRetention == 0:
+		o.DeadLetteredJobRetention = defaultDeadLetteredJobRetention
+	case o.DeadLetteredJobRetention < 0:
+		o.DeadLetteredJobRetention = -1
 	}
 
-	if o.InitialRetryDelay <= 0 {
-		o.InitialRetryDelay = defaultAlarmInitialRetryDelay
+	// For completed jobs:
+	// zero = do not store
+	// positive = keep for specified duration
+	// zero or negative = do not automatically delete
+	if o.CompletedJobRetention < 0 {
+		o.CompletedJobRetention = -1
 	}
 
 	// A capacity group is meaningless without a positive limit to enforce

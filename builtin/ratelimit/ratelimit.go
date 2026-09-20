@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/italypaleale/go-kit/utils"
 	"golang.org/x/time/rate"
 
 	"github.com/italypaleale/francis/actor"
@@ -69,26 +70,18 @@ func New(name string, opts ...Option) (*RateLimit, error) {
 	}
 
 	// The period defaults to one second, so WithRate(n) alone means n calls per second
-	per := o.per
-	if per <= 0 {
-		per = time.Second
-	}
+	per := utils.PositiveOr(o.per, time.Second)
 
 	// Set default idleTimeout
 	// We do not allow negative idle timeouts here, as that would make the actor never be expired, causing unbounded memory growth
-	if o.idleTimeout <= 0 {
-		// The default value is double the "per" interval, with a minimum of 1 minute
-		o.idleTimeout = max(2*per, time.Minute)
-	}
+	// The default value is double the "per" interval, with a minimum of 1 minute
+	o.idleTimeout = utils.PositiveOr(o.idleTimeout, max(2*per, time.Minute))
 
 	// Translate the rate/period into a token refill rate (tokens per second) and the burst into the bucket's capacity
 	// The bucket starts full, so the first calls for a fresh key are admitted immediately, then refill at limit
 	limit := rate.Limit(float64(o.rate) / per.Seconds())
-	burst := o.burst
-	if burst <= 0 {
-		// Strict by default: a capacity of one admits calls one at a time and rejects any excess until the bucket refills
-		burst = 1
-	}
+	// Strict by default: a capacity of one admits calls one at a time and rejects any excess until the bucket refills
+	burst := utils.PositiveOr(o.burst, 1)
 
 	return &RateLimit{
 		actorType: rateLimitActorTypePrefix + name,

@@ -18,7 +18,7 @@ func (p *Provider) Backup(ctx context.Context, w io.Writer) error {
 	// Snapshot each domain under its read lock
 	// Records placed in the maps are treated as immutable (mutations replace the entry rather than editing it in place), so the collected records stay valid after the lock is released
 	stateRecs := p.snapshotStateRecords()
-	alarmRecs, deadJobRecs := p.snapshotAlarmAndDeadJobRecords()
+	alarmRecs, terminalJobRecs := p.snapshotAlarmAndTerminalJobRecords()
 
 	// Write the header, which records the format version
 	bw, err := backup.NewWriter(w, p.Clock.Now())
@@ -39,8 +39,8 @@ func (p *Provider) Backup(ctx context.Context, w io.Writer) error {
 			return err
 		}
 	}
-	for _, rec := range deadJobRecs {
-		err = bw.WriteDeadJob(rec)
+	for _, rec := range terminalJobRecs {
+		err = bw.WriteTerminalJob(rec)
 		if err != nil {
 			return err
 		}
@@ -61,18 +61,24 @@ func (p *Provider) snapshotStateRecords() []*backup.StateRecord {
 			continue
 		}
 
-		recs = append(recs, &backup.StateRecord{
+		rec := &backup.StateRecord{
 			ActorType:  key.ActorType,
 			ActorID:    key.ActorID,
 			Data:       entry.Data,
 			Expiration: entry.Expiration,
-		})
+		}
+
+		if entry.WorkflowLabels != nil {
+			rec.WorkflowLabels = new(*entry.WorkflowLabels)
+		}
+
+		recs = append(recs, rec)
 	}
 	return recs
 }
 
-// snapshotAlarmAndDeadJobRecords collects all alarms (plain alarms and jobs, without the ephemeral lease fields) and dead jobs under the alarms read lock
-func (p *Provider) snapshotAlarmAndDeadJobRecords() ([]*backup.AlarmRecord, []*backup.DeadJobRecord) {
+// snapshotAlarmAndTerminalJobRecords collects all alarms (plain alarms and jobs, without the ephemeral lease fields) and dead jobs under the alarms read lock
+func (p *Provider) snapshotAlarmAndTerminalJobRecords() ([]*backup.AlarmRecord, []*backup.TerminalJobRecord) {
 	p.Mu.RLock()
 	defer p.Mu.RUnlock()
 
@@ -95,26 +101,28 @@ func (p *Provider) snapshotAlarmAndDeadJobRecords() ([]*backup.AlarmRecord, []*b
 		i++
 	}
 
-	deadJobs := make([]*backup.DeadJobRecord, len(p.DeadJobs))
+	terminalJobs := make([]*backup.TerminalJobRecord, len(p.TerminalJobs))
 	i = 0
-	for _, d := range p.DeadJobs {
-		deadJobs[i] = &backup.DeadJobRecord{
+	for _, d := range p.TerminalJobs {
+		terminalJobs[i] = &backup.TerminalJobRecord{
 			JobID:       d.JobID,
 			ActorType:   d.ActorType,
 			ActorID:     d.ActorID,
 			Method:      d.Method,
 			Data:        d.Data,
+			Status:      d.Status,
 			Attempts:    d.Attempts,
 			LastError:   d.LastError,
-			FailedAt:    d.FailedAt,
+			EndedAt:     d.EndedAt,
 			OriginalDue: d.OriginalDue,
 			Interval:    d.Interval,
 			Cron:        d.Cron,
+			Expiration:  d.Expiration,
 		}
 		i++
 	}
 
-	return alarms, deadJobs
+	return alarms, terminalJobs
 }
 
 // Restore wipes all persistent data and loads a snapshot from r
@@ -146,21 +154,21 @@ func (p *Provider) Restore(ctx context.Context, r io.Reader) error {
 
 	// Load records in batches, keyed to the two lock domains
 	var (
-		alarmSets   []AlarmChange
-		deadJobSets []DeadJobChange
-		stateSets   []ActorStateChange
+		alarmSets       []AlarmChange
+		terminalJobSets []TerminalJobChange
+		stateSets       []ActorStateChange
 	)
 
 	// flushMuDomain persists and applies the buffered alarm and dead-job records
 	flushMuDomain := func() error {
-		if len(alarmSets) == 0 && len(deadJobSets) == 0 {
+		if len(alarmSets) == 0 && len(terminalJobSets) == 0 {
 			return nil
 		}
 
 		changes := NewChanges()
 		defer changes.Release()
 		changes.Alarms.Set = append(changes.Alarms.Set, alarmSets...)
-		changes.DeadJobs.Set = append(changes.DeadJobs.Set, deadJobSets...)
+		changes.TerminalJobs.Set = append(changes.TerminalJobs.Set, terminalJobSets...)
 
 		flushErr := p.persistThenApply(ctx, &p.Mu, changes, func() {
 			for _, ac := range alarmSets {
@@ -168,8 +176,8 @@ func (p *Provider) Restore(ctx context.Context, r io.Reader) error {
 				p.Alarms[a.GetAlarmKey()] = a
 				p.AlarmsByID[a.ID] = a
 			}
-			for _, dc := range deadJobSets {
-				p.DeadJobs[dc.Value.JobID] = dc.Value
+			for _, dc := range terminalJobSets {
+				p.TerminalJobs[dc.Value.JobID] = dc.Value
 			}
 		})
 		if flushErr != nil {
@@ -177,7 +185,7 @@ func (p *Provider) Restore(ctx context.Context, r io.Reader) error {
 		}
 
 		alarmSets = alarmSets[:0]
-		deadJobSets = deadJobSets[:0]
+		terminalJobSets = terminalJobSets[:0]
 		return nil
 	}
 
@@ -214,7 +222,7 @@ func (p *Provider) Restore(ctx context.Context, r io.Reader) error {
 		case backup.RecordTypeState:
 			stateSets = append(stateSets, ActorStateChange{
 				Key:   NewActorKey(rec.State.ActorType, rec.State.ActorID),
-				Value: &StateEntry{Data: rec.State.Data, Expiration: rec.State.Expiration},
+				Value: &StateEntry{Data: rec.State.Data, Expiration: rec.State.Expiration, WorkflowLabels: rec.State.WorkflowLabels},
 			})
 			if len(stateSets) >= restoreBatchSize {
 				err = flushStateDomain()
@@ -225,16 +233,16 @@ func (p *Provider) Restore(ctx context.Context, r io.Reader) error {
 		case backup.RecordTypeAlarm:
 			a := alarmFromRecord(rec.Alarm)
 			alarmSets = append(alarmSets, AlarmChange{Key: a.ID, Value: a})
-			if len(alarmSets)+len(deadJobSets) >= restoreBatchSize {
+			if len(alarmSets)+len(terminalJobSets) >= restoreBatchSize {
 				err = flushMuDomain()
 				if err != nil {
 					return err
 				}
 			}
-		case backup.RecordTypeDeadJob:
-			d := deadJobFromRecord(rec.DeadJob)
-			deadJobSets = append(deadJobSets, DeadJobChange{Key: d.JobID, Value: d})
-			if len(alarmSets)+len(deadJobSets) >= restoreBatchSize {
+		case backup.RecordTypeTerminalJob:
+			d := terminalJobFromRecord(rec.TerminalJob)
+			terminalJobSets = append(terminalJobSets, TerminalJobChange{Key: d.JobID, Value: d})
+			if len(alarmSets)+len(terminalJobSets) >= restoreBatchSize {
 				err = flushMuDomain()
 				if err != nil {
 					return err
@@ -283,13 +291,13 @@ func (p *Provider) wipePersistentData(ctx context.Context) error {
 	for id := range p.AlarmsByID {
 		alarmChanges.Alarms.Delete = append(alarmChanges.Alarms.Delete, id)
 	}
-	for id := range p.DeadJobs {
-		alarmChanges.DeadJobs.Delete = append(alarmChanges.DeadJobs.Delete, id)
+	for id := range p.TerminalJobs {
+		alarmChanges.TerminalJobs.Delete = append(alarmChanges.TerminalJobs.Delete, id)
 	}
 	err := p.persistThenApply(ctx, &p.Mu, alarmChanges, func() {
 		clear(p.Alarms)
 		clear(p.AlarmsByID)
-		clear(p.DeadJobs)
+		clear(p.TerminalJobs)
 	})
 	if err != nil {
 		return err
@@ -328,19 +336,21 @@ func alarmFromRecord(r *backup.AlarmRecord) *Alarm {
 	}
 }
 
-// deadJobFromRecord builds an in-memory DeadJob from a backup record
-func deadJobFromRecord(r *backup.DeadJobRecord) *DeadJob {
-	return &DeadJob{
+// terminalJobFromRecord builds an in-memory TerminalJob from a backup record
+func terminalJobFromRecord(r *backup.TerminalJobRecord) *TerminalJob {
+	return &TerminalJob{
 		JobID:       r.JobID,
 		ActorType:   r.ActorType,
 		ActorID:     r.ActorID,
 		Method:      r.Method,
 		Data:        r.Data,
+		Status:      r.Status,
 		Attempts:    r.Attempts,
 		LastError:   r.LastError,
-		FailedAt:    r.FailedAt,
+		EndedAt:     r.EndedAt,
 		OriginalDue: r.OriginalDue,
 		Interval:    r.Interval,
 		Cron:        r.Cron,
+		Expiration:  r.Expiration,
 	}
 }
