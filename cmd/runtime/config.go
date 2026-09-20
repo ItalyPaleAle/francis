@@ -58,7 +58,10 @@ type jwtConfig struct {
 
 type providerConfig struct {
 	// ConnectionString selects and configures the data store
-	// The backend is inferred from the connection string scheme: "postgres://" or "postgresql://" for PostgreSQL, "memory" (or "memory://") for the non-durable in-memory store, and anything else is treated as a SQLite file path or DSN
+	// The backend is inferred from the connection string scheme:
+	// - "postgres://" or "postgresql://" for PostgreSQL
+	// - "memory" (or "memory://") for the non-durable in-memory store
+	// - anything else is treated as a SQLite file path or DSN
 	ConnectionString string `yaml:"connectionString"`
 
 	// QueryLog configures optional SQL statement logging
