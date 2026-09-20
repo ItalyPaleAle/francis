@@ -1,7 +1,7 @@
 ---
 title: "Metrics and tracing"
 weight: 90
-description: "Observability for workflows
+description: "Observability for workflows"
 ---
 
 To instrument a task, pass an OpenTelemetry meter with `WithMeter`. Without one, the instruments are no-ops.
