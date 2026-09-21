@@ -1032,8 +1032,7 @@ func (o *orchestrator) dropDeadline(ctx context.Context) error {
 	return nil
 }
 
-// applyElapsedDeadlines resolves a fired deadline against the journal, since one alarm stands for every deadline the instance has
-// What a timeout costs depends on the step it hit, which the per-step policies decide exactly as a handler failure would
+// applyElapsedDeadlines resolves a fired instance or event deadline against the journal
 func (o *orchestrator) applyElapsedDeadlines(st *instanceState, now time.Time) {
 	// The instance timeout ends the run, whatever it was doing
 	instanceDue := instanceDeadline(st, o.def)
@@ -1054,36 +1053,17 @@ func (o *orchestrator) applyElapsedDeadlines(st *instanceState, now time.Time) {
 	}
 
 	sr, d := st.currentRunningStep(o.def)
-	if sr == nil || d == nil || sr.Status != StepRunning {
+	if sr == nil || d == nil || sr.Status != StepRunning || d.kind != KindWait {
 		return
 	}
 
-	stepDue := d.stepDeadline(sr)
-	if stepDue.IsZero() || now.Before(stepDue) {
+	eventDue := d.eventDeadline(sr)
+	if eventDue.IsZero() || now.Before(eventDue) {
 		return
 	}
 
-	// A wait step that never got its event is the one case where the step's timeout ends the run rather than failing a task
-	if d.kind == KindWait {
-		st.beginUnwind(o.def, fmt.Sprintf("event %q timed out", d.eventName), StatusFailed, now)
-		return
-	}
-
-	// Every outstanding attempt of the timed-out step is failed, and the step's own policy decides what that costs the instance
-	for i := range sr.Tasks {
-		tr := &sr.Tasks[i]
-		if tr.Done {
-			continue
-		}
-		tr.Error = fmt.Sprintf("step %q timed out", sr.Name)
-		tr.LastError = tr.Error
-		tr.Done = true
-		tr.Abandoned = true
-		tr.CompletedAt = now
-		if sr.Remaining > 0 {
-			sr.Remaining--
-		}
-	}
+	// A wait that never received its event unwinds exactly like any other external failure
+	st.beginUnwind(o.def, fmt.Sprintf("event %q timed out", d.eventName), StatusFailed, now)
 }
 
 // handleUnknownVersionDeadline runs the deadline on a host that does not have the instance's version, working from the journal alone

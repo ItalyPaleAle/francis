@@ -461,12 +461,12 @@ func (st *instanceState) applySuspend(def *definition, reason string, now time.T
 		RemainingTimeout: until(instanceDeadline(st, def), now),
 	}
 
-	// The current step's own deadline is paused alongside the instance's, so a long suspension does not consume a short step timeout either
+	// The current event wait is paused alongside the instance so maintenance does not consume an external response budget
 	sr, d := st.currentRunningStep(def)
-	if sr != nil && d != nil && sr.Status == StepRunning {
-		stepDue := d.stepDeadline(sr)
-		if !stepDue.IsZero() {
-			rec.RemainingStepTimeout = until(stepDue, now)
+	if sr != nil && d != nil && sr.Status == StepRunning && d.kind == KindWait {
+		eventDue := d.eventDeadline(sr)
+		if !eventDue.IsZero() {
+			rec.RemainingEventTimeout = until(eventDue, now)
 		}
 	}
 
@@ -491,11 +491,8 @@ func (st *instanceState) applyResume(def *definition, now time.Time) bool {
 	st.StartedAt = now.Add(rec.RemainingTimeout - def.timeout)
 
 	sr, d := st.currentRunningStep(def)
-	if sr != nil && d != nil && rec.RemainingStepTimeout > 0 {
-		budget := d.stepBudget()
-		if budget > 0 {
-			sr.StartedAt = now.Add(rec.RemainingStepTimeout - budget)
-		}
+	if sr != nil && d != nil && d.kind == KindWait && rec.RemainingEventTimeout > 0 {
+		sr.StartedAt = now.Add(rec.RemainingEventTimeout - d.eventTimeout)
 	}
 
 	st.Suspended = nil
@@ -615,7 +612,7 @@ func advance(st *instanceState, def *definition, instanceID string, now time.Tim
 	st.Cursor = deriveCursor(st)
 }
 
-// nextDeadline is the earliest of the instance timeout and the current step's own timeout, which for a wait step is how long it waits for its event
+// nextDeadline is the earliest of the instance timeout and the current event wait
 // One alarm stands for every deadline the instance has, and the journal records which time it should carry
 func nextDeadline(st *instanceState, def *definition) time.Time {
 	if st.Status.IsTerminal() {
@@ -624,12 +621,12 @@ func nextDeadline(st *instanceState, def *definition) time.Time {
 
 	due := instanceDeadline(st, def)
 
-	// A frame being compensated must not keep rearming its expired forward step budget
+	// An open event wait may end before the instance backstop
 	sr, d := st.currentRunningStep(def)
-	if sr != nil && d != nil && sr.Status == StepRunning {
-		stepDue := d.stepDeadline(sr)
-		if !stepDue.IsZero() && (due.IsZero() || stepDue.Before(due)) {
-			due = stepDue
+	if sr != nil && d != nil && sr.Status == StepRunning && d.kind == KindWait {
+		eventDue := d.eventDeadline(sr)
+		if !eventDue.IsZero() && (due.IsZero() || eventDue.Before(due)) {
+			due = eventDue
 		}
 	}
 	return due
@@ -1357,19 +1354,10 @@ func instanceDeadline(st *instanceState, def *definition) time.Time {
 	return start.Add(timeout)
 }
 
-// stepBudget returns how long a step is allowed to take, which for a wait step is how long it waits for its event
-func (d *stepDef) stepBudget() time.Duration {
-	if d.kind == KindWait {
-		return d.eventTimeout
-	}
-	return d.stepTimeout
-}
-
-// stepDeadline returns when a running step's own timeout elapses, or the zero time when it declared none
-func (d *stepDef) stepDeadline(sr *stepRecord) time.Time {
-	budget := d.stepBudget()
-	if budget <= 0 || sr.StartedAt.IsZero() {
+// eventDeadline returns when a running wait step expires, or the zero time when it declared no timeout
+func (d *stepDef) eventDeadline(sr *stepRecord) time.Time {
+	if d.kind != KindWait || d.eventTimeout <= 0 || sr.StartedAt.IsZero() {
 		return time.Time{}
 	}
-	return sr.StartedAt.Add(budget)
+	return sr.StartedAt.Add(d.eventTimeout)
 }

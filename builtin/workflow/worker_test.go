@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -62,6 +63,15 @@ func reportedRun(t *testing.T, host *fakeHost) reportPayload {
 
 	p, ok := reportedPayload(t, host, methodDone).(reportPayload)
 	require.True(t, ok, "the done job should carry a report payload")
+	return p
+}
+
+// reportedCompensation returns the compensation report an undo worker dispatched
+func reportedCompensation(t *testing.T, host *fakeHost) compReportPayload {
+	t.Helper()
+
+	p, ok := reportedPayload(t, host, methodCompensated).(compReportPayload)
+	require.True(t, ok, "the compensated job should carry a report payload")
 	return p
 }
 
@@ -122,6 +132,47 @@ func TestWorkerReportsAHandlerFailureAsRetryable(t *testing.T) {
 	assert.Contains(t, report.Error, "upstream is down")
 	assert.True(t, report.Retryable)
 	assert.False(t, report.Transport)
+}
+
+func TestWorkerBoundsEachForwardAttemptAtExecution(t *testing.T) {
+	host := newFakeHost()
+	wf, err := New("forward-timeout", WithSteps(Step("a",
+		WithAttemptTimeout(10*time.Millisecond),
+		WithRun(func(ctx context.Context, tk Task) (any, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}),
+	)))
+	require.NoError(t, err)
+
+	w := newTestWorker(t, wf, host, false)
+	require.NoError(t, w.Job(t.Context(), methodRun, &payloadEnvelope{value: runPayloadFor(wf, "a")}))
+
+	report := reportedRun(t, host)
+	assert.Contains(t, report.Error, "attempt timeout elapsed after 10ms")
+	assert.True(t, report.Retryable, "each retry receives a fresh execution budget")
+}
+
+func TestWorkerBoundsEachCompensationAttemptAtExecution(t *testing.T) {
+	host := newFakeHost()
+	wf, err := New("compensation-timeout", WithSteps(Step("a",
+		WithRun(noopRun),
+		WithCompensateTimeout(10*time.Millisecond),
+		WithCompensate(func(ctx context.Context, c Compensation) error {
+			<-ctx.Done()
+			return ctx.Err()
+		}),
+	)))
+	require.NoError(t, err)
+
+	w := newTestWorker(t, wf, host, true)
+	p := runPayloadFor(wf, "a")
+	p.Result = json.RawMessage(`"effect"`)
+	require.NoError(t, w.Job(t.Context(), methodCompensate, &payloadEnvelope{value: p}))
+
+	report := reportedCompensation(t, host)
+	assert.Contains(t, report.Error, "attempt timeout elapsed after 10ms")
+	assert.True(t, report.Retryable, "each compensation retry receives a fresh execution budget")
 }
 
 func TestWorkerReportsAPermanentFailureAsFinal(t *testing.T) {

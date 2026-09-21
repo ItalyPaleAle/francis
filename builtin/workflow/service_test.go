@@ -2,7 +2,6 @@ package workflow_test
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -214,26 +213,25 @@ func TestTheInstanceTimeoutEndsTheRun(t *testing.T) {
 	assert.Contains(t, status.Cause, "instance timeout elapsed")
 }
 
-// TestAStepTimeoutFailsTheStepItHit verifies what a timeout costs is decided by the step it elapsed on, exactly as a handler failure would be
-func TestAStepTimeoutFailsTheStepItHit(t *testing.T) {
+// TestAnAttemptTimeoutFailsTheStepItHit verifies an execution deadline reports through the step's ordinary failure policy
+func TestAnAttemptTimeoutFailsTheStepItHit(t *testing.T) {
 	var attempts int
 	var mu sync.Mutex
 
-	wf, err := workflow.New("step-timeout", workflow.WithSteps(
+	wf, err := workflow.New("attempt-timeout", workflow.WithSteps(
 		workflow.Step("slow",
-			// The handler fails with a retry far enough out that the step's own deadline is what settles it, rather than a blocked handler holding the host's only slot
 			workflow.WithRun(func(ctx context.Context, tk workflow.Task) (any, error) {
 				mu.Lock()
 				attempts++
 				mu.Unlock()
-				return nil, errors.New("not ready")
+				<-ctx.Done()
+				return nil, ctx.Err()
 			}),
-			workflow.WithMaxAttempts(10),
-			workflow.WithRetryBackoff(time.Minute, time.Minute),
-			workflow.WithStepTimeout(time.Second),
+			workflow.WithMaxAttempts(1),
+			workflow.WithAttemptTimeout(100*time.Millisecond),
 		),
 		workflow.Step("never", workflow.WithRun(func(ctx context.Context, tk workflow.Task) (any, error) {
-			return nil, errors.New("this step should never run")
+			return nil, actor.ErrJobPermanentFailure
 		})),
 	))
 	require.NoError(t, err)
@@ -245,12 +243,71 @@ func TestAStepTimeoutFailsTheStepItHit(t *testing.T) {
 	require.NoError(t, err)
 
 	status := awaitStatus(t, svc, id, workflow.StatusFailed)
-	assert.Contains(t, stepView(t, status, "slow").Error, `step "slow" timed out`)
+	assert.Contains(t, stepView(t, status, "slow").Error, "attempt timeout elapsed after 100ms")
 	assert.Equal(t, workflow.StepSkipped, stepView(t, status, "never").Status)
 
 	mu.Lock()
 	defer mu.Unlock()
-	assert.Equal(t, 1, attempts, "the step's deadline settles it before its retry budget is spent")
+	assert.Equal(t, 1, attempts)
+}
+
+// TestQueueWaitDoesNotConsumeTheAttemptTimeout verifies saturation delays execution without aging the handler's own budget
+func TestQueueWaitDoesNotConsumeTheAttemptTimeout(t *testing.T) {
+	const attemptTimeout = 100 * time.Millisecond
+
+	firstEntered := make(chan struct{})
+	secondEntered := make(chan struct{})
+	firstRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFirst := func() {
+		releaseOnce.Do(func() {
+			close(firstRelease)
+		})
+	}
+	t.Cleanup(releaseFirst)
+
+	wf, err := workflow.New("queue-wait",
+		workflow.WithConcurrency(1),
+		workflow.WithSteps(workflow.Step("work",
+			workflow.WithMaxAttempts(1),
+			workflow.WithAttemptTimeout(attemptTimeout),
+			workflow.WithRun(func(ctx context.Context, tk workflow.Task) (any, error) {
+				if tk.InstanceID() == "first" {
+					close(firstEntered)
+					<-firstRelease
+					return "first", nil
+				}
+
+				close(secondEntered)
+				return "second", nil
+			}),
+		)),
+	)
+	require.NoError(t, err)
+
+	host := startHost(t, wf)
+	svc := wf.Service(host.Service())
+
+	_, _, err = svc.Start(t.Context(), nil, workflow.WithInstanceID("first"))
+	require.NoError(t, err)
+	select {
+	case <-firstEntered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("first task did not enter its handler")
+	}
+
+	_, _, err = svc.Start(t.Context(), nil, workflow.WithInstanceID("second"))
+	require.NoError(t, err)
+	time.Sleep(3 * attemptTimeout)
+	select {
+	case <-secondEntered:
+		t.Fatal("second task entered before capacity was released")
+	default:
+	}
+
+	releaseFirst()
+	status := awaitStatus(t, svc, "second", workflow.StatusCompleted)
+	assert.Empty(t, stepView(t, status, "work").Error)
 }
 
 // TestAFailedCompensationDoesNotStopTheUnwind verifies the default policy: a frame that cannot be undone is recorded and the rest of the stack is still unwound

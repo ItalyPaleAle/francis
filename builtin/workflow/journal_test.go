@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
@@ -8,6 +9,15 @@ import (
 	"github.com/stretchr/testify/require"
 	msgpack "github.com/vmihailenco/msgpack/v5"
 )
+
+func TestSuspendRecordUsesTheEventTimeoutWireName(t *testing.T) {
+	rec := suspendRecord{RemainingEventTimeout: time.Minute}
+
+	enc, err := msgpack.Marshal(rec)
+	require.NoError(t, err)
+	assert.True(t, bytes.Contains(enc, []byte("remainingEventTimeout")))
+	assert.False(t, bytes.Contains(enc, []byte("remainingStepTimeout")))
+}
 
 func TestAJournalEncodesWhenItIsHandedOverAsAValue(t *testing.T) {
 	// The actor client takes the state by value, so a marshaler the value's method set does not carry would leave the journal unwritable

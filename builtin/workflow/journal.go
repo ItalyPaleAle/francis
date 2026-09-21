@@ -215,8 +215,8 @@ type suspendRecord struct {
 	ResumeTo Status `msgpack:"resumeTo"`
 	// RemainingTimeout is what was left of the instance timeout, so a two-day pause does not eat a thirty-minute budget
 	RemainingTimeout time.Duration `msgpack:"remainingTimeout"`
-	// RemainingStepTimeout is what was left of the current step's timeout, including a WaitForEvent step's event timeout
-	RemainingStepTimeout time.Duration `msgpack:"remainingStepTimeout,omitempty"`
+	// RemainingEventTimeout is what was left of the current WaitForEvent step's timeout
+	RemainingEventTimeout time.Duration `msgpack:"remainingEventTimeout,omitempty"`
 }
 
 // parentRef identifies the parent instance of a child, so a child is locatable from the parent's journal and reports back to it

@@ -124,7 +124,8 @@ func (d *stepDecl) validateOptions(member bool) error {
 		{"WithRetryBackoff", d.retryInitial != 0 || d.retryMax != 0, taskKinds, true},
 		{"WithCompensateMaxAttempts", d.compMaxAttempt != 0, taskKinds, true},
 		{"WithCompensateBackoff", d.compInitial != 0 || d.compMax != 0, taskKinds, true},
-		{"WithStepTimeout", d.stepTimeout != 0, []Kind{KindStep, KindForEach, KindChild, KindParallel}, false},
+		{"WithAttemptTimeout", d.attemptTimeout != 0, workerKinds, true},
+		{"WithCompensateTimeout", d.compensateTimeout != 0, workerKinds, true},
 		{"WithEventTimeout", d.eventTimeout != 0, []Kind{KindWait}, false},
 		{"WithEventName", d.eventName != "", []Kind{KindWait}, false},
 		{"WithOptional", d.optional, stepKinds, false},
@@ -153,8 +154,8 @@ func (d *stepDecl) validateOptions(member bool) error {
 	}
 
 	// A child fan-out never runs a parent worker, so worker-only settings cannot affect its tasks
-	if d.kind == KindForEach && d.child != nil && (d.compensate != nil || len(d.inputFrom) != 0 || d.capability != "") {
-		return fmt.Errorf("child fan-out %q cannot use WithCompensate, WithInputFrom, or WithRequiredCapability", d.name)
+	if d.kind == KindForEach && d.child != nil && (d.compensate != nil || len(d.inputFrom) != 0 || d.capability != "" || d.attemptTimeout != 0 || d.compensateTimeout != 0) {
+		return fmt.Errorf("child fan-out %q cannot use worker handler options", d.name)
 	}
 	// Failure policies are closed sets even though the exported string types can be populated from configuration
 	if d.failurePolicy != "" && d.failurePolicy != FailFast && d.failurePolicy != CollectFailures && d.failurePolicy != TolerateFailures {
@@ -210,7 +211,7 @@ func WaitForEvent(name string, opts ...StepOption) StepSpec {
 // The group completes when every member has reported, and no member can read another's output, since WithInputFrom only ever names a top-level step that ran before the group
 // Options that apply to the group as a whole, such as WithFailurePolicy, are set with the returned spec's With method, since the members take the variadic slot
 // Each member carries its own attempt, backoff, compensation, and WithInputFrom options, which the engine applies to that member's task alone
-// Conditions, optionality, skip-on-failure rules, and step timeouts belong on the group and are rejected on individual members
+// Conditions, optionality, and skip-on-failure rules belong on the group and are rejected on individual members
 func Parallel(name string, steps ...StepSpec) StepSpec {
 	d := &stepDecl{
 		name:    name,
@@ -307,10 +308,19 @@ func WithCompensateBackoff(initial time.Duration, max time.Duration) StepOption 
 	}
 }
 
-// WithStepTimeout bounds how long this step may take, after which its outstanding attempts are failed
-func WithStepTimeout(d time.Duration) StepOption {
+// WithAttemptTimeout bounds one invocation of this step's handler and starts only after a worker begins the attempt
+// Queue wait and retry backoff do not consume the attempt's execution budget
+func WithAttemptTimeout(d time.Duration) StepOption {
 	return func(s *stepDecl) {
-		s.stepTimeout = d
+		s.attemptTimeout = d
+	}
+}
+
+// WithCompensateTimeout bounds one invocation of this step's compensation handler and starts only after an undo worker begins the attempt
+// Queue wait and retry backoff do not consume the compensation attempt's execution budget
+func WithCompensateTimeout(d time.Duration) StepOption {
+	return func(s *stepDecl) {
+		s.compensateTimeout = d
 	}
 }
 

@@ -16,7 +16,7 @@ provisionDatabase, err := workflow.New("provision-database",
 		workflow.Step("create-cluster",
 			workflow.WithRun(createCluster),
 			workflow.WithCompensate(deleteCluster),
-			workflow.WithStepTimeout(10*time.Minute),
+			workflow.WithAttemptTimeout(10*time.Minute),
 			// Only hosts advertising "cloud-api" run this, and its undo runs on one too
 			workflow.WithRequiredCapability("cloud-api"),
 		),

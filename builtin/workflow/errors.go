@@ -37,4 +37,6 @@ var (
 	errVersionNotServed = errors.New("workflow instance version is not served by this host")
 	// errRegistryGenerationUnavailable keeps a start retryable while a legacy registry host cannot confirm its fenced identity
 	errRegistryGenerationUnavailable = errors.New("workflow definition registry does not support generation confirmation")
+	// errAttemptTimeout is reported as an ordinary handler failure so the step's retry policy decides whether another attempt runs
+	errAttemptTimeout = errors.New("attempt timeout elapsed")
 )

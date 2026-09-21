@@ -8,7 +8,8 @@
 // Every unit of work, without exception, runs on a worker actor, which is where WithRun and WithCompensate are invoked
 // That is enforced by the code rather than by convention: the definition exposes no hook that runs on the Workflow actor, advance is a pure function of the journal and the definition, and a fan-out's size and a step's condition are both outputs of steps rather than callbacks the orchestrator runs
 //
-// The engine owns its own failure handling: attempts, dead-letter recovery, and the deadline are recorded in the journal and driven by the same reconcile loop, rather than delegated to per-actor-type settings the engine cannot observe
+// The engine owns its own failure handling: attempts, dead-letter recovery, and durable instance and event deadlines are recorded in the journal and driven by the same reconcile loop, rather than delegated to per-actor-type settings the engine cannot observe
+// Per-attempt execution budgets begin inside workers so time waiting for capacity never consumes them
 // Execution is at-least-once, like everything else in Francis, so handlers must be idempotent
 package workflow
 

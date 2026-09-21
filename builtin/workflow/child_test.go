@@ -451,12 +451,12 @@ func TestDeadLetteredChildReportCanBeRecovered(t *testing.T) {
 	require.Equal(t, StatusCompleted, readJournal(t, host, parentWF, "parent").Status)
 }
 
-func TestStepTimeoutUnwindsChild(t *testing.T) {
+func TestParentInstanceTimeoutUnwindsChild(t *testing.T) {
 	now := time.Now()
 	child, err := New("timeout-child", WithSteps(Step("work", WithRun(noopRun))))
 	require.NoError(t, err)
-	def := testDefinition(t, "timeout-parent", WithSteps(
-		Child("child", WithDefinition(child), WithStepTimeout(time.Second)),
+	def := testDefinition(t, "timeout-parent", WithTimeout(time.Second), WithSteps(
+		Child("child", WithDefinition(child)),
 	))
 	st := startJournal(t, def, now)
 	require.NotEmpty(t, st.step("child").Tasks[0].ChildID)

@@ -109,7 +109,7 @@ func WithVersion(v int) Option {
 	}
 }
 
-// WithTimeout bounds how long an instance may run before it is failed and unwound, defaulting to one hour
+// WithTimeout bounds how long an instance may remain active before it is failed and unwound, including time its tasks wait for capacity, and defaults to one hour
 func WithTimeout(d time.Duration) Option {
 	return func(o *options) {
 		o.timeout = d

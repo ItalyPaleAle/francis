@@ -14,7 +14,7 @@ import (
 
 const (
 	canonicalIRMagic    = "francis.workflow.ir"
-	definitionIRVersion = 1
+	definitionIRVersion = 2
 )
 
 // definitionData is the pure workflow-wide configuration shared by the Go frontend and the IR
@@ -48,9 +48,10 @@ type stepData struct {
 	compInitial    time.Duration
 	compMax        time.Duration
 
-	stepTimeout  time.Duration
-	eventTimeout time.Duration
-	eventName    string
+	attemptTimeout    time.Duration
+	compensateTimeout time.Duration
+	eventTimeout      time.Duration
+	eventName         string
 
 	optional      bool
 	skipOnFailure []string
@@ -153,7 +154,8 @@ func lowerStep(declaration *stepDecl, bindings map[string]stepBinding) (*stepDef
 	data.hasRun = declaration.run != nil
 	data.hasCompensate = declaration.compensate != nil
 	data.inputFrom = canonicalReferences(declaration.inputFrom)
-	data.stepTimeout = utils.PositiveOr(declaration.stepTimeout, 0)
+	data.attemptTimeout = utils.PositiveOr(declaration.attemptTimeout, 0)
+	data.compensateTimeout = utils.PositiveOr(declaration.compensateTimeout, 0)
 	data.eventTimeout = utils.PositiveOr(declaration.eventTimeout, 0)
 	data.skipOnFailure = canonicalReferences(declaration.skipOnFailure)
 	data.maxParallel = max(declaration.maxParallel, 0)
@@ -335,7 +337,7 @@ func canonicalStep(step *stepDef) []any {
 		int64(step.compMaxAttempt),
 		int64(step.compInitial),
 		int64(step.compMax),
-		int64(step.stepTimeout),
+		int64(step.attemptTimeout),
 		int64(step.eventTimeout),
 		step.eventName,
 		step.optional,
@@ -352,5 +354,6 @@ func canonicalStep(step *stepDef) []any {
 		step.untilValue,
 		step.hasUntil,
 		int64(step.maxIterations),
+		int64(step.compensateTimeout),
 	}
 }

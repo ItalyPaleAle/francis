@@ -29,7 +29,7 @@ orders, err := workflow.New("order-fulfillment",
 			workflow.WithCompensate(refundCharge),
 			workflow.WithMaxAttempts(5),
 			workflow.WithRetryBackoff(2*time.Second, time.Minute),
-			workflow.WithStepTimeout(30*time.Second),
+			workflow.WithAttemptTimeout(30*time.Second),
 		),
 		workflow.Step("ship", workflow.WithRun(createShipment)),
 	),
@@ -74,7 +74,7 @@ One call registers everything the workflow needs, including the actors that run 
 |--------|-------------|
 | `WithSteps(...)` | The graph, in the order the steps run (required) |
 | `WithVersion(n)` | The definition's version, stamped on every instance it starts (defaults to `1`) - see [Deploying and versioning](/workflows/deploying) |
-| `WithTimeout(d)` | How long an instance may run before it is failed and unwound (defaults to 1 hour) |
+| `WithTimeout(d)` | How long an instance may remain active, including task queue wait, before it is failed and unwound (defaults to 1 hour) |
 | `WithConcurrency(n)` | The maximum number of tasks this host runs at once (defaults to `1`) |
 | `WithCompensateConcurrency(n)` | The same, for compensations (defaults to `WithConcurrency`) |
 | `WithCapability(cap)` | Advertise a capability on this host (repeatable) |

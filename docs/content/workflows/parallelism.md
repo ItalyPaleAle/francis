@@ -78,7 +78,7 @@ The items are always a step's whole output: there is no selector for one field o
 
 `WithConcurrency` is separate: it limits how much work a host accepts across all instances. A fan-out of 500 with `WithMaxParallel(8)`, on four hosts each running `WithConcurrency(4)`, has at most 8 in flight for that instance and 16 across the cluster.
 
-Asking for more in-flight tasks than the cluster can run does not fail the fan-out. The surplus waits, and the step takes longer.
+Asking for more in-flight tasks than the cluster can run does not fail the fan-out. The surplus waits, and the step takes longer. Queue wait does not consume a task's `WithAttemptTimeout`, only the workflow's overall `WithTimeout` continues to run.
 
 ## Failure policies
 

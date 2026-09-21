@@ -130,13 +130,12 @@ func TestGroupOptionsSurviveOnTheSpec(t *testing.T) {
 	def := testDefinition(t, "group-with", WithSteps(
 		Step("plan", WithRun(noopRun)),
 		Parallel("notify", Step("email", WithRun(noopRun))).
-			With(WithOptional(), WithInputFrom("plan"), WithStepTimeout(time.Minute)),
+			With(WithOptional(), WithInputFrom("plan")),
 	))
 
 	notify := def.byName["notify"]
 	assert.True(t, notify.optional)
 	assert.Equal(t, []string{"plan"}, notify.inputFrom)
-	assert.Equal(t, time.Minute, notify.stepTimeout)
 }
 
 func TestMemberCompensateOnFailure(t *testing.T) {

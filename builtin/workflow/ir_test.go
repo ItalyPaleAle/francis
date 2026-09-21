@@ -93,7 +93,7 @@ func TestIRMessagePackTypesHaveStableBytes(t *testing.T) {
 	assertCanonicalFields(t, tests)
 }
 
-func TestStepIRFormatVersionOneHasStableBytes(t *testing.T) {
+func TestStepIRFormatVersionTwoHasStableBytes(t *testing.T) {
 	step := &stepDef{
 		name:                "task",
 		kind:                KindChild,
@@ -107,7 +107,7 @@ func TestStepIRFormatVersionOneHasStableBytes(t *testing.T) {
 		compMaxAttempt:      4,
 		compInitial:         5,
 		compMax:             6,
-		stepTimeout:         7,
+		attemptTimeout:      7,
 		eventTimeout:        8,
 		eventName:           "event",
 		optional:            true,
@@ -124,6 +124,7 @@ func TestStepIRFormatVersionOneHasStableBytes(t *testing.T) {
 		untilValue:          true,
 		hasUntil:            true,
 		maxIterations:       10,
+		compensateTimeout:   11,
 		members:             []*stepDef{},
 		child:               &childDefinitionIR{name: "child", version: 2},
 	}
@@ -143,7 +144,7 @@ func TestStepIRFormatVersionOneHasStableBytes(t *testing.T) {
 		{name: "compensation max attempts", value: schema[11], expectedHex: "d30000000000000004"},
 		{name: "compensation initial", value: schema[12], expectedHex: "d30000000000000005"},
 		{name: "compensation max", value: schema[13], expectedHex: "d30000000000000006"},
-		{name: "step timeout", value: schema[14], expectedHex: "d30000000000000007"},
+		{name: "attempt timeout", value: schema[14], expectedHex: "d30000000000000007"},
 		{name: "event timeout", value: schema[15], expectedHex: "d30000000000000008"},
 		{name: "event name", value: schema[16], expectedHex: "a56576656e74"},
 		{name: "optional", value: schema[17], expectedHex: "c3"},
@@ -160,13 +161,14 @@ func TestStepIRFormatVersionOneHasStableBytes(t *testing.T) {
 		{name: "until value", value: schema[28], expectedHex: "c3"},
 		{name: "has until", value: schema[29], expectedHex: "c3"},
 		{name: "max iterations", value: schema[30], expectedHex: "d3000000000000000a"},
+		{name: "compensation timeout", value: schema[31], expectedHex: "d3000000000000000b"},
 	}
 	expectedFields := assertCanonicalFields(t, fields)
-	assertCanonicalHex(t, "step", "dc001f"+expectedFields, schema)
-	assertCanonicalHex(t, "steps", "91dc001f"+expectedFields, canonicalSteps([]*stepDef{step}))
+	assertCanonicalHex(t, "step", "dc0020"+expectedFields, schema)
+	assertCanonicalHex(t, "steps", "91dc0020"+expectedFields, canonicalSteps([]*stepDef{step}))
 }
 
-func TestDefinitionIRFormatVersionOneHasStableBytes(t *testing.T) {
+func TestDefinitionIRFormatVersionTwoHasStableBytes(t *testing.T) {
 	ir := &definitionIR{
 		version:                   2,
 		timeout:                   3,
@@ -185,7 +187,7 @@ func TestDefinitionIRFormatVersionOneHasStableBytes(t *testing.T) {
 	schema := canonicalDefinition(ir)
 	fields := []canonicalField{
 		{name: "magic", value: schema[0], expectedHex: "b36672616e6369732e776f726b666c6f772e6972"},
-		{name: "format version", value: schema[1], expectedHex: "d30000000000000001"},
+		{name: "format version", value: schema[1], expectedHex: "d30000000000000002"},
 		{name: "name", value: schema[2], expectedHex: "a8776f726b666c6f77"},
 		{name: "version", value: schema[3], expectedHex: "d30000000000000002"},
 		{name: "steps", value: schema[4], expectedHex: "90"},

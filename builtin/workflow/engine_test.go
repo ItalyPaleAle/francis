@@ -731,14 +731,14 @@ func TestTerminationDropsTheTimers(t *testing.T) {
 	assert.False(t, stillArmed)
 }
 
-// TestTheDeadlineFailsTheStepItHit verifies what a timeout costs depends on the step it elapsed on, which the per-step policies decide exactly as a handler failure would
-func TestTheDeadlineFailsTheStepItHit(t *testing.T) {
+// TestAnAttemptTimeoutUsesTheStepFailurePolicy verifies a worker timeout report costs the step exactly what any other handler failure would
+func TestAnAttemptTimeoutUsesTheStepFailurePolicy(t *testing.T) {
 	host := newFakeHost()
 
 	wf, err := New("deadline",
 		WithTimeout(time.Hour),
 		WithSteps(
-			Step("slow", WithRun(noopRun), WithStepTimeout(time.Nanosecond), WithMaxAttempts(1), WithOptional()),
+			Step("slow", WithRun(noopRun), WithAttemptTimeout(time.Nanosecond), WithMaxAttempts(1), WithOptional()),
 			Step("after", WithRun(noopRun)),
 		),
 	)
@@ -746,13 +746,11 @@ func TestTheDeadlineFailsTheStepItHit(t *testing.T) {
 
 	o := newTestOrchestrator(t, wf, host, "inst-1")
 	require.NoError(t, o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}}))
-
-	time.Sleep(time.Millisecond)
-	require.NoError(t, o.Alarm(t.Context(), alarmDeadline, nil))
+	require.NoError(t, o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "slow", Index: 0, Attempt: 1, Error: errAttemptTimeout.Error(), Retryable: true}}))
 
 	st := readJournal(t, host, wf, "inst-1")
 	assert.Equal(t, StepFailed, st.step("slow").Status)
-	assert.Contains(t, st.step("slow").Error, "timed out")
+	assert.Contains(t, st.step("slow").Error, errAttemptTimeout.Error())
 
 	// The step declared its failure optional, so the run carries on rather than unwinding
 	assert.Equal(t, StepRunning, st.step("after").Status)

@@ -168,10 +168,28 @@ func (w *worker) invokeHandler(ctx context.Context, method string, p *runPayload
 
 	task := &taskEnvelope{p: p, undo: w.undo}
 
+	// Start the execution budget only after Francis has assigned capacity and the worker is ready to invoke the handler
+	timeout := d.attemptTimeout
+	if method == methodCompensate {
+		timeout = d.compensateTimeout
+	}
+	cancel := func() {}
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeoutCause(ctx, timeout, errAttemptTimeout)
+	}
+	defer cancel()
+
 	if method == methodCompensate {
 		res.err = w.runCompensate(ctx, d, task)
 	} else {
 		res.output, res.err = w.runForward(ctx, d, task)
+	}
+
+	// A handler that returns after its own deadline still failed the attempt even when it ignored cancellation
+	timeoutErr := context.Cause(ctx)
+	if errors.Is(timeoutErr, errAttemptTimeout) {
+		res.output = nil
+		res.err = fmt.Errorf("%w after %s", errAttemptTimeout, timeout)
 	}
 
 	tracing.End(span, res.err)

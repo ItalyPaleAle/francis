@@ -120,6 +120,10 @@ For a wider fan-out, use a [child workflow](/workflows/child-workflows) per batc
 
 `WithMaxAttempts` and `WithRetryBackoff` decide how many attempts a task gets and how long to wait between them. Compensations get a budget of their own.
 
+`WithAttemptTimeout` bounds one handler invocation. Its clock starts inside the worker after Francis assigns capacity, so time in the durable queue and retry backoff do not consume it. Every retry receives a fresh execution budget. A fan-out applies the timeout independently to each task rather than to the fan-out as a whole.
+
+The timeout cancels the context passed to the handler. A handler should pass that context to blocking calls and stop when it is cancelled, and an attempt that returns after its deadline is still reported as failed.
+
 Call `GetStatus` to show the attempts each task has spent and why the last one failed.
 
 | Return | What happens |
@@ -154,7 +158,8 @@ if errors.Is(err, store.ErrNotFound) {
 | `WithRetryBackoff(initial, max)` | The delay before the next attempt, and the max backoff (defaults to 2s and 1 minute) |
 | `WithCompensateMaxAttempts(n)` | Same as `WithMaxAttempts`, but for the compensation (defaults to `10`) |
 | `WithCompensateBackoff(initial, max)` | Same as `WithBackoff`, but for the compensation (defaults to 10s and 10 minutes) |
-| `WithStepTimeout(d)` | How long this step may take before its outstanding attempts are failed |
+| `WithAttemptTimeout(d)` | Maximum execution time for each handler attempt, excluding queue wait and retry backoff |
+| `WithCompensateTimeout(d)` | Maximum execution time for each compensation attempt, excluding queue wait and retry backoff |
 | `WithOptional()` | This step's failure does not fail the instance |
 | `WithSkipOnFailure(steps...)` | Steps to skip when this one fails |
 | `WithSkipIf(step, value)` | Skip this step when the named upstream step's output equals `value` |

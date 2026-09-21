@@ -503,15 +503,15 @@ func TestAdvanceSuspendPausesTheDeadlinesAndStartsNothing(t *testing.T) {
 	def := testDefinition(t, "suspendable",
 		WithTimeout(time.Hour),
 		WithSteps(
-			Step("a", WithRun(noopRun), WithStepTimeout(10*time.Minute)),
+			Step("a", WithRun(noopRun)),
 			Step("b", WithRun(noopRun)),
 		),
 	)
 
 	st := startJournal(t, def, now)
-	require.Equal(t, now.Add(10*time.Minute), st.DeadlineAt)
+	require.Equal(t, now.Add(time.Hour), st.DeadlineAt)
 
-	// Half the instance timeout and half the step's own budget have gone by the time it is paused
+	// Half the instance timeout has gone by when maintenance pauses the instance
 	paused := now.Add(30 * time.Minute)
 	apply(st, def, &event{kind: evSuspend, reason: "maintenance"}, paused)
 	advance(st, def, "inst-1", paused)
@@ -846,7 +846,8 @@ func TestFingerprintCoversEverythingATurnReads(t *testing.T) {
 		{name: "a step's retry backoff", opts: []Option{WithSteps(stepsWith(WithRetryBackoff(time.Second, time.Minute))...)}},
 		{name: "a step's compensation budget", opts: []Option{WithSteps(stepsWith(WithCompensateMaxAttempts(4))...)}},
 		{name: "a step's compensation backoff", opts: []Option{WithSteps(stepsWith(WithCompensateBackoff(time.Second, time.Minute))...)}},
-		{name: "a step's timeout", opts: []Option{WithSteps(stepsWith(WithStepTimeout(time.Minute))...)}},
+		{name: "an attempt timeout", opts: []Option{WithSteps(stepsWith(WithAttemptTimeout(time.Minute))...)}},
+		{name: "a compensation timeout", opts: []Option{WithSteps(stepsWith(WithCompensateTimeout(time.Minute))...)}},
 		{name: "compensating a step that failed", opts: []Option{WithSteps(stepsWith(WithCompensateOnFailure())...)}},
 		{
 			name: "a fan-out's window",
@@ -1261,7 +1262,7 @@ func TestOptionalLateSuccessKeepsCommittedEffects(t *testing.T) {
 			t.Run(kind+"/"+map[bool]string{false: "before-completion", true: "after-completion"}[afterCompletion], func(t *testing.T) {
 				// Exercise each source of optional abandonment with the same committed surrounding steps
 				now := time.Now()
-				optional := Step("optional", WithRun(noopRun), WithCompensate(noopCompensate), WithOptional(), WithStepTimeout(time.Second))
+				optional := Step("optional", WithRun(noopRun), WithCompensate(noopCompensate), WithOptional())
 				if kind == "parallel" {
 					optional = Parallel("optional",
 						Step("slow", WithRun(noopRun), WithCompensate(noopCompensate)),
@@ -1271,7 +1272,7 @@ func TestOptionalLateSuccessKeepsCommittedEffects(t *testing.T) {
 				if kind == "child" {
 					child, err := New("optional-child", WithSteps(Step("effect", WithRun(noopRun))))
 					require.NoError(t, err)
-					optional = Child("optional", WithDefinition(child), WithOptional(), WithStepTimeout(time.Second))
+					optional = Child("optional", WithDefinition(child), WithOptional())
 				}
 				def := testDefinition(t, "optional-late", WithSteps(
 					Step("first", WithRun(noopRun), WithCompensate(noopCompensate)),
@@ -1284,8 +1285,7 @@ func TestOptionalLateSuccessKeepsCommittedEffects(t *testing.T) {
 				if kind == "parallel" {
 					reportFailure(t, st, def, "optional", 1, "failed", false, now)
 				} else {
-					o := &orchestrator{def: def}
-					o.applyElapsedDeadlines(st, now.Add(2*time.Second))
+					abandonOutstandingTasks(st.step("optional"), "abandoned by test", now.Add(2*time.Second))
 				}
 				advance(st, def, "inst-1", now.Add(2*time.Second))
 				require.True(t, st.step("optional").task(0).Abandoned)
@@ -1386,32 +1386,20 @@ func TestLateEffectFencesEarlierUndo(t *testing.T) {
 	}
 }
 
-func TestCompensationIgnoresForwardStepDeadline(t *testing.T) {
-	for _, kind := range []string{"plain", "child"} {
-		t.Run(kind, func(t *testing.T) {
-			// Both a defensive undo and a child rollback can begin when the forward step times out
-			now := time.Now()
-			step := Step("effect", WithRun(noopRun), WithCompensate(noopCompensate), WithCompensateOnFailure(), WithStepTimeout(time.Second))
-			if kind == "child" {
-				child, err := New("deadline-child", WithSteps(Step("work", WithRun(noopRun))))
-				require.NoError(t, err)
-				step = Child("effect", WithDefinition(child), WithStepTimeout(time.Second))
-			}
-			def := testDefinition(t, "compensation-deadline", WithTimeout(time.Hour), WithSteps(step))
-			st := startJournal(t, def, now)
-			o := &orchestrator{def: def}
+func TestAttemptTimeoutIsNotADurableWorkflowDeadline(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "attempt-deadline", WithTimeout(time.Hour), WithSteps(
+		Step("effect", WithRun(noopRun), WithAttemptTimeout(time.Second)),
+	))
+	st := startJournal(t, def, now)
+	o := &orchestrator{def: def}
 
-			// Repeated recovery turns must retain the future instance deadline instead of hot-looping on the expired step
-			for second := 2; second < 5; second++ {
-				turnTime := now.Add(time.Duration(second) * time.Second)
-				o.applyElapsedDeadlines(st, turnTime)
-				advance(st, def, "inst-1", turnTime)
-				require.Equal(t, StatusCompensating, st.Status)
-				assert.Equal(t, now.Add(time.Hour), st.DeadlineAt)
-				assert.True(t, st.DeadlineAt.After(turnTime))
-			}
-		})
-	}
+	// Waiting in the queue does not create an earlier orchestrator alarm because the execution budget belongs to the worker
+	o.applyElapsedDeadlines(st, now.Add(2*time.Second))
+	advance(st, def, "inst-1", now.Add(2*time.Second))
+	require.Equal(t, StatusRunning, st.Status)
+	assert.Equal(t, StepRunning, st.step("effect").Status)
+	assert.Equal(t, now.Add(time.Hour), st.DeadlineAt)
 }
 
 func TestSuspendedFailurePreservesSuspension(t *testing.T) {
@@ -1486,21 +1474,20 @@ func TestRepeatedUnwindPreservesFailedRollback(t *testing.T) {
 	t.Logf("status=%s compensation=%s a.status=%s a.comp.error=%s", st.Status, st.Compensation, st.step("a").Status, st.step("a").Tasks[0].Comp.Error)
 }
 
-func TestStepTimeoutRecordsLateSuccess(t *testing.T) {
+func TestAbandonedAttemptRecordsLateSuccess(t *testing.T) {
 	now := time.Now()
 	def := testDefinition(t, "timeout-late", WithSteps(
 		Step("a", WithRun(noopRun), WithCompensate(noopCompensate)),
-		Step("b", WithRun(noopRun), WithCompensate(noopCompensate), WithStepTimeout(time.Second)),
+		Step("b", WithRun(noopRun), WithCompensate(noopCompensate)),
 	))
 	st := startJournal(t, def, now)
 	reportSuccess(t, st, def, "a", 0, "a-effect", now)
 	advance(st, def, "inst-1", now)
-	o := &orchestrator{def: def}
-	o.applyElapsedDeadlines(st, now.Add(2*time.Second))
+	st.beginUnwind(def, "injected failure", StatusFailed, now.Add(2*time.Second))
 	advance(st, def, "inst-1", now.Add(2*time.Second))
 	require.Equal(t, StatusCompensating, st.Status)
 
-	// Timeout does not interrupt the worker, so its eventual success is still real
+	// Abandonment does not interrupt the worker, so its eventual success is still real
 	duplicate := reportSuccess(t, st, def, "b", 0, "b-effect", now.Add(3*time.Second))
 	advance(st, def, "inst-1", now.Add(3*time.Second))
 	assert.False(t, duplicate)

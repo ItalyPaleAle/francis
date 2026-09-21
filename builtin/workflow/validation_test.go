@@ -260,7 +260,6 @@ func TestNewRejectsIgnoredParallelMemberOptions(t *testing.T) {
 		{"WithSkipIf", WithSkipIf("source", false)},
 		{"WithOptional", WithOptional()},
 		{"WithSkipOnFailure", WithSkipOnFailure("dependent")},
-		{"WithStepTimeout", WithStepTimeout(time.Second)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -291,13 +290,17 @@ func TestNewRejectsOptionsOnIncompatibleKinds(t *testing.T) {
 		{"group handler", Parallel("target", Step("member", WithRun(noopRun))).With(WithRun(noopRun))},
 		{"group compensation", Parallel("target", Step("member", WithRun(noopRun))).With(WithCompensate(noopCompensate))},
 		{"group capability", Parallel("target", Step("member", WithRun(noopRun))).With(WithRequiredCapability("gpu"))},
+		{"group attempt timeout", Parallel("target", Step("member", WithRun(noopRun))).With(WithAttemptTimeout(time.Second))},
 		{"wait optional", WaitForEvent("target", WithOptional())},
 		{"wait input dependencies", WaitForEvent("target", WithInputFrom("source"))},
-		{"wait conflicting timeouts", WaitForEvent("target", WithEventTimeout(time.Second), WithStepTimeout(time.Minute))},
+		{"wait attempt timeout", WaitForEvent("target", WithAttemptTimeout(time.Second))},
 		{"child handler", Child("target", WithDefinition(child), WithRun(noopRun))},
 		{"child input dependencies", Child("target", WithDefinition(child), WithInputFrom("source"))},
 		{"child capability", Child("target", WithDefinition(child), WithRequiredCapability("gpu"))},
+		{"child attempt timeout", Child("target", WithDefinition(child), WithAttemptTimeout(time.Second))},
 		{"child fan-out compensation", ForEach("target", WithItemsFrom("source"), WithChild(child), WithCompensate(noopCompensate))},
+		{"child fan-out attempt timeout", ForEach("target", WithItemsFrom("source"), WithChild(child), WithAttemptTimeout(time.Second))},
+		{"child fan-out compensation timeout", ForEach("target", WithItemsFrom("source"), WithChild(child), WithCompensateTimeout(time.Second))},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -314,9 +317,9 @@ func TestSupportedParallelAndChildOptionsRemainValid(t *testing.T) {
 	_, err = New("supported-options", WithSteps(
 		Step("source", WithRun(noopRun)),
 		Parallel("group",
-			Step("member", WithRun(noopRun), WithCompensate(noopCompensate), WithCompensateOnFailure(), WithMaxAttempts(5), WithRetryBackoff(time.Second, time.Minute), WithCompensateBackoff(time.Second, time.Minute), WithInputFrom("source"), WithRequiredCapability("gpu")),
+			Step("member", WithRun(noopRun), WithCompensate(noopCompensate), WithCompensateOnFailure(), WithMaxAttempts(5), WithRetryBackoff(time.Second, time.Minute), WithCompensateBackoff(time.Second, time.Minute), WithAttemptTimeout(time.Minute), WithCompensateTimeout(time.Minute), WithInputFrom("source"), WithRequiredCapability("gpu")),
 			Child("child", WithDefinition(child), WithCompensateMaxAttempts(3)),
-		).With(WithInputFrom("source"), WithOptional(), WithSkipIf("source", false), WithStepTimeout(time.Minute), WithFailurePolicy(CollectFailures)),
+		).With(WithInputFrom("source"), WithOptional(), WithSkipIf("source", false), WithFailurePolicy(CollectFailures)),
 		ForEach("fan", WithItemsFrom("source"), WithRun(noopRun), WithMaxParallel(2), WithFailurePolicy(TolerateFailures)),
 		WaitForEvent("event", WithSkipIf("source", true), WithEventTimeout(time.Minute)),
 	))
@@ -400,9 +403,9 @@ func TestNewRejectsLoopOptionsOnOtherKinds(t *testing.T) {
 			wantErr: "cannot use WithMaxIterations on a step node",
 		},
 		{
-			name:    "WithStepTimeout on a loop",
-			spec:    Loop("poll", Step("check", WithRun(noopRun))).With(WithUntil("check", true), WithStepTimeout(time.Minute)),
-			wantErr: "cannot use WithStepTimeout on a loop node",
+			name:    "WithAttemptTimeout on a loop",
+			spec:    Loop("poll", Step("check", WithRun(noopRun))).With(WithUntil("check", true), WithAttemptTimeout(time.Minute)),
+			wantErr: "cannot use WithAttemptTimeout on a loop node",
 		},
 	}
 

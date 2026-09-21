@@ -31,7 +31,7 @@ unwind:       refund-card ◄── release-stock ◄── unwind ship[0..2]
 - Within one step, compensations run concurrently.
 - A step is fully compensated before the next one starts.
 
-A compensation is a task like any other, with its own attempts and timeout, and its progress is visible in `GetStatus`.
+A compensation is a task like any other, with its own attempts and an optional per-attempt `WithCompensateTimeout`, and its progress is visible in `GetStatus`.
 
 ## What triggers an unwind
 

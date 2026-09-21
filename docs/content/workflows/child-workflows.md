@@ -104,7 +104,7 @@ unwind:  unwind(database) ∥ unwind(storage)   then   close-review-ticket
 
 ## Cancellation and suspension
 
-A parent's `Cancel` cancels its running children, and a parent's step timeout cancels the child it was waiting for.
+A parent's `Cancel` or instance timeout cancels its running children. A child definition's own `WithTimeout` independently bounds the child instance.
 
 Calling `Suspend` on the parent does _not_ propagate to its children.
 

@@ -80,7 +80,7 @@ While suspended:
 
 - Nothing new is started: no next step, attempt, or compensation.
 - In-flight tasks continue until done: a task that has already started runs to completion and its result is recorded.
-- Deadlines are paused. Francis restores whatever was left of the instance, step, and event timeouts on resume, so a two-day suspension does not eat a thirty-minute timeout.
+- Instance and event deadlines are paused. Francis restores whatever was left on resume, so a two-day suspension does not eat a thirty-minute timeout. An in-flight handler's `WithAttemptTimeout` is not paused because the handler keeps running.
 - Events are accepted. A `RaiseEvent` for the open `WaitForEvent` step is recorded, and the step completes on resume. However, a `RaiseEvent` does not automatically cause the workflow to be resumed.
 - Workflows can be canceled: `Cancel` on a suspended instance resumes it straight into `compensating` (but does not start the compensation). Suspending during a rollback pauses it at the step it had reached.
 - Children are not affected. A suspended parent's children keep running, and their results wait for the resume. Suspend a child explicitly if that is not what you want: `GetStatus` on the parent lists every child's instance ID.
