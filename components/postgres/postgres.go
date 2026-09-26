@@ -21,6 +21,7 @@ import (
 	"github.com/italypaleale/go-sql-utils/migrations"
 	postgresmigrations "github.com/italypaleale/go-sql-utils/migrations/postgres"
 	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"k8s.io/utils/clock"
@@ -48,7 +49,13 @@ type PostgresProvider struct {
 	cleanupInterval time.Duration
 	gc              cleanup.GarbageCollector
 	clock           clock.WithTicker
-	tablePrefix     string
+
+	// Prepended to the name of a table or other schema objects to reference it in a query
+	tablePrefix string
+	// Prefix alone, without the schema
+	namePrefix string
+	// Schema containing the provider's objects (unquoted), or empty to rely on the connection's search_path
+	schema string
 }
 
 func NewPostgresProvider(log *slog.Logger, postgresOpts PostgresProviderOptions, providerConfig components.ProviderConfig) (*PostgresProvider, error) {
@@ -64,6 +71,7 @@ func NewPostgresProvider(log *slog.Logger, postgresOpts PostgresProviderOptions,
 		cleanupInterval: postgresOpts.CleanupInterval,
 		db:              postgresOpts.DB,
 		clock:           postgresOpts.clock,
+		schema:          postgresOpts.Schema,
 	}
 
 	// Resolve the table prefix
@@ -74,7 +82,13 @@ func NewPostgresProvider(log *slog.Logger, postgresOpts PostgresProviderOptions,
 	}
 	if tablePrefix != "" {
 		// A non-empty prefix is stored with a trailing separator so tables are named e.g. "francis_hosts"
-		p.tablePrefix = tablePrefix + "_"
+		p.namePrefix = tablePrefix + "_"
+	}
+
+	// Queries qualify every object with the schema, because the search_path can't be changed on a connection that may be shared with the app
+	p.tablePrefix = p.namePrefix
+	if p.schema != "" {
+		p.tablePrefix = pgx.Identifier{p.schema}.Sanitize() + "." + p.namePrefix
 	}
 
 	// Set default values
@@ -217,7 +231,7 @@ func (p *PostgresProvider) performMigrations(ctx context.Context) error {
 			return fmt.Errorf("error reading migration script '%s': %w", e, err)
 		}
 
-		// Apply the table prefix to the script's "%s" placeholders
+		// Apply the table prefix to the script's "%s" and "%p" placeholders
 		script := p.q(string(data))
 
 		migrationFns[i] = func(ctx context.Context) error {
@@ -288,22 +302,25 @@ func (p *PostgresProvider) initGC() (err error) {
 }
 
 // q applies the configured table prefix to a query loaded from an embedded migration script
-// In those files, every table (and other schema object) name is written with a "%s" placeholder immediately before it (e.g. "%shosts"), which this replaces with the prefix
+// In those files, every reference to a table (or other schema object) is written with a "%s" placeholder immediately before the name (e.g. "%shosts"), which this replaces with the prefix, including the schema if any
+// Names that Postgres doesn't allow to be schema-qualified use a "%p" placeholder instead, which this replaces with the prefix alone: this applies to the names of new indexes and triggers (which are always created in the schema of their table), and to the new name in "RENAME TO"
 // Note: Temporary tables are transaction/session-local and thus never prefixed
 func (p *PostgresProvider) q(query string) string {
-	n := strings.Count(query, "%s")
-	if n == 0 {
-		return query
-	}
+	// The only values interpolated here are the statically-derived prefixes (with the schema quoted), so there's no risk of SQL injection
+	return strings.
+		NewReplacer(
+			"%s", p.tablePrefix,
+			"%p", p.namePrefix,
+		).
+		Replace(query)
+}
 
-	args := make([]any, n)
-	for i := range args {
-		args[i] = p.tablePrefix
+// tableIdentifier returns the identifier of a table, including the schema if one is configured, for APIs such as CopyFrom that quote the name themselves
+func (p *PostgresProvider) tableIdentifier(name string) pgx.Identifier {
+	if p.schema == "" {
+		return pgx.Identifier{p.namePrefix + name}
 	}
-
-	// The only value interpolated here is the statically-derived table prefix, so there's no risk of SQL injection
-	// #nosec G201
-	return fmt.Sprintf(query, args...)
+	return pgx.Identifier{p.schema, p.namePrefix + name}
 }
 
 // utcPtr returns a pointer to the UTC representation of t, or nil if t is nil

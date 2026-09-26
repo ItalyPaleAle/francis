@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 	"uuid"
@@ -59,33 +60,6 @@ func TestPostgresProvider(t *testing.T) {
 }
 
 func TestPostgresTablePrefix(t *testing.T) {
-	// schemaObjects returns the names of all tables, views, and functions created in the test schema
-	schemaObjects := func(t *testing.T, p *PostgresProvider, testSchema string) []string {
-		t.Helper()
-		rows, err := p.db.Query(t.Context(), `
-			SELECT table_name FROM information_schema.tables WHERE table_schema = $1
-			UNION ALL
-			SELECT table_name FROM information_schema.views WHERE table_schema = $1
-			UNION ALL
-			SELECT routine_name FROM information_schema.routines WHERE routine_schema = $1`,
-			testSchema,
-		)
-		require.NoError(t, err)
-		defer rows.Close()
-
-		var names []string
-		for rows.Next() {
-			var name string
-			require.NoError(t, rows.Scan(&name))
-			names = append(names, name)
-		}
-
-		err = rows.Err()
-		require.NoError(t, err)
-
-		return names
-	}
-
 	t.Run("default prefix is francis", func(t *testing.T) {
 		p, testSchema := initTestProvider(t, true)
 		assert.Equal(t, "francis_", p.tablePrefix)
@@ -106,7 +80,7 @@ func TestPostgresTablePrefix(t *testing.T) {
 	})
 
 	t.Run("custom prefix", func(t *testing.T) {
-		p, testSchema := initTestProviderWithPrefix(t, "myapp", true)
+		p, testSchema := initTestProviderWithOptions(t, "myapp", "", true)
 		assert.Equal(t, "myapp_", p.tablePrefix)
 
 		names := schemaObjects(t, p, testSchema)
@@ -120,7 +94,7 @@ func TestPostgresTablePrefix(t *testing.T) {
 	})
 
 	t.Run("custom prefix is functional end-to-end", func(t *testing.T) {
-		p, _ := initTestProviderWithPrefix(t, "myapp", true)
+		p, _ := initTestProviderWithOptions(t, "myapp", "", true)
 
 		// Register a host, then read it back through the regular API (which exercises the prefixed stored functions)
 		hostRes, err := p.RegisterHost(t.Context(), components.RegisterHostReq{
@@ -151,11 +125,70 @@ func TestPostgresTablePrefix(t *testing.T) {
 	})
 }
 
-func initTestProvider(t *testing.T, cleanup bool) (p *PostgresProvider, testSchema string) {
-	return initTestProviderWithPrefix(t, "", cleanup)
+func TestPostgresSchema(t *testing.T) {
+	// The provider's objects live in their own schema, which is not on the connection's search_path, so any query that doesn't reference the schema explicitly fails
+	// The mixed-case name ensures the schema is always quoted
+	dataSchema := generateTestSchemaName(t) + "_Data"
+	p, testSchema := initTestProviderWithOptions(t, "", dataSchema, true)
+	assert.Equal(t, `"`+dataSchema+`".francis_`, p.tablePrefix)
+
+	t.Run("objects are created in the configured schema", func(t *testing.T) {
+		names := schemaObjects(t, p, dataSchema)
+		assert.Contains(t, names, "francis_hosts")
+		assert.Contains(t, names, "francis_alarms")
+		assert.Contains(t, names, "francis_terminal_jobs")
+		assert.Contains(t, names, "francis_host_active_actor_count")
+		assert.Contains(t, names, "francis_metadata")
+		assert.Contains(t, names, "francis_fetch_and_lease_upcoming_alarms_v1")
+		assert.Contains(t, names, "francis_lookup_allocate_actor_v1")
+
+		// The connection's own schema only contains the freeze_time test helpers, so an object that lands there has a reference that's missing the schema
+		for _, name := range schemaObjects(t, p, testSchema) {
+			assert.Falsef(t, strings.HasPrefix(name, "francis_"), "object %q was created in the connection's schema", name)
+		}
+	})
+
+	// Run the test suites
+	suite := comptesting.NewSuite(p)
+	t.Run("suite", suite.RunTests)
+	t.Run("concurrency suite", suite.RunConcurrencyTests)
 }
 
-func initTestProviderWithPrefix(t *testing.T, tablePrefix string, cleanup bool) (p *PostgresProvider, testSchema string) {
+// schemaObjects returns the names of all tables, views, and functions in a schema
+func schemaObjects(t *testing.T, p *PostgresProvider, schema string) []string {
+	t.Helper()
+	rows, err := p.db.Query(t.Context(), `
+		SELECT table_name FROM information_schema.tables WHERE table_schema = $1
+		UNION ALL
+		SELECT table_name FROM information_schema.views WHERE table_schema = $1
+		UNION ALL
+		SELECT routine_name FROM information_schema.routines WHERE routine_schema = $1`,
+		schema,
+	)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	var names []string
+	for rows.Next() {
+		var name string
+		err = rows.Scan(&name)
+		require.NoError(t, err)
+		names = append(names, name)
+	}
+
+	err = rows.Err()
+	require.NoError(t, err)
+
+	return names
+}
+
+func initTestProvider(t *testing.T, cleanup bool) (p *PostgresProvider, testSchema string) {
+	return initTestProviderWithOptions(t, "", "", cleanup)
+}
+
+// initTestProviderWithOptions creates a provider whose connections have the (randomly-named) test schema on their search_path
+// If schema is non-empty, it's created too and the provider is configured to store its objects there
+func initTestProviderWithOptions(t *testing.T, tablePrefix string, schema string, cleanup bool) (p *PostgresProvider, testSchema string) {
 	connString := os.Getenv(connstringEnvVar)
 	if connString == "" {
 		t.Skip(`To run these tests, set the env var ` + connstringEnvVar + ` with the connection string for Postgres database. Example: "` + connstringEnvVar + `=postgres://actors:actors@localhost:5432/actors"`)
@@ -178,9 +211,15 @@ func initTestProviderWithPrefix(t *testing.T, tablePrefix string, cleanup bool) 
 	// Connect to the database beforehand so we can create a new schema for the tests
 	conn := connectTestDatabase(t, connString, testSchema, cleanup)
 
+	// Create the schema for the provider's objects, if requested
+	if schema != "" {
+		testutil.PostgresTestSchema(t, conn, schema, cleanup)
+	}
+
 	providerOpts := PostgresProviderOptions{
 		DB:          conn,
 		TablePrefix: tablePrefix,
+		Schema:      schema,
 
 		// Disable automated cleanups in this test
 		// We will run the cleanups automatically
@@ -284,7 +323,7 @@ func (p *PostgresProvider) Seed(ctx context.Context, spec comptesting.Spec) erro
 			}
 			_, err = tx.CopyFrom(
 				ctx,
-				pgx.Identifier{p.tablePrefix + "hosts"},
+				p.tableIdentifier("hosts"),
 				[]string{"host_id", "host_address", "host_last_health_check"},
 				pgx.CopyFromRows(rows),
 			)
@@ -306,7 +345,7 @@ func (p *PostgresProvider) Seed(ctx context.Context, spec comptesting.Spec) erro
 			}
 			_, err = tx.CopyFrom(
 				ctx,
-				pgx.Identifier{p.tablePrefix + "host_actor_types"},
+				p.tableIdentifier("host_actor_types"),
 				[]string{"host_id", "actor_type", "actor_idle_timeout", "actor_concurrency_limit"},
 				pgx.CopyFromRows(rows),
 			)
@@ -329,7 +368,7 @@ func (p *PostgresProvider) Seed(ctx context.Context, spec comptesting.Spec) erro
 			}
 			_, err = tx.CopyFrom(
 				ctx,
-				pgx.Identifier{p.tablePrefix + "active_actors"},
+				p.tableIdentifier("active_actors"),
 				[]string{"actor_type", "actor_id", "host_id", "actor_idle_timeout", "actor_activation"},
 				pgx.CopyFromRows(rows),
 			)
@@ -370,7 +409,7 @@ func (p *PostgresProvider) Seed(ctx context.Context, spec comptesting.Spec) erro
 			}
 			_, err = tx.CopyFrom(
 				ctx,
-				pgx.Identifier{p.tablePrefix + "alarms"},
+				p.tableIdentifier("alarms"),
 				[]string{
 					"alarm_id", "actor_type", "actor_id", "alarm_name", "alarm_due_time",
 					"alarm_interval", "alarm_ttl_time", "alarm_data",
@@ -612,7 +651,7 @@ func TestHostGarbageCollection(t *testing.T) {
 }
 
 // TestPostgresTimestampsStoredAsUTC guards the invariant that every time value is stored as a UTC timestamp, independent of the server/session time zone
-// The test connections are deliberately pinned to a non-UTC session time zone (see connectTestDatabase) and the clock runs in a non-UTC location (see initTestProviderWithPrefix), so any time-zone-dependent handling would be caught here
+// The test connections are deliberately pinned to a non-UTC session time zone (see connectTestDatabase) and the clock runs in a non-UTC location (see initTestProviderWithOptions), so any time-zone-dependent handling would be caught here
 func TestPostgresTimestampsStoredAsUTC(t *testing.T) {
 	p, testSchema := initTestProvider(t, true)
 

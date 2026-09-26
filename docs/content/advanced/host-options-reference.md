@@ -108,6 +108,7 @@ The SQLite and PostgreSQL provider options accept:
 | `DB` | SQLite (`*sql.DB`), Postgres (`*pgxpool.Pool`) | Use an existing connection instead of opening one. |
 | `Timeout` | SQLite, Postgres | Timeout for database queries. |
 | `CleanupInterval` | SQLite, Postgres, memory | Interval for purging expired state and alarms. |
+| `Schema` | Postgres, standalone Postgres | Schema that holds the provider's tables and functions. It must already exist, and its name is case-sensitive. When empty, objects are resolved through the connection's `search_path`. |
 | `QueryLog` | SQLite, Postgres | A `components.QueryLogConfig` that enables SQL statement logging when the provider opens its own connection. |
 | `OperationLog` | SQLite, Postgres, standalone | A `components.OperationLogConfig` that enables provider-operation logging through the local-host factory. |
 

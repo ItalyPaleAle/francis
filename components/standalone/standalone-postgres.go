@@ -32,12 +32,18 @@ var postgresMigrations embed.FS
 type StandalonePostgresBacked struct {
 	*internal.Provider
 
-	db          *pgxpool.Pool
-	ownsDB      bool
-	closed      atomic.Bool
-	timeout     time.Duration
-	log         *slog.Logger
+	db      *pgxpool.Pool
+	ownsDB  bool
+	closed  atomic.Bool
+	timeout time.Duration
+	log     *slog.Logger
+
+	// Prepended to the name of a table or other schema objects to reference it in a query
 	tablePrefix string
+	// Prefix alone, without the schema
+	namePrefix string
+	// Schema containing the provider's objects (unquoted), or empty to rely on the connection's search_path
+	schema string
 }
 
 // StandalonePostgresOptions contains options for creating a StandalonePostgresBacked provider
@@ -68,6 +74,11 @@ type StandalonePostgresOptions struct {
 	// Defaults to "francis" when empty
 	TablePrefix string
 
+	// Schema that contains every table and other schema objects used by the provider
+	// The schema must already exist
+	// When empty, objects are resolved using the connection's search_path
+	Schema string
+
 	// QueryLog controls optional SQL statement logging when this constructor opens the connection pool
 	// Callers that pass DB are responsible for configuring its statement tracing and logging
 	QueryLog components.QueryLogConfig
@@ -91,10 +102,17 @@ func NewStandalonePostgresBacked(log *slog.Logger, opts StandalonePostgresOption
 	}
 
 	s := &StandalonePostgresBacked{
-		db:          opts.DB,
-		timeout:     timeout,
-		log:         log,
-		tablePrefix: resolveTablePrefix(opts.TablePrefix),
+		db:         opts.DB,
+		timeout:    timeout,
+		log:        log,
+		namePrefix: resolveTablePrefix(opts.TablePrefix),
+		schema:     opts.Schema,
+	}
+
+	// Queries qualify every object with the schema, because the search_path can't be changed on a connection that may be shared with the app
+	s.tablePrefix = s.namePrefix
+	if s.schema != "" {
+		s.tablePrefix = pgx.Identifier{s.schema}.Sanitize() + "." + s.namePrefix
 	}
 
 	// Open an instrumented pool when the caller supplied a connection string
@@ -195,8 +213,8 @@ func (s *StandalonePostgresBacked) runMigrations(ctx context.Context) error {
 			return fmt.Errorf("error reading migration script '%s': %w", name, err)
 		}
 
-		// Apply the table prefix to the script's "%s" placeholders
-		script := applyTablePrefix(s.tablePrefix, string(data))
+		// Apply the table prefix to the script's "%s" and "%p" placeholders
+		script := applyTablePrefix(string(data), s.tablePrefix, s.namePrefix)
 
 		migrationFns[i] = func(ctx context.Context) error {
 			s.log.InfoContext(ctx, "Performing Postgres database migration", slog.String("migration", name))

@@ -93,15 +93,15 @@ func (p *PostgresProvider) Restore(ctx context.Context, r io.Reader) error {
 		pull := &recordPull{next: next}
 
 		// Bulk-load each section with COPY, which is efficient and safe because the tables are empty after the wipe
-		_, err = tx.CopyFrom(ctx, pgx.Identifier{p.tablePrefix + "actor_state"}, backupStateColumns, &copySection{pull: pull, wantType: backup.RecordTypeState, toValues: stateToCopyValues})
+		_, err = tx.CopyFrom(ctx, p.tableIdentifier("actor_state"), backupStateColumns, &copySection{pull: pull, wantType: backup.RecordTypeState, toValues: stateToCopyValues})
 		if err != nil {
 			return fmt.Errorf("failed to restore actor state: %w", err)
 		}
-		_, err = tx.CopyFrom(ctx, pgx.Identifier{p.tablePrefix + "alarms"}, backupAlarmColumns, &copySection{pull: pull, wantType: backup.RecordTypeAlarm, toValues: alarmToCopyValues})
+		_, err = tx.CopyFrom(ctx, p.tableIdentifier("alarms"), backupAlarmColumns, &copySection{pull: pull, wantType: backup.RecordTypeAlarm, toValues: alarmToCopyValues})
 		if err != nil {
 			return fmt.Errorf("failed to restore alarms: %w", err)
 		}
-		_, err = tx.CopyFrom(ctx, pgx.Identifier{p.tablePrefix + "terminal_jobs"}, backupTerminalJobColumns, &copySection{pull: pull, wantType: backup.RecordTypeTerminalJob, toValues: terminalJobToCopyValues})
+		_, err = tx.CopyFrom(ctx, p.tableIdentifier("terminal_jobs"), backupTerminalJobColumns, &copySection{pull: pull, wantType: backup.RecordTypeTerminalJob, toValues: terminalJobToCopyValues})
 		if err != nil {
 			return fmt.Errorf("failed to restore dead jobs: %w", err)
 		}

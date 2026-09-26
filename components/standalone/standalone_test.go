@@ -157,7 +157,7 @@ func TestStandaloneTablePrefix(t *testing.T) {
 		})
 
 		t.Run("custom prefix is functional end-to-end", func(t *testing.T) {
-			p := initPostgresTestProviderWithPrefix(t, "myapp")
+			p := initPostgresTestProviderWithOptions(t, "myapp", "")
 			require.Equal(t, "myapp_", p.tablePrefix)
 
 			require.True(t, tableInSchema(t, p, "myapp_hosts"))
@@ -179,6 +179,69 @@ func TestStandaloneTablePrefix(t *testing.T) {
 			require.Equal(t, "10.0.0.1:8080", hosts[0].Address)
 		})
 	})
+}
+
+func TestStandalonePostgresSchema(t *testing.T) {
+	// The provider's tables live in their own schema, which is not on the connection's search_path, so any query that doesn't reference the schema explicitly fails
+	// The mixed-case name ensures the schema is always quoted
+	dataSchema := generateTestSchemaName(t) + "_Data"
+	p := initPostgresTestProviderWithOptions(t, "", dataSchema)
+	require.Equal(t, `"`+dataSchema+`".francis_`, p.tablePrefix)
+
+	t.Run("tables are created in the configured schema", func(t *testing.T) {
+		tableInSchema := func(schema string, name string) bool {
+			var exists bool
+			err := p.db.
+				QueryRow(t.Context(),
+					"SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2)",
+					schema, name,
+				).
+				Scan(&exists)
+			require.NoError(t, err)
+			return exists
+		}
+
+		require.True(t, tableInSchema(dataSchema, "francis_hosts"))
+		require.True(t, tableInSchema(dataSchema, "francis_terminal_jobs"))
+		require.True(t, tableInSchema(dataSchema, "francis_metadata"))
+
+		// Nothing is created in the connection's own schema
+		var currentSchema string
+		err := p.db.QueryRow(t.Context(), "SELECT current_schema()").Scan(&currentSchema)
+		require.NoError(t, err)
+		require.False(t, tableInSchema(currentSchema, "francis_hosts"))
+		require.False(t, tableInSchema(currentSchema, "francis_metadata"))
+	})
+
+	t.Run("persisted data is loaded from the configured schema", func(t *testing.T) {
+		hostRes, err := p.RegisterHost(t.Context(), components.RegisterHostReq{
+			Address: "10.0.0.1:8080",
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "TestActor", IdleTimeout: 5 * time.Minute},
+			},
+		})
+		require.NoError(t, err)
+
+		// A new provider over the same database and schema loads the persisted host on init
+		p2, err := NewStandalonePostgresBacked(slog.New(slog.DiscardHandler), StandalonePostgresOptions{
+			DB:     p.db,
+			Schema: dataSchema,
+		}, comptesting.GetProviderConfig())
+		require.NoError(t, err)
+		defer p2.Close()
+
+		err = p2.Init(t.Context())
+		require.NoError(t, err)
+
+		hosts, err := p2.ListHosts(t.Context())
+		require.NoError(t, err)
+		require.Len(t, hosts, 1)
+		require.Equal(t, hostRes.HostID, hosts[0].HostID)
+	})
+
+	// Run the test suite
+	suite := comptesting.NewSuite(p)
+	t.Run("suite", suite.RunTests)
 }
 
 // TestStandalonePostgresTimestampsStoredAsUTC verifies the Postgres-backed standalone provider persists every time as a UTC timestamp, independent of the server/session time zone
@@ -323,10 +386,12 @@ func initSQLiteTestProviderWithPrefix(t *testing.T, tablePrefix string) *Standal
 }
 
 func initPostgresTestProvider(t *testing.T) *StandalonePostgresBacked {
-	return initPostgresTestProviderWithPrefix(t, "")
+	return initPostgresTestProviderWithOptions(t, "", "")
 }
 
-func initPostgresTestProviderWithPrefix(t *testing.T, tablePrefix string) *StandalonePostgresBacked {
+// initPostgresTestProviderWithOptions creates a provider whose connections have the (randomly-named) test schema on their search_path
+// If schema is non-empty, it's created too and the provider is configured to store its tables there
+func initPostgresTestProviderWithOptions(t *testing.T, tablePrefix string, schema string) *StandalonePostgresBacked {
 	connString := os.Getenv(postgresConnstringEnvVar)
 	if connString == "" {
 		t.Skip(`To run these tests, set the env var ` + postgresConnstringEnvVar + ` with the connection string for Postgres database. Example: "` + postgresConnstringEnvVar + `=postgres://actors:actors@localhost:5432/actors"`)
@@ -346,10 +411,16 @@ func initPostgresTestProviderWithPrefix(t *testing.T, tablePrefix string) *Stand
 	// Connect to the database with the test schema
 	conn := connectPostgresTestDatabase(t, connString, testSchema)
 
+	// Create the schema for the provider's tables, if requested
+	if schema != "" {
+		testutil.PostgresTestSchema(t, conn, schema, true)
+	}
+
 	providerOpts := StandalonePostgresOptions{
 		DB:          conn,
 		Clock:       clock,
 		TablePrefix: tablePrefix,
+		Schema:      schema,
 	}
 	providerConfig := comptesting.GetProviderConfig()
 

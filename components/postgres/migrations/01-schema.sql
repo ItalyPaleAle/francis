@@ -20,8 +20,8 @@ CREATE TABLE %shosts (
     host_last_health_check timestamp NOT NULL DEFAULT (now() AT TIME ZONE 'utc')
 );
 
-CREATE UNIQUE INDEX %shost_address_idx ON %shosts (host_address);
-CREATE INDEX %shost_last_health_check_idx ON %shosts (host_last_health_check);
+CREATE UNIQUE INDEX %phost_address_idx ON %shosts (host_address);
+CREATE INDEX %phost_last_health_check_idx ON %shosts (host_last_health_check);
 
 -- Contains the actor types supported by each host
 CREATE TABLE %shost_actor_types (
@@ -40,7 +40,7 @@ CREATE TABLE %shost_actor_types (
     FOREIGN KEY (host_id) REFERENCES %shosts (host_id) ON DELETE CASCADE
 );
 
-CREATE INDEX %sactor_type_idx ON %shost_actor_types (actor_type);
+CREATE INDEX %pactor_type_idx ON %shost_actor_types (actor_type);
 
 -- Contains the actors currently active on a host
 CREATE TABLE %sactive_actors (
@@ -61,7 +61,7 @@ CREATE TABLE %sactive_actors (
     FOREIGN KEY (host_id) REFERENCES %shosts (host_id) ON DELETE CASCADE
 );
 
-CREATE INDEX %sactive_actors_host_scan_idx ON %sactive_actors (host_id, actor_type);
+CREATE INDEX %pactive_actors_host_scan_idx ON %sactive_actors (host_id, actor_type);
 
 -- Reports the active actors per each host
 CREATE VIEW %shost_active_actor_count
@@ -87,7 +87,7 @@ CREATE TABLE %sactor_state (
     PRIMARY KEY (actor_type, actor_id)
 );
 
-CREATE INDEX %sactor_state_expiration_time_idx ON %sactor_state (actor_state_expiration_time)
+CREATE INDEX %pactor_state_expiration_time_idx ON %sactor_state (actor_state_expiration_time)
     WHERE actor_state_expiration_time IS NOT NULL;
 
 -- Contains the list of alarms created
@@ -118,9 +118,9 @@ CREATE TABLE %salarms (
     alarm_lease_expiration_time timestamp
 );
 
-CREATE UNIQUE INDEX %salarm_ref_idx ON %salarms (actor_type, actor_id, alarm_name);
-CREATE INDEX %salarm_due_time_idx ON %salarms (alarm_due_time);
-CREATE UNIQUE INDEX %salarm_lease_id_idx ON %salarms (alarm_lease_id)
+CREATE UNIQUE INDEX %palarm_ref_idx ON %salarms (actor_type, actor_id, alarm_name);
+CREATE INDEX %palarm_due_time_idx ON %salarms (alarm_due_time);
+CREATE UNIQUE INDEX %palarm_lease_id_idx ON %salarms (alarm_lease_id)
     WHERE alarm_lease_id IS NOT NULL;
 
 -- Trigger that nullifies the leases on the alarms table when an actor is deactivated
@@ -145,7 +145,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Use a statement-level trigger with a transition table, so the function runs once per DELETE statement and can operate on all deleted rows in a single batch.
-CREATE TRIGGER %sactive_actors_delete_update_alarms
+CREATE TRIGGER %pactive_actors_delete_update_alarms
 AFTER DELETE ON %sactive_actors
 REFERENCING OLD TABLE AS old_rows
 FOR EACH STATEMENT

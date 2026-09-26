@@ -32,6 +32,11 @@ type PostgresProviderOptions struct {
 	// Defaults to "francis" when empty
 	TablePrefix string
 
+	// Schema that contains every table and other schema objects used by the provider
+	// The schema must already exist
+	// When empty, objects are resolved using the connection's search_path
+	Schema string
+
 	// QueryLog controls optional SQL statement logging when this constructor opens the connection pool
 	// When a pool is passed in via DB, the caller can add statement tracing and logging with instrument/postgres.NewTracer from go-sql-utils on the pool config
 	QueryLog components.QueryLogConfig
