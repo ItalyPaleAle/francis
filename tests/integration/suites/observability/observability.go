@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,7 +149,8 @@ func postgresOptions(t *testing.T) postgres.PostgresProviderOptions {
 	})
 
 	return postgres.PostgresProviderOptions{
-		ConnectionString: connectionStringWithSearchPath(t, connString, schema),
+		ConnectionString: connString,
+		Schema:           schema,
 		CleanupInterval:  -1,
 		QueryLog: components.QueryLogConfig{
 			Enabled: true,
@@ -159,20 +159,6 @@ func postgresOptions(t *testing.T) postgres.PostgresProviderOptions {
 			Enabled: true,
 		},
 	}
-}
-
-func connectionStringWithSearchPath(t *testing.T, connString string, schema string) string {
-	connStringLC := strings.ToLower(connString)
-	if strings.HasPrefix(connStringLC, "postgres://") || strings.HasPrefix(connStringLC, "postgresql://") {
-		u, err := url.Parse(connString)
-		require.NoError(t, err)
-		query := u.Query()
-		query.Set("search_path", schema)
-		u.RawQuery = query.Encode()
-		return u.String()
-	}
-
-	return connString + " search_path=" + schema
 }
 
 func hasSpanPrefix(names map[string]bool, prefix string) bool {

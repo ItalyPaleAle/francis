@@ -33,4 +33,4 @@ CREATE TABLE %sdead_jobs (
     job_cron text
 );
 
-CREATE INDEX %sdead_jobs_actor_idx ON %sdead_jobs (actor_type, actor_id);
+CREATE INDEX %pdead_jobs_actor_idx ON %sdead_jobs (actor_type, actor_id);

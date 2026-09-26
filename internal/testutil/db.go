@@ -81,3 +81,25 @@ func PostgresTestDB(t *testing.T, connString string, testSchema string, cleanup 
 
 	return conn
 }
+
+// PostgresTestSchema creates a schema, which is not on the connection's search_path, and optionally deletes it at the end of the tests
+func PostgresTestSchema(t *testing.T, conn *pgxpool.Pool, schema string, cleanup bool) {
+	t.Helper()
+
+	schemaIdentifier := pgx.Identifier{schema}.Sanitize()
+	queryCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	_, err := conn.Exec(queryCtx, "CREATE SCHEMA "+schemaIdentifier)
+	require.NoErrorf(t, err, "Failed to create schema '%s'", schema)
+
+	if cleanup {
+		// This runs before the connection is closed, as cleanup functions run in reverse order
+		t.Cleanup(func() {
+			// t.Context() has been canceled already
+			queryCtx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 5*time.Second)
+			defer cancel()
+			_, err := conn.Exec(queryCtx, "DROP SCHEMA "+schemaIdentifier+" CASCADE")
+			require.NoErrorf(t, err, "Failed to drop schema '%s'", schema)
+		})
+	}
+}

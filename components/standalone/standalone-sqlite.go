@@ -219,7 +219,7 @@ func (s *StandaloneSQLiteBacked) runMigrations(ctx context.Context) error {
 		}
 
 		// Apply the table prefix to the script's "%s" placeholders
-		script := applyTablePrefix(s.tablePrefix, string(data))
+		script := applyTablePrefix(string(data), s.tablePrefix, s.tablePrefix)
 
 		migrationFns[i] = func(ctx context.Context) error {
 			s.log.InfoContext(ctx, "Performing SQLite database migration", slog.String("migration", name))

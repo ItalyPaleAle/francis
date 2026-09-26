@@ -12,7 +12,6 @@ package standalone
 
 import (
 	"database/sql"
-	"fmt"
 	"strings"
 
 	"github.com/italypaleale/francis/components"
@@ -34,22 +33,17 @@ func resolveTablePrefix(tablePrefix string) string {
 	return tablePrefix + "_"
 }
 
-// applyTablePrefix applies the given (already-resolved) table prefix to a query loaded from an embedded migration script.
-// In those files, every table (and other schema object) name is written with a "%s" placeholder immediately before it (e.g. "%shosts"), which this replaces with the prefix.
-func applyTablePrefix(tablePrefix string, query string) string {
-	n := strings.Count(query, "%s")
-	if n == 0 {
-		return query
-	}
-
-	args := make([]any, n)
-	for i := range args {
-		args[i] = tablePrefix
-	}
-
-	// The only value interpolated here is the statically-derived table prefix, so there's no risk of SQL injection
-	// #nosec G201
-	return fmt.Sprintf(query, args...)
+// applyTablePrefix applies the given (already-resolved) prefixes to a query loaded from an embedded migration script.
+// In those files, every reference to a table (or other schema object) is written with a "%s" placeholder immediately before the name (e.g. "%shosts"), which this replaces with tablePrefix, including the schema if any.
+// Names that can't be schema-qualified, such as those of new indexes, use a "%p" placeholder instead, which this replaces with namePrefix.
+func applyTablePrefix(query string, tablePrefix string, namePrefix string) string {
+	// The only values interpolated here are the statically-derived prefixes (with the schema quoted), so there's no risk of SQL injection
+	return strings.
+		NewReplacer(
+			"%s", tablePrefix,
+			"%p", namePrefix,
+		).
+		Replace(query)
 }
 
 // encodeWorkflowLabels serializes an actor state's workflow labels for the backing store, returning nil when there are none so the column stays NULL

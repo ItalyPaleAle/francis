@@ -533,7 +533,7 @@ func (p *PostgresProvider) insertHostActorTypes(ctx context.Context, tx pgx.Tx, 
 	defer cancel()
 	_, err := tx.CopyFrom(
 		queryCtx,
-		pgx.Identifier{p.tablePrefix + "host_actor_types"},
+		p.tableIdentifier("host_actor_types"),
 		[]string{"host_id", "actor_type", "actor_idle_timeout", "actor_concurrency_limit"},
 		&actorHostTypeColl{
 			hostID:     hostID,
