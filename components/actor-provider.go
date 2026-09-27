@@ -78,6 +78,7 @@ type ActorProvider interface {
 	// DispatchJob creates a job as an alarm row with Kind = job, returning the job ID and any lease acquired while storing it
 	// When req carries an alarm name (an idempotency key), a job with the same (actor_type, actor_id, name) is kept and its existing job ID is returned, so re-dispatching with the same key is idempotent (first-write-wins)
 	// Created reports whether this call inserted the job, rather than coalescing onto a live one that already held its idempotency key.
+	// When req.InitialState is set, it is stored as the actor's state in the same operation unless the actor already has live state, whether or not the job was created.
 	DispatchJob(ctx context.Context, ref ref.AlarmRef, req SetAlarmReq) (jobID string, created bool, lease *ref.AlarmLease, err error)
 
 	// DeadLetterAlarm moves a leased job from the alarms table to the terminal-job store, recording it as dead-lettered.
@@ -348,6 +349,17 @@ type SetAlarmReq struct {
 	// LeaseImmediate lists the hosts eligible to own an immediate lease when the alarm is within the provider's fetch-ahead interval
 	// An empty list or an alarm outside the interval does not attempt to acquire a lease
 	LeaseImmediate []string
+	// InitialState is honored only by DispatchJob, which stores it as the actor's state in the same atomic operation as the job
+	// It is written only when the actor has no live state, so it never replaces state the actor already has
+	InitialState *InitialState
+}
+
+// InitialState is actor state stored together with a dispatched job, for an actor that has no state yet
+type InitialState struct {
+	// Data is the encoded state
+	Data []byte
+	// WorkflowLabels is stored in the state row, as with SetStateOpts
+	WorkflowLabels *WorkflowLabels
 }
 
 // FetchAndLeaseUpcomingAlarmsReq is the request object for the FetchAndLeaseUpcomingAlarms method.

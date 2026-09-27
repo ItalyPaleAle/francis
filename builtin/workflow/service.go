@@ -112,7 +112,12 @@ func (s *WorkflowService) Start(ctx context.Context, input any, opts ...StartOpt
 	}
 
 	// The insertion is what says who started the instance, since the journal may not exist until the start job runs
-	_, created, err = client.Dispatch(ctx, methodStart, payload, actor.WithIdempotencyKey(methodStart))
+	// The placeholder is stored atomically with the job, which is what lets List return the instance while it is pending
+	placeholder, labels := newPendingPlaceholder(&payload)
+	_, created, err = client.Dispatch(ctx, methodStart, payload,
+		actor.WithIdempotencyKey(methodStart),
+		actor.WithInitialState(builtinkey.Key{}, placeholder, labels),
+	)
 	if err != nil {
 		return "", false, fmt.Errorf("failed to start the workflow instance: %w", err)
 	}
@@ -290,8 +295,9 @@ type ListOptions struct {
 	// Status restricts the listing to instances in one status, and an empty value lists every status
 	Status Status
 	// Version restricts the listing to instances stamped with one version, which is how an operator watches a drain
+	// A pending instance is stamped with the version it was started with
 	Version int
-	// Parent restricts the listing to the children of one instance
+	// Parent restricts the listing to the children of one instance, including the ones whose start job has not run yet
 	Parent string
 	// After is the pagination cursor, an instance ID, and only instances sorting strictly after it are returned
 	After string
@@ -318,6 +324,8 @@ func (l InstanceList) AfterID() string {
 
 // List returns a page of instances, filtered server-side on the workflow labels the orchestrator writes with every journal write
 // A label filter is an equality on an indexed column, so "every running instance" is a range scan rather than a walk of every retained journal
+// A pending instance is listed from the placeholder stored together with its start job, which carries the same labels
+// A placeholder whose start job was dead-lettered without running stays listed as pending until the instance's deadline turn removes it
 func (s *WorkflowService) List(ctx context.Context, opts *ListOptions) (InstanceList, error) {
 	var o ListOptions
 	if opts != nil {
@@ -348,10 +356,12 @@ func (s *WorkflowService) List(ctx context.Context, opts *ListOptions) (Instance
 	}
 	for i := range page.States {
 		st := page.States[i].Data
-		if st.Status == "" {
-			continue
+		switch {
+		case st.Status != "":
+			res.Instances = append(res.Instances, statusView(page.States[i].ActorID, &st, s.wf.def))
+		case st.PendingStart != nil:
+			res.Instances = append(res.Instances, statusView(page.States[i].ActorID, st.pendingView(), s.wf.def))
 		}
-		res.Instances = append(res.Instances, statusView(page.States[i].ActorID, &st, s.wf.def))
 	}
 	return res, nil
 }
@@ -386,11 +396,11 @@ func (s *WorkflowService) Definitions(ctx context.Context) ([]DefinitionInfo, er
 // It refuses a version that still has instances with ErrVersionInUse, since forgetting one under a running instance would let a different graph claim its number
 // Resetting this host's own version atomically installs its fingerprint with a new generation so an older deployment cannot reclaim it between removal and registration
 func (s *WorkflowService) ForgetVersion(ctx context.Context, version int) error {
-	page, err := s.List(ctx, &ListOptions{Version: version, Limit: 1})
+	inUse, err := versionHasJournals(ctx, s.svc, s.wf.baseType, version)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to check instances before forgetting the definition: %w", err)
 	}
-	if len(page.Instances) > 0 {
+	if inUse {
 		return fmt.Errorf("%w: version %d", ErrVersionInUse, version)
 	}
 
@@ -428,8 +438,9 @@ type InstanceStatus struct {
 	// Suspended is set while the instance is paused
 	Suspended *SuspendView
 	// Parent is set when the instance is a child of another
-	Parent      *ParentView
-	CreatedAt   time.Time
+	Parent    *ParentView
+	CreatedAt time.Time
+	// StartedAt is when the instance started running, and is not moved by a suspend and resume or by the fresh timeout budget an unwind receives
 	StartedAt   time.Time
 	CompletedAt time.Time
 }
@@ -467,7 +478,8 @@ type StepStatusView struct {
 	// ChildIDs are the instance IDs of the children a child step or a child fan-out started
 	ChildIDs []string
 	// Children retains the terminal status and compensation outcome each child reported
-	Children    []ChildStatusView
+	Children []ChildStatusView
+	// StartedAt is when the step was opened, and is not moved by a suspend and resume
 	StartedAt   time.Time
 	CompletedAt time.Time
 }

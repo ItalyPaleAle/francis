@@ -45,15 +45,31 @@ func (h *Host) Dispatch(ctx context.Context, actorType string, actorID string, m
 		return "", false, err
 	}
 
-	reqCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
-	defer cancel()
-	res, err := h.runtimeClient.DispatchJob(reqCtx, protocol.DispatchJobRequest{
+	req := protocol.DispatchJobRequest{
 		ActorType:     actorType,
 		ActorID:       actorID,
 		Method:        method,
 		Name:          name,
 		JobProperties: props,
-	})
+	}
+
+	// Encode any initial state the same way SetState does, so the actor reads it back as its own state
+	state, labels, ok := properties.InitialState()
+	if ok {
+		encoded, err := msgpack.Marshal(state)
+		if err != nil {
+			return "", false, fmt.Errorf("failed to serialize initial state using msgpack: %w", err)
+		}
+
+		req.InitialState = &protocol.InitialState{
+			Data:           encoded,
+			WorkflowLabels: workflowLabelsToProtocol(&labels),
+		}
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
+	defer cancel()
+	res, err := h.runtimeClient.DispatchJob(reqCtx, req)
 	if err != nil {
 		return "", false, fmt.Errorf("failed to dispatch job: %w", err)
 	}

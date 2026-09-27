@@ -96,6 +96,7 @@ func (st *instanceState) applyStart(def *definition, p *startPayload, now time.T
 		return true
 	}
 
+	st.PendingStart = nil
 	st.Workflow = def.name
 	st.Version = p.Version
 	st.DefinitionFingerprint = p.DefinitionFingerprint

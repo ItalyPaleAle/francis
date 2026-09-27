@@ -249,6 +249,17 @@ type DispatchJobRequest struct {
 	ActorID   string `msgpack:"id"`
 	Method    string `msgpack:"method"`
 	Name      string `msgpack:"name"`
+
+	// InitialState is stored as the actor's state together with the job when the actor has no state yet, set only by Francis' own built-in actors
+	InitialState *InitialState `msgpack:"initialState,omitempty"`
+}
+
+// InitialState is actor state stored together with a dispatched job
+type InitialState struct {
+	// Data is the msgpack-encoded state
+	Data []byte `msgpack:"data"`
+	// WorkflowLabels is the workflow engine's labels for the state row
+	WorkflowLabels *WorkflowLabels `msgpack:"workflowLabels,omitempty"`
 }
 
 // DispatchJobResponse carries the server-issued job ID

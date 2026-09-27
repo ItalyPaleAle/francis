@@ -422,19 +422,18 @@ func (o *orchestrator) status(ctx context.Context) (any, error) {
 		return nil, fmt.Errorf("failed to read the workflow journal: %w", err)
 	}
 
-	// An instance with no journal yet is either pending, with its start job still live, or was never started at all
-	// Only a job that has not ended says the instance is pending: a retained record of a start that already ran belongs to a journal that has since expired
+	// An instance with no journal yet is pending only while it has the placeholder stored with its start and that start job is still live
+	// A placeholder whose start job has ended belongs to an abandoned start, which the deadline turn removes
 	if st.Status == "" {
-		jobs, jErr := o.client.ListJobs(ctx)
-		if jErr == nil {
+		if st.PendingStart == nil {
+			return statusResult{}, nil
+		}
+
+		jobs, err := o.client.ListJobs(ctx)
+		if err == nil {
 			for _, j := range jobs {
 				if j.Method == methodStart && !j.Status.IsTerminal() {
-					return statusResult{Found: true, Status: statusView(o.instanceID, &instanceState{
-						Workflow:  o.def.name,
-						Version:   0,
-						Status:    StatusPending,
-						CreatedAt: j.CreatedAt,
-					}, o.def)}, nil
+					return statusResult{Found: true, Status: statusView(o.instanceID, st.pendingView(), o.def)}, nil
 				}
 			}
 		}

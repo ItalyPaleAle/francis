@@ -73,6 +73,12 @@ func (s *SQLiteProvider) insertJob(ctx context.Context, q querier, aRef ref.Alar
 		return stored, fmt.Errorf("failed to insert job: %w", err)
 	}
 
+	// The initial state shares the job's transaction, whether or not the job was created, so the two are committed together
+	err = s.insertInitialState(ctx, q, aRef.ActorRef(), req.InitialState)
+	if err != nil {
+		return stored, err
+	}
+
 	// Read the durable row back so an idempotency conflict can reuse an eligible unleased occurrence
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	err = q.
@@ -84,6 +90,44 @@ func (s *SQLiteProvider) insertJob(ctx context.Context, q querier, aRef ref.Alar
 		return stored, fmt.Errorf("failed to read back job: %w", err)
 	}
 	return stored, nil
+}
+
+// insertInitialState stores a job's initial state when the actor has no live state, treating an expired row that the garbage collector has not removed yet as no state
+func (s *SQLiteProvider) insertInitialState(ctx context.Context, q querier, aRef ref.ActorRef, initial *components.InitialState) error {
+	if initial == nil {
+		return nil
+	}
+
+	var wfLabels *string
+	if initial.WorkflowLabels != nil {
+		j, err := initial.WorkflowLabels.JSON()
+		if err != nil {
+			return err
+		}
+
+		if j != "" {
+			wfLabels = &j
+		}
+	}
+
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	_, err := q.ExecContext(ctx, `
+		INSERT INTO `+s.tablePrefix+`actor_state
+			(actor_type, actor_id, actor_state_data, actor_state_expiration_time, workflow_labels)
+		VALUES (?, ?, ?, NULL, ?)
+		ON CONFLICT (actor_type, actor_id) DO UPDATE SET
+			actor_state_data = excluded.actor_state_data,
+			actor_state_expiration_time = NULL,
+			workflow_labels = excluded.workflow_labels
+		WHERE `+s.tablePrefix+`actor_state.actor_state_expiration_time IS NOT NULL
+			AND `+s.tablePrefix+`actor_state.actor_state_expiration_time <= ?`,
+		aRef.ActorType, aRef.ActorID, initial.Data, wfLabels, s.clock.Now().UnixMilli(),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to store the job's initial state: %w", err)
+	}
+
+	return nil
 }
 
 // dispatchAndLeaseJob atomically stores a new idempotent job with any required actor placement and lease

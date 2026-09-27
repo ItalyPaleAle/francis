@@ -693,6 +693,12 @@ func (rt *Runtime) handleDispatchJob(parentCtx context.Context, _ *hostConn, req
 		ttl := time.UnixMilli(payload.TTLUnixMs)
 		setReq.TTL = &ttl
 	}
+	if payload.InitialState != nil {
+		setReq.InitialState = &components.InitialState{
+			Data:           payload.InitialState.Data,
+			WorkflowLabels: workflowLabelsFromProtocol(payload.InitialState.WorkflowLabels),
+		}
+	}
 
 	// Persist the job and acquire any immediate lease while keeping the ID stable for an idempotency-key re-dispatch
 	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)

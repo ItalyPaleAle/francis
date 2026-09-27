@@ -94,6 +94,8 @@ page, err := svc.List(ctx, &workflow.ListOptions{
 
 Each of `status`, `version`, and `parent` is indexed. There is nothing to configure, and those three are the only filters.
 
+`List` also returns instances whose start job has not run yet, with status `pending`. They carry the version they were started with and, for a child, its parent, so `Status: workflow.StatusPending`, `Version`, and `Parent` all match them.
+
 Because the default instance ID is a UUIDv7, a listing is in creation order. Page until `AfterID()` returns empty:
 
 ```go

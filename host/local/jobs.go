@@ -158,6 +158,20 @@ func jobPropertiesToSetAlarmReq(p actor.JobProperties, method string, input any,
 		req.TTL = &p.TTL
 	}
 
+	// Encode any initial state the same way SetState does, so the actor reads it back as its own state
+	state, labels, ok := p.InitialState()
+	if ok {
+		encoded, err := msgpack.Marshal(state)
+		if err != nil {
+			return components.SetAlarmReq{}, fmt.Errorf("failed to serialize initial state using msgpack: %w", err)
+		}
+
+		req.InitialState = &components.InitialState{
+			Data:           encoded,
+			WorkflowLabels: &labels,
+		}
+	}
+
 	return req, nil
 }
 

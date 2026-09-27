@@ -527,24 +527,6 @@ func TestPurgeRefusesUnresolvableLegacyWorker(t *testing.T) {
 	require.ErrorIs(t, err, ErrJournalIncompatible)
 }
 
-func TestPendingStatusDoesNotInventAVersion(t *testing.T) {
-	wf, err := New("pending-version", WithVersion(2), WithSteps(WaitForEvent("ready")))
-	require.NoError(t, err)
-	host := newFakeHost()
-	o := newTestOrchestrator(t, wf, host, "instance-1")
-
-	_, _, err = host.Dispatch(t.Context(), builtinActorType(wf.baseType), "instance-1", methodStart, startPayload{Version: 1}, actor.JobProperties{})
-	require.NoError(t, err)
-
-	result, err := o.status(t.Context())
-	require.NoError(t, err)
-	status, ok := result.(statusResult)
-	require.True(t, ok)
-	require.True(t, status.Found)
-	assert.Equal(t, StatusPending, status.Status.Status)
-	assert.Zero(t, status.Status.Version)
-}
-
 func TestTaskMetadataOmitsActorsThatCannotReceiveJobs(t *testing.T) {
 	child, err := New("task-metadata-child", WithSteps(WaitForEvent("ready")))
 	require.NoError(t, err)

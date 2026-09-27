@@ -6219,6 +6219,114 @@ func (s Suite) TestJobs(t *testing.T) {
 	})
 
 	// A caller needs to tell starting work from finding it already under way, and the insert is the only place that can say so: a status read before it would race the job that is being created
+	t.Run("dispatch stores an initial state atomically with the job", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		labels := &components.WorkflowLabels{Status: "pending", Version: 2, Parent: "p1"}
+		listLabeled := func(t *testing.T, filter components.WorkflowLabels) []string {
+			t.Helper()
+			res, err := s.p.ListStates(ctx, components.ListStatesReq{ActorType: "JOB", WorkflowLabels: &filter})
+			require.NoError(t, err)
+			ids := make([]string, len(res.States))
+			for i, state := range res.States {
+				ids[i] = state.ActorID
+			}
+			return ids
+		}
+
+		// A new job stores the state and its labels, on both the storage-only and the leasing paths
+		for _, actorID := range []string{"initial-future", "initial-immediate"} {
+			req := components.SetAlarmReq{
+				DueTime:      s.p.Now().Add(time.Hour),
+				Kind:         components.AlarmKindJob,
+				JobMethod:    "start",
+				InitialState: &components.InitialState{Data: []byte("placeholder"), WorkflowLabels: labels},
+			}
+			if actorID == "initial-immediate" {
+				req.DueTime = s.p.Now()
+				req.LeaseImmediate = []string{jobHost}
+			}
+			_, created, _, err := s.p.DispatchJob(ctx, ref.NewAlarmRef("JOB", actorID, "start"), req)
+			require.NoError(t, err)
+			assert.True(t, created)
+
+			data, err := s.p.GetState(ctx, ref.ActorRef{ActorType: "JOB", ActorID: actorID})
+			require.NoError(t, err)
+			assert.Equal(t, []byte("placeholder"), data)
+		}
+		assert.Equal(t, []string{"initial-future", "initial-immediate"}, listLabeled(t, components.WorkflowLabels{Parent: "p1"}))
+		assert.Equal(t, []string{"initial-future", "initial-immediate"}, listLabeled(t, components.WorkflowLabels{Status: "pending", Version: 2}))
+
+		// Existing live state is never replaced, whether the dispatch creates a job or coalesces onto one
+		existingRef := ref.ActorRef{ActorType: "JOB", ActorID: "initial-existing"}
+		require.NoError(t, s.p.SetState(ctx, existingRef, []byte("journal"), components.SetStateOpts{WorkflowLabels: &components.WorkflowLabels{Status: "running", Version: 2}}))
+		for range 2 {
+			_, _, _, err := s.p.DispatchJob(ctx, ref.NewAlarmRef("JOB", "initial-existing", "start"), components.SetAlarmReq{
+				DueTime:      s.p.Now().Add(time.Hour),
+				Kind:         components.AlarmKindJob,
+				JobMethod:    "start",
+				InitialState: &components.InitialState{Data: []byte("placeholder"), WorkflowLabels: labels},
+			})
+			require.NoError(t, err)
+		}
+		data, err := s.p.GetState(ctx, existingRef)
+		require.NoError(t, err)
+		assert.Equal(t, []byte("journal"), data)
+		assert.Equal(t, []string{"initial-existing"}, listLabeled(t, components.WorkflowLabels{Status: "running", Version: 2}))
+
+		// A dispatch that coalesces onto a live job still stores the state when the actor has none
+		for _, immediate := range []bool{false, true} {
+			actorID := "initial-coalesced"
+			if immediate {
+				actorID = "initial-coalesced-immediate"
+			}
+			jobRef := ref.NewAlarmRef("JOB", actorID, "start")
+			req := components.SetAlarmReq{
+				DueTime:   s.p.Now().Add(time.Hour),
+				Kind:      components.AlarmKindJob,
+				JobMethod: "start",
+			}
+			if immediate {
+				req.DueTime = s.p.Now()
+				req.LeaseImmediate = []string{jobHost}
+			}
+			jobID, _, _, err := s.p.DispatchJob(ctx, jobRef, req)
+			require.NoError(t, err)
+
+			req.InitialState = &components.InitialState{Data: []byte("late"), WorkflowLabels: labels}
+			duplicateID, created, _, err := s.p.DispatchJob(ctx, jobRef, req)
+			require.NoError(t, err)
+			assert.Equal(t, jobID, duplicateID)
+			assert.False(t, created)
+
+			data, err = s.p.GetState(ctx, jobRef.ActorRef())
+			require.NoError(t, err)
+			assert.Equal(t, []byte("late"), data)
+		}
+
+		// Expired state is treated as absent, so the initial state replaces it
+		expiredRef := ref.ActorRef{ActorType: "JOB", ActorID: "initial-expired"}
+		require.NoError(t, s.p.SetState(ctx, expiredRef, []byte("old"), components.SetStateOpts{TTL: time.Second}))
+		require.NoError(t, s.p.AdvanceClock(2*time.Second))
+		_, _, _, err = s.p.DispatchJob(ctx, ref.NewAlarmRef("JOB", "initial-expired", "start"), components.SetAlarmReq{
+			DueTime:      s.p.Now().Add(time.Hour),
+			Kind:         components.AlarmKindJob,
+			JobMethod:    "start",
+			InitialState: &components.InitialState{Data: []byte("placeholder"), WorkflowLabels: labels},
+		})
+		require.NoError(t, err)
+		data, err = s.p.GetState(ctx, expiredRef)
+		require.NoError(t, err)
+		assert.Equal(t, []byte("placeholder"), data)
+
+		// The stored state does not expire on its own
+		require.NoError(t, s.p.AdvanceClock(time.Hour))
+		data, err = s.p.GetState(ctx, expiredRef)
+		require.NoError(t, err)
+		assert.Equal(t, []byte("placeholder"), data)
+	})
+
 	t.Run("dispatch reports whether it created the job", func(t *testing.T) {
 		ctx := t.Context()
 		require.NoError(t, s.p.Seed(ctx, jobSeed()))

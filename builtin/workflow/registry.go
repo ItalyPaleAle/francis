@@ -240,6 +240,38 @@ func (r *registryActor) definitions(ctx context.Context) (any, error) {
 	return definitionsResponse{Entries: st.Versions}, nil
 }
 
+// versionHasJournals reports whether any instance of a version has a journal
+// Placeholders of pending instances carry the version label too, but they do not hold a version in use: their start is fenced by the registry generation it carries
+func versionHasJournals(ctx context.Context, svc *actor.Service, workflowType string, version int) (bool, error) {
+	const versionCheckPageSize = 100
+
+	instances := builtinactor.NewClient[instanceState](workflowType, "", svc)
+
+	opts := &actor.ListStatesOpts{
+		IncludeData: true,
+		Limit:       versionCheckPageSize,
+	}
+	opts.SetWorkflowLabels(builtinkey.Key{}, components.WorkflowLabels{Version: version})
+
+	for {
+		page, err := instances.ListStates(ctx, opts)
+		if err != nil {
+			return false, err
+		}
+
+		for i := range page.States {
+			if page.States[i].Data.Status != "" {
+				return true, nil
+			}
+		}
+
+		opts.After = page.AfterID()
+		if opts.After == "" {
+			return false, nil
+		}
+	}
+}
+
 // forget removes a version, which is the operator's reset for one that was registered wrongly and has no instances left
 func (r *registryActor) forget(ctx context.Context, data actor.Envelope) error {
 	var req forgetRequest
@@ -253,14 +285,11 @@ func (r *registryActor) forget(ctx context.Context, data actor.Envelope) error {
 
 	// This listing and the registry update share the registry's exclusive turn with start confirmations
 	// A start that persists after this listing must confirm after the reset and cannot dispatch under its revoked identity
-	opts := &actor.ListStatesOpts{Limit: 1}
-	opts.SetWorkflowLabels(builtinkey.Key{}, components.WorkflowLabels{Version: req.Version})
-	instances := builtinactor.NewClient[instanceState](r.workflowType, "", r.svc)
-	page, err := instances.ListStates(ctx, opts)
+	inUse, err := versionHasJournals(ctx, r.svc, r.workflowType, req.Version)
 	if err != nil {
 		return fmt.Errorf("failed to check instances before forgetting the definition: %w", err)
 	}
-	if len(page.States) > 0 {
+	if inUse {
 		return fmt.Errorf("%w: version %d", ErrVersionInUse, req.Version)
 	}
 
@@ -291,6 +320,7 @@ func (r *registryActor) forget(ctx context.Context, data actor.Envelope) error {
 	if err != nil {
 		return fmt.Errorf("failed to forget the definition: %w", err)
 	}
+
 	return nil
 }
 

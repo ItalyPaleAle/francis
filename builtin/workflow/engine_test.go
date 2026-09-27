@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -182,6 +183,19 @@ func (f *fakeHost) Dispatch(ctx context.Context, actorType string, actorID strin
 		return "", false, errors.New("injected dispatch failure")
 	}
 
+	// The initial state is stored with the job only when the actor has none, whether or not the job is created, as the providers do
+	initial, labels, hasInitial := props.InitialState()
+	_, hasState := f.state[key(actorType, actorID)]
+	if hasInitial && !hasState {
+		enc, err := msgpack.Marshal(initial)
+		if err != nil {
+			return "", false, err
+		}
+		f.state[key(actorType, actorID)] = enc
+		f.labels[key(actorType, actorID)] = &labels
+		f.ttls[key(actorType, actorID)] = 0
+	}
+
 	// Francis deduplicates an idempotency key against live rows only, so re-dispatching a pending task is a no-op
 	if props.IdempotencyKey != "" {
 		k := key(actorType, actorID, props.IdempotencyKey)
@@ -314,8 +328,55 @@ func (f *fakeHost) DeleteState(ctx context.Context, actorType string, actorID st
 	return nil
 }
 
+// ListStates filters on the workflow labels stored with each state, the way the providers' indexed listing does
 func (f *fakeHost) ListStates(ctx context.Context, actorType string, opts *actor.ListStatesOpts) (actor.StateList, error) {
-	return actor.StateList{}, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	page := actor.StateList{}
+	filter := opts.WorkflowLabels()
+	for stateKey, encoded := range f.state {
+		id, ok := strings.CutPrefix(stateKey, actorType+"/")
+		if !ok || id <= opts.After {
+			continue
+		}
+		if filter != nil && !labelsMatch(f.labels[stateKey], filter) {
+			continue
+		}
+		info := actor.StateInfo{ActorID: id}
+		if opts.IncludeData {
+			var st instanceState
+			err := msgpack.Unmarshal(encoded, &st)
+			if err != nil {
+				return page, err
+			}
+			info.Data = &fakeEnvelope{value: st}
+		}
+		page.States = append(page.States, info)
+	}
+	sort.Slice(page.States, func(i, j int) bool { return page.States[i].ActorID < page.States[j].ActorID })
+	if opts.Limit > 0 && len(page.States) > opts.Limit {
+		page.HasMore = true
+		page.States = page.States[:opts.Limit]
+	}
+	return page, nil
+}
+
+// labelsMatch reports whether stored labels match every field the filter sets
+func labelsMatch(stored *components.WorkflowLabels, filter *components.WorkflowLabels) bool {
+	if stored == nil {
+		return filter.IsZero()
+	}
+	if filter.Status != "" && filter.Status != stored.Status {
+		return false
+	}
+	if filter.Version != 0 && filter.Version != stored.Version {
+		return false
+	}
+	if filter.Parent != "" && filter.Parent != stored.Parent {
+		return false
+	}
+	return true
 }
 
 // dispatchedTo returns the methods dispatched to one actor, so a test can assert on what a turn scheduled

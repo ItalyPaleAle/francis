@@ -44,8 +44,7 @@ func (p *PostgresProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, r
 	// The self-assignment on conflict is intentional because it makes RETURNING atomically yield the winner of a concurrent insert
 	var jobID uuid.UUID
 	// #nosec G202 -- the only concatenated values are static table prefixes, not user input
-	err := p.db.
-		QueryRow(queryCtx, `
+	err := p.queryJobRow(queryCtx, aRef, req.InitialState, `
 			INSERT INTO `+p.tablePrefix+`alarms AS stored
 				(alarm_id, actor_type, actor_id, alarm_name,
 				alarm_due_time, alarm_interval, alarm_cron, alarm_ttl_time, alarm_data,
@@ -56,11 +55,13 @@ func (p *PostgresProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, r
 			ON CONFLICT (actor_type, actor_id, alarm_name) DO UPDATE
 			SET alarm_id = stored.alarm_id
 			RETURNING alarm_id`,
-			// alarm_due_time and alarm_ttl_time are stored as UTC
+		// alarm_due_time and alarm_ttl_time are stored as UTC
+		[]any{
 			alarmID, aRef.ActorType, aRef.ActorID, aRef.Name,
 			req.DueTime.UTC(), interval, cron, utcPtr(req.TTL), req.Data, req.JobMethod,
-		).
-		Scan(&jobID)
+		},
+		&jobID,
+	)
 	if err != nil {
 		return "", false, nil, fmt.Errorf("failed to dispatch job: %w", err)
 	}
@@ -83,15 +84,16 @@ func (p *PostgresProvider) dispatchAndLeaseJob(ctx context.Context, aRef ref.Ala
 		leaseID pgtype.UUID
 	)
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	err = p.db.
-		QueryRow(ctx,
-			`SELECT r_job_id, r_job_due_time, r_lease_id
+	err = p.queryJobRow(ctx, aRef, req.InitialState,
+		`SELECT r_job_id, r_job_due_time, r_lease_id
 			FROM `+p.tablePrefix+`dispatch_and_lease_job_v1($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+		[]any{
 			alarmID, aRef.ActorType, aRef.ActorID, aRef.Name,
 			req.DueTime.UTC(), interval, cron, utcPtr(req.TTL), req.Data, req.JobMethod, hostUUIDs,
 			p.cfg.HostHealthCheckDeadline, p.cfg.AlarmsFetchAheadInterval, p.cfg.AlarmsLeaseDuration,
-		).
-		Scan(&jobID, &dueTime, &leaseID)
+		},
+		&jobID, &dueTime, &leaseID,
+	)
 	if err != nil {
 		return "", false, nil, fmt.Errorf("failed to atomically dispatch and lease job: %w", err)
 	}
@@ -105,6 +107,57 @@ func (p *PostgresProvider) dispatchAndLeaseJob(ctx context.Context, aRef ref.Ala
 	leaseUUID := uuid.UUID(leaseID.Bytes)
 	lease := ref.NewAlarmLease(aRef, jobID.String(), dueTime, leaseUUID.String())
 	return jobID.String(), created, lease, nil
+}
+
+// queryJobRow runs the query that stores a job and scans its single result row into dest
+// When the dispatch carries an initial state, the state is stored first in the same batch, which Postgres runs as one implicit transaction, so the state and the job are committed together in a single round trip
+func (p *PostgresProvider) queryJobRow(ctx context.Context, aRef ref.AlarmRef, initial *components.InitialState, query string, args []any, dest ...any) error {
+	if initial == nil {
+		return p.db.QueryRow(ctx, query, args...).Scan(dest...)
+	}
+
+	var wfLabels *string
+	if initial.WorkflowLabels != nil {
+		j, err := initial.WorkflowLabels.JSON()
+		if err != nil {
+			return err
+		}
+
+		if j != "" {
+			wfLabels = &j
+		}
+	}
+
+	// The initial state is written only when the actor has no live state, and an expired row that the garbage collector has not removed yet counts as no state
+	batch := &pgx.Batch{}
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	batch.Queue(`INSERT INTO `+p.tablePrefix+`actor_state AS stored
+			(actor_type, actor_id, actor_state_data, actor_state_expiration_time, workflow_labels)
+		VALUES ($1, $2, $3, NULL, $4::jsonb)
+		ON CONFLICT (actor_type, actor_id) DO UPDATE SET
+			actor_state_data = EXCLUDED.actor_state_data,
+			actor_state_expiration_time = NULL,
+			workflow_labels = EXCLUDED.workflow_labels
+		WHERE stored.actor_state_expiration_time IS NOT NULL
+			AND stored.actor_state_expiration_time <= (now() AT TIME ZONE 'utc')`,
+		aRef.ActorType, aRef.ActorID, initial.Data, wfLabels,
+	)
+	batch.Queue(query, args...)
+
+	br := p.db.SendBatch(ctx, batch)
+	_, err := br.Exec()
+	if err != nil {
+		_ = br.Close()
+		return fmt.Errorf("failed to store the job's initial state: %w", err)
+	}
+
+	err = br.QueryRow().Scan(dest...)
+	if err != nil {
+		_ = br.Close()
+		return err
+	}
+
+	return br.Close()
 }
 
 func (p *PostgresProvider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLease, req components.DeadLetterAlarmReq) error {

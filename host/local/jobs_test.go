@@ -9,10 +9,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	msgpack "github.com/vmihailenco/msgpack/v5"
 	clocktesting "k8s.io/utils/clock/testing"
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/builtinkey"
 	components_mocks "github.com/italypaleale/francis/internal/mocks/components"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/testutil"
@@ -307,5 +309,26 @@ func TestJobPropertiesToSetAlarmReq(t *testing.T) {
 	t.Run("unserializable input errors", func(t *testing.T) {
 		_, err := jobPropertiesToSetAlarmReq(actor.JobProperties{}, "send", make(chan int), now)
 		require.ErrorContains(t, err, "msgpack")
+	})
+
+	t.Run("encodes the initial state with its labels", func(t *testing.T) {
+		var props actor.JobProperties
+		actor.WithInitialState(builtinkey.Key{}, map[string]string{"k": "v"}, components.WorkflowLabels{Status: "pending", Version: 2})(&props)
+
+		req, err := jobPropertiesToSetAlarmReq(props, "start", nil, now)
+		require.NoError(t, err)
+		require.NotNil(t, req.InitialState)
+		assert.Equal(t, &components.WorkflowLabels{Status: "pending", Version: 2}, req.InitialState.WorkflowLabels)
+
+		var decoded map[string]string
+		err = msgpack.Unmarshal(req.InitialState.Data, &decoded)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"k": "v"}, decoded)
+	})
+
+	t.Run("no initial state by default", func(t *testing.T) {
+		req, err := jobPropertiesToSetAlarmReq(actor.JobProperties{}, "send", nil, now)
+		require.NoError(t, err)
+		assert.Nil(t, req.InitialState)
 	})
 }

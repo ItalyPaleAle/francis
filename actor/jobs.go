@@ -7,6 +7,8 @@ import (
 
 	"github.com/robfig/cron/v3"
 
+	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/builtinkey"
 	timeutils "github.com/italypaleale/francis/internal/time"
 	"github.com/italypaleale/francis/internal/types"
 )
@@ -85,6 +87,24 @@ type JobProperties struct {
 	Cron string
 	// IdempotencyKey, when set, dedups re-dispatch within the same actor
 	IdempotencyKey string
+
+	// initialState is set only by the framework's built-in actors, through WithInitialState
+	initialState *jobInitialState
+}
+
+// jobInitialState is the actor state stored together with a dispatched job
+type jobInitialState struct {
+	state  any
+	labels components.WorkflowLabels
+}
+
+// InitialState returns the state and workflow labels attached with WithInitialState, and false when none were.
+func (p JobProperties) InitialState() (state any, labels components.WorkflowLabels, ok bool) {
+	if p.initialState == nil {
+		return nil, components.WorkflowLabels{}, false
+	}
+
+	return p.initialState.state, p.initialState.labels, true
 }
 
 // JobOption configures the properties of a dispatched job.
@@ -134,6 +154,15 @@ func WithJobCron(expr string) JobOption {
 func WithIdempotencyKey(key string) JobOption {
 	return func(p *JobProperties) {
 		p.IdempotencyKey = key
+	}
+}
+
+// WithInitialState stores state and workflow labels for the target actor in the same atomic operation that stores the job.
+// The state is written only when the actor has no state yet,
+// It is reserved for Francis' own built-in actors: the builtinkey.Key argument can only be supplied by francis-internal packages.
+func WithInitialState(_ builtinkey.Key, state any, labels components.WorkflowLabels) JobOption {
+	return func(p *JobProperties) {
+		p.initialState = &jobInitialState{state: state, labels: labels}
 	}
 }
 

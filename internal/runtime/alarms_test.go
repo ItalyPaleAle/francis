@@ -891,3 +891,34 @@ func TestDispatchAlarmHostTimeoutRetryable(t *testing.T) {
 	assert.GreaterOrEqual(t, elapsed, 50*time.Millisecond)
 	assert.Less(t, elapsed, 2*time.Second)
 }
+
+func TestHandleDispatchJobStoresInitialState(t *testing.T) {
+	rt, prov := newTestRuntime(t, WithAlarmsPollInterval(time.Hour))
+	c := connectTestHost(t, rt, prov, "10.1.0.43:1", protocol.ActorHostType{ActorType: "T"})
+
+	// A future job keeps the handler on the storage-only path, so the state written is only the one the request carries
+	resp := dispatchReq(t, rt, c, protocol.KindDispatchJob, protocol.DispatchJobRequest{
+		ActorType:     "T",
+		ActorID:       "a1",
+		Name:          "start",
+		Method:        "start",
+		DueTimeUnixMs: time.Now().Add(time.Hour).UnixMilli(),
+		InitialState: &protocol.InitialState{
+			Data:           []byte("placeholder"),
+			WorkflowLabels: &protocol.WorkflowLabels{Status: "pending", Version: 2, Parent: "p1"},
+		},
+	})
+	require.Equal(t, protocol.KindDispatchJobResponse, resp.Kind)
+
+	data, err := prov.GetState(t.Context(), ref.ActorRef{ActorType: "T", ActorID: "a1"})
+	require.NoError(t, err)
+	assert.Equal(t, []byte("placeholder"), data)
+
+	res, err := prov.ListStates(t.Context(), components.ListStatesReq{
+		ActorType:      "T",
+		WorkflowLabels: &components.WorkflowLabels{Status: "pending", Version: 2, Parent: "p1"},
+	})
+	require.NoError(t, err)
+	require.Len(t, res.States, 1)
+	assert.Equal(t, "a1", res.States[0].ActorID)
+}

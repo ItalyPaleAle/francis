@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"time"
 	"uuid"
@@ -22,6 +23,19 @@ func (p *Provider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req compo
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 
+	// The state domain is locked only when the job carries an initial state, in the same order Restore uses
+	if req.InitialState != nil {
+		p.stateWriteMu.Lock()
+		defer p.stateWriteMu.Unlock()
+	}
+	stateChange := p.initialStateChange(aRef.ActorRef(), req.InitialState)
+
+	changes := NewChanges()
+	defer changes.Release()
+	if stateChange != nil {
+		changes.ActorState.Set = append(changes.ActorState.Set, *stateChange)
+	}
+
 	// Idempotency: keep an existing job (or alarm) with the same key and return its ID
 	p.Mu.RLock()
 	existing, exists := p.Alarms[key]
@@ -33,6 +47,13 @@ func (p *Provider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req compo
 
 	if exists {
 		// The job that already holds this idempotency key is the one the caller gets back, and this call did not create it
+		// Its initial state is still stored, since the actor may have none even though its job is live
+		if stateChange != nil {
+			err := p.persistThenApplyWithState(ctx, changes, stateChange, func() {})
+			if err != nil {
+				return "", false, nil, err
+			}
+		}
 		return existingID, false, nil, nil
 	}
 
@@ -58,11 +79,9 @@ func (p *Provider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req compo
 		Data:      data,
 	}
 
-	changes := NewChanges()
-	defer changes.Release()
 	changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: alarmID, Value: a})
 
-	err := p.persistThenApply(ctx, &p.Mu, changes, func() {
+	err := p.persistThenApplyWithState(ctx, changes, stateChange, func() {
 		p.Alarms[key] = a
 		p.AlarmsByID[alarmID] = a
 	})
@@ -79,8 +98,18 @@ func (p *Provider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, r
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 
+	// The state domain is locked only when the job carries an initial state, in the same order Restore uses
+	if req.InitialState != nil {
+		p.stateWriteMu.Lock()
+		defer p.stateWriteMu.Unlock()
+	}
+	stateChange := p.initialStateChange(aRef.ActorRef(), req.InitialState)
+
 	changes := NewChanges()
 	defer changes.Release()
+	if stateChange != nil {
+		changes.ActorState.Set = append(changes.ActorState.Set, *stateChange)
+	}
 
 	// Preserve the first job stored for an idempotency key while allowing an unleased occurrence to become immediately schedulable
 	now := p.Clock.Now()
@@ -93,6 +122,12 @@ func (p *Provider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, r
 		if job.DueTime.After(now.Add(p.Cfg.AlarmsFetchAheadInterval)) || hasLiveLease {
 			jobID := job.ID
 			p.Mu.RUnlock()
+			if stateChange != nil {
+				err := p.persistThenApplyWithState(ctx, changes, stateChange, func() {})
+				if err != nil {
+					return "", false, nil, err
+				}
+			}
 			return jobID, false, nil, nil
 		}
 	} else {
@@ -160,6 +195,12 @@ func (p *Provider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, r
 	}
 	p.Mu.RUnlock()
 	if exists && !canLease {
+		if stateChange != nil {
+			err := p.persistThenApplyWithState(ctx, changes, stateChange, func() {})
+			if err != nil {
+				return "", false, nil, err
+			}
+		}
 		return job.ID, false, nil, nil
 	}
 
@@ -168,7 +209,7 @@ func (p *Provider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, r
 	if newActor != nil {
 		changes.ActiveActors.Set = append(changes.ActiveActors.Set, ActiveActorChange{Key: actorKey, Value: newActor})
 	}
-	err := p.persistThenApply(ctx, &p.Mu, changes, func() {
+	err := p.persistThenApplyWithState(ctx, changes, stateChange, func() {
 		p.Alarms[key] = job
 		p.AlarmsByID[job.ID] = job
 		if newActor != nil {
@@ -179,6 +220,52 @@ func (p *Provider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, r
 		return "", false, nil, err
 	}
 	return job.ID, !exists, lease, nil
+}
+
+// initialStateChange returns the change that stores a job's initial state, or nil when there is none or the actor already has live state
+// The caller must hold stateWriteMu
+func (p *Provider) initialStateChange(r ref.ActorRef, initial *components.InitialState) *ActorStateChange {
+	if initial == nil {
+		return nil
+	}
+
+	key := NewActorKey(r.ActorType, r.ActorID)
+	p.StateMu.RLock()
+	current, ok := p.ActorState[key]
+	live := ok && !current.IsExpired(p.Clock.Now())
+	p.StateMu.RUnlock()
+	if live {
+		return nil
+	}
+
+	entry := &StateEntry{Data: initial.Data}
+	if initial.WorkflowLabels != nil && !initial.WorkflowLabels.IsZero() {
+		entry.WorkflowLabels = new(*initial.WorkflowLabels)
+	}
+	return &ActorStateChange{Key: key, Value: entry}
+}
+
+// persistThenApplyWithState persists a job's change set, then applies it under Mu and, when it stores an initial state, under StateMu too
+// The caller must hold writeMu, and stateWriteMu when stateChange is set
+func (p *Provider) persistThenApplyWithState(ctx context.Context, changes *Changes, stateChange *ActorStateChange, apply func()) error {
+	if stateChange == nil {
+		return p.persistThenApply(ctx, &p.Mu, changes, apply)
+	}
+
+	err := p.PersistHook.PersistChanges(ctx, changes)
+	if err != nil {
+		return fmt.Errorf("error persisting changes: %w", err)
+	}
+
+	p.Mu.Lock()
+	apply()
+	p.Mu.Unlock()
+
+	p.StateMu.Lock()
+	p.ActorState[stateChange.Key] = stateChange.Value
+	p.StateMu.Unlock()
+
+	return nil
 }
 
 func (p *Provider) DeadLetterAlarm(ctx context.Context, lease *ref.AlarmLease, req components.DeadLetterAlarmReq) error {

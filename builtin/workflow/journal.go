@@ -6,6 +6,8 @@ import (
 	"time"
 
 	msgpack "github.com/vmihailenco/msgpack/v5"
+
+	"github.com/italypaleale/francis/components"
 )
 
 // Status is the lifecycle stage of a workflow instance
@@ -13,6 +15,7 @@ type Status string
 
 const (
 	// StatusPending indicates the start job is durable but has not run yet
+	// A pending instance has a placeholder in place of its journal, stored together with its start job
 	StatusPending Status = "pending"
 	// StatusRunning indicates the instance is executing its steps
 	StatusRunning Status = "running"
@@ -126,8 +129,48 @@ type instanceState struct {
 	// Resume shifts it forward so only the remaining budget is left, and an unwind resets it to grant compensation a fresh budget
 	DeadlineAnchor time.Time `msgpack:"deadlineAnchor,omitempty"`
 	CompletedAt    time.Time `msgpack:"completedAt,omitzero"`
+	// PendingStart is set only on the placeholder stored together with a start job, before the instance has a journal
+	// The placeholder keeps Status empty, so everything that asks whether the instance has a journal still finds none, and the first journal write replaces it
+	PendingStart *pendingStart `msgpack:"pendingStart,omitempty"`
 	// encoded reuses the exact size-check encoding when the provider serializes this state immediately afterward
 	encoded []byte
+}
+
+// pendingStart is what the placeholder of a pending instance records, so List and GetStatus can describe it before its start job runs
+type pendingStart struct {
+	Version   int        `msgpack:"version"`
+	Parent    *parentRef `msgpack:"parent,omitempty"`
+	CreatedAt time.Time  `msgpack:"createdAt"`
+}
+
+// newPendingPlaceholder returns the placeholder stored with a start job, and the workflow labels that make it listable
+func newPendingPlaceholder(p *startPayload) (state instanceState, labels components.WorkflowLabels) {
+	state = instanceState{
+		PendingStart: &pendingStart{
+			Version:   p.Version,
+			Parent:    p.Parent,
+			CreatedAt: p.CreatedAt,
+		},
+	}
+	labels = components.WorkflowLabels{
+		Status:  string(StatusPending),
+		Version: p.Version,
+	}
+	if p.Parent != nil {
+		labels.Parent = p.Parent.InstanceID
+	}
+
+	return state, labels
+}
+
+// pendingView returns the journal-shaped view of a pending instance from its placeholder
+func (st *instanceState) pendingView() *instanceState {
+	return &instanceState{
+		Status:    StatusPending,
+		Version:   st.PendingStart.Version,
+		Parent:    st.PendingStart.Parent,
+		CreatedAt: st.PendingStart.CreatedAt,
+	}
 }
 
 // instanceStateWire avoids recursively calling MarshalMsgpack while encoding the journal fields
@@ -277,6 +320,14 @@ func (st *instanceState) clone() instanceState {
 	if st.Parent != nil {
 		parent := *st.Parent
 		out.Parent = &parent
+	}
+	if st.PendingStart != nil {
+		ps := *st.PendingStart
+		if ps.Parent != nil {
+			parent := *ps.Parent
+			ps.Parent = &parent
+		}
+		out.PendingStart = &ps
 	}
 
 	out.Steps = make([]stepRecord, len(st.Steps))

@@ -183,29 +183,41 @@ func (o *orchestrator) runDeadline(ctx context.Context) error {
 
 	// Completed, missing, and suspended journals must explicitly stop the fallback recurrence
 	st, err := o.client.GetState(ctx)
-	if err != nil {
+	switch {
+	case err != nil:
 		return fmt.Errorf("failed to read the workflow journal: %w", err)
-	}
-	if st.Status == "" {
+
+	case st.Status == "":
 		if pendingStart {
 			return nil
 		}
+
+		// A placeholder whose start job ended without running, such as one that failed permanently or was deleted, would otherwise stay listed as pending
+		if st.PendingStart != nil {
+			err = o.client.DeleteState(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to remove the placeholder of an abandoned start: %w", err)
+			}
+		}
+
 		return o.dropDeadline(ctx)
-	}
-	if st.Status.IsTerminal() {
+
+	case st.Status.IsTerminal():
 		st = st.clone()
 		// A start may have become terminal in its first write, but its parent must not see an outcome before the registry decision is durable
 		err = o.confirmStart(ctx, &st, time.Now())
 		if err != nil {
 			return err
 		}
+
 		err = o.reportToParent(ctx, &st, false)
 		if err != nil {
 			return err
 		}
+
 		return o.finish(ctx)
-	}
-	if st.Status == StatusSuspended {
+
+	case st.Status == StatusSuspended:
 		return o.dropDeadline(ctx)
 	}
 
@@ -877,8 +889,13 @@ func (o *orchestrator) startChild(ctx context.Context, st *instanceState, sr *st
 		Attempt:     tr.Attempts,
 	}
 
+	// The placeholder stored with the job is what lets List, with a Parent filter, return the child while it is pending
+	placeholder, labels := newPendingPlaceholder(&payload)
 	client := builtinactor.NewClient[struct{}](child.baseType, tr.ChildID, o.svc)
-	_, _, err = client.Dispatch(ctx, methodStart, payload, actor.WithIdempotencyKey(methodStart))
+	_, _, err = client.Dispatch(ctx, methodStart, payload,
+		actor.WithIdempotencyKey(methodStart),
+		actor.WithInitialState(builtinkey.Key{}, placeholder, labels),
+	)
 	if err != nil {
 		return fmt.Errorf("failed to start child %s for %s[%d]: %w", child.name, sr.Name, tr.Index, err)
 	}
