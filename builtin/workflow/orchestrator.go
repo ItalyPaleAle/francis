@@ -37,6 +37,17 @@ type orchestrator struct {
 	// armedDeadline is what this activation last wrote to the deadline alarm, so an unchanged deadline costs no second write on the same row
 	// A fresh activation starts empty and therefore re-arms once, which is also how an alarm someone deleted comes back
 	armedDeadline time.Time
+	// unsavedDispatches are attempts this activation dispatched whose DispatchedAttempt marker is not in the journal yet
+	// They are saved with the next journal write rather than with a write of their own, and an activation that ends first only causes those tasks to be dispatched again
+	unsavedDispatches []dispatchAck
+}
+
+// dispatchAck records that the job for one attempt of a task, or of its compensation, was accepted
+type dispatchAck struct {
+	step    string
+	index   int
+	undo    bool
+	attempt int
 }
 
 // newOrchestrator builds the Workflow actor for one instance
@@ -548,6 +559,9 @@ func (o *orchestrator) terminalStateTTL(st *instanceState) time.Duration {
 
 // persist writes the journal, its workflow labels, and its retention TTL in one operation, and fails the instance rather than letting it outgrow what it can store
 func (o *orchestrator) persist(ctx context.Context, st *instanceState, now time.Time) error {
+	// Dispatch markers held back by an earlier turn are saved with this write, and are part of the size it is checked against
+	o.applyUnsavedDispatches(st)
+
 	opts := &actor.SetStateOpts{}
 	opts.SetWorkflowLabels(builtinkey.Key{}, o.labels(st))
 	opts.TTL = o.terminalStateTTL(st)
@@ -577,7 +591,33 @@ func (o *orchestrator) persist(ctx context.Context, st *instanceState, now time.
 	if err != nil {
 		return fmt.Errorf("failed to write the workflow journal: %w", err)
 	}
+
+	// The markers are durable now, and a failed write keeps them for the next one since the jobs were accepted either way
+	o.unsavedDispatches = nil
 	return nil
+}
+
+// applyUnsavedDispatches copies the dispatch markers this activation has not saved yet into the journal
+// A marker only ever moves forward, so one for an attempt the journal has since superseded changes nothing
+func (o *orchestrator) applyUnsavedDispatches(st *instanceState) {
+	for _, ack := range o.unsavedDispatches {
+		sr := st.step(ack.step)
+		if sr == nil {
+			continue
+		}
+		tr := sr.task(ack.index)
+		if tr == nil {
+			continue
+		}
+
+		if !ack.undo {
+			tr.DispatchedAttempt = max(tr.DispatchedAttempt, ack.attempt)
+			continue
+		}
+		if tr.Comp != nil {
+			tr.Comp.DispatchedAttempt = max(tr.Comp.DispatchedAttempt, ack.attempt)
+		}
+	}
 }
 
 // labels are what makes "list the running instances" a range scan on an indexed column rather than a walk of every retained journal
@@ -677,9 +717,10 @@ func (o *orchestrator) reconcile(ctx context.Context, st *instanceState, now tim
 		return err
 	}
 
-	// Dispatch acknowledgements are written afterward, so they must not mutate the state client's last durable snapshot
+	// Dispatch markers are set on a copy, so they must not mutate the state client's last durable snapshot
 	*st = st.clone()
-	var changed bool
+	o.applyUnsavedDispatches(st)
+	var acks []dispatchAck
 	for i := range st.Steps {
 		sr := &st.Steps[i]
 		d := o.def.byName[sr.Name]
@@ -687,12 +728,12 @@ func (o *orchestrator) reconcile(ctx context.Context, st *instanceState, now tim
 			continue
 		}
 
-		var dispatched bool
+		var stepAcks []dispatchAck
 		switch sr.Status {
 		case StepRunning:
-			dispatched, err = o.dispatchForward(ctx, st, sr, d, now)
+			stepAcks, err = o.dispatchForward(ctx, st, sr, d, now)
 		case StepCompensating:
-			dispatched, err = o.dispatchCompensations(ctx, st, sr, d, now)
+			stepAcks, err = o.dispatchCompensations(ctx, st, sr, d, now)
 		default:
 			// A step that settled while tasks were still outstanding leaves pending jobs behind, which are cancelled so the work that has not started never does
 			err = o.cancelOutstanding(ctx, st, sr)
@@ -701,41 +742,50 @@ func (o *orchestrator) reconcile(ctx context.Context, st *instanceState, now tim
 			}
 			continue
 		}
+		acks = append(acks, stepAcks...)
 		if err != nil {
+			// Whatever was accepted before the failure is still remembered, so the retried turn saves its marker instead of dispatching it again
+			o.unsavedDispatches = append(o.unsavedDispatches, acks...)
 			return err
 		}
-		changed = changed || dispatched
 	}
 
-	// An accepted attempt stays acknowledged across activations while a failed acknowledgement write safely repeats its idempotent dispatch
-	if changed {
-		statusBefore := st.Status
-		before := st.stepStatuses()
-		err = o.persist(ctx, st, now)
-		if err != nil {
-			return err
-		}
-		if st.Status.IsTerminal() {
-			o.recordTransitions(ctx, st, &event{}, statusBefore, before)
-			return o.reconcile(ctx, st, now, forceParentReport)
-		}
+	// A single marker waits for the next journal write, which saves a write on every step of a sequential workflow and on every slot a bounded fan-out refills
+	// Losing it with the activation only dispatches that one task again, which its idempotency key absorbs unless the job already finished
+	if len(acks) <= 1 {
+		o.unsavedDispatches = append(o.unsavedDispatches, acks...)
+		return nil
+	}
+
+	// Several markers are written now, because a new activation that lost them would dispatch a whole fan-out or compensation frame again
+	statusBefore := st.Status
+	before := st.stepStatuses()
+	err = o.persist(ctx, st, now)
+	if err != nil {
+		// The jobs were accepted even though the markers were not saved, so they wait for the next journal write
+		o.unsavedDispatches = append(o.unsavedDispatches, acks...)
+		return err
+	}
+	if st.Status.IsTerminal() {
+		o.recordTransitions(ctx, st, &event{}, statusBefore, before)
+		return o.reconcile(ctx, st, now, forceParentReport)
 	}
 
 	return nil
 }
 
-// dispatchForward dispatches every forward task the journal says should be running, within the fan-out's sliding window
-func (o *orchestrator) dispatchForward(ctx context.Context, st *instanceState, sr *stepRecord, d *stepDef, now time.Time) (bool, error) {
+// dispatchForward dispatches every forward task the journal says should be running, within the fan-out's sliding window, and returns a marker for each job that was accepted
+func (o *orchestrator) dispatchForward(ctx context.Context, st *instanceState, sr *stepRecord, d *stepDef, now time.Time) ([]dispatchAck, error) {
 	// A wait step has no task to dispatch: it is completed by RaiseEvent or failed by its own timeout
 	if d.kind == KindWait {
-		return false, nil
+		return nil, nil
 	}
 
 	// The window admits the first tasks in index order that are not yet done, and slides as results arrive
-	// Acknowledged jobs still occupy the window but require no further provider calls until their attempt changes
+	// Dispatched jobs still occupy the window but require no further provider calls until their attempt changes
 	window := d.maxParallel
 	var admitted int
-	var changed bool
+	var acks []dispatchAck
 	for i := range sr.Tasks {
 		tr := &sr.Tasks[i]
 		if tr.Done {
@@ -751,12 +801,12 @@ func (o *orchestrator) dispatchForward(ctx context.Context, st *instanceState, s
 
 		err := o.dispatchTask(ctx, st, sr, d, tr, now)
 		if err != nil {
-			return changed, err
+			return acks, err
 		}
 		tr.DispatchedAttempt = tr.Attempts
-		changed = true
+		acks = append(acks, dispatchAck{step: sr.Name, index: tr.Index, attempt: tr.Attempts})
 	}
-	return changed, nil
+	return acks, nil
 }
 
 // dispatchTask dispatches one attempt of one task, which is a job to a worker or the start of a child instance
@@ -837,9 +887,9 @@ func (o *orchestrator) startChild(ctx context.Context, st *instanceState, sr *st
 	return nil
 }
 
-// dispatchCompensations dispatches every compensation of the frame being unwound, which run concurrently because the tasks had no order between them going forward
-func (o *orchestrator) dispatchCompensations(ctx context.Context, st *instanceState, sr *stepRecord, d *stepDef, now time.Time) (bool, error) {
-	var changed bool
+// dispatchCompensations dispatches every compensation of the frame being unwound, which run concurrently because the tasks had no order between them going forward, and returns a marker for each job that was accepted
+func (o *orchestrator) dispatchCompensations(ctx context.Context, st *instanceState, sr *stepRecord, d *stepDef, now time.Time) ([]dispatchAck, error) {
+	var acks []dispatchAck
 	for i := range sr.Tasks {
 		tr := &sr.Tasks[i]
 		if tr.Comp == nil || tr.Comp.Done || tr.Comp.DispatchedAttempt >= tr.Comp.Attempts {
@@ -852,10 +902,10 @@ func (o *orchestrator) dispatchCompensations(ctx context.Context, st *instanceSt
 		if member.kind == KindChild || (d.kind == KindForEach && d.child != nil) {
 			err := o.unwindChild(ctx, st, sr.Name, tr)
 			if err != nil {
-				return changed, err
+				return acks, err
 			}
 			tr.Comp.DispatchedAttempt = tr.Comp.Attempts
-			changed = true
+			acks = append(acks, dispatchAck{step: sr.Name, index: tr.Index, undo: true, attempt: tr.Comp.Attempts})
 			continue
 		}
 
@@ -877,17 +927,17 @@ func (o *orchestrator) dispatchCompensations(ctx context.Context, st *instanceSt
 		client := builtinactor.NewClient[struct{}](undoType, workerActorID(o.instanceID, sr.Name, tr.Index), o.svc)
 		_, _, err := client.Dispatch(ctx, methodCompensate, payload, opts...)
 		if err != nil {
-			return changed, fmt.Errorf("failed to dispatch compensation %s[%d]: %w", sr.Name, tr.Index, err)
+			return acks, fmt.Errorf("failed to dispatch compensation %s[%d]: %w", sr.Name, tr.Index, err)
 		}
 		tr.Comp.DispatchedAttempt = tr.Comp.Attempts
-		changed = true
+		acks = append(acks, dispatchAck{step: sr.Name, index: tr.Index, undo: true, attempt: tr.Comp.Attempts})
 
 		o.wf.metrics.compensationsRun.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("workflow", o.def.name),
 			attribute.String("step", sr.Name),
 		))
 	}
-	return changed, nil
+	return acks, nil
 }
 
 // unwindChild asks a child instance to undo itself, which cancels one that is still running and reopens one that already completed

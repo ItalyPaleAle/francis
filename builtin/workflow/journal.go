@@ -135,6 +135,7 @@ func (st instanceState) MarshalMsgpack() ([]byte, error) {
 	if st.encoded != nil {
 		return st.encoded, nil
 	}
+
 	return msgpack.Marshal(instanceStateWire(st))
 }
 
@@ -163,7 +164,8 @@ type stepRecord struct {
 // taskRecord is one execution unit of a step: one worker actor, one durable job, and the attempts it took
 type taskRecord struct {
 	Index int `msgpack:"index"`
-	// DispatchedAttempt records the latest forward attempt whose job was durably accepted
+	// DispatchedAttempt records the latest forward attempt whose job was accepted, so later turns do not dispatch it again
+	// A turn that dispatched a single job saves it with the next journal write, so after an activation ends this can lag behind and that task is dispatched again
 	DispatchedAttempt int `msgpack:"dispatchedAttempt,omitempty"`
 	// Item is this task's fan-out element
 	Item json.RawMessage `msgpack:"item,omitempty"`
@@ -197,7 +199,7 @@ type taskRecord struct {
 type compRecord struct {
 	// GenerationStart fences reports from undo attempts dispatched before the latest forward outcome was recorded
 	GenerationStart int `msgpack:"generationStart,omitempty"`
-	// DispatchedAttempt records the latest compensation attempt whose job was durably accepted
+	// DispatchedAttempt records the latest compensation attempt whose job was accepted, and can lag behind the same way the forward marker does
 	DispatchedAttempt int       `msgpack:"dispatchedAttempt,omitempty"`
 	Attempts          int       `msgpack:"attempts"`
 	RetryAt           time.Time `msgpack:"retryAt,omitzero"`
@@ -258,8 +260,8 @@ func (sr *stepRecord) task(index int) *taskRecord {
 func (st *instanceState) clone() instanceState {
 	out := *st
 	out.encoded = nil
-	out.Input = cloneRawMessage(st.Input)
-	out.Output = cloneRawMessage(st.Output)
+	out.Input = bytes.Clone(st.Input)
+	out.Output = bytes.Clone(st.Output)
 	out.EventNames = append([]string(nil), st.EventNames...)
 	out.Stack = append([]string(nil), st.Stack...)
 	if st.Suspended != nil {
@@ -281,7 +283,7 @@ func (st *instanceState) clone() instanceState {
 // clone returns an independent step record including every task and encoded value it owns
 func (sr *stepRecord) clone() stepRecord {
 	out := *sr
-	out.Event = cloneRawMessage(sr.Event)
+	out.Event = bytes.Clone(sr.Event)
 	out.Tasks = make([]taskRecord, len(sr.Tasks))
 	for i := range sr.Tasks {
 		out.Tasks[i] = sr.Tasks[i].clone()
@@ -292,16 +294,11 @@ func (sr *stepRecord) clone() stepRecord {
 // clone returns an independent task record including its compensation bookkeeping
 func (tr *taskRecord) clone() taskRecord {
 	out := *tr
-	out.Item = cloneRawMessage(tr.Item)
-	out.Output = cloneRawMessage(tr.Output)
+	out.Item = bytes.Clone(tr.Item)
+	out.Output = bytes.Clone(tr.Output)
 	if tr.Comp != nil {
 		comp := *tr.Comp
 		out.Comp = &comp
 	}
 	return out
-}
-
-// cloneRawMessage preserves the distinction between a nil value and an empty non-nil value while breaking ownership of its backing array
-func cloneRawMessage(value json.RawMessage) json.RawMessage {
-	return bytes.Clone(value)
 }

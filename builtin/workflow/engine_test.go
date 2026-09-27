@@ -1207,6 +1207,8 @@ type dispatchCountingHost struct {
 
 	dispatchCalls map[string]int
 	failAck       bool
+	// journalWrites counts every journal write, which is what shows whether a dispatch marker cost a write of its own
+	journalWrites int
 }
 
 func (h *dispatchCountingHost) Dispatch(ctx context.Context, actorType string, actorID string, method string, data any, props actor.JobProperties) (string, bool, error) {
@@ -1220,6 +1222,11 @@ func (h *dispatchCountingHost) Dispatch(ctx context.Context, actorType string, a
 func (h *dispatchCountingHost) SetState(ctx context.Context, actorType string, actorID string, state any, opts *actor.SetStateOpts) error {
 	// Reject only acknowledgement writes to reproduce a crash after job acceptance but before its marker becomes durable
 	st, ok := state.(instanceState)
+	if ok {
+		h.mu.Lock()
+		h.journalWrites++
+		h.mu.Unlock()
+	}
 	if h.failAck && ok {
 		for _, sr := range st.Steps {
 			for _, tr := range sr.Tasks {
@@ -1275,7 +1282,13 @@ func TestFanOutDispatchCallsGrowLinearly(t *testing.T) {
 					if kind == "worker" {
 						expectedForward++
 					}
-					assert.Equal(t, expectedForward, host.dispatchCalls[forwardMethod])
+					if window == 0 {
+						assert.Equal(t, expectedForward, host.dispatchCalls[forwardMethod])
+					} else {
+						// A report that refills one slot keeps that marker in memory, and each fresh activation here loses it and dispatches that one task again
+						assert.GreaterOrEqual(t, host.dispatchCalls[forwardMethod], expectedForward)
+						assert.LessOrEqual(t, host.dispatchCalls[forwardMethod], 2*expectedForward)
+					}
 
 					// A wide compensation frame must also dispatch each member only once across sequential acknowledgements
 					err = o.Job(t.Context(), methodCancel, &payloadEnvelope{value: reasonPayload{Reason: "undo"}})
@@ -1296,9 +1309,9 @@ func TestFanOutDispatchCallsGrowLinearly(t *testing.T) {
 }
 
 func TestDispatchAcknowledgementFailureDoesNotPoisonRetry(t *testing.T) {
-	// Accept the first task's job but fail the subsequent acknowledgement write
+	// A group dispatches two jobs in one turn, so their markers are written immediately, and that write fails
 	host := &dispatchCountingHost{fakeHost: newFakeHost(), dispatchCalls: map[string]int{}, failAck: true}
-	wf, err := New("dispatch-ack-failure", WithSteps(Step("work", WithRun(noopRun))))
+	wf, err := New("dispatch-ack-failure", WithSteps(Parallel("work", Step("a", WithRun(noopRun)), Step("b", WithRun(noopRun)))))
 	require.NoError(t, err)
 	svc := actor.NewService(host)
 	o := newRoutedOrchestrator(t, wf, "instance", svc)
@@ -1310,18 +1323,21 @@ func TestDispatchAcknowledgementFailureDoesNotPoisonRetry(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, cached.step("work").task(0).DispatchedAttempt)
 
-	// The retry repeats the same idempotency key, then a new activation skips the durably acknowledged job
+	// The retried turn saves the markers the activation still holds instead of dispatching the jobs again
 	host.failAck = false
-	err = o.Job(t.Context(), methodStart, start)
-	require.NoError(t, err)
-	assert.Equal(t, 2, host.dispatchCalls[methodRun])
-	assert.Len(t, host.dispatchedTo(builtinActorType(wf.workerType("")), workerActorID("instance", "work", 0)), 1)
-	o = newRoutedOrchestrator(t, wf, "instance", svc)
 	err = o.Job(t.Context(), methodStart, start)
 	require.NoError(t, err)
 	assert.Equal(t, 2, host.dispatchCalls[methodRun])
 	st = readJournal(t, host.fakeHost, wf, "instance")
 	assert.Equal(t, 1, st.step("work").task(0).DispatchedAttempt)
+	assert.Equal(t, 1, st.step("work").task(1).DispatchedAttempt)
+
+	// A new activation reads the saved markers and dispatches nothing
+	o = newRoutedOrchestrator(t, wf, "instance", svc)
+	err = o.Job(t.Context(), methodStart, start)
+	require.NoError(t, err)
+	assert.Equal(t, 2, host.dispatchCalls[methodRun])
+	assert.Len(t, host.dispatchedTo(builtinActorType(wf.workerType("")), workerActorID("instance", "work", 0)), 1)
 }
 
 func TestDispatchMarkersPermitNewAttempts(t *testing.T) {
@@ -1352,16 +1368,91 @@ func TestDispatchMarkersPermitNewAttempts(t *testing.T) {
 	assert.Equal(t, CompensationCompleted, readJournal(t, host.fakeHost, wf, "instance").Compensation)
 }
 
+func TestSingleDispatchMarkerIsSavedWithTheNextJournalWrite(t *testing.T) {
+	t.Run("sequential steps", func(t *testing.T) {
+		host := &dispatchCountingHost{fakeHost: newFakeHost(), dispatchCalls: map[string]int{}}
+		wf, err := New("deferred-markers", WithSteps(
+			Step("a", WithRun(noopRun)),
+			Step("b", WithRun(noopRun)),
+			WaitForEvent("hold"),
+		))
+		require.NoError(t, err)
+		o := newRoutedOrchestrator(t, wf, "instance", actor.NewService(host))
+		require.NoError(t, o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}}))
+
+		// The start dispatched one job, and its marker is held for the next journal write rather than written on its own
+		assert.Equal(t, 1, host.dispatchCalls[methodRun])
+		st := readJournal(t, host.fakeHost, wf, "instance")
+		assert.Zero(t, st.step("a").task(0).DispatchedAttempt)
+
+		// Each report costs one journal write, which also saves the marker the previous turn held back
+		writes := host.journalWrites
+		require.NoError(t, o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "a", Attempt: 1}}))
+		assert.Equal(t, writes+1, host.journalWrites)
+		st = readJournal(t, host.fakeHost, wf, "instance")
+		assert.Equal(t, 1, st.step("a").task(0).DispatchedAttempt)
+		assert.Zero(t, st.step("b").task(0).DispatchedAttempt)
+
+		writes = host.journalWrites
+		require.NoError(t, o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "b", Attempt: 1}}))
+		assert.Equal(t, writes+1, host.journalWrites)
+		st = readJournal(t, host.fakeHost, wf, "instance")
+		assert.Equal(t, 1, st.step("b").task(0).DispatchedAttempt)
+		assert.Equal(t, 2, host.dispatchCalls[methodRun], "a marker held in memory still stops the same activation from dispatching again")
+	})
+
+	t.Run("bounded fan-out refilling one slot per report", func(t *testing.T) {
+		host := &dispatchCountingHost{fakeHost: newFakeHost(), dispatchCalls: map[string]int{}}
+		wf, err := New("deferred-window", WithSteps(
+			Step("plan", WithRun(noopRun)),
+			ForEach("work", WithItemsFrom("plan"), WithRun(noopRun), WithMaxParallel(2)),
+			WaitForEvent("hold"),
+		))
+		require.NoError(t, err)
+		o := newRoutedOrchestrator(t, wf, "instance", actor.NewService(host))
+		require.NoError(t, o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}}))
+		require.NoError(t, o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "plan", Attempt: 1, Output: json.RawMessage(`[1,2,3,4,5,6]`)}}))
+
+		// Every report frees one slot, and refilling it costs no journal write of its own
+		for index := range 6 {
+			writes := host.journalWrites
+			require.NoError(t, o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "work", Index: index, Attempt: 1}}))
+			assert.Equal(t, writes+1, host.journalWrites, "report %d", index)
+		}
+		assert.Equal(t, 7, host.dispatchCalls[methodRun], "each task is dispatched once")
+		st := readJournal(t, host.fakeHost, wf, "instance")
+		assert.Equal(t, StepCompleted, st.step("work").Status)
+	})
+
+	t.Run("a lost marker dispatches its task once more", func(t *testing.T) {
+		host := &dispatchCountingHost{fakeHost: newFakeHost(), dispatchCalls: map[string]int{}}
+		wf, err := New("lost-marker", WithSteps(Step("a", WithRun(noopRun)), WaitForEvent("hold")))
+		require.NoError(t, err)
+		svc := actor.NewService(host)
+		start := &payloadEnvelope{value: startPayload{Version: 1}}
+		o := newRoutedOrchestrator(t, wf, "instance", svc)
+		require.NoError(t, o.Job(t.Context(), methodStart, start))
+
+		// A new activation never saw the marker, so it dispatches the task again under the same idempotency key, which coalesces onto the live job
+		o = newRoutedOrchestrator(t, wf, "instance", svc)
+		require.NoError(t, o.Job(t.Context(), methodStart, start))
+		assert.Equal(t, 2, host.dispatchCalls[methodRun])
+		assert.Len(t, host.dispatchedTo(builtinActorType(wf.workerType("")), workerActorID("instance", "a", 0)), 1)
+	})
+}
+
 func TestOversizedDispatchAcknowledgementRecordsTermination(t *testing.T) {
 	// Measure the journal before its first dispatch acknowledgement so the marker alone crosses the configured cap
 	baselineHost := newFakeHost()
-	baselineWF, err := New("oversized-markers", WithSteps(Step("work", WithRun(noopRun))))
+	group := Parallel("work", Step("a", WithRun(noopRun)), Step("b", WithRun(noopRun)))
+	baselineWF, err := New("oversized-markers", WithSteps(group))
 	require.NoError(t, err)
 	baselineActor := newTestOrchestrator(t, baselineWF, baselineHost, "instance")
 	err = baselineActor.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
 	require.NoError(t, err)
 	baseline := readJournal(t, baselineHost, baselineWF, "instance")
 	baseline.step("work").task(0).DispatchedAttempt = 0
+	baseline.step("work").task(1).DispatchedAttempt = 0
 	baseline.encoded = nil
 	limit, err := journalSize(&baseline)
 	require.NoError(t, err)
@@ -1374,13 +1465,13 @@ func TestOversizedDispatchAcknowledgementRecordsTermination(t *testing.T) {
 		require.NoError(t, err)
 	})
 	host := &dispatchCountingHost{fakeHost: newFakeHost(), dispatchCalls: map[string]int{}}
-	wf, err := New("oversized-markers", WithMaxJournalSize(limit), WithMeter(provider.Meter("markers")), WithSteps(Step("work", WithRun(noopRun))))
+	wf, err := New("oversized-markers", WithMaxJournalSize(limit), WithMeter(provider.Meter("markers")), WithSteps(group))
 	require.NoError(t, err)
 	o := newRoutedOrchestrator(t, wf, "instance", actor.NewService(host))
 	err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
 	require.NoError(t, err)
 	st := readJournal(t, host.fakeHost, wf, "instance")
-	assert.Equal(t, 1, host.dispatchCalls[methodRun], "the ordinary journal must fit until dispatch is acknowledged")
+	assert.Equal(t, 2, host.dispatchCalls[methodRun], "the ordinary journal must fit until dispatch is acknowledged")
 	assert.Equal(t, StatusFailed, st.Status)
 	assert.Contains(t, st.Cause, ErrJournalTooLarge.Error())
 	assert.Equal(t, int64(0), int64MetricTotal(t, reader, "francis.workflow.instances.running"))
