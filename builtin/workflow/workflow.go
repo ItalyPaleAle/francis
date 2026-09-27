@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -74,6 +75,8 @@ type Workflow struct {
 
 	// boundService is the actor.Service the host handed to this workflow's factories, which is what the auto-purge cron job's handler runs against
 	boundService atomic.Pointer[actor.Service]
+	// startIdentityCaches holds one start-only registry identity per service so hosts with many starts do not serialize every admission through the registry
+	startIdentityCaches sync.Map
 }
 
 // New builds a workflow built-in actor identified by name

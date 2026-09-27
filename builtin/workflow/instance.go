@@ -15,9 +15,6 @@ import (
 	"github.com/italypaleale/francis/internal/builtinkey"
 )
 
-// cleanupConcurrency bounds how many cleanup calls one instance has in flight, so a large fan-out does not turn into an equally large goroutine and connection burst
-const cleanupConcurrency = 16
-
 // purge removes everything a terminated instance left behind: its children first, then its dead-letters, then its journal
 // That order is why an interrupted purge is safe to repeat
 func (o *orchestrator) purge(ctx context.Context, req purgePayload) (any, error) {
@@ -229,6 +226,9 @@ func (o *orchestrator) cancelJobTargets(ctx context.Context, targets []jobCleanu
 // forEachBounded calls fn for every item with at most cleanupConcurrency calls in flight, and joins the errors they return
 // Every item is attempted even after one fails, since each cleanup is independent and safe to repeat
 func forEachBounded[T any](items []T, fn func(T) error) error {
+	// Limit how many cleanup calls one instance has in flight, so a large fan-out does not turn into an equally large goroutine and connection burst
+	const cleanupConcurrency = 16
+
 	if len(items) == 0 {
 		return nil
 	}
@@ -257,11 +257,13 @@ func forEachBounded[T any](items []T, fn func(T) error) error {
 	wg.Wait()
 	close(errCh)
 
-	var joined error
+	errs := make([]error, 0)
 	for err := range errCh {
-		joined = errors.Join(joined, err)
+		if err != nil {
+			errs = append(errs, err)
+		}
 	}
-	return joined
+	return errors.Join(errs...)
 }
 
 // cancelLiveActorJobs removes only occurrences that have not completed or dead-lettered

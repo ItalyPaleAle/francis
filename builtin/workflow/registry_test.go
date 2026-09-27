@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -416,6 +417,36 @@ func TestRegistryGenerationsNeverReclaimForgottenAuthorization(t *testing.T) {
 	assert.False(t, res.(registerResponse).OK) //nolint:forcetypeassert
 }
 
+func TestStartConfirmationUsesReadPathAndChecksGeneration(t *testing.T) {
+	wf, err := New("shared-confirmation", WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+	host := newFakeHost()
+	host.registryResponse = registerResponse{Found: true, OK: true, Fingerprint: wf.def.fingerprint, Generation: 1}
+	svc := actor.NewService(host)
+	req := registerRequest{Version: wf.def.version, Fingerprint: wf.def.fingerprint, Generation: 1}
+
+	// A journal with a granted generation confirms through the registry's concurrent read path
+	_, err = wf.confirmDefinition(t.Context(), svc, req)
+	require.NoError(t, err)
+	host.mu.Lock()
+	assert.Equal(t, []string{builtinActorType(wf.registryType()) + "/" + methodCheck}, host.invokes)
+	host.mu.Unlock()
+
+	// A read from an older registry may report a matching fingerprint without comparing generations
+	host.registryResponse.Generation = 2
+	_, err = wf.confirmDefinition(t.Context(), svc, req)
+	require.ErrorIs(t, err, ErrDefinitionConflict)
+
+	// A host without the read method still confirms under the exclusive registry turn
+	host.registryResponse.Generation = 1
+	host.registryPeekErr = actorcore.ErrActorMethodUnsupported
+	_, err = wf.confirmDefinition(t.Context(), svc, req)
+	require.NoError(t, err)
+	host.mu.Lock()
+	assert.Equal(t, builtinActorType(wf.registryType())+"/"+methodRegister, host.invokes[len(host.invokes)-1])
+	host.mu.Unlock()
+}
+
 func TestStartConfirmationRetriesBeforeDispatch(t *testing.T) {
 	wf, err := New("confirm-retry", WithSteps(Step("work", WithRun(noopRun))))
 	require.NoError(t, err)
@@ -698,6 +729,146 @@ func TestForgetVersionInvalidatesExistingDecisions(t *testing.T) {
 	served, err = corrected.serveVersion(t.Context(), svc, 1)
 	require.NoError(t, err)
 	assert.True(t, served, "the corrected graph remains rejected after the registry reset")
+}
+
+// stateReadCountingHost distinguishes the public Start journal read from the registry actor's own state access
+type stateReadCountingHost struct {
+	*fakeHost
+
+	stateReads atomic.Int32
+}
+
+func (h *stateReadCountingHost) GetState(ctx context.Context, actorType string, actorID string, dest any) error {
+	h.stateReads.Add(1)
+	return h.fakeHost.GetState(ctx, actorType, actorID, dest)
+}
+
+func TestStartCachesIdentityAndReadsOnlyCallerChosenIDs(t *testing.T) {
+	wf, err := New("start-cache", WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+	host := &stateReadCountingHost{fakeHost: newFakeHost()}
+	svc := actor.NewService(host)
+	ctx := t.Context()
+
+	// Concurrent generated starts share one authorization and do not read journals for IDs they just created
+	const starts = 24
+	errs := make(chan error, starts)
+	var wg sync.WaitGroup
+	for range starts {
+		wg.Go(func() {
+			_, _, startErr := wf.Service(svc).Start(ctx, nil)
+			errs <- startErr
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for startErr := range errs {
+		require.NoError(t, startErr)
+	}
+	assert.Zero(t, host.stateReads.Load())
+	host.mu.Lock()
+	assert.Len(t, host.invokes, 1)
+	host.mu.Unlock()
+
+	// A caller-chosen ID still checks its journal and cannot restart a retained terminal instance
+	known := instanceState{Workflow: wf.name, Version: wf.def.version, Status: StatusCompleted}
+	err = host.SetState(ctx, builtinActorType(wf.baseType), "known", known, nil)
+	require.NoError(t, err)
+	_, created, err := wf.Service(svc).Start(ctx, nil, WithInstanceID("known"))
+	require.NoError(t, err)
+	assert.False(t, created)
+	assert.Equal(t, int32(1), host.stateReads.Load())
+
+	// The identity belongs to one service, so another host performs its own first authorization
+	other := &stateReadCountingHost{fakeHost: newFakeHost()}
+	_, created, err = wf.Service(actor.NewService(other)).Start(ctx, nil)
+	require.NoError(t, err)
+	assert.True(t, created)
+	other.mu.Lock()
+	assert.Len(t, other.invokes, 1)
+	other.mu.Unlock()
+}
+
+func TestStartIdentityCacheRefreshesAndDoesNotCacheConflicts(t *testing.T) {
+	wf, err := New("start-cache-refresh", WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+	host := newFakeHost()
+	host.registryResponse = registerResponse{Found: true, OK: false, Fingerprint: "other", Generation: 1}
+	svc := actor.NewService(host)
+
+	// A registry conflict is checked again so a later reset can authorize the same running process
+	for range 2 {
+		_, err = wf.cachedStartIdentity(t.Context(), svc)
+		require.ErrorIs(t, err, ErrDefinitionConflict)
+	}
+	host.registryResponse = registerResponse{Found: true, OK: true, Fingerprint: wf.def.fingerprint, Generation: 2}
+	identity, err := wf.cachedStartIdentity(t.Context(), svc)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2), identity.Generation)
+	host.mu.Lock()
+	assert.Len(t, host.invokes, 3)
+	host.mu.Unlock()
+
+	// Expiry forces a fresh registry decision even if no start delivery has exposed a remote reset
+	stored, ok := wf.startIdentityCaches.Load(svc)
+	require.True(t, ok)
+	cache, ok := stored.(*startIdentityCache)
+	require.True(t, ok)
+	cache.mu.Lock()
+	cache.current.Store(&startIdentityCacheEntry{identity: identity, expiresAt: time.Now().Add(-time.Second)})
+	cache.mu.Unlock()
+	_, err = wf.cachedStartIdentity(t.Context(), svc)
+	require.NoError(t, err)
+	host.mu.Lock()
+	assert.Len(t, host.invokes, 4)
+	host.mu.Unlock()
+}
+
+func TestStartCacheResetAndStaleGenerationFence(t *testing.T) {
+	old, err := New("start-cache-reset", WithSteps(Step("old", WithRun(noopRun))))
+	require.NoError(t, err)
+	corrected, err := New("start-cache-reset", WithSteps(Step("corrected", WithRun(noopRun))))
+	require.NoError(t, err)
+	host := newIdentityHost(t, old)
+	svc := actor.NewService(host)
+
+	// A remote reset can race with a host whose authorized generation is still cached
+	_, created, err := old.Service(svc).Start(t.Context(), nil, WithInstanceID("stale"))
+	require.NoError(t, err)
+	require.True(t, created)
+	payload, ok := reportedPayload(t, host.fakeHost, methodStart).(startPayload)
+	require.True(t, ok)
+	require.NoError(t, corrected.Service(svc).ForgetVersion(t.Context(), 1))
+	_, created, err = old.Service(svc).Start(t.Context(), nil, WithInstanceID("also-stale"))
+	require.NoError(t, err)
+	require.True(t, created)
+
+	// The durable confirmation rejects the stale start before any worker job and evicts that generation locally
+	o := newRoutedOrchestrator(t, old, "stale", svc)
+	err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: payload})
+	require.NoError(t, err)
+	st := readJournal(t, host.fakeHost, old, "stale")
+	assert.True(t, st.RegistryRejected)
+	assert.Equal(t, StatusFailed, st.Status)
+	assert.Empty(t, jobsFor(host.fakeHost, old.workerType(""), methodRun))
+	_, _, err = old.Service(svc).Start(t.Context(), nil, WithInstanceID("new"))
+	require.ErrorIs(t, err, ErrDefinitionConflict)
+	assert.Empty(t, jobsFor(host.fakeHost, old.workerType(""), methodRun))
+}
+
+func TestOwnVersionResetInvalidatesStartCache(t *testing.T) {
+	wf, err := New("own-start-cache-reset", WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+	host := newIdentityHost(t, wf)
+	svc := actor.NewService(host)
+
+	// A local reset installs a new generation and clears the cached authorization before the next start
+	current, err := wf.cachedStartIdentity(t.Context(), svc)
+	require.NoError(t, err)
+	require.NoError(t, wf.Service(svc).ForgetVersion(t.Context(), 1))
+	refreshed, err := wf.cachedStartIdentity(t.Context(), svc)
+	require.NoError(t, err)
+	assert.Greater(t, refreshed.Generation, current.Generation)
 }
 
 func TestFingerprintDistinguishesCommaContainingReferences(t *testing.T) {

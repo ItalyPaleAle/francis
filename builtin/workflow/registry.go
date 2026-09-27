@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -17,6 +19,22 @@ import (
 	"github.com/italypaleale/francis/internal/builtinactor"
 	"github.com/italypaleale/francis/internal/builtinkey"
 )
+
+// startIdentityCacheTTL bounds how long a host can dispatch starts under an identity that another host has since reset
+// Expiry catches remote resets when no start confirmation arrives to evict the stale identity
+const startIdentityCacheTTL = 5 * time.Minute
+
+// startIdentityCacheEntry is immutable so concurrent starts can read one authorization without locking
+type startIdentityCacheEntry struct {
+	identity  registerResponse
+	expiresAt time.Time
+}
+
+// startIdentityCache serializes refreshes for one service while allowing recent identities to be read without locking
+type startIdentityCache struct {
+	mu      sync.Mutex
+	current atomic.Pointer[startIdentityCacheEntry]
+}
 
 // registryState is what the definition registry holds: the fingerprint first recorded for each version of the graph
 type registryState struct {
@@ -296,9 +314,74 @@ func (w *Workflow) authorizeDefinition(ctx context.Context, svc *actor.Service) 
 	return w.confirmDefinition(ctx, svc, registerRequest{Version: w.def.version, Fingerprint: w.def.fingerprint})
 }
 
-// confirmDefinition serializes start authorization and post-persist confirmation with registry resets
+// cachedStartIdentity reuses an authorized graph identity only for new starts, whose first journal write is fenced by confirmStart before work runs
+func (w *Workflow) cachedStartIdentity(ctx context.Context, svc *actor.Service) (registerResponse, error) {
+	// Find the cache for this service so one Workflow registered on multiple hosts does not share their local authority
+	stored, ok := w.startIdentityCaches.Load(svc)
+	if !ok {
+		stored, _ = w.startIdentityCaches.LoadOrStore(svc, &startIdentityCache{})
+	}
+	cache := stored.(*startIdentityCache) //nolint:forcetypeassert
+
+	// Serve a recent identity without sending every start through the registry singleton
+	entry := cache.current.Load()
+	if entry != nil && time.Now().Before(entry.expiresAt) {
+		return entry.identity, nil
+	}
+
+	// Coalesce cold or expired refreshes so one burst makes one registry request
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	entry = cache.current.Load()
+	if entry != nil && time.Now().Before(entry.expiresAt) {
+		return entry.identity, nil
+	}
+
+	identity, err := w.authorizeDefinition(ctx, svc)
+	if err != nil {
+		return registerResponse{}, err
+	}
+
+	cache.current.Store(&startIdentityCacheEntry{
+		identity:  identity,
+		expiresAt: time.Now().Add(startIdentityCacheTTL),
+	})
+
+	return identity, nil
+}
+
+// invalidateStartIdentity removes a revoked generation without discarding a newer identity another start already refreshed
+// A zero generation clears the local cache after this service resets its own version
+func (w *Workflow) invalidateStartIdentity(svc *actor.Service, generation uint64) {
+	stored, ok := w.startIdentityCaches.Load(svc)
+	if !ok {
+		return
+	}
+	// Every cache entry is created with this concrete type
+	cache := stored.(*startIdentityCache) //nolint:forcetypeassert
+
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	entry := cache.current.Load()
+	if entry != nil && (generation == 0 || entry.identity.Generation == generation) {
+		cache.current.Store(nil)
+	}
+}
+
+// confirmDefinition registers new identities exclusively and confirms persisted starts under a shared read lock while both paths remain ordered with registry resets
 func (w *Workflow) confirmDefinition(ctx context.Context, svc *actor.Service, req registerRequest) (registerResponse, error) {
-	env, err := w.registryInvoke(ctx, svc, methodRegister, req)
+	// Only a new authorization may create or upgrade a registry entry
+	// A persisted journal can use a concurrent read because a later reset must see that journal under the registry's exclusive lock
+	var env actor.Envelope
+	var err error
+	if req.Generation == 0 {
+		env, err = w.registryInvoke(ctx, svc, methodRegister, req)
+	} else {
+		env, err = w.registryPeek(ctx, svc, methodCheck, req)
+		if errors.Is(err, actorcore.ErrActorMethodUnsupported) {
+			env, err = w.registryInvoke(ctx, svc, methodRegister, req)
+		}
+	}
 	if err != nil {
 		return registerResponse{}, fmt.Errorf("failed to authorize the workflow definition: %w", err)
 	}
@@ -307,7 +390,8 @@ func (w *Workflow) confirmDefinition(ctx context.Context, svc *actor.Service, re
 	if err != nil {
 		return registerResponse{}, fmt.Errorf("failed to decode the definition authorization: %w", err)
 	}
-	if !resp.OK {
+	// Compare the generation locally because an older registry's read path may check only the fingerprint
+	if !resp.OK || (req.Generation > 0 && resp.Generation != req.Generation) {
 		w.recordDefinitionConflict(ctx, req.Version)
 		return resp, ErrDefinitionConflict
 	}

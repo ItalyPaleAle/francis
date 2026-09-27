@@ -444,13 +444,12 @@ func TestWorkflowTurnStaysWithinTheOrchestrationBoundary(t *testing.T) {
 	st := readJournal(t, host, wf, "inst-1")
 	assert.Equal(t, StatusCompleted, st.Status)
 
-	// Start authorization and confirmation share the registry lock, while subsequent turns fence locally against the immutable journal identity
+	// Start authorization registers exclusively and confirmation reads concurrently, while subsequent turns fence locally against the immutable journal identity
 	host.mu.Lock()
 	defer host.mu.Unlock()
 	require.Len(t, host.invokes, 2)
-	for _, invocation := range host.invokes {
-		assert.Contains(t, invocation, methodRegister)
-	}
+	assert.Contains(t, host.invokes[0], methodRegister)
+	assert.Contains(t, host.invokes[1], methodCheck)
 }
 
 // TestTurnConvergesAfterAFaultBetweenTheStateWriteAndTheDispatch injects a failure between SetState and reconcile, and asserts the retried turn converges without double-counting

@@ -509,6 +509,9 @@ func (o *orchestrator) confirmStart(ctx context.Context, st *instanceState, now 
 	})
 	if err != nil && !errors.Is(err, ErrDefinitionConflict) {
 		return err
+	} else if errors.Is(err, ErrDefinitionConflict) {
+		// A revoked cached generation must not be reused by later starts on this host
+		o.wf.invalidateStartIdentity(o.svc, st.RegistryGeneration)
 	}
 
 	// The first persistence owns the cached snapshot, so the confirmation outcome must mutate an independent journal
@@ -845,7 +848,7 @@ func (o *orchestrator) startChild(ctx context.Context, st *instanceState, sr *st
 	if child == nil {
 		return fmt.Errorf("step %q is a child step with no definition", sr.Name)
 	}
-	identity, err := child.authorizeDefinition(ctx, o.svc)
+	identity, err := child.cachedStartIdentity(ctx, o.svc)
 	if err != nil {
 		return err
 	}

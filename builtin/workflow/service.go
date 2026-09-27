@@ -67,7 +67,8 @@ func (s *WorkflowService) Start(ctx context.Context, input any, opts ...StartOpt
 	}
 
 	instanceID = so.instanceID
-	if instanceID == "" {
+	generatedID := instanceID == ""
+	if generatedID {
 		instanceID = uuid.NewV7().String()
 	} else {
 		err = validateInstanceID(instanceID)
@@ -82,16 +83,21 @@ func (s *WorkflowService) Start(ctx context.Context, input any, opts ...StartOpt
 		return "", false, err
 	}
 
-	// An instance that already has a journal is not restarted, whatever its status: the repeated start is simply dropped
+	// Caller-chosen IDs need a journal read to preserve idempotency after their start job has ended
+	// A newly generated UUID has no prior journal to find, so it goes straight to durable dispatch
 	client := builtinactor.NewClient[instanceState](s.wf.baseType, instanceID, s.svc)
-	existing, err := client.GetState(ctx)
-	if err != nil {
-		return "", false, fmt.Errorf("failed to read the workflow journal: %w", err)
+	if !generatedID {
+		existing, readErr := client.GetState(ctx)
+		if readErr != nil {
+			return "", false, fmt.Errorf("failed to read the workflow journal: %w", readErr)
+		}
+		if existing.Status != "" {
+			return instanceID, false, nil
+		}
 	}
-	if existing.Status != "" {
-		return instanceID, false, nil
-	}
-	identity, err := s.wf.authorizeDefinition(ctx, s.svc)
+
+	// Cache the graph identity while the first journal turn retains the registry confirmation that fences resets
+	identity, err := s.wf.cachedStartIdentity(ctx, s.svc)
 	if err != nil {
 		return "", false, err
 	}
@@ -105,7 +111,7 @@ func (s *WorkflowService) Start(ctx context.Context, input any, opts ...StartOpt
 		CreatedAt:             time.Now(),
 	}
 
-	// The insertion is what says who started the instance, since the journal read above finds nothing until the start job has run
+	// The insertion is what says who started the instance, since the journal may not exist until the start job runs
 	_, created, err = client.Dispatch(ctx, methodStart, payload, actor.WithIdempotencyKey(methodStart))
 	if err != nil {
 		return "", false, fmt.Errorf("failed to start the workflow instance: %w", err)
@@ -396,6 +402,9 @@ func (s *WorkflowService) ForgetVersion(ctx context.Context, version int) error 
 	if err != nil {
 		return fmt.Errorf("failed to forget the definition: %w", err)
 	}
+
+	s.wf.invalidateStartIdentity(s.svc, 0)
+
 	return nil
 }
 
