@@ -1,13 +1,11 @@
 package remote
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"strconv"
 
-	msgpack "github.com/vmihailenco/msgpack/v5"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/italypaleale/francis/actor"
@@ -17,10 +15,6 @@ import (
 	"github.com/italypaleale/francis/internal/tracing"
 	"github.com/italypaleale/francis/protocol"
 )
-
-// errCapacityExhausted is returned inside the executeAlarm closure when the actor type's capacity group is full on this host
-// It is mapped to protocol.ErrCodeCapacityExhausted so the runtime re-routes the job rather than retrying or dead-lettering it
-var errCapacityExhausted = errors.New("capacity group is full on this host")
 
 func (h *Host) GetAlarm(ctx context.Context, actorType string, actorID string, name string) (actor.AlarmProperties, error) {
 	err := ref.ValidateComponents(actorType, actorID, name)
@@ -125,61 +119,25 @@ func (h *Host) executeAlarm(ctx context.Context, req protocol.ExecuteAlarmReques
 
 	// Acquire the actor's turn-based lock and run its Alarm or Job method
 	_, err := h.core.LockAndInvoke(ctx, aRef, func(invokeCtx context.Context, act *actorcore.ActiveActor) (any, error) {
-		// Wrap the occurrence data so the actor can decode it into a custom object
-		var data actor.Envelope
-		if len(req.Data) > 0 {
-			dec := msgpack.GetDecoder()
-			dec.Reset(bytes.NewReader(req.Data))
-			defer msgpack.PutDecoder(dec)
-			data = dec
-		}
-
-		// Stamp a per-occurrence key (ID + due-time ms) into the context so the actor can detect duplicate deliveries of the same occurrence without confusing them with legitimate subsequent firings of a repeating occurrence (which have a different due time)
-		invokeCtx = actor.WithRequestID(invokeCtx, alarmRequestID(req))
-
 		// Record the execution time before invoking the actor
 		executionTime = h.clock.Now().UnixMilli()
 
 		// Jobs are delivered to the Job method, plain alarms to the Alarm method
-		if req.Kind == string(components.AlarmKindJob) {
-			obj, ok := act.Instance.(actor.ActorJob)
-			if !ok {
-				return nil, actorcore.ErrActorMethodUnsupported
-			}
-
-			// Enforce the actor type's host-local capacity group before running the job
-			// A full group means this host declines the occurrence, which the runtime re-routes to another host without counting an attempt
-			release, admitted := h.core.TryAcquireCapacity(req.ActorType)
-			if !admitted {
-				return nil, errCapacityExhausted
-			}
-			defer release()
-
-			rErr := obj.Job(invokeCtx, req.JobMethod, data)
-			if rErr != nil {
-				return nil, rErr
-			}
-			return nil, nil
-		}
-
-		// The actor must implement the Alarm method to receive alarms
-		obj, ok := act.Instance.(actor.ActorAlarm)
-		if !ok {
-			return nil, actorcore.ErrActorMethodUnsupported
-		}
-		rErr := obj.Alarm(invokeCtx, req.Name, data)
-		if rErr != nil {
-			return nil, fmt.Errorf("error from actor: %w", rErr)
-		}
-
-		return nil, nil
+		// A job whose capacity group is full on this host is declined, which the runtime re-routes to another host without counting an attempt
+		return nil, h.core.RunOccurrence(invokeCtx, act, actorcore.Occurrence{
+			Job:       req.Kind == string(components.AlarmKindJob),
+			Name:      req.Name,
+			JobMethod: req.JobMethod,
+			Data:      req.Data,
+			RequestID: alarmRequestID(req),
+		})
 	})
 	if err != nil {
 		tracing.Fail(ctx, err.Error())
 
 		// The host declined this job occurrence, either because its capacity group is full or the handler returned ErrJobRejected
 		// It is signaled with a distinct code so the runtime re-routes it to another host without counting an attempt, and the actor is halted here to clear its placement so the re-route does not return to this host
-		if errors.Is(err, errCapacityExhausted) {
+		if errors.Is(err, actorcore.ErrCapacityExhausted) {
 			h.core.HaltDeferred(req.ActorType, req.ActorID)
 			return protocol.ExecuteAlarmResponse{}, protocol.NewError(protocol.ErrCodeCapacityExhausted, err.Error())
 		}

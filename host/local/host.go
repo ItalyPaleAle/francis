@@ -28,7 +28,6 @@ import (
 	"github.com/italypaleale/francis/components/sqlite"
 	"github.com/italypaleale/francis/components/standalone"
 	"github.com/italypaleale/francis/internal/actorcore"
-	"github.com/italypaleale/francis/internal/builtinkey"
 	"github.com/italypaleale/francis/internal/ca"
 	"github.com/italypaleale/francis/internal/certholder"
 	"github.com/italypaleale/francis/internal/hosttls"
@@ -72,13 +71,6 @@ type (
 	StandalonePostgresProviderOptions = standalone.StandalonePostgresOptions
 )
 
-// singletonActorRegistration is the host-side record for a singleton actor the host will bootstrap at startup
-type singletonActorRegistration struct {
-	// actorType is reserved for built-in actor types
-	actorType     string
-	bootstrapData any
-}
-
 // Host is an actor host.
 type Host struct {
 	// Address the host is reachable at
@@ -94,8 +86,6 @@ type Host struct {
 	actorProvider components.ActorProvider
 	service       *actor.Service
 	core          *actorcore.Manager
-	// singletonActors holds singleton actors registered before start, whose singleton instance the host bootstraps once ready
-	singletonActors []singletonActorRegistration
 	// resolver adapts this host to the placement resolver the shared messaging logic depends on
 	resolver actorcore.PlacementResolver
 
@@ -367,9 +357,8 @@ func (h *Host) Run(parentCtx context.Context) error {
 	h.readyOnce.Do(func() { close(h.ready) })
 
 	// Bootstrap the singleton actors now that the host can serve invocations
-	// Bootstrap runs on the cluster-wide singleton instance, so it is harmless for every host to do this
-	if len(h.singletonActors) > 0 {
-		go h.bootstrapSingletonActors(ctx)
+	if len(h.core.SingletonActorTypes()) > 0 {
+		go h.core.BootstrapSingletons(ctx)
 	}
 
 	// Set the draining flag as soon as the context is canceled so the peer server rejects new invocations with a retry-later error before any actors are halted, giving callers a chance to re-resolve
@@ -456,41 +445,6 @@ func (h *Host) issueSelfCert() error {
 // HaltAll halts all actors active on the host, gracefully
 func (h *Host) HaltAll() error {
 	return h.core.HaltAll()
-}
-
-// bootstrapSingletonActors drives the Bootstrap hook of each registered singleton actor once the host is ready
-// It invokes the reserved bootstrap lifecycle on the singleton instance through the privileged client, which routes to the owning host and serializes on that instance's turn lock
-// It retries with a short backoff because an invocation can briefly fail right after startup (Bootstrap is idempotent, so retrying is safe)
-func (h *Host) bootstrapSingletonActors(ctx context.Context) {
-	const maxAttempts = 5
-	for _, reg := range h.singletonActors {
-		at := reg.actorType
-		// The privileged client is allowed to target reserved built-in types and to send the reserved bootstrap method, both of which the public client rejects
-		client := actor.NewBuiltInActorClient[any](builtinkey.Key{}, at, actor.SingletonActorID, h.service)
-		for i := 1; ; i++ {
-			invokeCtx, cancel := context.WithTimeout(ctx, h.providerRequestTimeout)
-			_, err := client.Invoke(invokeCtx, at, actor.SingletonActorID, ref.MethodBootstrap, reg.bootstrapData)
-			cancel()
-			if err == nil {
-				h.log.DebugContext(ctx, "Bootstrapped singleton actor", slog.String("actorType", at))
-				break
-			}
-
-			if i >= maxAttempts || ctx.Err() != nil {
-				h.log.WarnContext(ctx, "Failed to bootstrap singleton actor", slog.String("actorType", at), slog.Any("error", err))
-				break
-			}
-
-			// Back off before the next attempt, but stop promptly if the host is shutting down
-			t := h.clock.NewTimer(time.Duration(i) * 500 * time.Millisecond)
-			select {
-			case <-t.C():
-			case <-ctx.Done():
-				t.Stop()
-				return
-			}
-		}
-	}
 }
 
 // Ready returns a channel that is closed once the host has registered and is safe to invoke.

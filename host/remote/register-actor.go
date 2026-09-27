@@ -99,15 +99,11 @@ func (h *Host) RegisterSingletonActor(actorType string, factory actor.Factory, o
 		opt(&o)
 	}
 
-	err := h.core.RegisterActor(actorType, factory, o)
+	err := h.core.RegisterSingletonActor(actorType, factory, o)
 	if err != nil {
 		return err
 	}
 
-	h.singletonActors = append(h.singletonActors, singletonActorRegistration{
-		actorType:     actorType,
-		bootstrapData: o.BootstrapData,
-	})
 	return nil
 }
 
@@ -122,12 +118,10 @@ func (h *Host) RegisterBuiltInActor(b builtinactor.BuiltInActor) error {
 		return errClientOnly
 	}
 
-	singletonTypes, err := builtinactor.Register(h.core, b)
+	err := builtinactor.Register(h.core, b)
 	if err != nil {
 		return err
 	}
-	for _, actorType := range singletonTypes {
-		h.singletonActors = append(h.singletonActors, singletonActorRegistration{actorType: actorType})
-	}
+
 	return nil
 }

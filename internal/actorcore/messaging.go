@@ -56,6 +56,36 @@ type PeerInvoker interface {
 	InvokeStream(ctx context.Context, address string, req protocol.InvokeActorRequest, body io.Reader) (string, io.ReadCloser, *protocol.Error)
 }
 
+// InvokeActor validates the actor reference and applies the invoke options of a public Invoke or Peek call, then performs Invoke
+func (m *Manager) InvokeActor(ctx context.Context, resolver PlacementResolver, peer PeerInvoker, actorType string, actorID string, method string, data any, readOnly bool, optsFn []actor.InvokeOption) (actor.Envelope, error) {
+	err := ref.ValidateComponents(actorType, actorID)
+	if err != nil {
+		return nil, err
+	}
+
+	opts := &types.InvokeOpts{}
+	for _, fn := range optsFn {
+		fn(opts)
+	}
+
+	return m.Invoke(ctx, resolver, peer, ref.NewActorRef(actorType, actorID), method, data, opts.ActiveOnly, readOnly)
+}
+
+// InvokeActorStream validates the actor reference and applies the invoke options of a public InvokeStream or PeekStream call, then performs InvokeStream
+func (m *Manager) InvokeActorStream(ctx context.Context, resolver PlacementResolver, peer PeerInvoker, actorType string, actorID string, method string, reqContentType string, body io.Reader, readOnly bool, optsFn []actor.InvokeOption) (string, io.ReadCloser, error) {
+	err := ref.ValidateComponents(actorType, actorID)
+	if err != nil {
+		return "", nil, err
+	}
+
+	opts := &types.InvokeOpts{}
+	for _, fn := range optsFn {
+		fn(opts)
+	}
+
+	return m.InvokeStream(ctx, resolver, peer, ref.NewActorRef(actorType, actorID), method, reqContentType, body, opts.ActiveOnly, readOnly)
+}
+
 // Invoke resolves an actor's placement and performs an object invocation, retrying once on a stale placement
 // readOnly requests a Peek rather than an Invoke: the actor is called through its ActorPeek interface, under the shared (read) lock
 func (m *Manager) Invoke(parentCtx context.Context, resolver PlacementResolver, peer PeerInvoker, r ref.ActorRef, method string, data any, activeOnly bool, readOnly bool) (env actor.Envelope, err error) {

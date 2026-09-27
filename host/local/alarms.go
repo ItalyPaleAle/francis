@@ -306,32 +306,19 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 			return h.executeJob(parentCtx, lease, act, a, &isJob, &jobMethod, &jobData, &jobProps)
 		}
 
-		// Ensure the actor implements the Alarm method
-		obj, ok := act.Instance.(actor.ActorAlarm)
-		if !ok {
-			// This is a fatal error, which causes us to drop the alarm since there's no way it can be completed
-			return executeAlarmStatusFatal, fmt.Errorf("actor of type '%s' does not implement the Alarm method", act.ActorType())
-		}
-
-		var data actor.Envelope
-		if len(a.Data) > 0 {
-			dec := msgpack.GetDecoder()
-			dec.Reset(bytes.NewReader(a.Data))
-			defer msgpack.PutDecoder(dec)
-			data = dec
-		}
-
 		// Mark the alarm as executed now
 		lease.SetExecutionTime(h.clock.Now())
 
-		// Stamp a per-occurrence key (alarm ID + due-time ms) into the context so the actor can detect
-		// duplicate deliveries of the same occurrence without confusing them with legitimate subsequent
-		// firings of a repeating alarm (which have a different due time)
-		alarmCtx := actor.WithRequestID(parentCtx, alarmRequestID(lease))
-
 		// Invoke the actor
-		err = obj.Alarm(alarmCtx, a.Name, data)
-		if err != nil {
+		err = h.core.RunOccurrence(parentCtx, act, actorcore.Occurrence{
+			Name:      a.Name,
+			Data:      a.Data,
+			RequestID: alarmRequestID(lease),
+		})
+		if errors.Is(err, actorcore.ErrActorMethodUnsupported) {
+			// This is a fatal error, which causes us to drop the alarm since there's no way it can be completed
+			return executeAlarmStatusFatal, err
+		} else if err != nil {
 			// Consider this as a retryable condition unless we've exhausted the configured max attempts
 			code := executeAlarmStatusRetryable
 			maxAttempts := h.core.ActorsConfig[aRef.ActorType].MaxAttempts
@@ -437,45 +424,27 @@ func (h *Host) executeJob(parentCtx context.Context, lease *ref.AlarmLease, act 
 	// Mark the occurrence as executed now, so the dead-letter path can compute the next occurrence even on a hard failure
 	lease.SetExecutionTime(h.clock.Now())
 
-	// The actor must implement the Job method to receive jobs
-	obj, ok := act.Instance.(actor.ActorJob)
-	if !ok {
-		// A hard-fatal error: the actor type can never service this job, so it is dead-lettered immediately
-		return executeAlarmStatusFatal, fmt.Errorf("actor of type '%s' does not implement the Job method", act.ActorType())
-	}
-
-	// Enforce the actor type's host-local capacity group before running the job
-	// A full group means this host declines the occurrence, which the release path hands to another host without counting an attempt
-	release, admitted := h.core.TryAcquireCapacity(aRef.ActorType)
-	if !admitted {
-		return executeAlarmStatusReleased, fmt.Errorf("capacity group is full on this host for actor type '%s'", aRef.ActorType)
-	}
-	defer release()
-
-	var data actor.Envelope
-	if len(a.Data) > 0 {
-		dec := msgpack.GetDecoder()
-		dec.Reset(bytes.NewReader(a.Data))
-		defer msgpack.PutDecoder(dec)
-		data = dec
-	}
-
-	// Stamp a per-occurrence key (job ID + due-time ms) so the actor can detect duplicate deliveries of the same occurrence
-	ctx := actor.WithRequestID(parentCtx, alarmRequestID(lease))
-
 	// Invoke the actor's Job method
-	err := obj.Job(ctx, a.JobMethod, data)
-	if err != nil {
+	err := h.core.RunOccurrence(parentCtx, act, actorcore.Occurrence{
+		Job:       true,
+		JobMethod: a.JobMethod,
+		Data:      a.Data,
+		RequestID: alarmRequestID(lease),
+	})
+	switch {
+	case errors.Is(err, actorcore.ErrActorMethodUnsupported):
+		// A hard-fatal error: the actor type can never service this job, so it is dead-lettered immediately
+		return executeAlarmStatusFatal, err
+	case errors.Is(err, actorcore.ErrCapacityExhausted):
+		// A full capacity group means this host declines the occurrence, which the release path hands to another host without counting an attempt
+		return executeAlarmStatusReleased, err
+	case errors.Is(err, actor.ErrJobRejected):
 		// ErrJobRejected declines the occurrence on this host without failing it, so it is re-routed to another host
-		if errors.Is(err, actor.ErrJobRejected) {
-			return executeAlarmStatusReleased, fmt.Errorf("job rejected by host: %w", err)
-		}
-
+		return executeAlarmStatusReleased, fmt.Errorf("job rejected by host: %w", err)
+	case errors.Is(err, actor.ErrJobPermanentFailure):
 		// ErrJobPermanentFailure skips the remaining retries and dead-letters the job immediately
-		if errors.Is(err, actor.ErrJobPermanentFailure) {
-			return executeAlarmStatusFatal, fmt.Errorf("job failed permanently: %w", err)
-		}
-
+		return executeAlarmStatusFatal, fmt.Errorf("job failed permanently: %w", err)
+	case err != nil:
 		// Otherwise retry until the actor type's max attempts are exhausted, then dead-letter
 		code := executeAlarmStatusRetryable
 		maxAttempts := h.core.ActorsConfig[aRef.ActorType].MaxAttempts
@@ -525,26 +494,10 @@ func (h *Host) deadLetterJob(ctx context.Context, lease *ref.AlarmLease, props r
 // fireJobFailed delivers the optional JobFailed reaction hook on the actor's turn-based lock, best-effort
 // It is never itself dead-lettered: an error here is only logged, leaving the dead_jobs record in place
 func (h *Host) fireJobFailed(parentCtx context.Context, lease *ref.AlarmLease, method string, data []byte, jobErr error) {
-	aRef := lease.ActorRef()
 	jobID := lease.Key()
 
-	_, err := h.core.LockAndInvoke(parentCtx, aRef, func(ctx context.Context, act *actorcore.ActiveActor) (any, error) {
-		// The hook is optional, so an actor that does not implement it is a no-op
-		obj, ok := act.Instance.(actor.ActorJobFailed)
-		if !ok {
-			return nil, nil
-		}
-
-		var env actor.Envelope
-		if len(data) > 0 {
-			dec := msgpack.GetDecoder()
-			dec.Reset(bytes.NewReader(data))
-			defer msgpack.PutDecoder(dec)
-			env = dec
-		}
-
-		return nil, obj.JobFailed(ctx, jobID, method, env, jobErr)
-	})
+	// The hook is optional, so an actor that does not implement it is a no-op
+	err := h.core.RunJobFailed(parentCtx, lease.ActorRef(), jobID, method, data, jobErr)
 	if err != nil {
 		h.log.Warn("JobFailed hook returned an error; dead-letter record is kept", slog.String("jobId", jobID), slog.Any("error", err))
 	}

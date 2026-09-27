@@ -78,6 +78,8 @@ type Manager struct {
 	// actorTypeLockMode holds the lock mode of each registered actor type, which is stamped onto every actor instance the type activates
 	// It is kept separate from ActorsConfig because that struct is the placement store's view of an actor type, and the lock mode is purely host-local
 	actorTypeLockMode map[string]LockMode
+	// singletons holds the singleton actor types registered before start, whose singleton instance BootstrapSingletons bootstraps once the host is ready
+	singletons []singletonRegistration
 	// Actors holds the actors currently active on this host, keyed by "actorType/actorID"
 	Actors *haxmap.Map[string, *ActiveActor]
 	// IdleProcessor schedules actors for deactivation when they become idle

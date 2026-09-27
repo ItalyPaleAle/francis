@@ -1,7 +1,6 @@
 package remote
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -162,24 +161,7 @@ func (h *Host) DeleteJob(ctx context.Context, actorType string, actorID string, 
 // jobFailed runs an actor's optional JobFailed hook at the runtime's request, after the runtime has dead-lettered a job
 // It is best-effort: an actor that does not implement the hook is a no-op, and the dead-letter record is already the source of truth
 func (h *Host) jobFailed(ctx context.Context, req protocol.JobFailedRequest) *protocol.Error {
-	aRef := ref.NewActorRef(req.ActorType, req.ActorID)
-
-	_, err := h.core.LockAndInvoke(ctx, aRef, func(invokeCtx context.Context, act *actorcore.ActiveActor) (any, error) {
-		obj, ok := act.Instance.(actor.ActorJobFailed)
-		if !ok {
-			return nil, nil
-		}
-
-		var data actor.Envelope
-		if len(req.Data) > 0 {
-			dec := msgpack.GetDecoder()
-			dec.Reset(bytes.NewReader(req.Data))
-			defer msgpack.PutDecoder(dec)
-			data = dec
-		}
-
-		return nil, obj.JobFailed(invokeCtx, req.JobID, req.Method, data, errors.New(req.ErrorMessage))
-	})
+	err := h.core.RunJobFailed(ctx, ref.NewActorRef(req.ActorType, req.ActorID), req.JobID, req.Method, req.Data, errors.New(req.ErrorMessage))
 	if err != nil {
 		return actorcore.InvokeErrorToProtocol(err)
 	}
