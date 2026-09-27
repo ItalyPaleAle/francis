@@ -55,10 +55,11 @@ func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.Regi
 		defer cancel()
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err = tx.Exec(queryCtx,
-			`INSERT INTO `+p.tablePrefix+`hosts (host_id, host_address, host_last_health_check)
-			VALUES ($1, $2, now() AT TIME ZONE 'utc')`,
+			`INSERT INTO `+p.tablePrefix+`hosts (host_id, host_address, host_last_health_check, host_session_id)
+			VALUES ($1, $2, now() AT TIME ZONE 'utc', $3)`,
 			hostID,
 			req.Address,
+			nullString(req.SessionID),
 		)
 		if isConstraintError(err) {
 			return zero, components.ErrHostAlreadyRegistered
@@ -123,7 +124,7 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 			return zero, err
 		}
 
-		// Try to refresh the existing registration in place
+		// Try to refresh the existing registration in place, handing it to the new session
 		// A unique constraint violation here means a different, healthy host already holds the address
 		queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
 		defer cancel()
@@ -131,9 +132,9 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		tag, err = tx.Exec(queryCtx,
 			`UPDATE `+p.tablePrefix+`hosts
-			SET host_address = $1, host_last_health_check = now() AT TIME ZONE 'utc'
+			SET host_address = $1, host_last_health_check = now() AT TIME ZONE 'utc', host_session_id = $3, host_draining = false
 			WHERE host_id = $2`,
-			req.Address, req.ExistingHostID,
+			req.Address, req.ExistingHostID, nullString(req.SessionID),
 		)
 		if isConstraintError(err) {
 			return zero, components.ErrHostAlreadyRegistered
@@ -151,9 +152,9 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 			defer cancel()
 			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 			_, err = tx.Exec(queryCtx,
-				`INSERT INTO `+p.tablePrefix+`hosts (host_id, host_address, host_last_health_check)
-				VALUES ($1, $2, now() AT TIME ZONE 'utc')`,
-				newHostID, req.Address,
+				`INSERT INTO `+p.tablePrefix+`hosts (host_id, host_address, host_last_health_check, host_session_id)
+				VALUES ($1, $2, now() AT TIME ZONE 'utc', $3)`,
+				newHostID, req.Address, nullString(req.SessionID),
 			)
 			if isConstraintError(err) {
 				return zero, components.ErrHostAlreadyRegistered
@@ -191,17 +192,17 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 }
 
 func (p *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, req components.UpdateActorHostReq) error {
-	// At this stage, there are two things we can update here (one or both):
+	// At this stage, there are three things we can update here (any combination):
 	// - The last health check
 	// - The list of supported actor types (if non-nil)
-	if !req.UpdateLastHealthCheck && req.ActorTypes == nil {
+	// - The draining flag (only ever set, never cleared)
+	if !req.UpdateLastHealthCheck && req.ActorTypes == nil && !req.Draining {
 		// Nothing to do/update
 		return nil
 	}
 
-	// If we're only updating actor types, we can skip obtaining a transaction to reduce the DB roundtrips
-	// (technically the req.UpdateLastHealthCheck check here is redundant)
-	if req.UpdateLastHealthCheck && req.ActorTypes == nil {
+	// If we're only updating the health check, we can skip obtaining a transaction to reduce the DB roundtrips
+	if req.UpdateLastHealthCheck && req.ActorTypes == nil && !req.Draining {
 		// A retry may repeat an attempt that committed after the caller stopped waiting
 		// Skip the redundant write when the last committed health check is already fresh enough
 		if req.Retry {
@@ -235,11 +236,19 @@ func (p *PostgresProvider) UpdateActorHost(ctx context.Context, hostID string, r
 			}
 		}
 
+		// Mark the host draining, which only applies to a host that is still registered and healthy
+		if req.Draining {
+			rErr = p.setActorHostDraining(ctx, hostID, tx)
+			if rErr != nil {
+				return zero, fmt.Errorf("failed to mark host draining: %w", rErr)
+			}
+		}
+
 		// Also update the list of supported actor types if non-nil
 		// Note that a nil list means "do not update", while an empty, non-nil list causes the removal of all supported actor types
 		if req.ActorTypes != nil {
-			// When updating actor types without updating health check, we need to verify the host exists and is healthy
-			if !req.UpdateLastHealthCheck {
+			// When updating actor types without updating health check or draining, we need to verify the host exists and is healthy
+			if !req.UpdateLastHealthCheck && !req.Draining {
 				queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 				defer cancel()
 				var ok bool
@@ -344,8 +353,35 @@ func (p *PostgresProvider) updateActorHostLastHealthCheck(ctx context.Context, h
 	return nil
 }
 
-func (p *PostgresProvider) UnregisterHost(ctx context.Context, hostID string) error {
+// setActorHostDraining marks a registered, healthy host as draining
+func (p *PostgresProvider) setActorHostDraining(ctx context.Context, hostID string, db postgresadapter.PGXQuerier) error {
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	res, err := db.Exec(queryCtx,
+		`UPDATE `+p.tablePrefix+`hosts
+		SET host_draining = true
+		WHERE
+			host_id = $1
+			AND host_last_health_check >= ((now() AT TIME ZONE 'utc') - $2::interval)`,
+		hostID,
+		p.cfg.HostHealthCheckDeadline,
+	)
+	if err != nil {
+		return fmt.Errorf("error executing query: %w", err)
+	}
+
+	// No row means the host doesn't exist or exists but is un-healthy
+	if res.RowsAffected() == 0 {
+		return components.ErrHostUnregistered
+	}
+
+	return nil
+}
+
+func (p *PostgresProvider) UnregisterHost(ctx context.Context, hostID string, opts components.UnregisterHostOpts) error {
 	// Deleting from the hosts table causes all actors to be deactivate
+	// With a session ID, only the registration that session still owns is deleted
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 	var hostActive bool
@@ -353,14 +389,20 @@ func (p *PostgresProvider) UnregisterHost(ctx context.Context, hostID string) er
 	err := p.db.
 		QueryRow(queryCtx,
 			`DELETE FROM `+p.tablePrefix+`hosts
-			WHERE host_id = $1
+			WHERE
+				host_id = $1
+				AND ($3 = '' OR host_session_id = $3)
 			RETURNING host_last_health_check >= ((now() AT TIME ZONE 'utc') - $2::interval)`,
 			hostID,
 			p.cfg.HostHealthCheckDeadline,
+			opts.SessionID,
 		).
 		Scan(&hostActive)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// Host doesn't exist
+		// Nothing was deleted: tell a registration owned by another session apart from one that doesn't exist
+		if opts.SessionID != "" {
+			return p.unregisterHostMissError(ctx, hostID)
+		}
 		return components.ErrHostUnregistered
 	} else if err != nil {
 		return fmt.Errorf("error executing query: %w", err)
@@ -373,6 +415,29 @@ func (p *PostgresProvider) UnregisterHost(ctx context.Context, hostID string) er
 	}
 
 	return nil
+}
+
+// unregisterHostMissError returns the error for a conditional UnregisterHost that deleted nothing
+// A host that still exists is owned by a different session, while a missing one was already unregistered
+func (p *PostgresProvider) unregisterHostMissError(ctx context.Context, hostID string) error {
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+	var exists bool
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	err := p.db.
+		QueryRow(queryCtx,
+			`SELECT EXISTS (SELECT 1 FROM `+p.tablePrefix+`hosts WHERE host_id = $1)`,
+			hostID,
+		).
+		Scan(&exists)
+	switch {
+	case err != nil:
+		return fmt.Errorf("error checking host existence: %w", err)
+	case exists:
+		return components.ErrHostSuperseded
+	default:
+		return components.ErrHostUnregistered
+	}
 }
 
 func (p *PostgresProvider) ListHosts(ctx context.Context) ([]components.HostInfo, error) {

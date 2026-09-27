@@ -16,6 +16,9 @@ import (
 	"github.com/italypaleale/francis/internal/buildinfo"
 )
 
+// runtimeIDEnvVar is the environment variable that overrides the runtimeId set in the config file
+var runtimeIDEnvVar = buildinfo.ConfigEnvPrefix + "RUNTIME_ID"
+
 // config is the on-disk configuration for the runtime binary
 type config struct {
 	Bind        string          `yaml:"bind"`
@@ -242,6 +245,13 @@ func loadConfig(path string) (*config, error) {
 	err = yaml.Unmarshal(data, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	// The runtime ID can be set per process with an env var, which overrides the config file
+	// This lets replicas that share one config file get a separate identity
+	runtimeID := os.Getenv(runtimeIDEnvVar)
+	if runtimeID != "" {
+		cfg.RuntimeID = runtimeID
 	}
 
 	return cfg, nil

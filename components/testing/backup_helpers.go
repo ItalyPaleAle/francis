@@ -186,7 +186,7 @@ func SeedBackupSample(t testing.TB, ctx context.Context, p components.ActorProvi
 	require.NoError(t, err)
 
 	// Remove the host so the cluster is quiescent
-	err = p.UnregisterHost(ctx, hostRes.HostID)
+	err = p.UnregisterHost(ctx, hostRes.HostID, components.UnregisterHostOpts{})
 	require.NoError(t, err)
 }
 

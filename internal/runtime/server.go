@@ -359,10 +359,15 @@ func (rt *Runtime) handleHostDisconnect(c *hostConn) {
 
 	// A draining host whose session has now closed is completely done, so remove it from the provider
 	// This also reaps any active-actor placements the host did not clear while draining
+	// The removal is conditional on this session still owning the registration, because the host may have reattached through another runtime replica, which this replica's HostManager cannot see
 	// Use a fresh context since the session context is already canceled
 	ctx, cancel := context.WithTimeout(context.Background(), rt.providerRequestTimeout)
 	defer cancel()
-	err := rt.provider.UnregisterHost(ctx, c.hostID)
+	err := rt.provider.UnregisterHost(ctx, c.hostID, components.UnregisterHostOpts{SessionID: c.sessionID})
+	if errors.Is(err, components.ErrHostSuperseded) {
+		rt.log.Info("Drained host is now owned by another session, leaving its registration in place", slog.String("hostId", c.hostID))
+		return
+	}
 	if err != nil && !errors.Is(err, components.ErrHostUnregistered) {
 		rt.log.Warn("Error unregistering drained host from provider",
 			slog.String("hostId", c.hostID),

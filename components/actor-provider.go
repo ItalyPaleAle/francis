@@ -49,7 +49,8 @@ type ActorProvider interface {
 
 	// UnregisterHost unregisters an actor host.
 	// If the host doesn't exist, returns ErrHostUnregistered.
-	UnregisterHost(ctx context.Context, hostID string) error
+	// When opts.SessionID is set and the registration is now owned by a different session, the host is left in place and ErrHostSuperseded is returned.
+	UnregisterHost(ctx context.Context, hostID string, opts UnregisterHostOpts) error
 
 	// ListHosts returns all actor hosts that are currently registered and healthy
 	ListHosts(ctx context.Context) ([]HostInfo, error)
@@ -195,6 +196,10 @@ type RegisterHostReq struct {
 	// If no such host exists (or if its health record has expired), a brand-new registration is created with a freshly-generated host ID and Reattached is false
 	// A host that sees Reattached false after having been registered before must drop every actor it's still holding
 	ExistingHostID string
+	// SessionID identifies the connection that owns the registration from now on, and is replaced on every reattach
+	// It lets UnregisterHost tell the owning session apart from one that was superseded, including by a session on another runtime replica
+	// Empty for hosts that are not connected through a session, such as in-process hosts
+	SessionID string
 	// JoinToken is the jti from the JWT bootstrap token
 	// When non-empty, the provider records it to prevent replay
 	// Empty when the token carried no jti or no expiry, and for non-JWT auth paths
@@ -222,6 +227,17 @@ type UpdateActorHostReq struct {
 	ActorTypes []ActorHostType
 	// Retry indicates the call repeats an earlier attempt that failed without a definitive answer
 	Retry bool
+	// Draining, when true, marks the host as draining, so no new actor is placed on it from now on
+	// Actors already active on the host stay resolvable until the host removes them
+	// The flag cannot be cleared through UpdateActorHost: it is reset only when the host registers or reattaches again
+	Draining bool
+}
+
+// UnregisterHostOpts contains options for UnregisterHost.
+type UnregisterHostOpts struct {
+	// SessionID, when non-empty, makes the removal conditional on the registration still being owned by this session
+	// Leave empty to remove the host unconditionally
+	SessionID string
 }
 
 // ActorHostType references a supported actor type.

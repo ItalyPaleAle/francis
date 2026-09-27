@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -68,4 +70,22 @@ func TestLoopbackBindAddr(t *testing.T) {
 	cfg = config{Bind: ":"}
 	_, err = cfg.loopbackBindAddr()
 	require.Error(t, err)
+}
+
+func TestLoadConfigRuntimeIDEnvOverride(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	err := os.WriteFile(path, []byte("runtimeId: from-file\n"), 0o600)
+	require.NoError(t, err)
+
+	// Without the env var, the config file value is used
+	t.Setenv(runtimeIDEnvVar, "")
+	cfg, err := loadConfig(path)
+	require.NoError(t, err)
+	assert.Equal(t, "from-file", cfg.RuntimeID)
+
+	// The env var overrides the config file value
+	t.Setenv(runtimeIDEnvVar, "francis-1")
+	cfg, err = loadConfig(path)
+	require.NoError(t, err)
+	assert.Equal(t, "francis-1", cfg.RuntimeID)
 }

@@ -278,6 +278,9 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 		existingID = reattachID
 	}
 
+	// Mint the session ID up front so the provider records this session as the owner of the registration
+	sessionID := uuid.NewV4().String()
+
 	// Register the host with the provider, reattaching to an existing registration when an identity is supplied
 	regCtx, cancel := context.WithTimeout(ctx, rt.providerRequestTimeout)
 	defer cancel()
@@ -285,6 +288,7 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 		Address:            payload.Address,
 		ActorTypes:         protocolActorTypesToComponents(payload.ActorTypes),
 		ExistingHostID:     existingID,
+		SessionID:          sessionID,
 		JoinToken:          joinToken,
 		JoinTokenExpiresAt: joinTokenExpiresAt,
 	})
@@ -302,7 +306,7 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 
 	// Record the host identity and session on the connection
 	c.hostID = res.HostID
-	c.sessionID = uuid.NewV4().String()
+	c.sessionID = sessionID
 	c.address = payload.Address
 	c.setActorTypes(payload.ActorTypes)
 	c.protocolVersion = negotiatedVersion
@@ -400,10 +404,22 @@ func (rt *Runtime) handleRenewCert(_ context.Context, c *hostConn, req *protocol
 }
 
 // handleUnregister handles a graceful, drain-oriented host shutdown request
-func (rt *Runtime) handleUnregister(_ context.Context, c *hostConn, req *protocol.Envelope) *protocol.Envelope {
-	// Mark the host draining so it is no longer selected for new placement or alarm work
-	// This alone makes the host ineligible for new work: ConnectedHostIDs excludes draining hosts and handleLookupActor returns retry-later for any actor resolved onto one
+func (rt *Runtime) handleUnregister(parentCtx context.Context, c *hostConn, req *protocol.Envelope) *protocol.Envelope {
+	// Mark the host draining so it is no longer selected for new placement or alarm work by this runtime
+	// ConnectedHostIDs excludes draining hosts and handleLookupActor returns retry-later for any actor resolved onto one
 	c.setDraining()
+
+	// Persist the draining flag too, so no runtime replica has the provider place a new actor on the host
+	// A failure is not fatal, since the host is draining regardless: it only leaves other replicas able to place new actors on it until it disconnects
+	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
+	defer cancel()
+	err := rt.provider.UpdateActorHost(ctx, c.hostID, components.UpdateActorHostReq{Draining: true})
+	if err != nil && !errors.Is(err, components.ErrHostUnregistered) {
+		rt.log.WarnContext(ctx, "Failed to persist host draining state",
+			slog.String("hostId", c.hostID),
+			slog.Any("error", err),
+		)
+	}
 
 	// Deliberately do not remove the host from the provider here
 	// Its actors are still active and must stay resolvable until the host has finished draining them (provider removal happens once the session closes, in handleHostDisconnect)

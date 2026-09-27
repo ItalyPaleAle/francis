@@ -84,10 +84,10 @@ type blockingUnregisterProvider struct {
 	release chan struct{}
 }
 
-func (p *blockingUnregisterProvider) UnregisterHost(ctx context.Context, hostID string) error {
+func (p *blockingUnregisterProvider) UnregisterHost(ctx context.Context, hostID string, opts components.UnregisterHostOpts) error {
 	close(p.started)
 	<-p.release
-	return p.ActorProvider.UnregisterHost(ctx, hostID)
+	return p.ActorProvider.UnregisterHost(ctx, hostID, opts)
 }
 
 // dialRuntime dials the runtime's WebTransport endpoint, retrying until the server is accepting connections
@@ -245,7 +245,7 @@ func TestRegisterIssuesCertificateOnlyAfterIdentityReset(t *testing.T) {
 	assert.Empty(t, reattached.WorkloadCertDER)
 
 	// Removing the registration makes the same authenticated reconnect receive a new identity
-	err = prov.UnregisterHost(t.Context(), registered.HostID)
+	err = prov.UnregisterHost(t.Context(), registered.HostID, components.UnregisterHostOpts{})
 	require.NoError(t, err)
 	resetSession := dialRuntimeWithTLS(t, t.Context(), addr, clientTLS)
 	reset := reconnectOnSession(t, t.Context(), resetSession, registered.HostID, pub)
@@ -577,4 +577,32 @@ func TestHandleHostDisconnectIgnoresSupersededSession(t *testing.T) {
 		ActiveOnly: true,
 	})
 	require.NoError(t, err, "a superseded session's teardown must not unregister the host")
+}
+
+func TestHandleHostDisconnectLeavesRegistrationOwnedByAnotherReplica(t *testing.T) {
+	rt, prov := newTestRuntime(t)
+	c := connectTestHost(t, rt, prov, "10.0.0.24:1", protocol.ActorHostType{ActorType: "T"})
+
+	aref := ref.NewActorRef("T", "a1")
+	_, err := prov.LookupActor(t.Context(), aref, components.LookupActorOpts{})
+	require.NoError(t, err)
+
+	// The host reattaches through another replica, which this replica's host manager never learns about
+	res, err := prov.RegisterHost(t.Context(), components.RegisterHostReq{
+		Address:        c.address,
+		ActorTypes:     []components.ActorHostType{{ActorType: "T", IdleTimeout: time.Minute}},
+		ExistingHostID: c.hostID,
+		SessionID:      "other-replica-session",
+	})
+	require.NoError(t, err)
+	require.True(t, res.Reattached)
+
+	// Tearing down the stale draining session on this replica must not unregister the host that now lives on the other replica
+	c.setDraining()
+	rt.handleHostDisconnect(c)
+
+	_, ok := rt.hosts.Get(c.hostID)
+	assert.False(t, ok, "the stale session is removed from this replica's host manager")
+	_, err = prov.LookupActor(t.Context(), aref, components.LookupActorOpts{ActiveOnly: true})
+	require.NoError(t, err, "a registration owned by another session must survive the stale teardown")
 }

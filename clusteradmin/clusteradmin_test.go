@@ -72,7 +72,7 @@ func TestAcquireForceFalseWithHosts(t *testing.T) {
 	require.ErrorIs(t, err, components.ErrHostsConnected)
 
 	// The lease must have been released on the failure path, so removing the host and retrying succeeds
-	err = admin.provider.UnregisterHost(t.Context(), res.HostID)
+	err = admin.provider.UnregisterHost(t.Context(), res.HostID, components.UnregisterHostOpts{})
 	require.NoError(t, err)
 
 	_, err = admin.AcquireExclusive(t.Context(), AcquireOptions{Force: false})
@@ -135,7 +135,7 @@ func TestAcquireForceDrains(t *testing.T) {
 	// Simulate the evicted host self-terminating shortly after
 	go func() {
 		time.Sleep(500 * time.Millisecond)
-		_ = admin.provider.UnregisterHost(context.Background(), res.HostID)
+		_ = admin.provider.UnregisterHost(context.Background(), res.HostID, components.UnregisterHostOpts{})
 	}()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)

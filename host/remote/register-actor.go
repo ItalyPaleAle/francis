@@ -128,7 +128,25 @@ func (h *Host) RegisterBuiltInActor(b builtinactor.BuiltInActor) error {
 
 	// A built-in may register more than one actor type (for example a work pool with one type per capability)
 	// Built-in actors carry only their bare type (host adds the reserved prefix when registering)
-	for _, reg := range builtinactor.RegistrationsFor(b) {
+	regs := builtinactor.RegistrationsFor(b)
+
+	// Check every type first, so a duplicate or invalid type rejects the built-in without registering part of it
+	seen := make(map[string]struct{}, len(regs))
+	for _, reg := range regs {
+		actorType := builtinactor.FullActorType(reg.ActorType)
+		_, dup := seen[actorType]
+		if dup {
+			return fmt.Errorf("failed to register built-in actor %q: %w", actorType, actorcore.ErrActorTypeAlreadyRegistered)
+		}
+		seen[actorType] = struct{}{}
+
+		err := h.core.CheckRegistration(actorType, reg.RegisterOptions)
+		if err != nil {
+			return fmt.Errorf("failed to register built-in actor %q: %w", actorType, err)
+		}
+	}
+
+	for _, reg := range regs {
 		actorType := builtinactor.FullActorType(reg.ActorType)
 		err := h.core.RegisterActor(actorType, reg.Factory, reg.RegisterOptions)
 		if err != nil {

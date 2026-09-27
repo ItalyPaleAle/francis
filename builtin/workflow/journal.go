@@ -118,10 +118,14 @@ type instanceState struct {
 	// Reported records that this instance's terminal outcome has been dispatched to its parent, so a retried turn does not report it twice
 	Reported bool `msgpack:"reported,omitempty"`
 	// Reopened records that this instance became active after its first termination so lifecycle instruments do not count it as a second instance
-	Reopened    bool      `msgpack:"reopened,omitempty"`
-	CreatedAt   time.Time `msgpack:"createdAt"`
-	StartedAt   time.Time `msgpack:"startedAt"`
-	CompletedAt time.Time `msgpack:"completedAt,omitzero"`
+	Reopened  bool      `msgpack:"reopened,omitempty"`
+	CreatedAt time.Time `msgpack:"createdAt"`
+	// StartedAt is when the instance really started, and is only ever reported
+	StartedAt time.Time `msgpack:"startedAt"`
+	// DeadlineAnchor is the time the instance timeout is measured from, when it differs from StartedAt
+	// Resume shifts it forward so only the remaining budget is left, and an unwind resets it to grant compensation a fresh budget
+	DeadlineAnchor time.Time `msgpack:"deadlineAnchor,omitempty"`
+	CompletedAt    time.Time `msgpack:"completedAt,omitzero"`
 	// encoded reuses the exact size-check encoding when the provider serializes this state immediately afterward
 	encoded []byte
 }
@@ -156,9 +160,11 @@ type stepRecord struct {
 	// A loop node runs no task of its own, so without this the step after a loop would read nothing from the step preceding it
 	Output json.RawMessage `msgpack:"output,omitempty"`
 	// Error is the reason the step failed, once it has
-	Error       string    `msgpack:"error,omitempty"`
-	StartedAt   time.Time `msgpack:"startedAt,omitzero"`
-	CompletedAt time.Time `msgpack:"completedAt,omitzero"`
+	Error     string    `msgpack:"error,omitempty"`
+	StartedAt time.Time `msgpack:"startedAt,omitzero"`
+	// DeadlineAnchor is the time a WaitForEvent step's timeout is measured from after a resume shifted it, and zero means StartedAt
+	DeadlineAnchor time.Time `msgpack:"deadlineAnchor,omitempty"`
+	CompletedAt    time.Time `msgpack:"completedAt,omitzero"`
 }
 
 // taskRecord is one execution unit of a step: one worker actor, one durable job, and the attempts it took

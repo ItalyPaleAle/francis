@@ -30,6 +30,10 @@ const (
 	actorBusyReEnqueueInterval = 10 * time.Second
 )
 
+// ErrActorTypeAlreadyRegistered is returned by RegisterActor when the actor type is already registered on this host
+// Registering a type twice would replace its factory and configuration, so the second registration is rejected instead
+var ErrActorTypeAlreadyRegistered = errors.New("actor type is already registered on this host")
+
 // RemoveActorFunc removes an actor from the placement store when it is deactivated on this host
 // In local mode this calls the provider directly
 // In remote mode it notifies the runtime
@@ -116,16 +120,44 @@ func (m *Manager) SetLogger(log *slog.Logger) {
 	m.log = log
 }
 
+// CheckRegistration returns the error RegisterActor would return for a duplicate type or invalid options, without registering anything
+// Callers that register several types together use it to reject the whole batch before registering any of them
+func (m *Manager) CheckRegistration(actorType string, opts RegisterActorOptions) error {
+	_, exists := m.ActorsConfig[actorType]
+	if exists {
+		return fmt.Errorf("%w: %q", ErrActorTypeAlreadyRegistered, actorType)
+	}
+
+	// Validate applies defaults to opts, which is a copy here, so the caller's options are left untouched
+	return opts.Validate()
+}
+
 // RegisterActor registers a factory and configuration for an actor type
-// It must be called before Start
+// It must be called before Start, and returns ErrActorTypeAlreadyRegistered if the type was already registered
 func (m *Manager) RegisterActor(actorType string, factory actor.Factory, opts RegisterActorOptions) error {
 	if m.started.Load() {
 		return errors.New("cannot call RegisterActor after the host has started")
 	}
 
+	// Reject a duplicate before touching any state, so the first registration stays intact
+	_, exists := m.ActorsConfig[actorType]
+	if exists {
+		return fmt.Errorf("%w: %q", ErrActorTypeAlreadyRegistered, actorType)
+	}
+
+	// Validate also applies the option defaults, so it must run on the options that are recorded
 	err := opts.Validate()
 	if err != nil {
 		return err
+	}
+
+	// Enroll the type in its capacity group, if one was configured, so its executions are gated on this host
+	// This runs before the type is recorded, so a rejected group leaves no partial registration behind
+	if opts.CapacityGroup != "" {
+		err = m.registerCapacityGroup(actorType, opts.CapacityGroup, opts.CapacityGroupLimit)
+		if err != nil {
+			return err
+		}
 	}
 
 	// #nosec G115 -- We have validated in opts.Validate that this is <= MaxInt32
@@ -143,14 +175,6 @@ func (m *Manager) RegisterActor(actorType string, factory actor.Factory, opts Re
 	}
 	m.ActorFactories[actorType] = factory
 	m.actorTypeLockMode[actorType] = opts.LockMode
-
-	// Enroll the type in its capacity group, if one was configured, so its executions are gated on this host
-	if opts.CapacityGroup != "" {
-		err = m.registerCapacityGroup(actorType, opts.CapacityGroup, opts.CapacityGroupLimit)
-		if err != nil {
-			return err
-		}
-	}
 
 	return nil
 }

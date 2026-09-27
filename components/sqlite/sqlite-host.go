@@ -57,11 +57,12 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 		defer cancel()
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err = tx.ExecContext(queryCtx,
-			`INSERT INTO `+s.tablePrefix+`hosts (host_id, host_address, host_last_health_check)
-			VALUES (?, ?, ?)`,
+			`INSERT INTO `+s.tablePrefix+`hosts (host_id, host_address, host_last_health_check, host_session_id)
+			VALUES (?, ?, ?, ?)`,
 			hostID,
 			req.Address,
 			now,
+			nullString(req.SessionID),
 		)
 		if isConstraintError(err) {
 			return zero, components.ErrHostAlreadyRegistered
@@ -133,7 +134,7 @@ func (s *SQLiteProvider) reattachHost(ctx context.Context, req components.Regist
 			return zero, components.ErrClusterLocked
 		}
 
-		// Try to refresh the existing registration in place
+		// Try to refresh the existing registration in place, handing it to the new session
 		// A unique constraint violation here means a different, healthy host already holds the address
 		queryCtx, cancel = context.WithTimeout(ctx, s.timeout)
 		defer cancel()
@@ -141,9 +142,9 @@ func (s *SQLiteProvider) reattachHost(ctx context.Context, req components.Regist
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		res, err = tx.ExecContext(queryCtx,
 			`UPDATE `+s.tablePrefix+`hosts
-			SET host_address = ?, host_last_health_check = ?
+			SET host_address = ?, host_last_health_check = ?, host_session_id = ?, host_draining = 0
 			WHERE host_id = ?`,
-			req.Address, now, req.ExistingHostID,
+			req.Address, now, nullString(req.SessionID), req.ExistingHostID,
 		)
 		if isConstraintError(err) {
 			return zero, components.ErrHostAlreadyRegistered
@@ -166,9 +167,9 @@ func (s *SQLiteProvider) reattachHost(ctx context.Context, req components.Regist
 			defer cancel()
 			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 			_, err = tx.ExecContext(queryCtx,
-				`INSERT INTO `+s.tablePrefix+`hosts (host_id, host_address, host_last_health_check)
-				VALUES (?, ?, ?)`,
-				newHostID, req.Address, now,
+				`INSERT INTO `+s.tablePrefix+`hosts (host_id, host_address, host_last_health_check, host_session_id)
+				VALUES (?, ?, ?, ?)`,
+				newHostID, req.Address, now, nullString(req.SessionID),
 			)
 			if isConstraintError(err) {
 				return zero, components.ErrHostAlreadyRegistered
@@ -206,17 +207,17 @@ func (s *SQLiteProvider) reattachHost(ctx context.Context, req components.Regist
 }
 
 func (s *SQLiteProvider) UpdateActorHost(ctx context.Context, hostID string, req components.UpdateActorHostReq) error {
-	// At this stage, there are two things we can update here (one or both):
+	// At this stage, there are three things we can update here (any combination):
 	// - The last health check
 	// - The list of supported actor types (if non-nil)
-	if !req.UpdateLastHealthCheck && req.ActorTypes == nil {
+	// - The draining flag (only ever set, never cleared)
+	if !req.UpdateLastHealthCheck && req.ActorTypes == nil && !req.Draining {
 		// Nothing to do/update
 		return nil
 	}
 
-	// If we're only updating actor types, we can skip obtaining a transaction to reduce the DB roundtrips
-	// (technically the req.UpdateLastHealthCheck check here is redundant)
-	if req.UpdateLastHealthCheck && req.ActorTypes == nil {
+	// If we're only updating the health check, we can skip obtaining a transaction to reduce the DB roundtrips
+	if req.UpdateLastHealthCheck && req.ActorTypes == nil && !req.Draining {
 		// A retry may repeat an attempt that committed after the caller stopped waiting
 		// Skip the redundant write when the last committed health check is already fresh enough
 		if req.Retry {
@@ -250,11 +251,19 @@ func (s *SQLiteProvider) UpdateActorHost(ctx context.Context, hostID string, req
 			}
 		}
 
+		// Mark the host draining, which only applies to a host that is still registered and healthy
+		if req.Draining {
+			rErr = s.setActorHostDraining(ctx, hostID, tx)
+			if rErr != nil {
+				return zero, fmt.Errorf("failed to mark host draining: %w", rErr)
+			}
+		}
+
 		// Also update the list of supported actor types if non-nil
 		// Note that a nil list means "do not update", while an empty, non-nil list causes the removal of all supported actor types
 		if req.ActorTypes != nil {
-			// When updating actor types without updating health check, we need to verify the host exists and is healthy
-			if !req.UpdateLastHealthCheck {
+			// When updating actor types without updating health check or draining, we need to verify the host exists and is healthy
+			if !req.UpdateLastHealthCheck && !req.Draining {
 				now := s.clock.Now().UnixMilli()
 				queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 				defer cancel()
@@ -371,8 +380,41 @@ func (s *SQLiteProvider) updateActorHostLastHealthCheck(ctx context.Context, hos
 	return nil
 }
 
-func (s *SQLiteProvider) UnregisterHost(ctx context.Context, hostID string) error {
+// setActorHostDraining marks a registered, healthy host as draining
+func (s *SQLiteProvider) setActorHostDraining(ctx context.Context, hostID string, db querier) error {
+	now := s.clock.Now().UnixMilli()
+
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	res, err := db.ExecContext(queryCtx,
+		`UPDATE `+s.tablePrefix+`hosts
+		SET host_draining = 1
+		WHERE
+			host_id = ?
+			AND host_last_health_check >= ?`,
+		hostID,
+		now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
+	)
+	if err != nil {
+		return fmt.Errorf("error executing query: %w", err)
+	}
+
+	// No row means the host doesn't exist, or exists but is un-healthy
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("error counting affected rows: %w", err)
+	}
+	if affected == 0 {
+		return components.ErrHostUnregistered
+	}
+
+	return nil
+}
+
+func (s *SQLiteProvider) UnregisterHost(ctx context.Context, hostID string, opts components.UnregisterHostOpts) error {
 	// Deleting from the hosts table causes all actors to be deactivate
+	// With a session ID, only the registration that session still owns is deleted
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	now := s.clock.Now().UnixMilli()
@@ -381,14 +423,21 @@ func (s *SQLiteProvider) UnregisterHost(ctx context.Context, hostID string) erro
 	err := s.db.
 		QueryRowContext(queryCtx,
 			`DELETE FROM `+s.tablePrefix+`hosts
-			WHERE host_id = ?
+			WHERE
+				host_id = ?
+				AND (? = '' OR host_session_id = ?)
 			RETURNING host_last_health_check >= ?`,
 			hostID,
+			opts.SessionID,
+			opts.SessionID,
 			now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
 		).
 		Scan(&hostActive)
 	if errors.Is(err, sql.ErrNoRows) {
-		// Host doesn't exist
+		// Nothing was deleted: tell a registration owned by another session apart from one that doesn't exist
+		if opts.SessionID != "" {
+			return s.unregisterHostMissError(ctx, hostID)
+		}
 		return components.ErrHostUnregistered
 	} else if err != nil {
 		return fmt.Errorf("error executing query: %w", err)
@@ -401,6 +450,29 @@ func (s *SQLiteProvider) UnregisterHost(ctx context.Context, hostID string) erro
 	}
 
 	return nil
+}
+
+// unregisterHostMissError returns the error for a conditional UnregisterHost that deleted nothing
+// A host that still exists is owned by a different session, while a missing one was already unregistered
+func (s *SQLiteProvider) unregisterHostMissError(ctx context.Context, hostID string) error {
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	var exists bool
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	err := s.db.
+		QueryRowContext(queryCtx,
+			`SELECT EXISTS (SELECT 1 FROM `+s.tablePrefix+`hosts WHERE host_id = ?)`,
+			hostID,
+		).
+		Scan(&exists)
+	switch {
+	case err != nil:
+		return fmt.Errorf("error checking host existence: %w", err)
+	case exists:
+		return components.ErrHostSuperseded
+	default:
+		return components.ErrHostUnregistered
+	}
 }
 
 func (s *SQLiteProvider) ListHosts(ctx context.Context) ([]components.HostInfo, error) {
@@ -543,6 +615,7 @@ func (s *SQLiteProvider) lookupActorInTransaction(ctx context.Context, tx *sql.T
 	//    We will need to filter the result in the Go code at the end.
 	// 2. available_host:
 	//    This CTE selects a host with capacity to activate the actor on. It considers host filters (if any) too.
+	//    A draining host is never selected, although an actor that is already active on one is still returned by existing_actor.
 	//    Note the `NOT EXISTS (SELECT 1 FROM existing_actor)` clause, which means the CTE will return 0 rows if existing_actor found something previously.
 	// 3. actor_to_use:
 	//    This CTE combines the results of existing_actor and available_host in a UNION.
@@ -601,6 +674,7 @@ func (s *SQLiteProvider) lookupActorInTransaction(ctx context.Context, tx *sql.T
 				NOT EXISTS (SELECT 1 FROM existing_actor)
 				AND hat.actor_type = ?
 				AND h.host_last_health_check >= ?
+				AND h.host_draining = 0
 				AND (
 					hat.actor_concurrency_limit = 0
 					OR COALESCE(haac.active_count, 0) < hat.actor_concurrency_limit
@@ -804,4 +878,12 @@ func (s *SQLiteProvider) insertHostActorTypes(ctx context.Context, tx *sql.Tx, h
 	}
 
 	return nil
+}
+
+// nullString returns nil (SQL NULL) for an empty string, otherwise the string
+func nullString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }

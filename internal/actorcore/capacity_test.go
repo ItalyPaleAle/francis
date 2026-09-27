@@ -2,6 +2,7 @@ package actorcore
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -102,5 +103,40 @@ func TestRegisterCapacityGroupValidation(t *testing.T) {
 		o.CapacityGroup = "g"
 		err := o.Validate()
 		require.Error(t, err)
+	})
+}
+
+func TestRegisterActorDuplicate(t *testing.T) {
+	firstFactory := func(string, *actor.Service) actor.Actor { return struct{}{} }
+	secondFactory := func(string, *actor.Service) actor.Actor { return struct{}{} }
+
+	t.Run("a second registration of the same type is rejected", func(t *testing.T) {
+		m := NewManager(Options{})
+		err := m.RegisterActor("dup", firstFactory, RegisterActorOptions{IdleTimeout: time.Minute})
+		require.NoError(t, err)
+
+		err = m.RegisterActor("dup", secondFactory, RegisterActorOptions{IdleTimeout: time.Hour})
+		require.ErrorIs(t, err, ErrActorTypeAlreadyRegistered)
+
+		// The first registration is left intact
+		cfg, ok := m.ActorConfig("dup")
+		require.True(t, ok)
+		assert.Equal(t, time.Minute, cfg.IdleTimeout)
+		assert.Len(t, m.RegisteredActorTypes(), 1)
+	})
+
+	t.Run("a rejected capacity group leaves no partial registration", func(t *testing.T) {
+		m := NewManager(Options{})
+		err := m.RegisterActor("a", firstFactory, RegisterActorOptions{CapacityGroup: "g", CapacityGroupLimit: 2})
+		require.NoError(t, err)
+
+		err = m.RegisterActor("b", firstFactory, RegisterActorOptions{CapacityGroup: "g", CapacityGroupLimit: 3})
+		require.Error(t, err)
+		_, ok := m.ActorConfig("b")
+		assert.False(t, ok)
+
+		// Retrying with the right limit succeeds, since the failed attempt recorded nothing
+		err = m.RegisterActor("b", firstFactory, RegisterActorOptions{CapacityGroup: "g", CapacityGroupLimit: 2})
+		require.NoError(t, err)
 	})
 }

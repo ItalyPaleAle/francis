@@ -179,7 +179,7 @@ Subcommands (including `print-ca`, `healthcheck`, `backup`, and `restore`) resol
 | Key | Description |
 |-----|-------------|
 | `bind` | Address and port the runtime listens on. Default `:8443`. |
-| `runtimeId` | Optional identifier for this runtime, used in its server certificate. |
+| `runtimeId` | Optional identifier for this runtime, used in its server certificate, logs, and traces. The `FRANCIS_RUNTIME_ID` environment variable overrides it, so replicas sharing one config file can each get a distinct ID. When neither is set, the runtime picks a random ID on every start. |
 | `runtimePSKs` | List of runtime pre-shared keys from which the cluster CA is derived. **Required.** |
 | `bootstrap.method` | How hosts authenticate when joining: `psk` or `jwt`. **Required.** |
 | `bootstrap.hostPSK` | The shared host bootstrap secret, for `method: psk`. |

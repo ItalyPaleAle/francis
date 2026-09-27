@@ -99,3 +99,54 @@ func TestJournalSizeUsesTheProviderEncoding(t *testing.T) {
 	stored := readJournal(t, host, wf, "instance-1")
 	assert.Equal(t, StatusFailed, stored.Status)
 }
+
+func TestAJournalWithoutADeadlineAnchorStillDecodes(t *testing.T) {
+	// legacyStep and legacyState have the wire shape journals had before the deadline anchor was added
+	type legacyStep struct {
+		Name      string     `msgpack:"name"`
+		Kind      Kind       `msgpack:"kind"`
+		Status    StepStatus `msgpack:"status"`
+		StartedAt time.Time  `msgpack:"startedAt,omitzero"`
+	}
+	type legacyState struct {
+		Status    Status       `msgpack:"status"`
+		Steps     []legacyStep `msgpack:"steps"`
+		CreatedAt time.Time    `msgpack:"createdAt"`
+		StartedAt time.Time    `msgpack:"startedAt"`
+	}
+
+	started := time.Now().UTC().Truncate(time.Millisecond)
+	enc, err := msgpack.Marshal(legacyState{
+		Status:    StatusRunning,
+		Steps:     []legacyStep{{Name: "wait", Kind: KindWait, Status: StepRunning, StartedAt: started}},
+		CreatedAt: started,
+		StartedAt: started,
+	})
+	require.NoError(t, err)
+
+	var got instanceState
+	err = msgpack.Unmarshal(enc, &got)
+	require.NoError(t, err)
+	assert.True(t, got.DeadlineAnchor.IsZero())
+	assert.True(t, got.StartedAt.Equal(started))
+	require.Len(t, got.Steps, 1)
+	assert.True(t, got.Steps[0].DeadlineAnchor.IsZero())
+
+	// A zero anchor is omitted, so journals that never resumed keep their size, and a set one survives a round trip
+	plain, err := msgpack.Marshal(instanceStateWire(got))
+	require.NoError(t, err)
+	assert.False(t, bytes.Contains(plain, []byte("deadlineAnchor")))
+
+	anchor := started.Add(time.Hour)
+	got.DeadlineAnchor = anchor
+	got.Steps[0].DeadlineAnchor = anchor
+	enc, err = msgpack.Marshal(instanceStateWire(got))
+	require.NoError(t, err)
+
+	var roundTrip instanceState
+	err = msgpack.Unmarshal(enc, &roundTrip)
+	require.NoError(t, err)
+	assert.True(t, roundTrip.DeadlineAnchor.Equal(anchor))
+	require.Len(t, roundTrip.Steps, 1)
+	assert.True(t, roundTrip.Steps[0].DeadlineAnchor.Equal(anchor))
+}

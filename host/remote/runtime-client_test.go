@@ -411,3 +411,110 @@ func TestRuntimeClientFailsFastOnPermanentRegistrationRejection(t *testing.T) {
 	default:
 	}
 }
+
+func TestDispatchInboundChecksSessionIdentity(t *testing.T) {
+	// The handler records whether it ran, so the test can assert that rejected requests never reach it
+	var called bool
+	rc := newRuntimeClient(runtimeClientConfig{
+		addresses: []string{"127.0.0.1:1"},
+		handlers: runtimeHandlers{
+			terminateActor: func(context.Context, protocol.TerminateActorRequest) *protocol.Error {
+				called = true
+				return nil
+			},
+		},
+	})
+	identity := sessionIdentity{hostID: "host-1", sessionID: "session-2"}
+
+	tests := []struct {
+		name      string
+		hostID    string
+		sessionID string
+		wantCode  protocol.ErrorCode
+	}{
+		{name: "matching identity", hostID: "host-1", sessionID: "session-2"},
+		{name: "unstamped request", hostID: "", sessionID: ""},
+		{name: "superseded session", hostID: "host-1", sessionID: "session-1", wantCode: protocol.ErrCodeSessionSuperseded},
+		{name: "different host", hostID: "host-9", sessionID: "session-2", wantCode: protocol.ErrCodeHostMismatch},
+		{name: "superseded session wins over different host", hostID: "host-9", sessionID: "session-1", wantCode: protocol.ErrCodeSessionSuperseded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			called = false
+
+			req, err := protocol.NewRequest(protocol.KindTerminateActor, protocol.TerminateActorRequest{ActorType: "a", ActorID: "1"})
+			require.NoError(t, err)
+			req.HostID = tt.hostID
+			req.SessionID = tt.sessionID
+
+			resp := rc.dispatchInbound(t.Context(), req, identity)
+			perr, isErr := resp.AsError()
+
+			if tt.wantCode == "" {
+				assert.False(t, isErr, "unexpected error %v", perr)
+				assert.Equal(t, protocol.KindTerminateActorResponse, resp.Kind)
+				assert.True(t, called)
+				return
+			}
+
+			require.True(t, isErr)
+			assert.Equal(t, tt.wantCode, perr.Code)
+			assert.False(t, called, "handler must not run for a rejected request")
+		})
+	}
+}
+
+func TestReplyRetryLater(t *testing.T) {
+	// A pipe stands in for the WebTransport stream, since it offers the same read, write, and deadline methods
+	hostSide, runtimeSide := net.Pipe()
+	defer hostSide.Close()
+	defer runtimeSide.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		replyRetryLater(hostSide)
+	}()
+
+	// Send a request as the runtime would, then read the correlated reply
+	req, err := protocol.NewRequest(protocol.KindExecuteAlarm, protocol.ExecuteAlarmRequest{})
+	require.NoError(t, err)
+	err = runtimeSide.SetDeadline(time.Now().Add(5 * time.Second))
+	require.NoError(t, err)
+	err = protocol.WriteMessage(runtimeSide, req)
+	require.NoError(t, err)
+
+	resp, err := protocol.ReadMessage(runtimeSide)
+	require.NoError(t, err)
+	<-done
+
+	perr, isErr := resp.AsError()
+	require.True(t, isErr)
+	assert.Equal(t, protocol.ErrCodeRetryLater, perr.Code)
+
+	retryAfter, ok := perr.RetryAfter()
+	require.True(t, ok)
+	assert.Equal(t, time.Second, retryAfter)
+}
+
+func TestWarnInboundRejectedIsRateLimited(t *testing.T) {
+	clk := clocktesting.NewFakeClock(time.Now())
+	rc := newRuntimeClient(runtimeClientConfig{
+		addresses: []string{"127.0.0.1:1"},
+		clock:     clk,
+	})
+
+	// The first rejection warns immediately and resets the counter
+	rc.warnInboundRejected(t.Context())
+	assert.Equal(t, int64(0), rc.inboundRejected.Load())
+
+	// Rejections within the interval are only counted
+	rc.warnInboundRejected(t.Context())
+	rc.warnInboundRejected(t.Context())
+	assert.Equal(t, int64(2), rc.inboundRejected.Load())
+
+	// Once the interval elapses, the next rejection warns and reports the accumulated count
+	clk.Step(inboundRejectWarnInterval)
+	rc.warnInboundRejected(t.Context())
+	assert.Equal(t, int64(0), rc.inboundRejected.Load())
+}

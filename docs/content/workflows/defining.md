@@ -4,7 +4,7 @@ weight: 10
 description: "workflow.New, the options, and registering on a host"
 ---
 
-A workflow is built with `workflow.New`, which takes a name and a set of options and returns a value you register on a host. The name must be unique within the cluster and must not contain `/`.
+A workflow is built with `workflow.New`, which takes a name and a set of options and returns a value you register on a host. The name must be unique within the cluster and must not contain `/` or `.`.
 
 ```go
 import "github.com/italypaleale/francis/builtin/workflow"

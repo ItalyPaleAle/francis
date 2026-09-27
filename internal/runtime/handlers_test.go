@@ -251,7 +251,7 @@ func TestHandleLookupActorCache(t *testing.T) {
 
 	// Remove the host from the provider
 	// The cache should still serve the prior placement
-	err := prov.UnregisterHost(t.Context(), hostID)
+	err := prov.UnregisterHost(t.Context(), hostID, components.UnregisterHostOpts{})
 	require.NoError(t, err)
 
 	cachedResp := dispatchReq(t, rt, c, protocol.KindLookupActor, protocol.LookupActorRequest{ActorType: "T", ActorID: "a1"})
@@ -279,7 +279,7 @@ func TestHandleLookupActorSkipCacheRefreshesCache(t *testing.T) {
 
 	// Remove the host from the provider
 	// A subsequent cached lookup should still serve the entry written above
-	require.NoError(t, prov.UnregisterHost(t.Context(), hostID))
+	require.NoError(t, prov.UnregisterHost(t.Context(), hostID, components.UnregisterHostOpts{}))
 
 	cachedResp := dispatchReq(t, rt, c, protocol.KindLookupActor, protocol.LookupActorRequest{ActorType: "T", ActorID: "a1"})
 	require.Equal(t, protocol.KindLookupActorResponse, cachedResp.Kind)
@@ -325,6 +325,24 @@ func TestHandleUnregisterKeepsHostRegistered(t *testing.T) {
 	assert.True(t, c.IsDraining())
 	_, err = prov.LookupActor(t.Context(), aref, components.LookupActorOpts{ActiveOnly: true})
 	require.NoError(t, err, "the active actor must still be placed after a graceful unregister")
+}
+
+func TestHandleUnregisterExcludesHostFromNewPlacements(t *testing.T) {
+	rt, prov := newTestRuntime(t)
+	c := connectTestHost(t, rt, prov, "10.0.0.25:1", protocol.ActorHostType{ActorType: "T"})
+
+	resp := dispatchReq(t, rt, c, protocol.KindUnregisterHost, protocol.UnregisterHostRequest{})
+	require.Equal(t, protocol.KindUnregisterHostResponse, resp.Kind)
+
+	// The draining flag is persisted in the provider, so a lookup for a new actor finds no capable host
+	_, err := prov.LookupActor(t.Context(), ref.NewActorRef("T", "new"), components.LookupActorOpts{})
+	require.ErrorIs(t, err, components.ErrNoHost)
+
+	// A second host that is not draining receives the new placement
+	other := registerTestHost(t, prov, "10.0.0.26:1", "T")
+	res, err := prov.LookupActor(t.Context(), ref.NewActorRef("T", "new"), components.LookupActorOpts{})
+	require.NoError(t, err)
+	assert.Equal(t, other, res.HostID)
 }
 
 func TestHandleRemoveActor(t *testing.T) {

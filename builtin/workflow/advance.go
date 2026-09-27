@@ -118,6 +118,7 @@ func (st *instanceState) applyStart(def *definition, p *startPayload, now time.T
 		st.CreatedAt = now
 	}
 	st.StartedAt = now
+	st.DeadlineAnchor = time.Time{}
 
 	// Persist the event contract so callers with a newer graph can still drive this instance
 	st.EventNames = nil
@@ -214,7 +215,7 @@ func (st *instanceState) applyReport(def *definition, p *reportPayload, now time
 			st.CompletedAt = time.Time{}
 			st.Reported = false
 			st.Reopened = true
-			st.StartedAt = now
+			st.DeadlineAnchor = now
 			st.Compensation = currentCompensationFailure(st, def)
 		}
 		return false
@@ -410,7 +411,8 @@ func (st *instanceState) applyUnwind(def *definition, ev *event, now time.Time) 
 	st.Suspended = nil
 
 	// The unwind gets the instance timeout as its own budget, since the forward run's is long since spent
-	st.StartedAt = now
+	// Only the deadline anchor moves, so StartedAt still reports the real start
+	st.DeadlineAnchor = now
 
 	st.recordUnwoundBy(ev)
 	st.beginUnwind(def, reason, StatusCancelled, now)
@@ -476,7 +478,7 @@ func (st *instanceState) applySuspend(def *definition, reason string, now time.T
 }
 
 // applyResume continues a suspended instance, putting the deadlines back where the suspension found them
-// The remainders are restored by shifting the recorded start times forward, so every deadline recomputes from the journal exactly as it did before
+// The remainders are restored by shifting the deadline anchors forward, so every deadline recomputes from the journal exactly as it did before while StartedAt keeps reporting the real start time
 func (st *instanceState) applyResume(def *definition, now time.Time) bool {
 	if st.Status != StatusSuspended || st.Suspended == nil {
 		return true
@@ -488,11 +490,12 @@ func (st *instanceState) applyResume(def *definition, now time.Time) bool {
 		st.Status = StatusRunning
 	}
 
-	st.StartedAt = now.Add(rec.RemainingTimeout - def.timeout)
+	// The anchor subtracts the same timeout instanceDeadline adds, so the deadline lands exactly the remainder after now
+	st.DeadlineAnchor = now.Add(rec.RemainingTimeout - utils.PositiveOr(st.Timeout, def.timeout))
 
 	sr, d := st.currentRunningStep(def)
 	if sr != nil && d != nil && d.kind == KindWait && rec.RemainingEventTimeout > 0 {
-		sr.StartedAt = now.Add(rec.RemainingEventTimeout - d.eventTimeout)
+		sr.DeadlineAnchor = now.Add(rec.RemainingEventTimeout - d.eventTimeout)
 	}
 
 	st.Suspended = nil
@@ -858,6 +861,7 @@ func openStep(st *instanceState, def *definition, sr *stepRecord, instanceID str
 	}
 
 	sr.StartedAt = now
+	sr.DeadlineAnchor = time.Time{}
 	sr.Status = StepRunning
 
 	switch d.kind {
@@ -1035,6 +1039,7 @@ func rewindLoopBody(st *instanceState, d *stepDef) {
 		sr.Remaining = 0
 		sr.Error = ""
 		sr.StartedAt = time.Time{}
+		sr.DeadlineAnchor = time.Time{}
 		sr.CompletedAt = time.Time{}
 		sr.Iteration++
 
@@ -1385,7 +1390,10 @@ func until(deadline time.Time, now time.Time) time.Duration {
 
 // instanceDeadline returns when the instance timeout elapses
 func instanceDeadline(st *instanceState, def *definition) time.Time {
-	start := st.StartedAt
+	start := st.DeadlineAnchor
+	if start.IsZero() {
+		start = st.StartedAt
+	}
 	if start.IsZero() {
 		start = st.CreatedAt
 	}
@@ -1400,6 +1408,11 @@ func instanceDeadline(st *instanceState, def *definition) time.Time {
 func (d *stepDef) eventDeadline(sr *stepRecord) time.Time {
 	if d.kind != KindWait || d.eventTimeout <= 0 || sr.StartedAt.IsZero() {
 		return time.Time{}
+	}
+
+	// A resumed wait measures its timeout from the shifted anchor, so the pause did not consume the remaining budget
+	if !sr.DeadlineAnchor.IsZero() {
+		return sr.DeadlineAnchor.Add(d.eventTimeout)
 	}
 	return sr.StartedAt.Add(d.eventTimeout)
 }

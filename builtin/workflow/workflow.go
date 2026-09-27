@@ -85,15 +85,15 @@ type Workflow struct {
 //
 // Register the returned value on a host with the host's RegisterBuiltInActor method, then start instances through the service returned by Service
 // Register the same workflow on every host that should run its steps, advertising each host's own capabilities, and register any child definition the same way on the same hosts
-// Names must be unique within a cluster and must not contain '/'
+// Names must be unique within a cluster and must not contain '/' or '.'
 func New(name string, opts ...Option) (*Workflow, error) {
 	if name == "" {
 		return nil, errors.New("workflow name is required")
 	}
 
-	err := ref.ValidateComponents(name)
+	err := validateTypeComponent(name)
 	if err != nil {
-		return nil, fmt.Errorf("invalid workflow name: %w", err)
+		return nil, fmt.Errorf("invalid workflow name %q: %w", name, err)
 	}
 
 	var o options
@@ -180,7 +180,7 @@ func (o *options) validateCapabilities() error {
 			return errors.New("capability name must not be empty")
 		}
 
-		err := ref.ValidateComponents(capName)
+		err := validateTypeComponent(capName)
 		if err != nil {
 			return fmt.Errorf("invalid capability %q: %w", capName, err)
 		}
@@ -192,6 +192,19 @@ func (o *options) validateCapabilities() error {
 		seen[capName] = struct{}{}
 	}
 
+	return nil
+}
+
+// validateTypeComponent checks a workflow name or capability that becomes part of a registered actor type
+// Beyond the reserved '/' delimiter, it rejects '.', which joins the workflow name to its sub-type suffixes and capabilities
+func validateTypeComponent(s string) error {
+	err := ref.ValidateComponents(s)
+	if err != nil {
+		return err
+	}
+	if strings.ContainsRune(s, '.') {
+		return errors.New("must not contain '.'")
+	}
 	return nil
 }
 
@@ -458,7 +471,7 @@ func (def *definition) validateStep(d *stepDef, index int) (err error) {
 
 	// A step's required capability has to be a valid type component, since it becomes part of the worker's actor type
 	if d.capability != "" {
-		err = ref.ValidateComponents(d.capability)
+		err = validateTypeComponent(d.capability)
 		if err != nil {
 			return fmt.Errorf("step %q has an invalid required capability: %w", d.name, err)
 		}

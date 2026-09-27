@@ -34,6 +34,9 @@ func backdateStart(t *testing.T, host *fakeHost, wf *Workflow, instanceID string
 	st := readJournal(t, host, wf, instanceID)
 	st.StartedAt = st.StartedAt.Add(-by)
 	st.CreatedAt = st.CreatedAt.Add(-by)
+	if !st.DeadlineAnchor.IsZero() {
+		st.DeadlineAnchor = st.DeadlineAnchor.Add(-by)
+	}
 
 	err := host.SetState(t.Context(), builtinActorType(wf.baseType), instanceID, st, nil)
 	require.NoError(t, err)

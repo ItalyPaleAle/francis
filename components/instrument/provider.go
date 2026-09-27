@@ -151,7 +151,7 @@ func classifyOperation(method string, err error) operationDisposition {
 			return operationWarning
 		}
 	case "UnregisterHost":
-		if errors.Is(err, components.ErrHostUnregistered) {
+		if errors.Is(err, components.ErrHostUnregistered) || errors.Is(err, components.ErrHostSuperseded) {
 			return operationExpected
 		}
 	case "RemoveActor":
@@ -222,9 +222,9 @@ func (w *providerWrapper) UpdateActorHost(ctx context.Context, hostID string, re
 }
 
 // UnregisterHost implements components.ActorProvider
-func (w *providerWrapper) UnregisterHost(ctx context.Context, hostID string) (err error) {
+func (w *providerWrapper) UnregisterHost(ctx context.Context, hostID string, opts components.UnregisterHostOpts) (err error) {
 	spanCtx, span, start := w.beginOp(ctx, "UnregisterHost")
-	err = w.base.UnregisterHost(spanCtx, hostID)
+	err = w.base.UnregisterHost(spanCtx, hostID, opts)
 	w.finishOp(spanCtx, span, "UnregisterHost", start, err)
 
 	return err

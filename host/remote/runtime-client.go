@@ -105,6 +105,11 @@ type runtimeClient struct {
 
 	readyOnce sync.Once
 	ready     chan struct{}
+
+	// inboundRejected counts streams rejected for being above the inbound concurrency limit since the last warning
+	inboundRejected atomic.Int64
+	// inboundRejectLastWarn is the time of the last warning about rejected streams, in Unix nanoseconds
+	inboundRejectLastWarn atomic.Int64
 }
 
 // newRuntimeClient returns a runtimeClient with defaults filled in
@@ -260,7 +265,7 @@ func (rc *runtimeClient) connectAndServe(ctx context.Context, addr string) (bool
 	go rc.runCertRenewal(serveCtx, rc.certNotAfter(resp.CertNotAfterMs))
 
 	// Serve runtime-initiated requests until the session ends or the context is canceled
-	rc.serveInbound(serveCtx, session)
+	rc.serveInbound(serveCtx, session, sessionIdentity{hostID: resp.HostID, sessionID: resp.SessionID})
 
 	// A canceled context means we are shutting down gracefully
 	// Order matters: mark ourselves draining, tell the runtime, then drain local actors, all while the session is still alive
@@ -652,14 +657,34 @@ func (rc *runtimeClient) runHealthChecks(ctx context.Context, session *webtransp
 	}
 }
 
-// inboundConcurrencyLimit caps the goroutines handling runtime-initiated requests in a single session
-// The runtime only sends alarm dispatch and actor-termination requests, so a small bound is sufficient (a higher value would indicate a misbehaving or compromised runtime)
-const inboundConcurrencyLimit = 2 << 6
+const (
+	// inboundConcurrencyLimit caps the goroutines handling runtime-initiated requests in a single session
+	// The runtime only sends alarm dispatch and actor-termination requests, so a small bound is sufficient (a higher value would indicate a misbehaving or compromised runtime)
+	inboundConcurrencyLimit = 128
+
+	// inboundRejectLimit caps the goroutines replying retry-later to streams that arrive while a session is at its inbound concurrency limit
+	// Beyond this limit, streams are closed without a reply, so a flooding runtime cannot make the host spawn goroutines without limit
+	inboundRejectLimit = 32
+
+	// inboundRejectTimeout bounds the whole exchange (reading the request and writing the retry-later reply) on a stream rejected for being above the concurrency limit
+	inboundRejectTimeout = 5 * time.Second
+
+	// inboundRejectWarnInterval is the minimum interval between warnings about streams rejected for being above the concurrency limit
+	inboundRejectWarnInterval = 10 * time.Second
+)
+
+// sessionIdentity is the host and session ID the runtime assigned to one session at registration
+type sessionIdentity struct {
+	hostID    string
+	sessionID string
+}
 
 // serveInbound accepts and dispatches runtime-initiated streams until the session ends
-func (rc *runtimeClient) serveInbound(ctx context.Context, session *webtransport.Session) {
-	// Per-session semaphore that bounds how many inbound streams are handled concurrently
+// The identity is the one assigned to this session, so requests are checked against the session they arrived on rather than a newer one
+func (rc *runtimeClient) serveInbound(ctx context.Context, session *webtransport.Session, identity sessionIdentity) {
+	// Per-session semaphores that bound how many inbound streams are handled concurrently, and how many rejections are in flight
 	sem := make(chan struct{}, inboundConcurrencyLimit)
+	rejectSem := make(chan struct{}, inboundRejectLimit)
 	for {
 		stream, err := session.AcceptStream(ctx)
 		if err != nil {
@@ -671,7 +696,7 @@ func (rc *runtimeClient) serveInbound(ctx context.Context, session *webtransport
 		select {
 		case sem <- struct{}{}:
 		default:
-			wt.CloseStream(stream)
+			rc.rejectOverLimit(ctx, stream, rejectSem)
 			continue
 		}
 
@@ -682,16 +707,83 @@ func (rc *runtimeClient) serveInbound(ctx context.Context, session *webtransport
 			}()
 
 			// Handle the stream
-			rc.handleInbound(ctx, stream)
+			rc.handleInbound(ctx, stream, identity)
 		}()
 	}
+}
+
+// rejectOverLimit rejects a stream that arrived while the session is at its inbound concurrency limit, without blocking the accept loop
+// The reply runs on its own goroutine bounded by rejectSem, and a stream that finds that bound full too is closed without a reply
+func (rc *runtimeClient) rejectOverLimit(ctx context.Context, stream *webtransport.Stream, rejectSem chan struct{}) {
+	// Make saturation visible to operators without logging once per rejected stream
+	rc.warnInboundRejected(ctx)
+
+	// Claim a rejection slot, or drop the stream when even the rejections are saturated
+	select {
+	case rejectSem <- struct{}{}:
+	default:
+		wt.CloseStream(stream)
+		return
+	}
+
+	go func() {
+		defer func() {
+			// Release the rejection slot
+			<-rejectSem
+		}()
+		defer wt.CloseStream(stream)
+
+		// Reply with retry-later so the runtime sees a structured, retryable error rather than a failed round trip
+		replyRetryLater(stream)
+	}()
+}
+
+// replyRetryLater reads one request from a stream and replies with a retry-later error, bounding the whole exchange with a deadline
+func replyRetryLater(stream protocol.Stream) {
+	// A single deadline covers both the read and the write, so a stalled runtime cannot pin the goroutine
+	err := stream.SetDeadline(time.Now().Add(inboundRejectTimeout))
+	if err != nil {
+		return
+	}
+
+	// Read the request first, since the runtime writes it before waiting for the reply
+	req, err := protocol.ReadMessage(stream)
+	if err != nil {
+		// We cannot respond if we could not even read the request
+		return
+	}
+
+	// Tell the runtime to retry once the host has spare capacity
+	perr := protocol.NewError(protocol.ErrCodeRetryLater, "host has too many in-flight runtime requests").WithRetryAfter(time.Second)
+	_ = protocol.WriteMessage(stream, req.ErrorReply(perr))
+}
+
+// warnInboundRejected counts a stream rejected for being above the inbound concurrency limit, and logs a warning at most once per inboundRejectWarnInterval
+func (rc *runtimeClient) warnInboundRejected(ctx context.Context) {
+	// Count the rejection so the next warning reports every stream rejected since the previous one
+	rc.inboundRejected.Add(1)
+
+	// Only the caller that advances the last-warning time logs, so concurrent sessions do not log the same interval twice
+	now := rc.cfg.clock.Now().UnixNano()
+	last := rc.inboundRejectLastWarn.Load()
+	if last != 0 && now-last < int64(inboundRejectWarnInterval) {
+		return
+	}
+	if !rc.inboundRejectLastWarn.CompareAndSwap(last, now) {
+		return
+	}
+
+	rc.cfg.log.WarnContext(ctx, "Rejecting runtime requests because the host is at its inbound concurrency limit",
+		slog.Int("limit", inboundConcurrencyLimit),
+		slog.Int64("rejected", rc.inboundRejected.Swap(0)),
+	)
 }
 
 // inboundReadTimeout bounds how long a runtime-initiated request frame may take to arrive on an accepted stream before it is abandoned
 const inboundReadTimeout = 30 * time.Second
 
 // handleInbound reads one runtime request from a stream, dispatches it, and writes the response
-func (rc *runtimeClient) handleInbound(ctx context.Context, stream *webtransport.Stream) {
+func (rc *runtimeClient) handleInbound(ctx context.Context, stream *webtransport.Stream, identity sessionIdentity) {
 	defer wt.CloseStream(stream)
 
 	// Read the runtime's request off the stream
@@ -705,12 +797,22 @@ func (rc *runtimeClient) handleInbound(ctx context.Context, stream *webtransport
 	ctx = protocol.ExtractTraceContext(ctx, req)
 
 	// Dispatch to the matching handler and write its response back on the same stream
-	resp := rc.dispatchInbound(ctx, req)
+	resp := rc.dispatchInbound(ctx, req, identity)
 	_ = protocol.WriteMessage(stream, resp)
 }
 
 // dispatchInbound routes a runtime-initiated request to its handler
-func (rc *runtimeClient) dispatchInbound(ctx context.Context, req *protocol.Envelope) *protocol.Envelope {
+// The identity is the one assigned to the session the request arrived on
+func (rc *runtimeClient) dispatchInbound(ctx context.Context, req *protocol.Envelope, identity sessionIdentity) *protocol.Envelope {
+	// Reject requests stamped for a different session or host, mirroring the check the runtime applies to host requests
+	// Each session is its own QUIC connection today, so this is defense in depth against a request meant for a superseded session
+	if req.SessionID != "" && req.SessionID != identity.sessionID {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeSessionSuperseded, "session has been superseded"))
+	}
+	if req.HostID != "" && req.HostID != identity.hostID {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeHostMismatch, "request is for a different host"))
+	}
+
 	switch req.Kind {
 	case protocol.KindExecuteAlarm:
 		return rc.handleExecuteAlarm(ctx, req)

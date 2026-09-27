@@ -1306,7 +1306,7 @@ func TestPersistHook_UnregisterHost(t *testing.T) {
 	mock.Reset()
 
 	// Unregister the host
-	err = p.UnregisterHost(t.Context(), res.HostID)
+	err = p.UnregisterHost(t.Context(), res.HostID, components.UnregisterHostOpts{})
 	require.NoError(t, err)
 
 	// Verify PersistChanges was called

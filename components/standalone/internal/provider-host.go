@@ -61,6 +61,7 @@ func (p *Provider) RegisterHost(ctx context.Context, req components.RegisterHost
 		ID:              hostID,
 		Address:         req.Address,
 		LastHealthCheck: p.Clock.Now(),
+		SessionID:       req.SessionID,
 	}
 	changes.Hosts.Set = append(changes.Hosts.Set, HostChange{Key: hostID, Value: h})
 
@@ -178,6 +179,10 @@ func (p *Provider) reattachHost(ctx context.Context, req components.RegisterHost
 		updatedHost = existing.Clone()
 		updatedHost.Address = req.Address
 		updatedHost.LastHealthCheck = p.Clock.Now()
+
+		// Hand the registration to the new session, which starts out not draining like a brand-new registration
+		updatedHost.SessionID = req.SessionID
+		updatedHost.Draining = false
 		changes.Hosts.Set = append(changes.Hosts.Set, HostChange{Key: req.ExistingHostID, Value: updatedHost})
 
 		// Replace the supported actor types
@@ -242,6 +247,7 @@ func (p *Provider) reattachHost(ctx context.Context, req components.RegisterHost
 		ID:              hostID,
 		Address:         req.Address,
 		LastHealthCheck: p.Clock.Now(),
+		SessionID:       req.SessionID,
 	}
 	changes.Hosts.Set = append(changes.Hosts.Set, HostChange{Key: hostID, Value: h})
 	freshHats := buildHostActorTypes(hostID, req.ActorTypes, changes)
@@ -285,7 +291,7 @@ func buildHostActorTypes(hostID string, actorTypes []components.ActorHostType, c
 
 func (p *Provider) UpdateActorHost(ctx context.Context, hostID string, req components.UpdateActorHostReq) error {
 	// Nothing to update
-	if !req.UpdateLastHealthCheck && req.ActorTypes == nil {
+	if !req.UpdateLastHealthCheck && req.ActorTypes == nil && !req.Draining {
 		return nil
 	}
 
@@ -310,15 +316,22 @@ func (p *Provider) UpdateActorHost(ctx context.Context, hostID string, req compo
 	)
 	// A retry does not need another write when the last committed health check is already fresh enough
 	// Keeping this behavior uniform lets callers use the same retry contract with every provider
-	healthCheckFresh := req.Retry && req.UpdateLastHealthCheck && req.ActorTypes == nil &&
+	healthCheckFresh := req.Retry && req.UpdateLastHealthCheck && req.ActorTypes == nil && !req.Draining &&
 		healthy && p.Clock.Since(h.LastHealthCheck) <= p.Cfg.HealthCheckPolicy().Budget()
 
 	if healthy {
 		// Update last health check if requested
 		// We clone the host instead of mutating it in place, so nothing changes in memory until the change has been persisted
-		if req.UpdateLastHealthCheck {
+		if req.UpdateLastHealthCheck || req.Draining {
 			updatedHost = h.Clone()
-			updatedHost.LastHealthCheck = p.Clock.Now()
+			if req.UpdateLastHealthCheck {
+				updatedHost.LastHealthCheck = p.Clock.Now()
+			}
+
+			// The draining flag is only ever set here, and reset when the host registers or reattaches again
+			if req.Draining {
+				updatedHost.Draining = true
+			}
 			changes.Hosts.Set = append(changes.Hosts.Set, HostChange{Key: hostID, Value: updatedHost})
 		}
 
@@ -367,7 +380,7 @@ func (p *Provider) UpdateActorHost(ctx context.Context, hostID string, req compo
 	})
 }
 
-func (p *Provider) UnregisterHost(ctx context.Context, hostID string) error {
+func (p *Provider) UnregisterHost(ctx context.Context, hostID string, opts components.UnregisterHostOpts) error {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 
@@ -381,7 +394,9 @@ func (p *Provider) UnregisterHost(ctx context.Context, hostID string) error {
 		wasHealthy   bool
 		deleteActors []ActorKey
 	)
-	if ok {
+	// A registration now owned by a different session is left in place
+	superseded := ok && opts.SessionID != "" && h.SessionID != opts.SessionID
+	if ok && !superseded {
 		address = h.Address
 		wasHealthy = p.IsHostHealthy(h)
 
@@ -404,8 +419,11 @@ func (p *Provider) UnregisterHost(ctx context.Context, hostID string) error {
 	}
 	p.Mu.RUnlock()
 
-	if !ok {
+	switch {
+	case !ok:
 		return components.ErrHostUnregistered
+	case superseded:
+		return components.ErrHostSuperseded
 	}
 
 	err := p.persistThenApply(ctx, &p.Mu, changes, func() {
@@ -582,8 +600,9 @@ func (p *Provider) findHostWithCapacity(actorType string, allowedHosts []string)
 			continue
 		}
 
+		// A draining host keeps the actors it already has, but never receives a new one
 		h, ok := p.Hosts[hostID]
-		if !ok || !p.IsHostHealthy(h) {
+		if !ok || !p.IsHostHealthy(h) || h.Draining {
 			continue
 		}
 

@@ -538,6 +538,62 @@ func TestAdvanceSuspendPausesTheDeadlinesAndStartsNothing(t *testing.T) {
 	assert.Nil(t, st.Suspended)
 	assert.Equal(t, StepRunning, stepStatus(t, st, "b"))
 	assert.WithinDuration(t, resumed.Add(30*time.Minute), instanceDeadline(st, def), time.Second)
+	assert.WithinDuration(t, resumed.Add(30*time.Minute), st.DeadlineAt, time.Second)
+
+	// The remainder is carried by the deadline anchor, so StartedAt still reports when the instance really started
+	assert.True(t, st.StartedAt.Equal(now), "StartedAt moved to %v", st.StartedAt)
+	assert.WithinDuration(t, resumed.Add(-30*time.Minute), st.DeadlineAnchor, time.Second)
+}
+
+func TestAdvanceResumeShiftsAWaitStepDeadlineButNotItsStart(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "resumable-wait",
+		WithTimeout(10*time.Hour),
+		WithSteps(
+			WaitForEvent("approval", WithEventTimeout(time.Hour)),
+			Step("after", WithRun(noopRun)),
+		),
+	)
+
+	st := startJournal(t, def, now)
+	require.Equal(t, StepRunning, stepStatus(t, st, "approval"))
+	waitStarted := st.step("approval").StartedAt
+	require.False(t, waitStarted.IsZero())
+
+	// Twenty minutes into the wait the instance is suspended for a day
+	paused := now.Add(20 * time.Minute)
+	apply(st, def, &event{kind: evSuspend, reason: "maintenance"}, paused)
+	advance(st, def, "inst-1", paused)
+	require.NotNil(t, st.Suspended)
+	assert.Equal(t, 40*time.Minute, st.Suspended.RemainingEventTimeout)
+
+	resumed := paused.Add(24 * time.Hour)
+	apply(st, def, &event{kind: evResume}, resumed)
+	advance(st, def, "inst-1", resumed)
+	require.Equal(t, StatusRunning, st.Status)
+
+	// The wait keeps the forty minutes it had left, while both start times stay where they really were
+	sr := st.step("approval")
+	assert.WithinDuration(t, resumed.Add(40*time.Minute), def.byName["approval"].eventDeadline(sr), time.Second)
+	assert.WithinDuration(t, resumed.Add(40*time.Minute), st.DeadlineAt, time.Second)
+	assert.True(t, sr.StartedAt.Equal(waitStarted), "the wait's StartedAt moved to %v", sr.StartedAt)
+	assert.True(t, st.StartedAt.Equal(now), "StartedAt moved to %v", st.StartedAt)
+	assert.WithinDuration(t, resumed.Add(10*time.Hour-20*time.Minute), instanceDeadline(st, def), time.Second)
+}
+
+func TestDeadlinesFallBackToStartedAtWithoutAnAnchor(t *testing.T) {
+	// A journal written before the deadline anchor existed carries a StartedAt that an earlier resume may already have shifted, and it must keep measuring from it
+	now := time.Now()
+	def := testDefinition(t, "legacy-anchor",
+		WithTimeout(time.Hour),
+		WithSteps(WaitForEvent("approval", WithEventTimeout(time.Minute))),
+	)
+
+	st := &instanceState{CreatedAt: now.Add(-time.Hour), StartedAt: now, Timeout: time.Hour}
+	assert.True(t, instanceDeadline(st, def).Equal(now.Add(time.Hour)))
+
+	sr := &stepRecord{Name: "approval", StartedAt: now}
+	assert.True(t, def.byName["approval"].eventDeadline(sr).Equal(now.Add(time.Minute)))
 }
 
 func TestAdvanceCancelUnwindsAndTerminatesAsCancelled(t *testing.T) {
@@ -551,11 +607,15 @@ func TestAdvanceCancelUnwindsAndTerminatesAsCancelled(t *testing.T) {
 	reportSuccess(t, st, def, "a", 0, "one", now)
 	advance(st, def, "inst-1", now)
 
-	apply(st, def, &event{kind: evCancel, reason: "customer cancelled"}, now)
-	advance(st, def, "inst-1", now)
+	cancelled := now.Add(45 * time.Minute)
+	apply(st, def, &event{kind: evCancel, reason: "customer cancelled"}, cancelled)
+	advance(st, def, "inst-1", cancelled)
 
 	assert.Equal(t, StatusCompensating, st.Status)
 	assert.Equal(t, "customer cancelled", st.Cause)
+
+	// Cancelling does not rewrite when the instance started
+	assert.True(t, st.StartedAt.Equal(now), "StartedAt moved to %v", st.StartedAt)
 
 	// The step that was in flight is closed out so the unwind does not wait on attempts nobody will re-drive
 	assert.Equal(t, StepFailed, stepStatus(t, st, "b"))
@@ -777,6 +837,11 @@ func TestNewRejectsAnInvalidGraph(t *testing.T) {
 			name:    "step requiring a capability that is not a valid type component",
 			opts:    []Option{WithSteps(Step("a", WithRun(noopRun), WithRequiredCapability("gpu/large")))},
 			wantErr: "invalid required capability",
+		},
+		{
+			name:    "step requiring a dotted capability",
+			opts:    []Option{WithSteps(Step("a", WithRun(noopRun), WithRequiredCapability("gpu.large")))},
+			wantErr: "must not contain '.'",
 		},
 	}
 
@@ -1737,4 +1802,27 @@ func TestAdvanceLoopWhoseBodyAlwaysSkipsStillEndsAtItsBound(t *testing.T) {
 	assert.Equal(t, StepFailed, stepStatus(t, st, "poll"))
 	assert.Equal(t, 4, st.step("poll").Iteration)
 	assert.Equal(t, StatusFailed, st.Status)
+}
+
+func TestUnwindOfACompletedChildGetsAFreshBudgetWithoutMovingStartedAt(t *testing.T) {
+	now := time.Now()
+	def := testDefinition(t, "child-reopened",
+		WithTimeout(time.Hour),
+		WithSteps(Step("a", WithRun(noopRun), WithCompensate(noopCompensate))),
+	)
+	st := startJournal(t, def, now)
+	st.Parent = &parentRef{InstanceID: "parent", Workflow: "parent-workflow", Step: "child", Attempt: 1}
+	reportSuccess(t, st, def, "a", 0, "effect", now)
+	advance(st, def, "inst-1", now)
+	require.Equal(t, StatusCompleted, st.Status)
+
+	// The parent asks for the rollback long after the forward budget elapsed
+	unwound := now.Add(3 * time.Hour)
+	apply(st, def, &event{kind: evUnwind, fromParent: true, compAttempt: 1}, unwound)
+	advance(st, def, "inst-1", unwound)
+	require.Equal(t, StatusCompensating, st.Status)
+
+	// The unwind's budget is measured from the anchor, while StartedAt still reports the real start
+	assert.True(t, st.StartedAt.Equal(now), "StartedAt moved to %v", st.StartedAt)
+	assert.True(t, instanceDeadline(st, def).Equal(unwound.Add(time.Hour)))
 }

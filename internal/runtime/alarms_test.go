@@ -24,6 +24,7 @@ func connectTestHost(t *testing.T, rt *Runtime, prov *standalone.StandaloneMemor
 	res, err := prov.RegisterHost(t.Context(), components.RegisterHostReq{
 		Address:    address,
 		ActorTypes: []components.ActorHostType{{ActorType: at.ActorType, IdleTimeout: time.Minute}},
+		SessionID:  "s1",
 	})
 	require.NoError(t, err)
 

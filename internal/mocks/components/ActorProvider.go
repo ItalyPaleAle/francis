@@ -2182,16 +2182,16 @@ func (_c *MockActorProvider_SetState_Call) RunAndReturn(run func(ctx context.Con
 }
 
 // UnregisterHost provides a mock function for the type MockActorProvider
-func (_mock *MockActorProvider) UnregisterHost(ctx context.Context, hostID string) error {
-	ret := _mock.Called(ctx, hostID)
+func (_mock *MockActorProvider) UnregisterHost(ctx context.Context, hostID string, opts components.UnregisterHostOpts) error {
+	ret := _mock.Called(ctx, hostID, opts)
 
 	if len(ret) == 0 {
 		panic("no return value specified for UnregisterHost")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string) error); ok {
-		r0 = returnFunc(ctx, hostID)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, components.UnregisterHostOpts) error); ok {
+		r0 = returnFunc(ctx, hostID, opts)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -2206,11 +2206,12 @@ type MockActorProvider_UnregisterHost_Call struct {
 // UnregisterHost is a helper method to define mock.On call
 //   - ctx context.Context
 //   - hostID string
-func (_e *MockActorProvider_Expecter) UnregisterHost(ctx any, hostID any) *MockActorProvider_UnregisterHost_Call {
-	return &MockActorProvider_UnregisterHost_Call{Call: _e.mock.On("UnregisterHost", ctx, hostID)}
+//   - opts components.UnregisterHostOpts
+func (_e *MockActorProvider_Expecter) UnregisterHost(ctx any, hostID any, opts any) *MockActorProvider_UnregisterHost_Call {
+	return &MockActorProvider_UnregisterHost_Call{Call: _e.mock.On("UnregisterHost", ctx, hostID, opts)}
 }
 
-func (_c *MockActorProvider_UnregisterHost_Call) Run(run func(ctx context.Context, hostID string)) *MockActorProvider_UnregisterHost_Call {
+func (_c *MockActorProvider_UnregisterHost_Call) Run(run func(ctx context.Context, hostID string, opts components.UnregisterHostOpts)) *MockActorProvider_UnregisterHost_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -2220,9 +2221,14 @@ func (_c *MockActorProvider_UnregisterHost_Call) Run(run func(ctx context.Contex
 		if args[1] != nil {
 			arg1 = args[1].(string)
 		}
+		var arg2 components.UnregisterHostOpts
+		if args[2] != nil {
+			arg2 = args[2].(components.UnregisterHostOpts)
+		}
 		run(
 			arg0,
 			arg1,
+			arg2,
 		)
 	})
 	return _c
@@ -2233,7 +2239,7 @@ func (_c *MockActorProvider_UnregisterHost_Call) Return(err error) *MockActorPro
 	return _c
 }
 
-func (_c *MockActorProvider_UnregisterHost_Call) RunAndReturn(run func(ctx context.Context, hostID string) error) *MockActorProvider_UnregisterHost_Call {
+func (_c *MockActorProvider_UnregisterHost_Call) RunAndReturn(run func(ctx context.Context, hostID string, opts components.UnregisterHostOpts) error) *MockActorProvider_UnregisterHost_Call {
 	_c.Call.Return(run)
 	return _c
 }

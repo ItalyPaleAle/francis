@@ -21,6 +21,9 @@ func TestNewRejectsAnInvalidName(t *testing.T) {
 	}{
 		{name: "empty", wfName: "", wantErr: "workflow name is required"},
 		{name: "path separator", wfName: "orders/ship", wantErr: "invalid workflow name"},
+		// A dotted name could register the same type as another workflow's worker, undo, or registry sub-type
+		{name: "sub-type collision", wfName: "orders.worker", wantErr: "must not contain '.'"},
+		{name: "dot", wfName: "orders.v2", wantErr: "invalid workflow name"},
 	}
 
 	for _, tt := range tests {
@@ -40,6 +43,7 @@ func TestNewRejectsInvalidCapabilities(t *testing.T) {
 	}{
 		{name: "empty", capabilities: []string{""}, wantErr: "capability name must not be empty"},
 		{name: "path separator", capabilities: []string{"gpu/large"}, wantErr: "invalid capability"},
+		{name: "dot", capabilities: []string{"gpu.large"}, wantErr: "must not contain '.'"},
 		{name: "declared twice", capabilities: []string{"gpu", "gpu"}, wantErr: "declared more than once"},
 	}
 

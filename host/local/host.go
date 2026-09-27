@@ -386,7 +386,7 @@ func (h *Host) Run(parentCtx context.Context) error {
 		unregisterCtx, unregisterCancel := context.WithTimeout(context.Background(), h.providerRequestTimeout)
 		defer unregisterCancel()
 
-		unregisterErr := h.actorProvider.UnregisterHost(unregisterCtx, res.HostID)
+		unregisterErr := h.actorProvider.UnregisterHost(unregisterCtx, res.HostID, components.UnregisterHostOpts{})
 		if unregisterErr != nil {
 			h.log.WarnContext(unregisterCtx, "Error unregistering actor host", slog.Any("error", unregisterErr))
 			return

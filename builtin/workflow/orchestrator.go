@@ -1106,7 +1106,8 @@ func (o *orchestrator) applyElapsedDeadlines(st *instanceState, now time.Time) {
 
 		st.beginUnwind(o.def, "instance timeout elapsed", StatusFailed, now)
 		// Compensation receives a fresh instance-sized budget because the forward budget has already elapsed
-		st.StartedAt = now
+		// Only the deadline anchor moves, so StartedAt still reports the real start
+		st.DeadlineAnchor = now
 		return
 	}
 
