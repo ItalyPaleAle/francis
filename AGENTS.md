@@ -20,7 +20,11 @@ val, ok := something.(string)
 if ok { ... }
 ```
 
-If you modify `pkg/config.Config` or any struct referenced from it, always run `make gen-config` before finishing the task.
+The runtime configuration lives in `cmd/runtime/config.go`, and there is no generated config documentation.
+If you add, remove, or change an option in the `config` struct or any struct referenced from it, update the configuration reference in `docs/content/docs/deploying-the-runtime.md` by hand.
+If the option is exposed by the Helm chart, also update `charts/francis/values.yaml`, `charts/francis/values.schema.json`, the config file template in `charts/francis/templates/_helpers.tpl`, and the values table in `charts/francis/README.md`.
+
+If you change an interface that is mocked in `internal/mocks` (the list is in `.mockery.yml`), run `make mocks` to regenerate the mocks before finishing the task.
 
 ## Comments
 

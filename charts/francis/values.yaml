@@ -74,8 +74,9 @@ database:
 # REQUIRED unless existingConfigSecret is set: pass it with --set or a values file that is kept out of source control
 runtimePSKs: []
 
-# Optional identifier for this runtime, recorded in its server certificate
-# All replicas share this value
+# Optional prefix for the runtime ID, which identifies each replica in its server certificate, logs, and traces
+# Every replica gets a distinct ID that is stable across restarts: "<runtimeId>-<pod name>" when this is set, or just the pod name when it is empty
+# The ID is passed with the FRANCIS_RUNTIME_ID env var, so it also applies when existingConfigSecret is set, overriding any runtimeId in that file
 runtimeId: ""
 
 # How worker hosts authenticate themselves when they join the cluster

@@ -226,7 +226,7 @@ Choose whichever fits your setup:
   existingConfigSecretKey: config.yaml
   ```
 
-  With `existingConfigSecret` set the chart stops rendering a config file, so `database` (except its persistence settings), `runtimePSKs`, `runtimeId`, `bootstrap`, `tuning`, and `log` are all ignored. The Secret must hold a complete [runtime configuration](https://francis.italypaleale.me/docs/deploying-the-runtime/#configuration), and it must bind to `0.0.0.0` on the port in `service.port`.
+  With `existingConfigSecret` set the chart stops rendering a config file, so `database` (except its persistence settings), `runtimePSKs`, `bootstrap`, `tuning`, and `log` are all ignored. The Secret must hold a complete [runtime configuration](https://francis.italypaleale.me/docs/deploying-the-runtime/#configuration), and it must bind to `0.0.0.0` on the port in `service.port`.
 
 Treat the runtime PSKs as your most sensitive cluster secret: anyone holding a current one can mint a trusted certificate and join the cluster.
 
@@ -280,7 +280,7 @@ The test runs the image's own `francis healthcheck` against the first replica, w
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `runtimePSKs` | list | `[]` | **Required.** Pre-shared keys the cluster CA is derived from. The first is the primary, the rest stay trusted so keys can be rotated. |
-| `runtimeId` | string | `""` | Optional identifier recorded in the runtime's server certificate. |
+| `runtimeId` | string | `""` | Optional prefix for the runtime ID recorded in each replica's server certificate, logs, and traces. Each replica gets `<runtimeId>-<pod name>`, or just its pod name when this is empty, so IDs are distinct and stable across restarts. It is set with the `FRANCIS_RUNTIME_ID` env var, so it also applies (and overrides the file's `runtimeId`) with `existingConfigSecret`. |
 | `bootstrap.method` | string | `jwt` | How workers authenticate when joining: `psk` or `jwt`. |
 | `bootstrap.hostPSK` | string | `""` | Shared secret workers present, required with `method: psk`. |
 | `bootstrap.jwt.issuer` | string | `""` | Expected JWT issuer, required with `method: jwt`. |
