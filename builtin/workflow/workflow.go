@@ -268,6 +268,11 @@ func (o *options) newDefinition(name string) (*definition, error) {
 		if err != nil {
 			return nil, err
 		}
+
+		// A loop's body steps are flattened into the graph, so the walk needs this to find the loop that gates each of them
+		for _, member := range d.body {
+			def.loopOf[member] = d
+		}
 	}
 
 	// Validate each step against the indexed graph, now that every name is known
@@ -426,7 +431,12 @@ func (def *definition) validateStep(d *stepDef, index int) (err error) {
 
 	// A condition has to be decided before the step it gates runs
 	if d.hasSkipIf {
-		err = def.requireEarlierStep(d.name, index, d.skipIfStep, "WithSkipIf")
+		// WithSkipIf on a loop is checked before the loop starts, and the loop's body comes before the loop node in the graph, so the step it names must come before the first body step
+		gate := index
+		if d.kind == KindLoop && len(d.body) > 0 {
+			gate = def.order[d.body[0]]
+		}
+		err = def.requireEarlierStep(d.name, gate, d.skipIfStep, "WithSkipIf")
 		if err != nil {
 			return err
 		}

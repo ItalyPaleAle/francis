@@ -837,6 +837,13 @@ func openStep(st *instanceState, def *definition, sr *stepRecord, instanceID str
 		return false
 	}
 
+	// WithSkipIf on a loop is checked before the loop starts, when the walk reaches the loop's body, because the loop node itself comes after its body in the graph
+	loop := def.loopOf[sr.Name]
+	if loop != nil && skipsLoopBeforeStart(st, def, loop) {
+		skipLoop(st, loop, now)
+		return true
+	}
+
 	// A condition is a recorded output rather than a predicate evaluated here, so an absent output simply means the step runs
 	if d.hasSkipIf && conditionMatches(st, def, d) {
 		sr.Status = StepSkipped
@@ -905,6 +912,41 @@ func conditionMatches(st *instanceState, def *definition, d *stepDef) bool {
 	return stepOutputIs(st, def, d.skipIfStep, d.skipIfValue)
 }
 
+// skipsLoopBeforeStart reports whether a loop that has not started yet is skipped by its WithSkipIf
+// A loop that already started is never skipped: WithSkipIf names a step before the loop, so its answer cannot change while the loop runs
+func skipsLoopBeforeStart(st *instanceState, def *definition, loop *stepDef) bool {
+	if !loop.hasSkipIf {
+		return false
+	}
+
+	lr := st.step(loop.name)
+	if lr == nil || lr.Status != StepPending || lr.Iteration > 0 {
+		return false
+	}
+	return conditionMatches(st, def, loop)
+}
+
+// skipLoop records a loop and its body steps as skipped
+func skipLoop(st *instanceState, loop *stepDef, now time.Time) {
+	for _, name := range loop.body {
+		sr := st.step(name)
+		if sr == nil || sr.Status != StepPending {
+			continue
+		}
+		sr.Status = StepSkipped
+		sr.CompletedAt = now
+		sr.Remaining = 0
+	}
+
+	lr := st.step(loop.name)
+	if lr == nil {
+		return
+	}
+	lr.Status = StepSkipped
+	lr.CompletedAt = now
+	lr.Remaining = 0
+}
+
 // loopSatisfied reports whether the body step named by WithUntil recorded the output the loop ends on
 // A body step that failed or was skipped has no output to end the loop with, so the loop repeats rather than finishing on a step that did not decide anything
 func loopSatisfied(st *instanceState, def *definition, d *stepDef) bool {
@@ -957,7 +999,7 @@ func stepOutputIs(st *instanceState, def *definition, stepName string, want bool
 func openLoop(st *instanceState, def *definition, sr *stepRecord, d *stepDef, now time.Time) bool {
 	sr.Iteration++
 
-	// The condition is read only after the body has run, so a loop always runs its body at least once
+	// WithUntil is checked only after the body has run, so once a loop starts its body runs at least once
 	if loopSatisfied(st, def, d) {
 		sr.StartedAt = now
 		sr.Output = loopResult(st, def, d)

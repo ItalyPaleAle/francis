@@ -231,6 +231,22 @@ type statusResult struct {
 	Status InstanceStatus `msgpack:"status,omitempty"`
 }
 
+// purgePayload is what a purge request carries, which is empty unless a parent is purging one of its children
+type purgePayload struct {
+	// ParentWorkflow and ParentInstanceID identify the parent purging this instance as part of its own purge
+	// That parent confirmed before it started that neither it nor any ancestor can reopen its children, so a child it names as its parent skips reading its ancestry again
+	ParentWorkflow   string `msgpack:"parentWorkflow,omitempty"`
+	ParentInstanceID string `msgpack:"parentInstanceId,omitempty"`
+}
+
+// vouchesFor reports whether the request comes from the parent the journal records, which is the only caller whose ancestry check this instance can rely on
+func (p purgePayload) vouchesFor(parent *parentRef) bool {
+	if parent == nil || p.ParentInstanceID == "" {
+		return false
+	}
+	return p.ParentWorkflow == parent.Workflow && p.ParentInstanceID == parent.InstanceID
+}
+
 // purgeResult is the reply a purge carries back from the orchestrator to the service, for the same reason
 type purgeResult struct {
 	Found  bool `msgpack:"found"`

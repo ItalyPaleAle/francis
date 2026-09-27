@@ -487,7 +487,7 @@ func TestPurgeRefusesUnresolvableLegacyChild(t *testing.T) {
 	err = o.persist(t.Context(), st, time.Now())
 	require.NoError(t, err)
 
-	_, err = o.purge(t.Context())
+	_, err = o.purge(t.Context(), purgePayload{})
 	require.ErrorIs(t, err, ErrJournalIncompatible)
 
 	var retained instanceState
@@ -520,7 +520,7 @@ func TestPurgeRefusesUnresolvableLegacyWorker(t *testing.T) {
 	err = o.persist(t.Context(), st, time.Now())
 	require.NoError(t, err)
 
-	_, err = o.purge(t.Context())
+	_, err = o.purge(t.Context(), purgePayload{})
 	require.ErrorIs(t, err, ErrJournalIncompatible)
 }
 
@@ -793,7 +793,7 @@ func TestPurgeRefusesCyclicAncestry(t *testing.T) {
 	err = host.SetState(t.Context(), builtinActorType(wf.baseType), "cycle", st, nil)
 	require.NoError(t, err)
 	o := newTestOrchestrator(t, wf, host, "cycle")
-	_, err = o.purge(t.Context())
+	_, err = o.purge(t.Context(), purgePayload{})
 	require.ErrorContains(t, err, "ancestry contains a cycle")
 	require.Equal(t, StatusCompleted, readJournal(t, host, wf, "cycle").Status)
 }
@@ -823,11 +823,11 @@ func TestPurgeRetriesAFailedStateDeletion(t *testing.T) {
 
 	// A provider failure must leave both the durable journal and the activation's retryable snapshot intact
 	host.deleteErr = errors.New("injected deletion failure")
-	_, err = o.purge(t.Context())
+	_, err = o.purge(t.Context(), purgePayload{})
 	require.ErrorIs(t, err, host.deleteErr)
 	require.Equal(t, StatusCompleted, readJournal(t, host.fakeHost, wf, "instance").Status)
 	host.deleteErr = nil
-	result, err := o.purge(t.Context())
+	result, err := o.purge(t.Context(), purgePayload{})
 	require.NoError(t, err)
 	require.Equal(t, purgeResult{Found: true}, result)
 	var st instanceState
@@ -905,7 +905,7 @@ func TestPurgeRemovesRetainedWorkerAndUndoJobs(t *testing.T) {
 	}
 
 	// Successful purge must remove every retained job before deleting the only journal that identifies its task actors
-	result, err := o.purge(t.Context())
+	result, err := o.purge(t.Context(), purgePayload{})
 	require.NoError(t, err)
 	require.Equal(t, purgeResult{Found: true}, result)
 	for _, id := range retainedIDs {
@@ -1043,4 +1043,192 @@ func TestOpenedTasksRetainEveryActorTypeNeededForCleanup(t *testing.T) {
 	require.Equal(t, wf.workerType("gpu"), sr.Tasks[0].WorkerType)
 	require.Equal(t, wf.undoType("gpu"), sr.Tasks[0].UndoType)
 	require.Equal(t, child.baseType, sr.Tasks[1].ChildType)
+}
+
+// purgeTrackingHost routes purge invocations to real orchestrators over itself, so a recursive purge reaches every level through the same instrumented host
+type purgeTrackingHost struct {
+	*fakeHost
+
+	workflows map[string]*Workflow
+	// reads counts journal reads per actor, which is what shows whether a child re-read its ancestry
+	reads map[string]int
+	// gateType, entered, and release hold purges of one actor type open, which is what shows whether they overlap
+	gateType string
+	entered  chan struct{}
+	release  chan struct{}
+}
+
+func newPurgeTrackingHost(wfs ...*Workflow) *purgeTrackingHost {
+	h := &purgeTrackingHost{
+		fakeHost:  newFakeHost(),
+		workflows: map[string]*Workflow{},
+		reads:     map[string]int{},
+	}
+	for _, wf := range wfs {
+		h.workflows[builtinActorType(wf.baseType)] = wf
+	}
+	return h
+}
+
+func (h *purgeTrackingHost) Invoke(ctx context.Context, actorType string, actorID string, method string, data any, opts ...actor.InvokeOption) (actor.Envelope, error) {
+	if method != methodPurge {
+		return h.fakeHost.Invoke(ctx, actorType, actorID, method, data, opts...)
+	}
+
+	// Hold the gated type's purges until the test releases them
+	if h.gateType != "" && actorType == h.gateType {
+		h.entered <- struct{}{}
+		select {
+		case <-h.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	o, ok := newOrchestrator(h.workflows[actorType], actorID, actor.NewService(h)).(*orchestrator)
+	if !ok {
+		return nil, errors.New("workflow factory did not return an orchestrator")
+	}
+	result, err := o.Invoke(ctx, method, &payloadEnvelope{value: data})
+	return &fakeEnvelope{value: result}, err
+}
+
+func (h *purgeTrackingHost) GetState(ctx context.Context, actorType string, actorID string, dest any) error {
+	h.mu.Lock()
+	h.reads[key(actorType, actorID)]++
+	h.mu.Unlock()
+	return h.fakeHost.GetState(ctx, actorType, actorID, dest)
+}
+
+func (h *purgeTrackingHost) readsOf(wf *Workflow, instanceID string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.reads[key(builtinActorType(wf.baseType), instanceID)]
+}
+
+func (h *purgeTrackingHost) hasJournal(wf *Workflow, instanceID string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, ok := h.state[key(builtinActorType(wf.baseType), instanceID)]
+	return ok
+}
+
+// persistTerminated writes a completed journal whose children are the given instances of child
+func persistTerminated(t *testing.T, svc *actor.Service, wf *Workflow, instanceID string, parent *parentRef, child *Workflow, childIDs ...string) {
+	t.Helper()
+
+	st := &instanceState{
+		Workflow:     wf.name,
+		Version:      1,
+		Status:       StatusCompleted,
+		Compensation: CompensationNone,
+		CompletedAt:  time.Now(),
+		Parent:       parent,
+	}
+	if len(childIDs) > 0 {
+		sr := stepRecord{Name: "children", Kind: KindForEach, Status: StepCompleted}
+		for i, id := range childIDs {
+			sr.Tasks = append(sr.Tasks, taskRecord{Index: i, Done: true, ChildID: id, ChildType: child.baseType})
+		}
+		st.Steps = []stepRecord{sr}
+	}
+	o := newRoutedOrchestrator(t, wf, instanceID, svc)
+	require.NoError(t, o.persist(t.Context(), st, time.Now()))
+}
+
+func TestPurgeRemovesChildrenConcurrently(t *testing.T) {
+	leaf, err := New("concurrent-leaf", WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+	root, err := New("concurrent-root", WithSteps(Step("plan", WithRun(noopRun)), ForEach("children", WithItemsFrom("plan"), WithChild(leaf))))
+	require.NoError(t, err)
+
+	// Every leaf purge is held open, so a purge that invokes its children one at a time never gets past the first
+	const width = 4
+	host := newPurgeTrackingHost(root, leaf)
+	host.gateType = builtinActorType(leaf.baseType)
+	host.entered = make(chan struct{}, width)
+	host.release = make(chan struct{})
+	svc := actor.NewService(host)
+	childIDs := make([]string, width)
+	for i := range width {
+		childIDs[i] = workerActorID("root-1", "children", i)
+		persistTerminated(t, svc, leaf, childIDs[i], &parentRef{Workflow: root.name, InstanceID: "root-1", Step: "children", Index: i}, nil)
+	}
+	persistTerminated(t, svc, root, "root-1", nil, leaf, childIDs...)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- root.Service(svc).Purge(t.Context(), "root-1")
+	}()
+	for range width {
+		select {
+		case <-host.entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the parent did not purge its children concurrently")
+		}
+	}
+	close(host.release)
+	require.NoError(t, <-done)
+
+	assert.False(t, host.hasJournal(root, "root-1"))
+	for _, id := range childIDs {
+		assert.False(t, host.hasJournal(leaf, id), "child %s was not purged", id)
+	}
+}
+
+func TestPurgedChildrenDoNotReReadTheirAncestry(t *testing.T) {
+	leaf, err := New("ancestry-leaf", WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+	mid, err := New("ancestry-mid", WithSteps(Step("plan", WithRun(noopRun)), ForEach("children", WithItemsFrom("plan"), WithChild(leaf))))
+	require.NoError(t, err)
+	root, err := New("ancestry-root", WithSteps(Child("sub", WithDefinition(mid))))
+	require.NoError(t, err)
+
+	// Build a terminated three-level tree, which is the shape where every leaf used to read both of its ancestors
+	host := newPurgeTrackingHost(root, mid, leaf)
+	svc := actor.NewService(host)
+	leafIDs := []string{"leaf-0", "leaf-1", "leaf-2"}
+	for i, id := range leafIDs {
+		persistTerminated(t, svc, leaf, id, &parentRef{Workflow: mid.name, InstanceID: "mid-1", Step: "children", Index: i, Depth: 2}, nil)
+	}
+	persistTerminated(t, svc, mid, "mid-1", &parentRef{Workflow: root.name, InstanceID: "root-1", Step: "sub", Depth: 1}, leaf, leafIDs...)
+	persistTerminated(t, svc, root, "root-1", nil, mid, "mid-1")
+
+	require.NoError(t, root.Service(svc).Purge(t.Context(), "root-1"))
+
+	// Each journal is read once, by its own purge, because a parent's purge tells its children their ancestry is already settled
+	assert.Equal(t, 1, host.readsOf(root, "root-1"))
+	assert.Equal(t, 1, host.readsOf(mid, "mid-1"))
+	assert.False(t, host.hasJournal(root, "root-1"))
+	assert.False(t, host.hasJournal(mid, "mid-1"))
+	for _, id := range leafIDs {
+		assert.False(t, host.hasJournal(leaf, id), "leaf %s was not purged", id)
+	}
+}
+
+func TestPurgeChecksAncestryUnlessItsOwnParentAsks(t *testing.T) {
+	leaf, err := New("vouch-leaf", WithSteps(Step("work", WithRun(noopRun))))
+	require.NoError(t, err)
+	parent, err := New("vouch-parent", WithSteps(Child("sub", WithDefinition(leaf))))
+	require.NoError(t, err)
+
+	// A running parent can still reopen its completed child, so the child must be retained
+	host := newPurgeTrackingHost(parent, leaf)
+	svc := actor.NewService(host)
+	running := newRoutedOrchestrator(t, parent, "parent-1", svc)
+	require.NoError(t, running.persist(t.Context(), &instanceState{Workflow: parent.name, Version: 1, Status: StatusRunning}, time.Now()))
+	persistTerminated(t, svc, leaf, "leaf-1", &parentRef{Workflow: parent.name, InstanceID: "parent-1", Step: "sub"}, nil)
+
+	// A caller, or anything claiming to be a different parent, gets the full ancestry check
+	for _, req := range []purgePayload{
+		{},
+		{ParentWorkflow: parent.name, ParentInstanceID: "someone-else"},
+		{ParentWorkflow: "other-workflow", ParentInstanceID: "parent-1"},
+	} {
+		o := newRoutedOrchestrator(t, leaf, "leaf-1", svc)
+		result, pErr := o.purge(t.Context(), req)
+		require.NoError(t, pErr)
+		assert.Equal(t, purgeResult{Found: true, Active: true}, result, "request %+v", req)
+		assert.True(t, host.hasJournal(leaf, "leaf-1"))
+	}
 }

@@ -1664,6 +1664,59 @@ func TestAdvanceLoopWaitStepWaitsForItsOwnEventEachIteration(t *testing.T) {
 	assert.Nil(t, st.step("tick").Event)
 }
 
+func TestAdvanceLoopSkipIfIsDecidedBeforeTheFirstIteration(t *testing.T) {
+	newDef := func(t *testing.T) *definition {
+		return testDefinition(t, "gated-loop", WithSteps(
+			Step("pending", WithRun(noopRun)),
+			Loop("batches",
+				Step("plan", WithRun(noopRun)),
+				Step("run", WithRun(noopRun)),
+			).With(WithUntil("run", true), WithSkipIf("pending", false)),
+			Step("finish", WithRun(noopRun)),
+		))
+	}
+
+	t.Run("matching condition skips the body with the loop", func(t *testing.T) {
+		now := time.Now()
+		def := newDef(t)
+		st := startJournal(t, def, now)
+		reportSuccess(t, st, def, "pending", 0, false, now)
+		advance(st, def, "inst-1", now)
+
+		// The loop node sits after its body, so the condition has to be read when the walk reaches the body or the first iteration would already have run
+		for _, name := range []string{"plan", "run", "batches"} {
+			assert.Equal(t, StepSkipped, stepStatus(t, st, name), "step %s", name)
+			assert.Empty(t, st.step(name).Tasks, "step %s", name)
+		}
+		assert.Zero(t, st.step("batches").Iteration)
+		assert.Equal(t, StepRunning, stepStatus(t, st, "finish"))
+	})
+
+	t.Run("non-matching condition runs the loop", func(t *testing.T) {
+		now := time.Now()
+		def := newDef(t)
+		st := startJournal(t, def, now)
+		reportSuccess(t, st, def, "pending", 0, true, now)
+		advance(st, def, "inst-1", now)
+		assert.Equal(t, StepRunning, stepStatus(t, st, "plan"))
+
+		// Every later iteration runs as usual, since the condition is only consulted before the first one
+		reportSuccess(t, st, def, "plan", 0, nil, now)
+		advance(st, def, "inst-1", now)
+		reportSuccess(t, st, def, "run", 0, false, now)
+		advance(st, def, "inst-1", now)
+		assert.Equal(t, StepRunning, stepStatus(t, st, "plan"))
+		assert.Equal(t, 1, st.step("batches").Iteration)
+
+		reportSuccess(t, st, def, "plan", 1, nil, now)
+		advance(st, def, "inst-1", now)
+		reportSuccess(t, st, def, "run", 1, true, now)
+		advance(st, def, "inst-1", now)
+		assert.Equal(t, StepCompleted, stepStatus(t, st, "batches"))
+		assert.Equal(t, StepRunning, stepStatus(t, st, "finish"))
+	})
+}
+
 func TestAdvanceLoopWhoseBodyAlwaysSkipsStillEndsAtItsBound(t *testing.T) {
 	now := time.Now()
 	def := testDefinition(t, "skipping", WithSteps(

@@ -227,6 +227,7 @@ func Parallel(name string, steps ...StepSpec) StepSpec {
 // Loop declares a control node that repeats the steps of its body until a condition holds
 // The body runs in order, one task at a time, and every step of it is an ordinary step of the workflow: a later step can read what the last iteration produced, and the graph shows the body rather than hiding it inside the loop
 // The condition and the iteration bound are set with the returned spec's With method, since the body takes the variadic slot
+// WithSkipIf on a loop is checked before the loop starts, and skips the loop together with its body
 //
 //	Loop("poll",
 //		Step("check", WithRun(checkReady)),
@@ -356,6 +357,7 @@ func WithSkipOnFailure(steps ...string) StepOption {
 
 // WithSkipIf skips this step when the named upstream step's output equals value
 // A condition is a step that returns a boolean rather than a predicate the orchestrator evaluates, so the decision is a recorded output rather than a hidden evaluation
+// On a loop it is checked before the loop starts and skips the loop together with its body, so it must name a step that comes before the loop
 func WithSkipIf(step string, value bool) StepOption {
 	return func(d *stepDecl) {
 		d.skipIfStep = step
@@ -366,7 +368,7 @@ func WithSkipIf(step string, value bool) StepOption {
 
 // WithUntil ends a loop once the named step of its body has output the given value, and is required on a loop
 // The condition is a step that returns a boolean rather than a predicate the orchestrator evaluates, exactly as WithSkipIf is, so what ended the loop is a recorded output the journal can show
-// It is read after every iteration, so a loop always runs its body at least once
+// It is checked after every iteration, so once a loop starts its body runs at least once
 func WithUntil(step string, value bool) StepOption {
 	return func(d *stepDecl) {
 		d.untilStep = step

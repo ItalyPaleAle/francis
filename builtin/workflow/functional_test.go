@@ -772,3 +772,44 @@ func TestLoopFailsWhenItsConditionNeverHolds(t *testing.T) {
 	assert.Equal(t, int32(3), checks.Load(), "the body runs exactly as many times as the bound allows")
 	assert.Contains(t, status.Cause, "within 3 iterations")
 }
+
+// TestLoopSkippedByItsConditionNeverRunsItsBody verifies WithSkipIf on a loop is decided before the first iteration rather than after it
+func TestLoopSkippedByItsConditionNeverRunsItsBody(t *testing.T) {
+	var bodyRuns atomic.Int32
+	body := func(ctx context.Context, tk workflow.Task) (any, error) {
+		bodyRuns.Add(1)
+		return true, nil
+	}
+
+	wf, err := workflow.New("nothing-pending",
+		workflow.WithTimeout(time.Minute),
+		workflow.WithSteps(
+			workflow.Step("pending", workflow.WithRun(func(ctx context.Context, tk workflow.Task) (any, error) {
+				return false, nil
+			})),
+			workflow.Loop("batches",
+				workflow.Step("plan-batch", workflow.WithRun(body)),
+				workflow.Step("run-batch", workflow.WithRun(body)),
+			).With(workflow.WithUntil("run-batch", true), workflow.WithSkipIf("pending", false)),
+			workflow.Step("finish", workflow.WithRun(func(ctx context.Context, tk workflow.Task) (any, error) {
+				return "done", nil
+			})),
+		),
+	)
+	require.NoError(t, err)
+
+	host := startHost(t, wf)
+	svc := wf.Service(host.Service())
+
+	id, _, err := svc.Start(t.Context(), nil)
+	require.NoError(t, err)
+
+	// Nothing was pending, so no body step may have started any work before the loop was skipped
+	status := awaitStatus(t, svc, id, workflow.StatusCompleted)
+	assert.Equal(t, int32(0), bodyRuns.Load())
+	for _, name := range []string{"plan-batch", "run-batch", "batches"} {
+		assert.Equal(t, workflow.StepSkipped, stepView(t, status, name).Status, "step %s", name)
+		assert.Equal(t, 0, stepView(t, status, name).Tasks, "step %s", name)
+	}
+	assert.Equal(t, workflow.StepCompleted, stepView(t, status, "finish").Status)
+}

@@ -108,7 +108,9 @@ type definition struct {
 	fingerprint string
 	byName      map[string]*stepDef
 	order       map[string]int
-	bindings    map[string]stepBinding
+	// loopOf maps each loop body step to the loop that repeats it
+	loopOf   map[string]*stepDef
+	bindings map[string]stepBinding
 }
 
 // lowerDefinition compiles the cloned Go declarations into canonical IR and separate executable bindings
@@ -140,6 +142,7 @@ func (o *options) lowerDefinition(name string, declarations []*stepDecl) (*defin
 		definitionIR: ir,
 		byName:       map[string]*stepDef{},
 		order:        map[string]int{},
+		loopOf:       map[string]*stepDef{},
 		bindings:     bindings,
 	}, nil
 }

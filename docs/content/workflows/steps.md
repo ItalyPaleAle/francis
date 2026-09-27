@@ -236,7 +236,8 @@ The body steps are ordinary steps of the workflow. They appear in a status query
 
 A few things to know:
 
-- The condition is read after the body, so the body always runs at least once.
+- `WithUntil` is checked after each iteration, so once a loop starts, its body runs at least once.
+- `WithSkipIf` on the loop is checked before the loop starts. If it matches, the loop and its body steps are skipped. It must name a step that comes before the loop.
 - The whole body runs every iteration. To skip part of it on the round that ends the loop, put `WithSkipIf` on that step, as in `WithSkipIf("check", true)` on `pause` above.
 - A loop reports the output of the step its condition named, so the step after a loop reads the loop itself rather than a body step.
 - `WithMaxIterations` defaults to 100. A loop whose condition has not held by the last iteration fails, which is what keeps a condition that never becomes true from running the instance to its timeout. `WithOptional` and `WithSkipOnFailure` decide what that costs, exactly as for any other step.

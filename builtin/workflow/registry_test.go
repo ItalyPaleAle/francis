@@ -610,7 +610,7 @@ func (h *registryRoutingHost) Invoke(ctx context.Context, actorType string, acto
 		if !ok {
 			return nil, errors.New("workflow factory did not return an orchestrator")
 		}
-		result, err := orchestrator.purge(ctx)
+		result, err := orchestrator.Invoke(ctx, method, &payloadEnvelope{value: data})
 		return &fakeEnvelope{value: result}, err
 	}
 	return h.fakeHost.Invoke(ctx, actorType, actorID, method, data, opts...)

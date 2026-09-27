@@ -15,9 +15,12 @@ import (
 	"github.com/italypaleale/francis/internal/builtinkey"
 )
 
+// cleanupConcurrency bounds how many cleanup calls one instance has in flight, so a large fan-out does not turn into an equally large goroutine and connection burst
+const cleanupConcurrency = 16
+
 // purge removes everything a terminated instance left behind: its children first, then its dead-letters, then its journal
 // That order is why an interrupted purge is safe to repeat
-func (o *orchestrator) purge(ctx context.Context) (any, error) {
+func (o *orchestrator) purge(ctx context.Context, req purgePayload) (any, error) {
 	st, err := o.client.GetState(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read the workflow journal: %w", err)
@@ -30,12 +33,15 @@ func (o *orchestrator) purge(ctx context.Context) (any, error) {
 	}
 
 	// A descendant is retained while any ancestor can still reopen the completed children between them to unwind it
-	active, err := o.parentStillRunning(ctx, st.Parent)
-	if err != nil {
-		return nil, err
-	}
-	if active {
-		return purgeResult{Found: true, Active: true}, nil
+	// A parent purging this instance already checked the same ancestry and holds its own turn while it does, so only a request from anyone else reads the ancestors again
+	if !req.vouchesFor(st.Parent) {
+		active, err := o.parentStillRunning(ctx, st.Parent)
+		if err != nil {
+			return nil, err
+		}
+		if active {
+			return purgeResult{Found: true, Active: true}, nil
+		}
 	}
 
 	// Older journals may omit cleanup targets, and those references are reconstructed only after the registry proves this exact graph owns the version
@@ -45,27 +51,9 @@ func (o *orchestrator) purge(ctx context.Context) (any, error) {
 	}
 
 	// Children go first, recursively, so a child is never left orphaned by its parent's removal
-	for i := range st.Steps {
-		for j := range st.Steps[i].Tasks {
-			tr := &st.Steps[i].Tasks[j]
-			childID := tr.ChildID
-			if childID == "" {
-				continue
-			}
-
-			childType := tr.ChildType
-			if childType == "" {
-				childType, err = o.legacyChildType(&st, st.Steps[i].Name, tr.Index)
-				if err != nil {
-					return nil, err
-				}
-			}
-
-			cErr := o.purgeChild(ctx, childType, childID)
-			if cErr != nil && !errors.Is(cErr, ErrInstanceNotFound) {
-				return nil, fmt.Errorf("failed to purge child %s: %w", childID, cErr)
-			}
-		}
+	err = o.purgeChildren(ctx, &st)
+	if err != nil {
+		return nil, err
 	}
 
 	// The instance's own jobs are a bounded set, since each one belongs to a journal entry
@@ -114,6 +102,49 @@ func (o *orchestrator) parentStillRunning(ctx context.Context, parent *parentRef
 		parent = parentState.Parent
 	}
 	return false, nil
+}
+
+// childPurgeTarget identifies one child instance a purge removes
+type childPurgeTarget struct {
+	actorType string
+	actorID   string
+}
+
+// purgeChildren removes every child the journal started, before the journal that names them is gone
+func (o *orchestrator) purgeChildren(ctx context.Context, st *instanceState) (err error) {
+	// Resolve every child first, so an unresolvable legacy reference fails the purge before any child is removed
+	targets := make([]childPurgeTarget, 0)
+	for i := range st.Steps {
+		for j := range st.Steps[i].Tasks {
+			tr := &st.Steps[i].Tasks[j]
+			if tr.ChildID == "" {
+				continue
+			}
+
+			childType := tr.ChildType
+			if childType == "" {
+				childType, err = o.legacyChildType(st, st.Steps[i].Name, tr.Index)
+				if err != nil {
+					return err
+				}
+			}
+			targets = append(targets, childPurgeTarget{actorType: childType, actorID: tr.ChildID})
+		}
+	}
+
+	// Children are independent instances, so they are purged concurrently rather than one synchronous invocation at a time
+	// Each is told this instance is its parent, which spares it from reading the whole ancestry again
+	req := purgePayload{
+		ParentWorkflow:   o.def.name,
+		ParentInstanceID: o.instanceID,
+	}
+	return forEachBounded(targets, func(target childPurgeTarget) error {
+		rErr := o.purgeChild(ctx, target.actorType, target.actorID, req)
+		if rErr != nil && !errors.Is(rErr, ErrInstanceNotFound) {
+			return fmt.Errorf("failed to purge child %s: %w", target.actorID, rErr)
+		}
+		return nil
+	})
 }
 
 // purgeJobs removes every job the instance still has, whether it is still scheduled or has already ended
@@ -172,69 +203,57 @@ type jobCleanupTarget struct {
 
 // deleteJobTargets bounds concurrent cleanup while overlapping independent provider calls
 func (o *orchestrator) deleteJobTargets(ctx context.Context, targets []jobCleanupTarget) error {
-	if len(targets) == 0 {
+	return forEachBounded(targets, func(target jobCleanupTarget) error {
+		client := builtinactor.NewClient[struct{}](target.actorType, target.actorID, o.svc)
+		err := deleteActorJobs(ctx, client)
+		if err != nil {
+			return fmt.Errorf("failed to remove jobs for %s/%s: %w", target.actorType, target.actorID, err)
+		}
+		return nil
+	})
+}
+
+// cancelJobTargets removes live work concurrently before the journal publishes that the attempts were abandoned
+// The same bounded fan-out used by purge keeps terminal cleanup latency proportional to provider latency rather than task count
+func (o *orchestrator) cancelJobTargets(ctx context.Context, targets []jobCleanupTarget) error {
+	return forEachBounded(targets, func(target jobCleanupTarget) error {
+		client := builtinactor.NewClient[struct{}](target.actorType, target.actorID, o.svc)
+		err := cancelLiveActorJobs(ctx, client)
+		if err != nil {
+			return fmt.Errorf("failed to cancel jobs for %s/%s: %w", target.actorType, target.actorID, err)
+		}
+		return nil
+	})
+}
+
+// forEachBounded calls fn for every item with at most cleanupConcurrency calls in flight, and joins the errors they return
+// Every item is attempted even after one fails, since each cleanup is independent and safe to repeat
+func forEachBounded[T any](items []T, fn func(T) error) error {
+	if len(items) == 0 {
 		return nil
 	}
 
 	// A fixed worker bound avoids turning a large fan-out into an equally large goroutine and connection burst
-	workers := min(len(targets), 16)
-	targetCh := make(chan jobCleanupTarget)
-	errCh := make(chan error, len(targets))
+	workers := min(len(items), cleanupConcurrency)
+	itemCh := make(chan T)
+	errCh := make(chan error, len(items))
 	var wg sync.WaitGroup
 	for range workers {
 		wg.Go(func() {
-			for target := range targetCh {
-				client := builtinactor.NewClient[struct{}](target.actorType, target.actorID, o.svc)
-				err := deleteActorJobs(ctx, client)
+			for item := range itemCh {
+				err := fn(item)
 				if err != nil {
-					errCh <- fmt.Errorf("failed to remove jobs for %s/%s: %w", target.actorType, target.actorID, err)
+					errCh <- err
 				}
 			}
 		})
 	}
 
-	// Feed every target before collecting failures because the error channel is sized for the whole batch
-	for _, target := range targets {
-		targetCh <- target
+	// Feed every item before collecting failures because the error channel is sized for the whole batch
+	for _, item := range items {
+		itemCh <- item
 	}
-	close(targetCh)
-	wg.Wait()
-	close(errCh)
-
-	var joined error
-	for err := range errCh {
-		joined = errors.Join(joined, err)
-	}
-	return joined
-}
-
-// cancelJobTargets removes live work concurrently before the journal publishes that the attempts were abandoned
-func (o *orchestrator) cancelJobTargets(ctx context.Context, targets []jobCleanupTarget) error {
-	if len(targets) == 0 {
-		return nil
-	}
-
-	// The same bounded fan-out used by purge keeps terminal cleanup latency proportional to provider latency rather than task count
-	workers := min(len(targets), 16)
-	targetCh := make(chan jobCleanupTarget)
-	errCh := make(chan error, len(targets))
-	var wg sync.WaitGroup
-	for range workers {
-		wg.Go(func() {
-			for target := range targetCh {
-				client := builtinactor.NewClient[struct{}](target.actorType, target.actorID, o.svc)
-				err := cancelLiveActorJobs(ctx, client)
-				if err != nil {
-					errCh <- fmt.Errorf("failed to cancel jobs for %s/%s: %w", target.actorType, target.actorID, err)
-				}
-			}
-		})
-	}
-
-	for _, target := range targets {
-		targetCh <- target
-	}
-	close(targetCh)
+	close(itemCh)
 	wg.Wait()
 	close(errCh)
 
@@ -370,9 +389,9 @@ func deleteActorJobs[T any](ctx context.Context, client actor.Client[T]) error {
 }
 
 // purgeChild invokes a journaled child type directly so cleanup does not depend on the current parent's graph
-func (o *orchestrator) purgeChild(ctx context.Context, childType string, childID string) error {
+func (o *orchestrator) purgeChild(ctx context.Context, childType string, childID string, req purgePayload) error {
 	env, err := retryWhilePlacementMoves(ctx, func(ctx context.Context) (actor.Envelope, error) {
-		return builtinactor.InvokeActor(ctx, o.svc, childType, childID, methodPurge, nil)
+		return builtinactor.InvokeActor(ctx, o.svc, childType, childID, methodPurge, req)
 	})
 	if err != nil {
 		return err

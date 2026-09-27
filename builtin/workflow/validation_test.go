@@ -364,6 +364,11 @@ func TestNewRejectsAnInvalidLoop(t *testing.T) {
 			wantErr: `names "elsewhere" in WithUntil, which is not a step of its body`,
 		},
 		{
+			name:    "skip condition inside the body",
+			spec:    Loop("poll", Step("check", WithRun(noopRun))).With(WithUntil("check", true), WithSkipIf("check", true)),
+			wantErr: `names "check" in WithSkipIf, but "check" does not run before it`,
+		},
+		{
 			name:    "negative bound",
 			spec:    Loop("poll", Step("check", WithRun(noopRun))).With(WithUntil("check", true), WithMaxIterations(-1)),
 			wantErr: "negative WithMaxIterations",

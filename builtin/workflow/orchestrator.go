@@ -207,10 +207,15 @@ func (o *orchestrator) runDeadline(ctx context.Context) error {
 }
 
 // Invoke handles the operations a caller drives synchronously, which are the ones whose result the caller needs
-func (o *orchestrator) Invoke(ctx context.Context, method string, _ actor.Envelope) (any, error) {
+func (o *orchestrator) Invoke(ctx context.Context, method string, data actor.Envelope) (any, error) {
 	switch method {
 	case methodPurge:
-		return o.purge(ctx)
+		var req purgePayload
+		err := decodePayload(data, &req)
+		if err != nil {
+			return nil, err
+		}
+		return o.purge(ctx, req)
 	default:
 		// Only the engine invokes this actor, so an unknown method is a programming error
 		return nil, fmt.Errorf("unknown workflow method %q", method)
