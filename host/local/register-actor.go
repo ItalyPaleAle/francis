@@ -2,7 +2,6 @@ package local
 
 import (
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/italypaleale/francis/actor"
@@ -111,40 +110,13 @@ func (h *Host) RegisterBuiltInActor(b builtinactor.BuiltInActor) error {
 	if h.running.Load() {
 		return errors.New("cannot call RegisterBuiltInActor after host has started")
 	}
-	if b == nil {
-		return errors.New("built-in actor is nil")
+
+	singletonTypes, err := builtinactor.Register(h.core, b)
+	if err != nil {
+		return err
 	}
-
-	// A built-in may register more than one actor type (for example a work pool with one type per capability)
-	// Built-in actors carry only their bare type (host adds the reserved prefix when registering)
-	regs := builtinactor.RegistrationsFor(b)
-
-	// Check every type first, so a duplicate or invalid type rejects the built-in without registering part of it
-	seen := make(map[string]struct{}, len(regs))
-	for _, reg := range regs {
-		actorType := builtinactor.FullActorType(reg.ActorType)
-		_, dup := seen[actorType]
-		if dup {
-			return fmt.Errorf("failed to register built-in actor %q: %w", actorType, actorcore.ErrActorTypeAlreadyRegistered)
-		}
-		seen[actorType] = struct{}{}
-
-		err := h.core.CheckRegistration(actorType, reg.RegisterOptions)
-		if err != nil {
-			return fmt.Errorf("failed to register built-in actor %q: %w", actorType, err)
-		}
-	}
-
-	for _, reg := range regs {
-		actorType := builtinactor.FullActorType(reg.ActorType)
-		err := h.core.RegisterActor(actorType, reg.Factory, reg.RegisterOptions)
-		if err != nil {
-			return fmt.Errorf("failed to register built-in actor %q: %w", actorType, err)
-		}
-
-		if reg.Singleton {
-			h.singletonActors = append(h.singletonActors, singletonActorRegistration{actorType: actorType})
-		}
+	for _, actorType := range singletonTypes {
+		h.singletonActors = append(h.singletonActors, singletonActorRegistration{actorType: actorType})
 	}
 	return nil
 }
