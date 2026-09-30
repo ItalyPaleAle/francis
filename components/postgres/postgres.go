@@ -104,9 +104,9 @@ func NewPostgresProvider(log *slog.Logger, postgresOpts PostgresProviderOptions,
 		p.clock = clock.RealClock{}
 	}
 
-	// The query timeout should be greater than HostHealthCheckDeadline
+	// The host health check deadline must be greater than the query timeout
 	if p.timeout >= p.cfg.HostHealthCheckDeadline {
-		return nil, fmt.Errorf("the configured host health check deadline ('%v') must be bigger than the query timeout ('%v')", p.timeout, p.cfg.HostHealthCheckDeadline)
+		return nil, fmt.Errorf("the configured host health check deadline ('%v') must be bigger than the query timeout ('%v')", p.cfg.HostHealthCheckDeadline, p.timeout)
 	}
 
 	// Open a database connection unless we have one passed in already

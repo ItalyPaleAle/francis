@@ -1652,15 +1652,13 @@ func (s Suite) TestConcurrentLookupActor(t *testing.T) {
 		results := make([]components.LookupActorRes, numRoutines)
 		errors := make([]error, numRoutines)
 
-		wg.Add(numRoutines)
 		for i := range numRoutines {
-			go func(idx int) {
-				defer wg.Done()
+			wg.Go(func() {
 				ref := ref.NewActorRef("TestActor", actorID)
 				result, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{})
-				results[idx] = result
-				errors[idx] = err
-			}(i)
+				results[i] = result
+				errors[i] = err
+			})
 		}
 
 		wg.Wait()
@@ -1714,15 +1712,13 @@ func (s Suite) TestConcurrentLookupActor(t *testing.T) {
 		results := make([]components.LookupActorRes, numRoutines)
 		errors := make([]error, numRoutines)
 
-		wg.Add(numRoutines)
 		for i := range numRoutines {
-			go func(idx int) {
-				defer wg.Done()
-				ref := ref.NewActorRef("TestActor", fmt.Sprintf("actor-%d", idx))
+			wg.Go(func() {
+				ref := ref.NewActorRef("TestActor", fmt.Sprintf("actor-%d", i))
 				result, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{})
-				results[idx] = result
-				errors[idx] = err
-			}(i)
+				results[i] = result
+				errors[i] = err
+			})
 		}
 
 		wg.Wait()
@@ -1787,15 +1783,13 @@ func (s Suite) TestConcurrentLookupActor(t *testing.T) {
 		results := make([]components.LookupActorRes, numRoutines)
 		errors := make([]error, numRoutines)
 
-		wg.Add(numRoutines)
 		for i := range numRoutines {
-			go func(idx int) {
-				defer wg.Done()
+			wg.Go(func() {
 				ref := ref.NewActorRef("TestActor", actorID)
 				result, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{})
-				results[idx] = result
-				errors[idx] = err
-			}(i)
+				results[i] = result
+				errors[i] = err
+			})
 		}
 
 		wg.Wait()
@@ -1849,15 +1843,13 @@ func (s Suite) TestConcurrentLookupActor(t *testing.T) {
 		results := make([]components.LookupActorRes, numRoutines)
 		errors := make([]error, numRoutines)
 
-		wg.Add(numRoutines)
 		for i := range numRoutines {
-			go func(idx int) {
-				defer wg.Done()
-				ref := ref.NewActorRef("TestActor", fmt.Sprintf("actor-limited-%d", idx))
+			wg.Go(func() {
+				ref := ref.NewActorRef("TestActor", fmt.Sprintf("actor-limited-%d", i))
 				result, err := s.p.LookupActor(ctx, ref, components.LookupActorOpts{})
-				results[idx] = result
-				errors[idx] = err
-			}(i)
+				results[i] = result
+				errors[i] = err
+			})
 		}
 
 		wg.Wait()
@@ -1961,17 +1953,15 @@ func (s Suite) TestConcurrentFetchAlarms(t *testing.T) {
 		allLeases := make([][]*ref.AlarmLease, numRoutines)
 		errors := make([]error, numRoutines)
 
-		wg.Add(numRoutines)
 		for i := range numRoutines {
-			go func(idx int) {
-				defer wg.Done()
-				hostID := fmt.Sprintf("%08x-0000-4000-8000-000000000000", idx+1)
+			wg.Go(func() {
+				hostID := fmt.Sprintf("%08x-0000-4000-8000-000000000000", i+1)
 				leases, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
 					Hosts: []string{hostID},
 				})
-				allLeases[idx] = leases
-				errors[idx] = err
-			}(i)
+				allLeases[i] = leases
+				errors[i] = err
+			})
 		}
 
 		wg.Wait()
@@ -2055,17 +2045,15 @@ func (s Suite) TestConcurrentFetchAlarms(t *testing.T) {
 		allLeases := make([][]*ref.AlarmLease, numRoutines)
 		errors := make([]error, numRoutines)
 
-		wg.Add(numRoutines)
 		for i := range numRoutines {
-			go func(idx int) {
-				defer wg.Done()
-				hostID := fmt.Sprintf("%08x-0000-4000-8000-000000000000", idx+1)
+			wg.Go(func() {
+				hostID := fmt.Sprintf("%08x-0000-4000-8000-000000000000", i+1)
 				leases, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
 					Hosts: []string{hostID},
 				})
-				allLeases[idx] = leases
-				errors[idx] = err
-			}(i)
+				allLeases[i] = leases
+				errors[i] = err
+			})
 		}
 
 		wg.Wait()
@@ -2190,17 +2178,15 @@ func (s Suite) TestConcurrentFetchAlarms(t *testing.T) {
 		errors := make([]error, numRoutines*attempts)
 
 		for a := range attempts {
-			wg.Add(numRoutines)
 			for i := range numRoutines {
-				go func(a, idx int) {
-					defer wg.Done()
-					hostID := fmt.Sprintf("%08x-0000-4000-8000-000000000000", idx+1)
+				wg.Go(func() {
+					hostID := fmt.Sprintf("%08x-0000-4000-8000-000000000000", i+1)
 					leases, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
 						Hosts: []string{hostID},
 					})
-					allLeases[(a*numRoutines)+idx] = leases
-					errors[(a*numRoutines)+idx] = err
-				}(a, i)
+					allLeases[(a*numRoutines)+i] = leases
+					errors[(a*numRoutines)+i] = err
+				})
 			}
 
 			wg.Wait()
