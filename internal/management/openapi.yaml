@@ -1,0 +1,2463 @@
+openapi: 3.1.0
+info:
+  title: Francis management API
+  version: v1
+  summary: Operational read and control API for a Francis actor cluster.
+  description: |
+    The management API exposes read-only views of a Francis cluster (hosts, runtimes, placements, in-memory activations, actor state, jobs, alarms, and workflows), plus a small set of audited actions (drain a host, deactivate an actor, cancel/suspend/resume a workflow instance).
+
+    ## Authentication and scopes
+
+    Every route under `/api/v1` requires an `Authorization: Bearer <token>` header, except `GET /api/v1/openapi.yaml`.
+    Tokens are only accepted in the `Authorization` header, never in the query string.
+    `GET /healthz` (served at the root, outside `/api/v1`) is also public.
+
+    Each operation declares the scope it requires in its description and in the `x-required-scope` extension.
+    The server is configured with two token lists:
+
+    - **Read-only tokens** receive every scope except those ending in `:manage`.
+    - **Management tokens** receive every scope.
+
+    | Scope | Grants |
+    | --- | --- |
+    | `cluster:read` | Cluster summary, runtimes, hosts |
+    | `actors:read` | Activations, placements, actor types, actor-state listings |
+    | `actors:state:read` | Reading the stored state of an actor (audited) |
+    | `workflows:read` | Workflows, instances, event history |
+    | `workflows:data:read` | Including workflow instance input and output in instance details (audited) |
+    | `jobs:read` | Jobs and alarms |
+    | `actors:manage` | Deactivating an actor |
+    | `hosts:manage` | Draining a host |
+    | `workflows:manage` | Cancelling, suspending, and resuming workflow instances |
+
+    A missing or unknown token yields `401` with a `WWW-Authenticate: Bearer realm="francis-management"` header; a valid token lacking the route's scope yields `403`.
+
+    ## Pagination
+
+    Paginated endpoints accept `limit` (1 to 1000, default 100) and an opaque `cursor`, and return `{ "items": [...], "nextCursor": "..." }`.
+    `nextCursor` is omitted on the last page.
+    Pass it back unchanged as `cursor` to fetch the next page; its contents are not part of the contract.
+    A malformed cursor or an out-of-range limit yields `400 badRequest`.
+    A page may contain fewer items than `limit` even when more pages follow (for example when a filter is applied after reading a page), so always rely on `nextCursor` to detect the end.
+
+    ## Fan-out endpoints and partial results
+
+    Some endpoints query every host's in-memory snapshot (`/activations`, `/actor-types`, `/workflows`, and the activation count of `/cluster/summary`).
+    Hosts are queried concurrently with a per-host timeout, and a host that cannot be queried does not fail the request: the response sets `partial: true` and lists the host in `errors` (see `HostError`).
+    Each host is sampled independently, so these responses are operational evidence rather than a transactionally consistent view of the cluster: an actor that moved during collection may appear twice or not at all, and actors may move between pages.
+    Use `GET /hosts/{hostId}/activations` for the freshest view of one host.
+
+    ## Errors
+
+    Every error response has a JSON body described by the `Error` schema.
+    Every response carries an `X-Request-Id` header, which is also echoed as `requestId` in error bodies and recorded in audit logs.
+    Errors with `retryable: true` may succeed if the request is repeated later.
+
+    Error `code` values:
+
+    | Code | Status | Meaning |
+    | --- | --- | --- |
+    | `badRequest` | 400 | Invalid path segment, query parameter, cursor, or request body |
+    | `unauthorized` | 401 | Missing or unknown bearer token |
+    | `forbidden` | 403 | The token does not grant the route's scope |
+    | `notFound` | 404 | The resource does not exist, or no such route |
+    | `notApplicable` | 404 | The resource does not exist in this topology (for example runtimes in the local topology) |
+    | `eventHistoryDisabled` | 404 | The workflow opted out of event history |
+    | `methodNotAllowed` | 405 | The path exists but does not serve the method; the `Allow` header lists the methods it serves |
+    | `lastServer` | 409 | Draining the host would leave one or more actor types without a live server; `details.actorTypes` lists them |
+    | `exclusiveLeaseHeld` | 409 | An exclusive-access lease is held on the cluster (for example during a restore), so actions are refused; `details.owner` and `details.expiresAt` describe it, and are omitted when the lease was released before it could be read; retryable |
+    | `hostReattached` | 409 | The host kept reconnecting, so the request could not be delivered to its current session; send it again; retryable |
+    | `payloadTooLarge` | 413 | The request body is larger than 64 KiB |
+    | `stateNotDecodable` | 422 | The stored actor state cannot be rendered as JSON, because it is not valid MessagePack or a map has two keys that would share a JSON name |
+    | `internal` | 500 | Unexpected server error |
+    | `hostUnavailable` | 503 | The host, or the runtime owning its session, could not be reached; retryable |
+    | `noHostsReachable` | 503 | None of the queried hosts could be reached; `details.errors` lists them; retryable |
+    | `timeout` | 504 | The request timed out; retryable |
+  license:
+    name: See repository
+servers:
+  - url: /api/v1
+    description: Management API, relative to the management listener
+security:
+  - bearerAuth: []
+tags:
+  - name: Meta
+    description: Public endpoints.
+  - name: Cluster
+    description: Cluster-wide summary, runtime replicas, and hosts.
+  - name: Actors
+    description: Activations, placements, actor types, and actor state.
+  - name: Jobs
+    description: Durable jobs and alarms.
+  - name: Workflows
+    description: Workflow definitions, instances, and event history.
+  - name: Actions
+    description: Audited operations that change cluster state.
+
+paths:
+  /openapi.yaml:
+    get:
+      tags: [Meta]
+      operationId: getOpenAPI
+      summary: Get this OpenAPI document
+      description: |
+        Returns this document as YAML.
+        Public: no bearer token is required.
+      security: []
+      x-required-scope: null
+      responses:
+        "200":
+          description: The OpenAPI document.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+  /healthz:
+    servers:
+      - url: /
+        description: Served at the root of the management listener, outside `/api/v1`
+    get:
+      tags: [Meta]
+      operationId: getHealthz
+      summary: Liveness check
+      description: |
+        Served at `GET /healthz`, outside `/api/v1`.
+        Public: no bearer token is required.
+        Always returns `{"status":"ok"}` while the server is running.
+      security: []
+      x-required-scope: null
+      responses:
+        "200":
+          description: The server is running.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+
+  /cluster/summary:
+    get:
+      tags: [Cluster]
+      operationId: getClusterSummary
+      summary: Get a cluster summary
+      description: |
+        Requires scope `cluster:read`.
+
+        Summarizes the cluster: topology, exclusive-access lease, runtime replicas, hosts by state, placements, live activations, jobs by status, and workflow instances by status.
+        Job and workflow instance counts stop at 10,000 per bucket (`truncated: true` then means the real count is at least `count`).
+        The live activation count is collected from the hosts that are not unreachable; when some host could not be queried, `activations.partial` is `true` and `activations.live` is a lower bound.
+        The counts are gathered from separate reads and are not transactionally consistent with each other.
+      x-required-scope: cluster:read
+      responses:
+        "200":
+          description: The cluster summary.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClusterSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /runtimes:
+    get:
+      tags: [Cluster]
+      operationId: listRuntimes
+      summary: List runtime replicas
+      description: |
+        Requires scope `cluster:read`.
+
+        Lists the runtime replicas with a live membership, sorted by runtime ID, with the number of host sessions each holds.
+        The response uses the page envelope, but is never paginated (`nextCursor` is always omitted) and takes no `limit` or `cursor`.
+        In the local topology there are no runtime replicas, and the endpoint returns `404 notApplicable`.
+      x-required-scope: cluster:read
+      responses:
+        "200":
+          description: The runtime replicas.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimePage"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /hosts:
+    get:
+      tags: [Cluster]
+      operationId: listHosts
+      summary: List hosts
+      description: |
+        Requires scope `cluster:read`.
+
+        Lists the hosts with a live registration, ordered by host ID.
+        The `state` filter is applied to each page after it is read, so a filtered page may hold fewer items than `limit` while more pages follow.
+      x-required-scope: cluster:read
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - name: state
+          in: query
+          required: false
+          description: Only return hosts in this state.
+          schema:
+            $ref: "#/components/schemas/HostState"
+      responses:
+        "200":
+          description: A page of hosts.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /hosts/{hostId}:
+    parameters:
+      - $ref: "#/components/parameters/HostId"
+    get:
+      tags: [Cluster]
+      operationId: getHost
+      summary: Get a host
+      description: |
+        Requires scope `cluster:read`.
+
+        Returns a host's registration, the actor types it serves with their placement usage and job retention, and the host's own report of its execution capacity and served workflow definitions.
+        The host's report is fetched live; when the host cannot be queried, `runtime` is omitted and `runtimeError` describes the failure, while the rest of the response is still returned with `200`.
+      x-required-scope: cluster:read
+      responses:
+        "200":
+          description: The host.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostDetail"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /hosts/{hostId}/activations:
+    parameters:
+      - $ref: "#/components/parameters/HostId"
+    get:
+      tags: [Actors]
+      operationId: listHostActivations
+      summary: List the in-memory activations of one host
+      description: |
+        Requires scope `actors:read`.
+
+        Asks the host directly for a page of the actors it holds in memory, ordered by actor type and then actor ID.
+        This is the freshest view of a single host; unlike `/activations`, a host that cannot be reached fails the request with `503 hostUnavailable`.
+        `activeCount` is the number of matching activations on the host, across all pages.
+      x-required-scope: actors:read
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - name: type
+          in: query
+          required: false
+          description: Only return activations of this actor type.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: A page of the host's activations.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostActivations"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /hosts/{hostId}/drain:
+    parameters:
+      - $ref: "#/components/parameters/HostId"
+    post:
+      tags: [Actions]
+      operationId: drainHost
+      summary: Drain a host
+      description: |
+        Requires scope `hosts:manage`. The action is audited, including its reason.
+
+        Marks the host draining in the provider, so no new actor is placed on it anywhere, then asks the host to drain and returns `202` once the host acknowledged.
+        The host then deactivates its actors gracefully, bounded by `timeout`; the drain continues after the response is sent.
+
+        - Draining a host that is the last live, non-draining server of one or more actor types is refused with `409 lastServer` (with `details.actorTypes`), unless `force` is `true`; a forced drain lists those types in `forcedActorTypes`. The check is atomic with other drain requests, so concurrent drains of the last servers of a type can't both succeed without `force`.
+        - Repeating a drain on a host that is already draining is never refused, and `alreadyDraining` reports whether the host was already draining.
+        - While an exclusive-access lease is held on the cluster, the action is refused with `409 exclusiveLeaseHeld`.
+        - If the host reconnected before it received the request, including to another runtime replica, the request is sent again to its new session; only if the host keeps reconnecting is the response `409 hostReattached`, and the request can be sent again.
+        - When the request to the host fails, the host is asked whether it is draining. A host that is draining accepted the drain and the response is `202`. A host that is not draining has its draining mark removed, and the error has `details.hostDraining: false`. A host that can't be asked keeps its mark, since it may have accepted the drain, and the error has `details.hostDraining: true`.
+
+        The request body is optional; an empty body is equivalent to `{}`.
+        Unknown fields are rejected.
+      x-required-scope: hosts:manage
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DrainRequest"
+      responses:
+        "202":
+          description: The host accepted the drain request.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DrainResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /activations:
+    get:
+      tags: [Actors]
+      operationId: listActivations
+      summary: List in-memory activations across hosts
+      description: |
+        Requires scope `actors:read`.
+
+        Walks the hosts in host ID order, querying a batch of hosts concurrently, until the page is full.
+        Items are ordered by host, then by actor type and actor ID within each host.
+
+        This is a fan-out endpoint: a host that cannot be queried is reported in `errors` and sets `partial: true`, and its activations are missing from the page.
+        If every queried host failed, the response is `503 noHostsReachable` with the host errors in `details.errors`.
+        Each host is sampled independently, so the listing is not transactionally consistent: an actor that moved between hosts during collection or between pages may be listed twice or not at all.
+      x-required-scope: actors:read
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - name: type
+          in: query
+          required: false
+          description: Only return activations of this actor type.
+          schema:
+            type: string
+        - name: host
+          in: query
+          required: false
+          description: Only query this host. Returns `404 notFound` when the host is not registered.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: A page of activations.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Activations"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /placements:
+    get:
+      tags: [Actors]
+      operationId: listPlacements
+      summary: List actor placements
+      description: |
+        Requires scope `actors:read`.
+
+        Lists the placements recorded in the provider, ordered by actor type and then actor ID.
+        A placement records which host an actor is assigned to; it does not prove the actor is currently in memory (see `/activations`).
+      x-required-scope: actors:read
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - name: host
+          in: query
+          required: false
+          description: Only return placements on this host.
+          schema:
+            type: string
+        - name: type
+          in: query
+          required: false
+          description: Only return placements of this actor type.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: A page of placements.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlacementPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /actor-types:
+    get:
+      tags: [Actors]
+      operationId: listActorTypes
+      summary: List actor types
+      description: |
+        Requires scope `actors:read`.
+
+        Aggregates the actor types registered by every live host, sorted by actor type, with per-host placement usage and job retention, and the execution capacity groups the hosts report.
+        Not paginated.
+
+        This is a fan-out endpoint for the capacity groups: a host that cannot be queried is reported in `errors`, sets `partial: true`, and contributes no `capacityGroups` entries (its registration is still listed under `hosts`).
+      x-required-scope: actors:read
+      responses:
+        "200":
+          description: The actor types.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActorTypes"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /actor-states:
+    get:
+      tags: [Actors]
+      operationId: listActorStates
+      summary: List the actors of a type that have stored state
+      description: |
+        Requires scope `actors:read`.
+
+        Lists the IDs of the actors of one type that have stored state, ordered by actor ID, with their workflow labels when the state belongs to a workflow orchestrator.
+        The state itself is not returned; use `GET /actor-states/{type}/{id}`.
+      x-required-scope: actors:read
+      parameters:
+        - name: type
+          in: query
+          required: true
+          description: The actor type. Must not be empty and must not contain `/`.
+          schema:
+            type: string
+            minLength: 1
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of actors with stored state.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActorStateItemPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /actor-states/{type}/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ActorType"
+      - $ref: "#/components/parameters/ActorId"
+    get:
+      tags: [Actors]
+      operationId: getActorState
+      summary: Read an actor's stored state
+      description: |
+        Requires scope `actors:state:read`. Every read is audited (the data itself is never logged).
+
+        Actor state is stored as MessagePack.
+        By default it is converted to JSON and returned inside an `ActorState` envelope.
+        Send `Accept: application/msgpack` (also accepted: `application/x-msgpack`, `application/vnd.msgpack`) to receive the exact stored bytes instead, with `Content-Type: application/msgpack`.
+        Quality values are honored: the bytes are returned only when a MessagePack type is listed by name with a quality above zero and at least as high as the quality of JSON, so `*/*` alone keeps the JSON envelope.
+
+        JSON conversion convention:
+
+        | MessagePack | JSON | Lossy |
+        | --- | --- | --- |
+        | nil, bool, array, map with UTF-8 string keys | `null`, boolean, array, object (MessagePack field names are the keys) | no |
+        | integer within ±2^53 | number | no |
+        | string that is valid UTF-8 | string | no |
+        | float (32 or 64 bit), finite | number | no |
+        | integer beyond ±2^53 | decimal string, such as `"18446744073709551615"` | yes |
+        | float NaN, +Inf, -Inf | string `"NaN"`, `"Infinity"`, `"-Infinity"` | yes |
+        | bin, or string that is not valid UTF-8 | `{"$binary": "<standard base64>"}` | yes |
+        | timestamp extension (type -1) | RFC 3339 string in UTC with nanoseconds, such as `"2026-01-02T03:04:05.123456789Z"` | yes |
+        | any other extension | `{"$ext": <type>, "data": "<standard base64>"}` | yes |
+        | map key that is not a UTF-8 string | the key's JSON rendering, as a string key | yes |
+
+        `lossy` is `true` when any value used a rendering that cannot be converted back to the same MessagePack bytes; request MessagePack when exactness matters.
+        If the stored bytes are not a single valid MessagePack value (or are nested more than 512 levels deep), the JSON rendering fails with `422 stateNotDecodable`; the raw bytes can still be read with `Accept: application/msgpack`.
+        The same happens when two keys of a map would become the same JSON name, such as `1` and `"1"` or the same key stored twice, since JSON parsers disagree on which value they keep.
+      x-required-scope: actors:state:read
+      parameters:
+        - name: Accept
+          in: header
+          required: false
+          description: Send `application/msgpack` to receive the raw stored bytes instead of the JSON envelope. A MessagePack type with `q=0`, or with a lower quality than JSON, keeps the JSON envelope.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The actor's state.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActorState"
+            application/msgpack:
+              schema:
+                type: string
+                contentMediaType: application/msgpack
+                description: The exact stored MessagePack bytes.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          description: "`stateNotDecodable`: the stored state cannot be rendered as JSON, because it is not valid MessagePack or a map has two keys that would share a JSON name."
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /actors/{type}/{id}/deactivate:
+    parameters:
+      - $ref: "#/components/parameters/ActorType"
+      - $ref: "#/components/parameters/ActorId"
+    post:
+      tags: [Actions]
+      operationId: deactivateActor
+      summary: Deactivate an actor
+      description: |
+        Requires scope `actors:manage`. The action is audited.
+
+        Looks up the host the actor is actively placed on (without creating a placement), and asks that host to halt the actor, returning `200` once the host acknowledged.
+        The actor's stored state is kept; it is re-activated on its next invocation.
+
+        - When the actor is not active anywhere, or its host went away since the lookup, the response is `200` with `notActive: true` and no request is sent to a host.
+        - When the host reports the actor was not active, the response is `200` with `notActive: true` and `hostId` set.
+        - While an exclusive-access lease is held on the cluster, the action is refused with `409 exclusiveLeaseHeld`.
+        - If the host reconnected before it received the request, including to another runtime replica, the request is sent again to its new session; only if the host keeps reconnecting is the response `409 hostReattached`, and the request can be sent again.
+
+        The request body is not read.
+      x-required-scope: actors:manage
+      responses:
+        "200":
+          description: The actor was deactivated, or was not active.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeactivateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /jobs:
+    get:
+      tags: [Jobs]
+      operationId: listJobs
+      summary: List jobs
+      description: |
+        Requires scope `jobs:read`.
+
+        Lists durable jobs, ordered by job ID.
+        Terminal jobs (`completed`, `dead`) are only listed while a record of them is retained, as configured by the actor type's job retention.
+      x-required-scope: jobs:read
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - name: type
+          in: query
+          required: false
+          description: Only return jobs of this actor type.
+          schema:
+            type: string
+        - name: id
+          in: query
+          required: false
+          description: Only return jobs of this actor ID. Requires `type`.
+          schema:
+            type: string
+        - name: status
+          in: query
+          required: false
+          description: Only return jobs in this status.
+          schema:
+            $ref: "#/components/schemas/JobStatus"
+      responses:
+        "200":
+          description: A page of jobs.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /jobs/{jobId}:
+    parameters:
+      - name: jobId
+        in: path
+        required: true
+        description: The job ID.
+        schema:
+          type: string
+    get:
+      tags: [Jobs]
+      operationId: getJob
+      summary: Get a job
+      description: |
+        Requires scope `jobs:read`.
+      x-required-scope: jobs:read
+      responses:
+        "200":
+          description: The job.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /alarms:
+    get:
+      tags: [Jobs]
+      operationId: listAlarms
+      summary: List alarms
+      description: |
+        Requires scope `jobs:read`.
+
+        Lists alarms, ordered by actor type, actor ID, and alarm name.
+      x-required-scope: jobs:read
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - name: type
+          in: query
+          required: false
+          description: Only return alarms of this actor type.
+          schema:
+            type: string
+        - name: id
+          in: query
+          required: false
+          description: Only return alarms of this actor ID. Requires `type`.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: A page of alarms.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlarmPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /workflows:
+    get:
+      tags: [Workflows]
+      operationId: listWorkflows
+      summary: List workflows
+      description: |
+        Requires scope `workflows:read`.
+
+        Lists the workflows known to the cluster, sorted by name.
+        A workflow is known from its definition registry (which exists once an instance started), from stored orchestrator state, and from the orchestrator types live hosts serve.
+        For each workflow, `versions` comes from the registry, `hosts` from the live hosts serving it, and `conflicts` lists versions registered or served with more than one definition fingerprint.
+        Not paginated.
+
+        This is a fan-out endpoint: a host that cannot be queried is reported in `errors`, sets `partial: true`, and is still listed under the workflows it serves with `definitions: null`.
+      x-required-scope: workflows:read
+      responses:
+        "200":
+          description: The workflows.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Workflows"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /workflows/{name}/instances:
+    parameters:
+      - $ref: "#/components/parameters/WorkflowName"
+    get:
+      tags: [Workflows]
+      operationId: listWorkflowInstances
+      summary: List workflow instances
+      description: |
+        Requires scope `workflows:read`.
+
+        Lists the instances of a workflow, ordered by instance ID, from the labels stored with each instance (the journals are not read, so items stay at summary size).
+        When no label filter (`status`, `version`, `parent`) is set, instances without labels are listed too, with `status: "unknown"`.
+      x-required-scope: workflows:read
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+        - name: status
+          in: query
+          required: false
+          description: Only return instances in this status.
+          schema:
+            $ref: "#/components/schemas/WorkflowStatus"
+        - name: version
+          in: query
+          required: false
+          description: Only return instances running this definition version.
+          schema:
+            type: integer
+            minimum: 1
+        - name: parent
+          in: query
+          required: false
+          description: Only return child instances whose parent label equals this value.
+          schema:
+            type: string
+        - name: createdFrom
+          in: query
+          required: false
+          description: Only return instances created at or after this time (RFC 3339).
+          schema:
+            type: string
+            format: date-time
+        - name: createdTo
+          in: query
+          required: false
+          description: Only return instances created strictly before this time (RFC 3339).
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: A page of instances.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstanceItemPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /workflows/{name}/instances/{instanceId}:
+    parameters:
+      - $ref: "#/components/parameters/WorkflowName"
+      - $ref: "#/components/parameters/InstanceId"
+    get:
+      tags: [Workflows]
+      operationId: getWorkflowInstance
+      summary: Get a workflow instance
+      description: |
+        Requires scope `workflows:read`.
+        The instance's `input` and `output` are included only when the token also grants `workflows:data:read`; that read is audited.
+        Without it, `dataRedacted` is `true` and `input`/`output` are omitted.
+
+        Returns the instance's journal: status, steps, parent, suspension, timestamps, and the orchestrator's dead-lettered jobs (up to 100).
+        A pending instance (one whose start job has not run yet) is reported only while its start job is live, and takes its input, version, fingerprint, creation time, and parent from the start job.
+      x-required-scope: workflows:read
+      responses:
+        "200":
+          description: The instance.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Instance"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /workflows/{name}/instances/{instanceId}/events:
+    parameters:
+      - $ref: "#/components/parameters/WorkflowName"
+      - $ref: "#/components/parameters/InstanceId"
+    get:
+      tags: [Workflows]
+      operationId: listWorkflowInstanceEvents
+      summary: List the event history of a workflow instance
+      description: |
+        Requires scope `workflows:read`.
+
+        Lists the instance's history events in sequence order.
+        Returns `404 eventHistoryDisabled` when the workflow opted out of event history, and `404 notFound` when the instance does not exist.
+        For a pending instance the event-history check is skipped and whatever events are stored (usually none) are listed.
+      x-required-scope: workflows:read
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of events.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /workflows/{name}/instances/{instanceId}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/WorkflowName"
+      - $ref: "#/components/parameters/InstanceId"
+    post:
+      tags: [Actions]
+      operationId: cancelWorkflowInstance
+      summary: Cancel a workflow instance
+      description: |
+        Requires scope `workflows:manage`. The action is audited, including its reason.
+
+        Dispatches the same durable cancel job `WorkflowService.Cancel` sends to the orchestrator; the instance then compensates its completed steps and terminates as cancelled.
+        A non-empty `reason` is required.
+
+        - `202`: the control job was dispatched, or coalesced onto an identical pending one (`coalesced: true`, in which case this request's reason was dropped).
+        - `200` with `noEffect: true`: the instance is terminal (`completed`, `failed`, `cancelled`) or already `compensating`, so the engine would ignore the request and no job was dispatched.
+        - While an exclusive-access lease is held on the cluster, the action is refused with `409 exclusiveLeaseHeld`.
+
+        `status` in the response is the instance status read before dispatching.
+      x-required-scope: workflows:manage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CancelRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/ControlNoEffect"
+        "202":
+          $ref: "#/components/responses/ControlAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /workflows/{name}/instances/{instanceId}/suspend:
+    parameters:
+      - $ref: "#/components/parameters/WorkflowName"
+      - $ref: "#/components/parameters/InstanceId"
+    post:
+      tags: [Actions]
+      operationId: suspendWorkflowInstance
+      summary: Suspend a workflow instance
+      description: |
+        Requires scope `workflows:manage`. The action is audited, including its reason.
+
+        Dispatches the same durable suspend job `WorkflowService.Suspend` sends to the orchestrator.
+        The `reason` is optional and is recorded on the suspension.
+        The request body is optional; an empty body is equivalent to `{}`.
+
+        - `202`: the control job was dispatched, or coalesced onto an identical pending one (`coalesced: true`, in which case this request's reason was dropped).
+        - `200` with `noEffect: true`: the instance is terminal (`completed`, `failed`, `cancelled`), so the engine would ignore the request and no job was dispatched.
+        - While an exclusive-access lease is held on the cluster, the action is refused with `409 exclusiveLeaseHeld`.
+
+        `status` in the response is the instance status read before dispatching.
+      x-required-scope: workflows:manage
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SuspendRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/ControlNoEffect"
+        "202":
+          $ref: "#/components/responses/ControlAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /workflows/{name}/instances/{instanceId}/resume:
+    parameters:
+      - $ref: "#/components/parameters/WorkflowName"
+      - $ref: "#/components/parameters/InstanceId"
+    post:
+      tags: [Actions]
+      operationId: resumeWorkflowInstance
+      summary: Resume a workflow instance
+      description: |
+        Requires scope `workflows:manage`. The action is audited.
+
+        Dispatches the same durable resume job `WorkflowService.Resume` sends to the orchestrator.
+        Resume does not take a reason: a request with a non-empty `reason` is rejected with `400 badRequest`.
+        The request body is optional; an empty body is equivalent to `{}`.
+
+        - `202`: the control job was dispatched, or coalesced onto an identical pending one (`coalesced: true`).
+        - `200` with `noEffect: true`: the instance is terminal (`completed`, `failed`, `cancelled`), so the engine would ignore the request and no job was dispatched.
+        - While an exclusive-access lease is held on the cluster, the action is refused with `409 exclusiveLeaseHeld`.
+
+        `status` in the response is the instance status read before dispatching.
+      x-required-scope: workflows:manage
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResumeRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/ControlNoEffect"
+        "202":
+          $ref: "#/components/responses/ControlAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        A read-only or management token from the server configuration, sent as `Authorization: Bearer <token>`.
+        Read-only tokens grant every scope except those ending in `:manage`; management tokens grant every scope.
+
+  headers:
+    X-Request-Id:
+      description: A unique ID assigned to the request, also returned as `requestId` in error bodies and recorded in audit logs.
+      schema:
+        type: string
+
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Maximum number of items to return.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 1000
+        default: 100
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: Opaque cursor returned as `nextCursor` by the previous page. Omit for the first page.
+      schema:
+        type: string
+    HostId:
+      name: hostId
+      in: path
+      required: true
+      description: The host ID.
+      schema:
+        type: string
+    ActorType:
+      name: type
+      in: path
+      required: true
+      description: The actor type. Must not contain `/`.
+      schema:
+        type: string
+    ActorId:
+      name: id
+      in: path
+      required: true
+      description: The actor ID. Must not contain `/`.
+      schema:
+        type: string
+    WorkflowName:
+      name: name
+      in: path
+      required: true
+      description: The workflow name. Must not contain `/` or `.`.
+      schema:
+        type: string
+    InstanceId:
+      name: instanceId
+      in: path
+      required: true
+      description: The workflow instance ID. Must not contain `/`.
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: "`badRequest`: an invalid path segment, query parameter, cursor, or request body."
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: "`unauthorized`: the bearer token is missing or unknown."
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+        WWW-Authenticate:
+          description: Always `Bearer realm="francis-management"`.
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: "`forbidden`: the token does not grant the scope the route requires."
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: "`notFound`: the resource does not exist. Some routes also return `notApplicable` (not available in this topology) or `eventHistoryDisabled`."
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: |
+        One of:
+        - `exclusiveLeaseHeld` (actions only): an exclusive-access lease is held on the cluster; `details.owner` and `details.expiresAt` describe it, and are omitted when the lease was released before it could be read; retryable.
+        - `lastServer` (drain only): the host is the last live server of the actor types in `details.actorTypes`; set `force` to drain it anyway.
+        - `hostReattached`: the host kept reconnecting, so the request could not be delivered to its current session; send it again; retryable.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    PayloadTooLarge:
+      description: "`payloadTooLarge`: the request body exceeds 64 KiB."
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InternalError:
+      description: "`internal`: an unexpected server error."
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ServiceUnavailable:
+      description: "`hostUnavailable`: the host (or the runtime owning its session) could not be reached, or `noHostsReachable`: none of the queried hosts could be reached (with `details.errors`). Retryable."
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    GatewayTimeout:
+      description: "`timeout`: the request timed out. Retryable."
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ControlAccepted:
+      description: The control job was dispatched, or coalesced onto an identical pending one.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ControlResponse"
+    ControlNoEffect:
+      description: The engine would ignore the request for the instance's current status, so no job was dispatched (`noEffect` is `true`).
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ControlResponse"
+
+  schemas:
+    Error:
+      type: object
+      description: The body of every error response.
+      required: [code, message]
+      properties:
+        code:
+          $ref: "#/components/schemas/ErrorCode"
+        message:
+          type: string
+          description: A human-readable description of the error.
+        requestId:
+          type: string
+          description: The request ID, also returned in the `X-Request-Id` header.
+        retryable:
+          type: boolean
+          description: Present and `true` when repeating the request later may succeed. Omitted otherwise.
+        details:
+          type: object
+          additionalProperties: true
+          description: |
+            Additional machine-readable context, present for some codes:
+            - `lastServer`: `actorTypes` (array of strings).
+            - `exclusiveLeaseHeld`: `owner` (string) and `expiresAt` (RFC 3339 timestamp).
+            - `noHostsReachable`: `errors` (array of `HostError`).
+
+    ErrorCode:
+      type: string
+      description: A machine-readable error code. See the API description for the meaning of each code.
+      enum:
+        - badRequest
+        - unauthorized
+        - forbidden
+        - notFound
+        - notApplicable
+        - methodNotAllowed
+        - exclusiveLeaseHeld
+        - lastServer
+        - hostUnavailable
+        - hostReattached
+        - noHostsReachable
+        - eventHistoryDisabled
+        - payloadTooLarge
+        - stateNotDecodable
+        - timeout
+        - internal
+
+    HostError:
+      type: object
+      description: A host that could not be queried by a fan-out request.
+      required: [hostId, code, message]
+      properties:
+        hostId:
+          type: string
+        code:
+          type: string
+          description: "`hostUnavailable`, `hostReattached`, or `notApplicable`; any other failure (including a per-host timeout) is reported as `hostUnavailable`."
+        message:
+          type: string
+
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          const: ok
+
+    Topology:
+      type: string
+      description: "`remote` is a cluster of hosts connected to standalone runtime replicas; `local` is a cluster of hosts that embed the provider and talk to each other directly."
+      enum: [remote, local]
+
+    HostState:
+      type: string
+      description: "`draining` when the host is draining (regardless of reachability), otherwise `unreachable` when no session to it is held, otherwise `connected`."
+      enum: [connected, draining, unreachable]
+
+    JobStatus:
+      type: string
+      description: "`dead` is dead-lettered."
+      enum: [pending, active, completed, dead]
+
+    WorkflowStatus:
+      type: string
+      enum: [pending, running, suspended, compensating, completed, failed, cancelled]
+
+    BoundedCount:
+      type: object
+      description: A count that stops at 10,000.
+      required: [count, truncated]
+      properties:
+        count:
+          type: integer
+        truncated:
+          type: boolean
+          description: True when the count reached the cap, so the real count is at least `count`.
+
+    ExclusiveLease:
+      type: object
+      required: [owner, expiresAt]
+      properties:
+        owner:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+
+    ClusterSummary:
+      type: object
+      required: [topology, exclusiveLease, runtimes, hosts, placements, activations, jobs, workflows, observedAt]
+      properties:
+        topology:
+          $ref: "#/components/schemas/Topology"
+        exclusiveLease:
+          description: The holder of the cluster exclusive-access lease, `null` when none is held. While held, actions are refused.
+          oneOf:
+            - $ref: "#/components/schemas/ExclusiveLease"
+            - type: "null"
+        runtimes:
+          type: [integer, "null"]
+          description: The number of runtime replicas with a live membership, `null` in the local topology.
+        hosts:
+          type: object
+          required: [total, connected, draining, unreachable]
+          properties:
+            total:
+              type: integer
+            connected:
+              type: integer
+            draining:
+              type: integer
+            unreachable:
+              type: integer
+        placements:
+          type: integer
+          description: Total placements across all hosts, from the provider.
+        activations:
+          type: object
+          required: [live, partial, errors]
+          properties:
+            live:
+              type: integer
+              description: The number of in-memory activations reported by the hosts that answered.
+            partial:
+              type: boolean
+              description: True when some hosts were unreachable or could not be queried, so `live` is a lower bound.
+            errors:
+              type: array
+              items:
+                $ref: "#/components/schemas/HostError"
+        jobs:
+          type: object
+          description: Job counts keyed by status (`pending`, `active`, `completed`, `dead`); every key is always present.
+          propertyNames:
+            $ref: "#/components/schemas/JobStatus"
+          additionalProperties:
+            $ref: "#/components/schemas/BoundedCount"
+        workflows:
+          type: object
+          description: Instance counts keyed by workflow name, then by status. Statuses with no instances are omitted.
+          additionalProperties:
+            type: object
+            propertyNames:
+              $ref: "#/components/schemas/WorkflowStatus"
+            additionalProperties:
+              $ref: "#/components/schemas/BoundedCount"
+        observedAt:
+          type: string
+          format: date-time
+
+    Runtime:
+      type: object
+      required: [runtimeId, address, self, lastHeartbeat, expiresAt, connectedHosts]
+      properties:
+        runtimeId:
+          type: string
+        address:
+          type: string
+        self:
+          type: boolean
+          description: True for the replica serving this request.
+        lastHeartbeat:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+          description: When the replica's membership expires unless renewed.
+        connectedHosts:
+          type: [integer, "null"]
+          description: The number of host sessions the replica holds, `null` when it could not be queried.
+        error:
+          type: string
+          description: Set when the replica could not be queried.
+
+    RuntimePage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Runtime"
+        nextCursor:
+          type: string
+          description: Never set for this endpoint.
+
+    Host:
+      type: object
+      required: [hostId, address, state, draining, lastHealthCheck, actorTypeCount, placementCount]
+      properties:
+        hostId:
+          type: string
+        address:
+          type: string
+        state:
+          $ref: "#/components/schemas/HostState"
+        draining:
+          type: boolean
+        lastHealthCheck:
+          type: string
+          format: date-time
+        ownerRuntimeId:
+          type: string
+          description: The runtime replica holding the host's session, or the runtime the host registered with. Omitted when unknown (such as in the local topology).
+        actorTypeCount:
+          type: integer
+        placementCount:
+          type: integer
+          description: Total placements on the host across its actor types.
+
+    HostPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Host"
+        nextCursor:
+          type: string
+
+    Capacity:
+      type: object
+      description: The placement usage of an actor type.
+      required: [used, limit, available, unlimited]
+      properties:
+        used:
+          type: integer
+        limit:
+          type: [integer, "null"]
+          description: The placement limit, `null` when unlimited.
+        available:
+          type: [integer, "null"]
+          description: The remaining placements (never negative), `null` when unlimited.
+        unlimited:
+          type: boolean
+
+    RetentionPolicy:
+      type: object
+      description: Whether terminal jobs leave a record, and for how long.
+      required: [recorded, forever]
+      properties:
+        recorded:
+          type: boolean
+          description: True when a record of the terminal job is kept.
+        forever:
+          type: boolean
+          description: True when the record is kept indefinitely.
+        retentionMs:
+          type: integer
+          format: int64
+          description: How long the record is kept, in milliseconds. Omitted when zero.
+
+    Retention:
+      type: object
+      required: [completedJobs, deadLetteredJobs]
+      properties:
+        completedJobs:
+          $ref: "#/components/schemas/RetentionPolicy"
+        deadLetteredJobs:
+          $ref: "#/components/schemas/RetentionPolicy"
+
+    HostActorType:
+      type: object
+      required: [actorType, idleTimeoutMs, placements, jobRetention]
+      properties:
+        actorType:
+          type: string
+        idleTimeoutMs:
+          type: integer
+          format: int64
+        placements:
+          $ref: "#/components/schemas/Capacity"
+        jobRetention:
+          $ref: "#/components/schemas/Retention"
+
+    CapacityGroup:
+      type: object
+      description: A host-local execution capacity group, with its point-in-time usage.
+      required: [name, limit, inUse, actorTypes]
+      properties:
+        name:
+          type: string
+        limit:
+          type: integer
+        inUse:
+          type: integer
+        actorTypes:
+          type: array
+          items:
+            type: string
+
+    WorkflowDefinition:
+      type: object
+      required: [name, version, fingerprint]
+      properties:
+        name:
+          type: string
+        version:
+          type: integer
+        fingerprint:
+          type: string
+
+    HostRuntime:
+      type: object
+      description: What a host reports about itself.
+      required: [observedAt, activeCount, draining, capacityGroups, workflows]
+      properties:
+        observedAt:
+          type: string
+          format: date-time
+        activeCount:
+          type: integer
+          description: The number of actors the host holds in memory.
+        draining:
+          type: boolean
+        capacityGroups:
+          type: array
+          items:
+            $ref: "#/components/schemas/CapacityGroup"
+        workflows:
+          type: array
+          description: The workflow definitions the host serves.
+          items:
+            $ref: "#/components/schemas/WorkflowDefinition"
+
+    HostDetail:
+      allOf:
+        - $ref: "#/components/schemas/Host"
+        - type: object
+          required: [actorTypes, observedAt]
+          properties:
+            actorTypes:
+              type: array
+              items:
+                $ref: "#/components/schemas/HostActorType"
+            runtime:
+              $ref: "#/components/schemas/HostRuntime"
+              description: The host's own report. Omitted when the host could not be queried.
+            runtimeError:
+              $ref: "#/components/schemas/HostError"
+              description: Why the host could not be queried. Omitted on success.
+            observedAt:
+              type: string
+              format: date-time
+
+    Activation:
+      type: object
+      required: [hostId, actorType, actorId, activatedAt, deactivating, observedAt]
+      properties:
+        hostId:
+          type: string
+        actorType:
+          type: string
+        actorId:
+          type: string
+        activatedAt:
+          type: string
+          format: date-time
+        deactivating:
+          type: boolean
+        observedAt:
+          type: string
+          format: date-time
+          description: When the host took the snapshot this activation comes from.
+
+    HostActivations:
+      type: object
+      required: [hostId, observedAt, activeCount, items]
+      properties:
+        hostId:
+          type: string
+        observedAt:
+          type: string
+          format: date-time
+        activeCount:
+          type: integer
+          description: The number of matching activations on the host, across all pages.
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Activation"
+        nextCursor:
+          type: string
+
+    Activations:
+      type: object
+      required: [items, partial, errors, startedAt, finishedAt]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Activation"
+        nextCursor:
+          type: string
+        partial:
+          type: boolean
+          description: True when some hosts could not be queried, so their activations are missing.
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/HostError"
+        startedAt:
+          type: string
+          format: date-time
+          description: When collection started.
+        finishedAt:
+          type: string
+          format: date-time
+          description: When collection finished.
+
+    Placement:
+      type: object
+      required: [actorType, actorId, hostId, idleTimeoutMs]
+      properties:
+        actorType:
+          type: string
+        actorId:
+          type: string
+        hostId:
+          type: string
+        idleTimeoutMs:
+          type: integer
+          format: int64
+
+    PlacementPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Placement"
+        nextCursor:
+          type: string
+
+    ActorTypeHost:
+      type: object
+      required: [hostId, draining, idleTimeoutMs, placements, jobRetention]
+      properties:
+        hostId:
+          type: string
+        draining:
+          type: boolean
+        idleTimeoutMs:
+          type: integer
+          format: int64
+        placements:
+          $ref: "#/components/schemas/Capacity"
+        jobRetention:
+          $ref: "#/components/schemas/Retention"
+
+    ActorTypeCapacityGroup:
+      allOf:
+        - type: object
+          required: [hostId]
+          properties:
+            hostId:
+              type: string
+              description: The host that reported the group.
+        - $ref: "#/components/schemas/CapacityGroup"
+
+    ActorType:
+      type: object
+      required: [actorType, builtIn, placements, hosts, jobRetention, capacityGroups]
+      properties:
+        actorType:
+          type: string
+        builtIn:
+          type: boolean
+          description: True for actor types built into Francis, such as workflow actors.
+        placements:
+          $ref: "#/components/schemas/Capacity"
+          description: The placement usage summed across the hosts serving the type; unlimited when any host is unlimited.
+        hosts:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActorTypeHost"
+        jobRetention:
+          description: The job retention, `null` when the hosts serving the type registered different retentions.
+          oneOf:
+            - $ref: "#/components/schemas/Retention"
+            - type: "null"
+        capacityGroups:
+          type: array
+          description: The capacity groups that include this type, one entry per reporting host.
+          items:
+            $ref: "#/components/schemas/ActorTypeCapacityGroup"
+
+    ActorTypes:
+      type: object
+      required: [items, partial, errors, observedAt]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActorType"
+        partial:
+          type: boolean
+          description: True when some hosts could not be queried, so their capacity groups are missing.
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/HostError"
+        observedAt:
+          type: string
+          format: date-time
+
+    WorkflowLabels:
+      type: object
+      description: The labels the workflow engine stores with an orchestrator's state. Empty fields are omitted.
+      properties:
+        status:
+          type: string
+        version:
+          type: integer
+        parent:
+          type: string
+        created:
+          type: string
+          description: The creation time, in the stored label format (`2006-01-02T15:04:05.000000000Z`).
+
+    ActorStateItem:
+      type: object
+      required: [actorId]
+      properties:
+        actorId:
+          type: string
+        workflowLabels:
+          $ref: "#/components/schemas/WorkflowLabels"
+          description: Present only for state that has workflow labels.
+
+    ActorStateItemPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActorStateItem"
+        nextCursor:
+          type: string
+
+    ActorState:
+      type: object
+      required: [actorType, actorId, size, lossy, state]
+      properties:
+        actorType:
+          type: string
+        actorId:
+          type: string
+        size:
+          type: integer
+          description: The size of the stored MessagePack value, in bytes.
+        lossy:
+          type: boolean
+          description: True when any value used a rendering that cannot be converted back to the same MessagePack bytes.
+        state:
+          description: The stored value converted to JSON, following the convention described on the operation. Any JSON value.
+
+    DeactivateResponse:
+      type: object
+      required: [actorType, actorId, notActive]
+      properties:
+        actorType:
+          type: string
+        actorId:
+          type: string
+        hostId:
+          type: string
+          description: The host the actor was placed on. Omitted when no active placement was found.
+        notActive:
+          type: boolean
+          description: True when the actor was not active, so nothing was deactivated.
+
+    DrainRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        timeout:
+          type: string
+          description: A Go duration string (such as `30s`) bounding the host's graceful teardown; positive and at most `5m`. When omitted, the host waits for every actor to deactivate, with no time limit.
+          examples: ["30s"]
+        force:
+          type: boolean
+          default: false
+          description: Drain the host even when it is the last live server of one or more actor types.
+        reason:
+          type: string
+          maxLength: 1024
+          description: A free-form reason, recorded in the audit log and passed to the host. At most 1024 bytes.
+
+    DrainResponse:
+      type: object
+      required: [hostId, alreadyDraining]
+      properties:
+        hostId:
+          type: string
+        alreadyDraining:
+          type: boolean
+          description: True when the host was already draining.
+        forcedActorTypes:
+          type: array
+          description: The actor types left without a live server because the drain was forced. Omitted when none.
+          items:
+            type: string
+
+    WorkflowLink:
+      type: object
+      description: Links an actor of a workflow to its workflow instance, derived from the actor type and ID naming conventions.
+      required: [workflow, role]
+      properties:
+        workflow:
+          type: string
+        role:
+          type: string
+          enum: [orchestrator, worker, undo, registry, other]
+        capability:
+          type: string
+          description: The capability of a worker or undo actor type, when it has one.
+        instanceId:
+          type: string
+          description: The workflow instance, for orchestrator, worker, and undo actors whose ID could be parsed.
+        step:
+          type: string
+          description: The step, for worker and undo actors.
+        taskIndex:
+          type: integer
+          description: The task index within the step, for worker and undo actors.
+
+    Job:
+      type: object
+      required: [jobId, actorType, actorId, method, status, dueTime]
+      properties:
+        jobId:
+          type: string
+        actorType:
+          type: string
+        actorId:
+          type: string
+        method:
+          type: string
+        status:
+          $ref: "#/components/schemas/JobStatus"
+        dueTime:
+          type: string
+          format: date-time
+        interval:
+          type: string
+          description: The repeat interval, for repeating jobs.
+        cron:
+          type: string
+          description: The cron expression, for cron jobs.
+        createdAt:
+          type: string
+          format: date-time
+          description: Omitted when unknown.
+        attempts:
+          type: integer
+          description: The number of attempts. Present only for terminal jobs (`completed`, `dead`).
+        lastError:
+          type: string
+          description: The last error. Only for terminal jobs, omitted when empty.
+        endedAt:
+          type: string
+          format: date-time
+          description: When the job ended. Only for terminal jobs, omitted when unknown.
+        workflow:
+          $ref: "#/components/schemas/WorkflowLink"
+          description: Present for jobs of workflow actors.
+
+    JobPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Job"
+        nextCursor:
+          type: string
+
+    Alarm:
+      type: object
+      required: [alarmId, actorType, actorId, name, dueTime, leased]
+      properties:
+        alarmId:
+          type: string
+        actorType:
+          type: string
+        actorId:
+          type: string
+        name:
+          type: string
+        dueTime:
+          type: string
+          format: date-time
+        interval:
+          type: string
+          description: The repeat interval, for repeating alarms.
+        ttl:
+          type: string
+          format: date-time
+          description: When a repeating alarm stops repeating. Omitted when unset.
+        leased:
+          type: boolean
+          description: True when a host currently holds a lease on the alarm.
+        leaseExpiration:
+          type: string
+          format: date-time
+          description: When the lease expires. Present only when leased.
+        leaseHostId:
+          type: string
+          description: The host holding the lease, which is the live host the alarm's actor is placed on. Omitted when not leased, or when the actor has no placement on a live host.
+
+    AlarmPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Alarm"
+        nextCursor:
+          type: string
+
+    WorkflowVersion:
+      type: object
+      required: [version, fingerprint, firstSeenAt, generation]
+      properties:
+        version:
+          type: integer
+        fingerprint:
+          type: string
+        firstSeenAt:
+          type: string
+          format: date-time
+        generation:
+          type: integer
+          format: uint64
+
+    WorkflowHostDefinition:
+      type: object
+      required: [version, fingerprint]
+      properties:
+        version:
+          type: integer
+        fingerprint:
+          type: string
+
+    WorkflowHost:
+      type: object
+      required: [hostId, draining, definitions]
+      properties:
+        hostId:
+          type: string
+        draining:
+          type: boolean
+        definitions:
+          type: [array, "null"]
+          description: The versions the host serves, `null` when the host could not be queried.
+          items:
+            $ref: "#/components/schemas/WorkflowHostDefinition"
+
+    WorkflowConflict:
+      type: object
+      description: A version registered or served with more than one definition fingerprint.
+      required: [version, fingerprints, hosts]
+      properties:
+        version:
+          type: integer
+        fingerprints:
+          type: array
+          items:
+            type: string
+        hosts:
+          type: array
+          description: The hosts serving the version (the registry itself is not listed).
+          items:
+            type: string
+
+    Workflow:
+      type: object
+      required: [name, versions, hosts, conflicts]
+      properties:
+        name:
+          type: string
+        versions:
+          type: array
+          description: The versions recorded by the workflow's definition registry.
+          items:
+            $ref: "#/components/schemas/WorkflowVersion"
+        hosts:
+          type: array
+          description: The live hosts serving the workflow's orchestrator.
+          items:
+            $ref: "#/components/schemas/WorkflowHost"
+        conflicts:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkflowConflict"
+
+    Workflows:
+      type: object
+      required: [items, partial, errors, observedAt]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Workflow"
+        partial:
+          type: boolean
+          description: True when some hosts could not be queried, so their definitions are missing.
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/HostError"
+        observedAt:
+          type: string
+          format: date-time
+
+    InstanceItem:
+      type: object
+      required: [instanceId, status]
+      properties:
+        instanceId:
+          type: string
+        status:
+          type: string
+          description: The instance status from its labels, or `unknown` when the instance has no labels.
+        version:
+          type: integer
+          description: Omitted when unknown.
+        parent:
+          type: string
+          description: The parent label, for child instances.
+        createdAt:
+          type: string
+          format: date-time
+          description: Omitted when unknown.
+
+    InstanceItemPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/InstanceItem"
+        nextCursor:
+          type: string
+
+    InstanceParent:
+      type: object
+      required: [instanceId, workflow, index]
+      properties:
+        instanceId:
+          type: string
+        workflow:
+          type: string
+        step:
+          type: string
+          description: The parent's step that started this instance.
+        index:
+          type: integer
+          description: The task index within the parent's step.
+
+    InstanceSuspension:
+      type: object
+      properties:
+        reason:
+          type: string
+        at:
+          type: string
+          format: date-time
+        resumeTo:
+          type: string
+          description: The status the instance returns to when resumed.
+
+    ChildLink:
+      type: object
+      required: [workflow, instanceId]
+      properties:
+        workflow:
+          type: string
+        instanceId:
+          type: string
+
+    Step:
+      type: object
+      required: [name, kind, status, taskCount, tasksRemaining]
+      properties:
+        name:
+          type: string
+        kind:
+          type: string
+          description: The node kind, such as `step`, `parallel`, `foreach`, `child`, `wait`, or `loop`.
+        status:
+          type: string
+          description: The step status, such as `pending`, `running`, `completed`, `failed`, `skipped`, `compensating`, `compensated`, or `compensation-failed`.
+        iteration:
+          type: integer
+          description: The loop iteration. Omitted when zero.
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        error:
+          type: string
+        taskCount:
+          type: integer
+        tasksRemaining:
+          type: integer
+        children:
+          type: array
+          description: The child workflow instances started by this step. Omitted when none.
+          items:
+            $ref: "#/components/schemas/ChildLink"
+
+    Instance:
+      type: object
+      required: [workflow, instanceId, status, version, hasOutput, steps, eventHistory, deadJobs]
+      properties:
+        workflow:
+          type: string
+        instanceId:
+          type: string
+        status:
+          $ref: "#/components/schemas/WorkflowStatus"
+        cause:
+          type: string
+          description: Why the instance failed, was cancelled, or is compensating.
+        terminalStatus:
+          type: string
+          description: The status a compensating instance will terminate into.
+        compensation:
+          type: string
+          description: The compensation outcome.
+          enum: [none, completed, partial, failed]
+        version:
+          type: integer
+        definitionFingerprint:
+          type: string
+        parent:
+          $ref: "#/components/schemas/InstanceParent"
+          description: Present for child instances.
+        suspended:
+          $ref: "#/components/schemas/InstanceSuspension"
+          description: Present while the instance is suspended.
+        createdAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        hasOutput:
+          type: boolean
+          description: True when the instance stored an output (a stored JSON `null` counts).
+        input:
+          description: The instance input as JSON. Present only with the `workflows:data:read` scope, and only when an input was stored.
+        output:
+          description: The instance output as JSON. Present only with the `workflows:data:read` scope and when `hasOutput` is true.
+        dataRedacted:
+          type: boolean
+          description: Present and `true` when `input` and `output` were withheld because the token lacks `workflows:data:read`.
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/Step"
+        eventHistory:
+          type: boolean
+          description: False when the workflow opted out of event history.
+        deadJobs:
+          type: array
+          description: The orchestrator's dead-lettered jobs (at most 100). The engine retries them automatically, so an entry can be transient.
+          items:
+            $ref: "#/components/schemas/Job"
+
+    Event:
+      type: object
+      required: [seq, time, kind]
+      properties:
+        seq:
+          type: integer
+          format: int64
+          description: The event's sequence number within the instance.
+        time:
+          type: string
+          format: date-time
+        timeSource:
+          type: string
+          description: How `time` was obtained.
+          enum: [engine, dispatch, report, worker]
+        kind:
+          type: string
+          description: |
+            The event kind, one of: `instance_started`, `instance_suspended`, `instance_resumed`, `instance_reopened`, `instance_completed`, `instance_failed`, `instance_cancelled`, `cancel_requested`, `unwind_requested`, `compensation_started`, `parent_notified`, `step_started`, `step_completed`, `step_failed`, `step_skipped`, `step_compensating`, `step_compensated`, `step_compensation_failed`, `wait_started`, `event_received`, `task_dispatched`, `child_started`, `worker_started`, `worker_finished`, `task_retry_scheduled`, `task_completed`, `task_failed`, `task_abandoned`, `compensation_dispatched`, `child_unwind_requested`, `compensation_retry_scheduled`, `compensation_completed`, `compensation_failed`.
+            New kinds may be added.
+        step:
+          type: string
+        taskIndex:
+          type: integer
+        attempt:
+          type: integer
+          description: Omitted when zero.
+        outcome:
+          type: string
+        error:
+          type: string
+        child:
+          $ref: "#/components/schemas/ChildLink"
+        iteration:
+          type: integer
+          description: The loop iteration of the step; omitted outside a loop body.
+        undo:
+          type: boolean
+          description: Set when the event is about a compensation rather than the forward task; omitted when false.
+        reason:
+          type: string
+          description: The reason of a cancel, unwind or suspend, or the cause of an unwind.
+        eventName:
+          type: string
+          description: The event a wait step waits for or received.
+        dueTime:
+          type: string
+          format: date-time
+          description: The earliest time a scheduled attempt may run, when it is later than the event.
+
+    EventPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Event"
+        nextCursor:
+          type: string
+
+    CancelRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: Why the instance is cancelled. Required and not blank; at most 1024 bytes.
+
+    SuspendRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        reason:
+          type: string
+          maxLength: 1024
+          description: Why the instance is suspended. At most 1024 bytes.
+
+    ResumeRequest:
+      type: object
+      additionalProperties: false
+      description: Resume takes no reason; a non-empty `reason` is rejected with `400`.
+      properties:
+        reason:
+          type: string
+          maxLength: 0
+
+    ControlResponse:
+      type: object
+      required: [workflow, instanceId, action, coalesced, noEffect, status]
+      properties:
+        workflow:
+          type: string
+        instanceId:
+          type: string
+        action:
+          type: string
+          enum: [cancel, suspend, resume]
+        coalesced:
+          type: boolean
+          description: True when a control job of the same kind was already pending, so this request was merged into it and its reason was dropped.
+        noEffect:
+          type: boolean
+          description: True when the engine would ignore the request for the instance's status, so no job was dispatched.
+        status:
+          $ref: "#/components/schemas/WorkflowStatus"
+          description: The instance status read before dispatching.

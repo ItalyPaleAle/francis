@@ -58,6 +58,20 @@ Name of the headless Service, which gives every replica a stable per-pod DNS nam
 {{- end }}
 
 {{/*
+Name of the Service in front of the management API, which is kept apart from the UDP runtime Service
+*/}}
+{{- define "francis.managementServiceName" -}}
+{{- printf "%s-management" (include "francis.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Directory the management API's TLS Secret is mounted at
+*/}}
+{{- define "francis.managementTLSMountPath" -}}
+{{- print "/etc/francis-management-tls" }}
+{{- end }}
+
+{{/*
 Name of the Secret holding the runtime config file, which is the user-provided one when existingConfigSecret is set
 */}}
 {{- define "francis.configSecretName" -}}
@@ -181,6 +195,28 @@ maxHosts: {{ int .Values.tuning.maxHosts }}
 log:
   level: {{ .Values.log.level | quote }}
   json: {{ .Values.log.json }}
+{{- if .Values.management.enabled }}
+
+# The management API binds all interfaces so the management Service can reach it
+management:
+  enabled: true
+  bind: ":{{ int .Values.management.port }}"
+  readOnlyTokens:
+  {{- range .Values.management.readOnlyTokens }}
+    - {{ . | quote }}
+  {{- else }} []
+  {{- end }}
+  managementTokens:
+  {{- range .Values.management.managementTokens }}
+    - {{ . | quote }}
+  {{- else }} []
+  {{- end }}
+  {{- if .Values.management.tls.existingSecret }}
+  tls:
+    certFile: {{ printf "%s/tls.crt" (include "francis.managementTLSMountPath" .) | quote }}
+    keyFile: {{ printf "%s/tls.key" (include "francis.managementTLSMountPath" .) | quote }}
+  {{- end }}
+{{- end }}
 {{- end }}
 
 {{/*
@@ -304,6 +340,28 @@ Every template includes this so the error surfaces no matter which resource rend
 
 {{- if not (has (lower (default "" .Values.log.level)) (list "debug" "info" "warn" "error")) -}}
 {{- fail (printf "\nfrancis: log.level must be one of \"debug\", \"info\", \"warn\", or \"error\", got %q" (toString .Values.log.level)) -}}
+{{- end -}}
+
+{{- if .Values.management.enabled -}}
+{{- $readOnly := default (list) .Values.management.readOnlyTokens -}}
+{{- $mgmt := default (list) .Values.management.managementTokens -}}
+{{- if and (empty $readOnly) (empty $mgmt) -}}
+{{- fail "\nfrancis: management.enabled requires at least one token in management.readOnlyTokens or management.managementTokens.\nPass them with --set-string 'management.managementTokens[0]=…' or supply the whole config file with existingConfigSecret." -}}
+{{- end -}}
+{{- /* Tokens are never printed in error messages, only their list and index */ -}}
+{{- $seen := dict -}}
+{{- range $list := list (dict "name" "readOnlyTokens" "tokens" $readOnly) (dict "name" "managementTokens" "tokens" $mgmt) -}}
+{{- range $i, $token := $list.tokens -}}
+{{- $token = toString $token -}}
+{{- if lt (len $token) 32 -}}
+{{- fail (printf "\nfrancis: management.%s[%d] is shorter than 32 characters" $list.name $i) -}}
+{{- end -}}
+{{- if hasKey $seen $token -}}
+{{- fail (printf "\nfrancis: management.%s[%d] is a duplicate: every management token must be unique across readOnlyTokens and managementTokens" $list.name $i) -}}
+{{- end -}}
+{{- $_ := set $seen $token true -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 
 {{- end -}}

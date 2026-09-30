@@ -21,6 +21,7 @@ import (
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/bootstrapauth"
 	"github.com/italypaleale/francis/internal/ca"
+	"github.com/italypaleale/francis/internal/management"
 	"github.com/italypaleale/francis/internal/peer"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/wt"
@@ -32,7 +33,7 @@ import (
 type Runtime struct {
 	provider components.ActorProvider
 	// mgmtProvider is the provider's management interface, nil when the provider does not implement it
-	// It serves the membership of runtime replicas
+	// It serves the management API and the membership of runtime replicas
 	mgmtProvider components.ManagementProvider
 	hosts        *HostManager
 
@@ -86,6 +87,8 @@ type Runtime struct {
 	advertiseAddress string
 	// peers sends management requests to other runtime replicas
 	peers *peer.Client
+	// management serves the management API, nil when it is disabled
+	management *management.Server
 
 	log   *slog.Logger
 	clock clock.WithTicker
@@ -171,8 +174,19 @@ func NewRuntime(provider components.ActorProvider, opts ...RuntimeOption) (*Runt
 		clock:                   options.clock,
 	}
 
-	// Replica membership needs the provider's optional management interface
+	// The management API and replica membership need the provider's optional management interface
 	rt.mgmtProvider, _ = provider.(components.ManagementProvider)
+
+	// Create the management API server when it is enabled
+	if options.management != nil {
+		if rt.mgmtProvider == nil {
+			return nil, errors.New("the management API requires an actor provider that implements components.ManagementProvider")
+		}
+		rt.management, err = management.NewServer(*options.management, &managementBackend{rt: rt}, management.WithLogger(options.logger.With(slog.String("scope", "management"))))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create management API server: %w", err)
+		}
+	}
 
 	// By default, alarms are dispatched to hosts over their WebTransport session
 	rt.sendToHost = func(ctx context.Context, c *hostConn, env *protocol.Envelope) (*protocol.Envelope, error) {
@@ -234,6 +248,11 @@ func (rt *Runtime) Run(parentCtx context.Context) error {
 	// Keep this replica's membership registered, so other replicas can route management requests to it
 	if rt.mgmtProvider != nil {
 		services = append(services, rt.runMembership)
+	}
+
+	// Serve the management API when it is enabled
+	if rt.management != nil {
+		services = append(services, rt.management.Run)
 	}
 
 	// Run all background services

@@ -9,6 +9,7 @@ import (
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/internal/bootstrapauth"
+	"github.com/italypaleale/francis/internal/management"
 )
 
 // defaultWorkloadCertTTL is the default lifetime of a host workload certificate
@@ -56,6 +57,8 @@ type runtimeOptions struct {
 
 	// advertiseAddress is the address other runtime replicas dial to reach this one, defaulting to bind
 	advertiseAddress string
+	// management, when set, enables the management API server
+	management *management.Config
 
 	// Allows setting a clock for testing
 	clock clock.WithTicker
@@ -135,5 +138,12 @@ func WithShutdownGracePeriod(d time.Duration) RuntimeOption {
 func WithAdvertiseAddress(addr string) RuntimeOption {
 	return func(o *runtimeOptions) {
 		o.advertiseAddress = addr
+	}
+}
+
+// WithManagement enables the management API server with the given configuration
+func WithManagement(cfg management.Config) RuntimeOption {
+	return func(o *runtimeOptions) {
+		o.management = &cfg
 	}
 }

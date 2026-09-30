@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -14,18 +15,25 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/italypaleale/francis/internal/buildinfo"
+	"github.com/italypaleale/francis/internal/management"
 )
 
 // runtimeIDEnvVar is the environment variable that overrides the runtimeId set in the config file
 var runtimeIDEnvVar = buildinfo.ConfigEnvPrefix + "RUNTIME_ID"
 
+// advertiseAddressEnvVar is the environment variable that overrides the advertiseAddress set in the config file
+var advertiseAddressEnvVar = buildinfo.ConfigEnvPrefix + "ADVERTISE_ADDRESS"
+
 // config is the on-disk configuration for the runtime binary
 type config struct {
-	Bind        string          `yaml:"bind"`
-	RuntimeID   string          `yaml:"runtimeId"`
-	RuntimePSKs []string        `yaml:"runtimePSKs"`
-	Bootstrap   bootstrapConfig `yaml:"bootstrap"`
-	Provider    providerConfig  `yaml:"provider"`
+	Bind      string `yaml:"bind"`
+	RuntimeID string `yaml:"runtimeId"`
+	// AdvertiseAddress is the address other runtime replicas dial to reach this one, which defaults to the bind address
+	AdvertiseAddress string           `yaml:"advertiseAddress"`
+	Management       managementConfig `yaml:"management"`
+	RuntimePSKs      []string         `yaml:"runtimePSKs"`
+	Bootstrap        bootstrapConfig  `yaml:"bootstrap"`
+	Provider         providerConfig   `yaml:"provider"`
 
 	WorkloadCertTTL     string `yaml:"workloadCertTTL"`
 	HealthCheckDeadline string `yaml:"healthCheckDeadline"`
@@ -50,6 +58,59 @@ type bootstrapConfig struct {
 	HostPSK string `yaml:"hostPSK"`
 	// JWT configures the "jwt" method
 	JWT jwtConfig `yaml:"jwt"`
+}
+
+// managementConfig configures the optional management REST API
+type managementConfig struct {
+	// Enabled starts the management listener, which is off by default
+	Enabled bool `yaml:"enabled"`
+	// Bind is the TCP address of the management listener, which defaults to 0.0.0.0:7401
+	Bind string `yaml:"bind"`
+	// ReadOnlyTokens receive every scope except those ending in ":manage"
+	ReadOnlyTokens []string `yaml:"readOnlyTokens"`
+	// ManagementTokens receive every scope
+	ManagementTokens []string `yaml:"managementTokens"`
+	// TLS optionally serves the management API over HTTPS
+	TLS managementTLSConfig `yaml:"tls"`
+}
+
+type managementTLSConfig struct {
+	// CertFile is the path to the PEM-encoded certificate chain
+	CertFile string `yaml:"certFile"`
+	// KeyFile is the path to the PEM-encoded private key
+	KeyFile string `yaml:"keyFile"`
+}
+
+// managementServerConfig validates the management configuration and returns the server configuration
+func (cfg managementConfig) managementServerConfig() (management.Config, error) {
+	res := management.Config{
+		Bind:             cfg.Bind,
+		ReadOnlyTokens:   cfg.ReadOnlyTokens,
+		ManagementTokens: cfg.ManagementTokens,
+	}
+
+	switch {
+	case cfg.TLS.CertFile == "" && cfg.TLS.KeyFile == "":
+		// Serve plain HTTP
+	case cfg.TLS.CertFile == "" || cfg.TLS.KeyFile == "":
+		return res, errors.New("management.tls.certFile and management.tls.keyFile must be set together")
+	default:
+		cert, err := tls.LoadX509KeyPair(cfg.TLS.CertFile, cfg.TLS.KeyFile)
+		if err != nil {
+			return res, fmt.Errorf("failed to load the management TLS certificate: %w", err)
+		}
+		res.TLSConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+	}
+
+	err := res.Validate()
+	if err != nil {
+		return res, err
+	}
+
+	return res, nil
 }
 
 type jwtConfig struct {
@@ -252,6 +313,10 @@ func loadConfig(path string) (*config, error) {
 	runtimeID := os.Getenv(runtimeIDEnvVar)
 	if runtimeID != "" {
 		cfg.RuntimeID = runtimeID
+	}
+	advertiseAddress := os.Getenv(advertiseAddressEnvVar)
+	if advertiseAddress != "" {
+		cfg.AdvertiseAddress = advertiseAddress
 	}
 
 	return cfg, nil

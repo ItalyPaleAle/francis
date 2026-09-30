@@ -139,7 +139,7 @@ openTelemetry:
   samplerArg: ""
 
 # Mount a Secret holding a complete runtime config.yaml instead of having the chart render one
-# When this is set the chart ignores database (except for the persistence settings), runtimePSKs, runtimeId, bootstrap, tuning, and log
+# When this is set the chart ignores database (except for the persistence settings), runtimePSKs, runtimeId, bootstrap, tuning, log, and the management tokens
 existingConfigSecret: ""
 existingConfigSecretKey: config.yaml
 
@@ -163,6 +163,36 @@ service:
   loadBalancerSourceRanges: []
   externalTrafficPolicy: ""
   annotations: {}
+
+# Management REST API, which exposes cluster inventory, actor state, workflow instances, and administrative actions
+# It is off by default, and no TCP port is opened until it is enabled
+# See https://francis.italypaleale.me/docs/management-api/
+management:
+  enabled: false
+  # TCP port the management API listens on, on all interfaces so the Service can reach it
+  port: 7401
+  # Bearer tokens that grant every read scope, but no actions
+  # Each token must be at least 32 characters long, and a token cannot appear in both lists
+  # Tokens are rendered into the chart's config Secret, so pass them with --set-string or a values file that is kept out of source control
+  # With existingConfigSecret set these are ignored, and the management block must be written in that Secret instead
+  readOnlyTokens: []
+  # Bearer tokens that grant every scope, including actions such as draining a host or cancelling a workflow instance
+  managementTokens: []
+  tls:
+    # Name of an existing kubernetes.io/tls Secret, whose certificate the management API serves over HTTPS
+    # When empty the API is served over plain HTTP, and the runtime logs a warning because it listens on a non-loopback address
+    # The certificate is loaded when the runtime starts, so pods must be restarted to pick up a renewed one
+    existingSecret: ""
+  # Service in front of the management API, which is separate from the UDP runtime Service
+  # A single LoadBalancer Service mixing TCP and UDP ports needs the MixedProtocolLBService feature, so the two are kept apart
+  service:
+    type: ClusterIP
+    # Only used when type is NodePort or LoadBalancer
+    nodePort: null
+    loadBalancerIP: ""
+    loadBalancerSourceRanges: []
+    externalTrafficPolicy: ""
+    annotations: {}
 
 serviceAccount:
   create: true

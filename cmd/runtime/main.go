@@ -148,6 +148,18 @@ func run(ctx context.Context, cfg *config) error {
 	if cfg.RuntimeID != "" {
 		opts = append(opts, runtime.WithRuntimeID(cfg.RuntimeID))
 	}
+	if cfg.AdvertiseAddress != "" {
+		opts = append(opts, runtime.WithAdvertiseAddress(cfg.AdvertiseAddress))
+	}
+
+	// Enable the management API when configured
+	if cfg.Management.Enabled {
+		mgmtCfg, err := cfg.Management.managementServerConfig()
+		if err != nil {
+			return err
+		}
+		opts = append(opts, runtime.WithManagement(mgmtCfg))
+	}
 
 	rt, err := runtime.NewRuntime(provider, opts...)
 	if err != nil {

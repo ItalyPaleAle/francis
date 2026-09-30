@@ -32,6 +32,7 @@ import (
 	"github.com/italypaleale/francis/internal/ca"
 	"github.com/italypaleale/francis/internal/certholder"
 	"github.com/italypaleale/francis/internal/hosttls"
+	"github.com/italypaleale/francis/internal/management"
 	"github.com/italypaleale/francis/internal/peer"
 	"github.com/italypaleale/francis/internal/providerfactory"
 	"github.com/italypaleale/francis/internal/ref"
@@ -103,6 +104,8 @@ type Host struct {
 	peerClient *peer.Client
 	// peerServer serves invocations of actors owned by this host over WebTransport
 	peerServer *peer.Server
+	// management serves the management API, nil when it is disabled
+	management *management.Server
 
 	// cas is the cluster CA bundle derived from the runtime PSKs, index 0 being the primary used to self-issue this host's certificate
 	cas []*ca.CA
@@ -279,6 +282,14 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 		MaxRequestBodySize:  options.MaxRequestBodySize,
 	})
 
+	// Create the management API server when it is enabled
+	if options.Management != nil {
+		h.management, err = h.newManagementServer(*options.Management, options.Logger.With(slog.String("scope", "management")))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create management API server: %w", err)
+		}
+	}
+
 	return h, nil
 }
 
@@ -445,6 +456,11 @@ func (h *Host) Run(parentCtx context.Context) error {
 
 		// Run the actor provider
 		h.actorProvider.Run,
+	}
+
+	// Serve the management API when it is enabled
+	if h.management != nil {
+		services = append(services, h.management.Run)
 	}
 
 	// Run all services
