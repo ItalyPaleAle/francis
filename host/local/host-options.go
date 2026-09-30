@@ -141,6 +141,9 @@ type newHostOptions struct {
 	MaxRequestBodySize        int64
 	MaxHosts                  int
 
+	// When set, enables the management API
+	Management *ManagementOptions
+
 	// Allows setting a clock for testing
 	clock clock.WithTicker
 }

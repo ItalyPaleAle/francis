@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,6 +75,35 @@ func advertiseFromBind(bind string, getHostIP func() (string, error)) (string, e
 	return net.JoinHostPort(ip, port), nil
 }
 
+// advertiseWithBindPort completes an explicit advertise address that has no port with the port of the bind address
+// Replicas dial the same WebTransport server that hosts connect to, so the bind port is the right default, and an address that already has a port is returned as-is
+func advertiseWithBindPort(advertise string, bind string) (string, error) {
+	// An address with a port is already complete
+	host, port, err := net.SplitHostPort(advertise)
+	if err == nil && port != "" {
+		return advertise, nil
+	}
+
+	// Otherwise the whole value is the host, which may be a bare or bracketed IPv6 address
+	if err != nil {
+		host = advertise
+		if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+			host = host[1 : len(host)-1]
+		}
+	}
+	if host == "" || strings.ContainsAny(host, "[]") || (strings.Contains(host, ":") && net.ParseIP(host) == nil) {
+		return "", fmt.Errorf("invalid advertise address '%s': it must be a host or a host:port", advertise)
+	}
+
+	// Borrow the port of the bind address
+	_, port, err = net.SplitHostPort(bind)
+	if err != nil {
+		return "", fmt.Errorf("invalid bind address '%s': %w", bind, err)
+	}
+
+	return net.JoinHostPort(host, port), nil
+}
+
 // isUnspecifiedAddress reports whether an address has no host or an unspecified one, such as ":8443" or "0.0.0.0:8443"
 // Another machine can't dial such an address: on Linux it even reaches the dialing machine itself
 func isUnspecifiedAddress(address string) bool {
@@ -121,7 +151,7 @@ func (rt *Runtime) runMembership(ctx context.Context) error {
 			// Other replicas forward management requests to this address, which they can't dial
 			runtimes, lErr := rt.provider.ListRuntimes(rCtx)
 			if lErr == nil && len(runtimes) > 1 {
-				rt.log.WarnContext(ctx, "Other runtime replicas can't reach this one at the address it advertises, so management requests for its hosts fail on them; set the advertise address, or the "+netutils.HostIPEnvVar+" environment variable, to an address they can dial", slog.String("address", address))
+				rt.log.WarnContext(ctx, "Other runtime replicas can't reach this one at the address it advertises, so management requests for its hosts fail on them; set the advertise address to an address they can dial", slog.String("address", address))
 				warnUnreachable = false
 			}
 		}

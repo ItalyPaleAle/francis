@@ -149,6 +149,42 @@
         "annotations": { "type": "object" }
       }
     },
+    "management": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "readOnlyTokens": {
+          "description": "Bearer tokens granting every read scope. Each must be at least 32 characters, and no token may appear in both lists.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 32 }
+        },
+        "managementTokens": {
+          "description": "Bearer tokens granting every scope, including actions. Each must be at least 32 characters, and no token may appear in both lists.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 32 }
+        },
+        "tls": {
+          "type": "object",
+          "properties": {
+            "existingSecret": { "type": "string" }
+          }
+        },
+        "service": {
+          "type": "object",
+          "properties": {
+            "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+            "nodePort": { "type": ["integer", "null"], "minimum": 1, "maximum": 65535 },
+            "loadBalancerIP": { "type": "string" },
+            "loadBalancerSourceRanges": { "type": "array", "items": { "type": "string" } },
+            "externalTrafficPolicy": { "type": "string", "enum": ["", "Cluster", "Local"] },
+            "annotations": { "type": "object" }
+          }
+        }
+      }
+    },
     "serviceAccount": {
       "type": "object",
       "properties": {

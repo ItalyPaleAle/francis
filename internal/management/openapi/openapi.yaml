@@ -1,0 +1,4489 @@
+components:
+  schemas:
+    Activation:
+      properties:
+        activatedAt:
+          format: date-time
+          type: string
+        actorId:
+          type: string
+        actorType:
+          type: string
+        deactivating:
+          type: boolean
+        hostId:
+          type: string
+        observedAt:
+          description: When the host took the snapshot this activation comes from
+          format: date-time
+          type: string
+      required:
+      - activatedAt
+      - actorId
+      - actorType
+      - deactivating
+      - hostId
+      - observedAt
+      type: object
+    Activations:
+      properties:
+        errors:
+          items:
+            $ref: '#/components/schemas/HostError'
+          type: array
+        finishedAt:
+          description: When collection finished
+          format: date-time
+          type: string
+        items:
+          items:
+            $ref: '#/components/schemas/Activation'
+          type: array
+        nextCursor:
+          description: Opaque cursor to pass back as `cursor` to fetch the next page,
+            omitted on the last page
+          type: string
+        partial:
+          description: True when some hosts could not be queried, so their activations
+            are missing
+          type: boolean
+        startedAt:
+          description: When collection started
+          format: date-time
+          type: string
+      required:
+      - errors
+      - finishedAt
+      - items
+      - partial
+      - startedAt
+      type: object
+    ActorState:
+      properties:
+        actorId:
+          type: string
+        actorType:
+          type: string
+        lossy:
+          description: True when any value used a rendering that changes its shape,
+            such as binary data or a timestamp; numbers are always strings and don't
+            count
+          type: boolean
+        size:
+          description: The size of the stored MessagePack value, in bytes
+          type: integer
+        state:
+          description: The stored value converted to JSON, following the convention
+            described on the operation; any JSON value
+          type: object
+      required:
+      - actorId
+      - actorType
+      - lossy
+      - size
+      - state
+      type: object
+    ActorStateItem:
+      properties:
+        actorId:
+          type: string
+        workflowLabels:
+          allOf:
+          - $ref: '#/components/schemas/WorkflowLabels'
+          description: Present only for state that has workflow labels
+      required:
+      - actorId
+      type: object
+    ActorType:
+      properties:
+        actorType:
+          type: string
+        builtIn:
+          description: True for actor types built into Francis, such as workflow actors
+          type: boolean
+        capacityGroups:
+          description: The capacity groups that include this type, one entry per reporting
+            host
+          items:
+            $ref: '#/components/schemas/ActorTypeCapacityGroup'
+          type: array
+        hosts:
+          items:
+            $ref: '#/components/schemas/ActorTypeHost'
+          type: array
+        jobRetention:
+          allOf:
+          - $ref: '#/components/schemas/Retention'
+          description: The job retention, `null` when the hosts serving the type registered
+            different retentions
+          nullable: true
+        placements:
+          allOf:
+          - $ref: '#/components/schemas/Capacity'
+          description: The placement usage summed across the hosts serving the type,
+            unlimited when any host is unlimited
+      required:
+      - actorType
+      - builtIn
+      - capacityGroups
+      - hosts
+      - jobRetention
+      - placements
+      type: object
+    ActorTypeCapacityGroup:
+      properties:
+        actorTypes:
+          items:
+            type: string
+          type: array
+        hostId:
+          description: The host that reported the group
+          type: string
+        inUse:
+          type: integer
+        limit:
+          type: integer
+        name:
+          type: string
+      required:
+      - actorTypes
+      - hostId
+      - inUse
+      - limit
+      - name
+      type: object
+    ActorTypeHost:
+      properties:
+        draining:
+          type: boolean
+        hostId:
+          type: string
+        idleTimeoutMs:
+          type: integer
+        jobRetention:
+          $ref: '#/components/schemas/Retention'
+        placements:
+          $ref: '#/components/schemas/Capacity'
+      required:
+      - draining
+      - hostId
+      - idleTimeoutMs
+      - jobRetention
+      - placements
+      type: object
+    ActorTypes:
+      properties:
+        errors:
+          items:
+            $ref: '#/components/schemas/HostError'
+          type: array
+        items:
+          items:
+            $ref: '#/components/schemas/ActorType'
+          type: array
+        observedAt:
+          format: date-time
+          type: string
+        partial:
+          description: True when some hosts could not be queried, so their capacity
+            groups are missing
+          type: boolean
+      required:
+      - errors
+      - items
+      - observedAt
+      - partial
+      type: object
+    Alarm:
+      properties:
+        actorId:
+          type: string
+        actorType:
+          type: string
+        alarmId:
+          type: string
+        dueTime:
+          format: date-time
+          type: string
+        interval:
+          description: The repeat interval, for repeating alarms
+          type: string
+        leaseExpiration:
+          description: When the lease expires, present only when leased
+          format: date-time
+          type: string
+        leaseHostId:
+          description: The host holding the lease, which is the live host the alarm's
+            actor is placed on; omitted when not leased, or when the actor has no
+            placement on a live host
+          type: string
+        leased:
+          description: True when a host currently holds a lease on the alarm
+          type: boolean
+        name:
+          type: string
+        ttl:
+          description: When a repeating alarm stops repeating, omitted when unset
+          format: date-time
+          type: string
+      required:
+      - actorId
+      - actorType
+      - alarmId
+      - dueTime
+      - leased
+      - name
+      type: object
+    BoundedCount:
+      description: A count that stops at 10,000.
+      properties:
+        count:
+          type: integer
+        truncated:
+          description: True when the count reached the cap, so the real count is at
+            least `count`
+          type: boolean
+      required:
+      - count
+      - truncated
+      type: object
+    Capacity:
+      description: The placement usage of an actor type.
+      properties:
+        available:
+          description: The remaining placements (never negative), `null` when unlimited
+          nullable: true
+          type: integer
+        limit:
+          description: The placement limit, `null` when unlimited
+          nullable: true
+          type: integer
+        unlimited:
+          type: boolean
+        used:
+          type: integer
+      required:
+      - available
+      - limit
+      - unlimited
+      - used
+      type: object
+    CapacityGroup:
+      description: A host-local execution capacity group, with its point-in-time usage.
+      properties:
+        actorTypes:
+          items:
+            type: string
+          type: array
+        inUse:
+          type: integer
+        limit:
+          type: integer
+        name:
+          type: string
+      required:
+      - actorTypes
+      - inUse
+      - limit
+      - name
+      type: object
+    ChildLink:
+      properties:
+        instanceId:
+          type: string
+        workflow:
+          type: string
+      required:
+      - instanceId
+      - workflow
+      type: object
+    ClusterActivations:
+      properties:
+        errors:
+          items:
+            $ref: '#/components/schemas/HostError'
+          type: array
+        live:
+          description: The number of in-memory activations reported by the hosts that
+            answered
+          type: integer
+        partial:
+          description: True when some hosts were unreachable or could not be queried,
+            so `live` is a lower bound
+          type: boolean
+      required:
+      - errors
+      - live
+      - partial
+      type: object
+    ClusterHosts:
+      properties:
+        connected:
+          type: integer
+        draining:
+          type: integer
+        total:
+          type: integer
+        unreachable:
+          type: integer
+      required:
+      - connected
+      - draining
+      - total
+      - unreachable
+      type: object
+    ClusterSummary:
+      properties:
+        activations:
+          $ref: '#/components/schemas/ClusterActivations'
+        exclusiveLease:
+          allOf:
+          - $ref: '#/components/schemas/ExclusiveLease'
+          description: The holder of the cluster exclusive-access lease, `null` when
+            none is held; while held, actions are refused
+          nullable: true
+        hosts:
+          $ref: '#/components/schemas/ClusterHosts'
+        jobs:
+          additionalProperties:
+            $ref: '#/components/schemas/BoundedCount'
+          description: Job counts keyed by status (`pending`, `active`, `completed`,
+            `dead`), with every key always present
+          type: object
+        observedAt:
+          format: date-time
+          type: string
+        placements:
+          description: Total placements across all hosts, from the provider
+          type: integer
+        runtimes:
+          description: The number of runtime replicas with a live membership, `null`
+            in the local topology
+          nullable: true
+          type: integer
+        topology:
+          description: '`remote` is a cluster of hosts connected to standalone runtime
+            replicas; `local` is a cluster of hosts that embed the provider and talk
+            to each other directly'
+          enum:
+          - remote
+          - local
+          type: string
+        workflows:
+          additionalProperties:
+            additionalProperties:
+              $ref: '#/components/schemas/BoundedCount'
+            type: object
+          description: Instance counts keyed by workflow name, then by status, omitting
+            statuses with no instances
+          type: object
+      required:
+      - activations
+      - exclusiveLease
+      - hosts
+      - jobs
+      - observedAt
+      - placements
+      - runtimes
+      - topology
+      - workflows
+      type: object
+    ControlRequest:
+      description: Cancel requires a non-blank reason, suspend takes an optional one,
+        and resume rejects a non-empty one with `400`.
+      properties:
+        reason:
+          description: Why the instance is cancelled or suspended, at most 1024 bytes
+          maxLength: 1024
+          type: string
+      type: object
+    ControlResponse:
+      properties:
+        action:
+          enum:
+          - cancel
+          - suspend
+          - resume
+          type: string
+        coalesced:
+          description: True when a control job of the same kind was already pending,
+            so this request was merged into it and its reason was dropped
+          type: boolean
+        instanceId:
+          type: string
+        noEffect:
+          description: True when the engine would ignore the request for the instance's
+            status, so no job was dispatched
+          type: boolean
+        status:
+          description: The instance status read before dispatching
+          enum:
+          - pending
+          - running
+          - suspended
+          - compensating
+          - completed
+          - failed
+          - cancelled
+          type: string
+        workflow:
+          type: string
+      required:
+      - action
+      - coalesced
+      - instanceId
+      - noEffect
+      - status
+      - workflow
+      type: object
+    DeactivateResponse:
+      properties:
+        actorId:
+          type: string
+        actorType:
+          type: string
+        hostId:
+          description: The host the actor was placed on, omitted when no active placement
+            was found
+          type: string
+        notActive:
+          description: True when the actor was not active, so nothing was deactivated
+          type: boolean
+      required:
+      - actorId
+      - actorType
+      - notActive
+      type: object
+    DrainRequest:
+      properties:
+        force:
+          default: false
+          description: Drain the host even when it is the last live server of one
+            or more actor types
+          type: boolean
+        reason:
+          description: A free-form reason of at most 1024 bytes, recorded in the audit
+            log and passed to the host
+          maxLength: 1024
+          type: string
+        timeout:
+          description: A Go duration string (such as `30s`) bounding the host's graceful
+            teardown, positive and at most `5m`; when omitted, the host waits for
+            every actor to deactivate, with no time limit
+          example: 30s
+          type: string
+      type: object
+    DrainResponse:
+      properties:
+        alreadyDraining:
+          description: True when the host was already draining
+          type: boolean
+        forcedActorTypes:
+          description: The actor types left without a live server because the drain
+            was forced, omitted when none
+          items:
+            type: string
+          type: array
+        hostId:
+          type: string
+      required:
+      - alreadyDraining
+      - hostId
+      type: object
+    Error:
+      description: The body of every error response.
+      properties:
+        code:
+          description: |-
+            A machine-readable error code
+            See the API description for the meaning of each code
+          enum:
+          - badRequest
+          - unauthorized
+          - forbidden
+          - notFound
+          - notApplicable
+          - methodNotAllowed
+          - exclusiveLeaseHeld
+          - lastServer
+          - hostUnavailable
+          - hostReattached
+          - noHostsReachable
+          - eventHistoryDisabled
+          - payloadTooLarge
+          - stateNotDecodable
+          - timeout
+          - internal
+          type: string
+        details:
+          additionalProperties: {}
+          description: |-
+            Additional machine-readable context, present for some codes:
+            `lastServer` has `actorTypes` (array of strings);
+            `exclusiveLeaseHeld` has `owner` (string) and `expiresAt` (RFC 3339 timestamp);
+            `noHostsReachable` has `errors` (array of `HostError`)
+          type: object
+        message:
+          description: A human-readable description of the error
+          type: string
+        requestId:
+          description: The request ID, also returned in the `X-Request-Id` header
+          type: string
+        retryable:
+          description: Present and `true` when repeating the request later may succeed
+          type: boolean
+      required:
+      - code
+      - message
+      type: object
+    Event:
+      properties:
+        attempt:
+          description: Omitted when zero
+          type: integer
+        child:
+          $ref: '#/components/schemas/ChildLink'
+        dueTime:
+          description: The earliest time a scheduled attempt may run, when it is later
+            than the event
+          format: date-time
+          type: string
+        error:
+          type: string
+        eventName:
+          description: The event a wait step waits for or received
+          type: string
+        iteration:
+          description: The loop iteration of the step, omitted outside a loop body
+          type: integer
+        kind:
+          description: The event kind, one of `instance_started`, `instance_suspended`,
+            `instance_resumed`, `instance_reopened`, `instance_completed`, `instance_failed`,
+            `instance_cancelled`, `cancel_requested`, `unwind_requested`, `compensation_started`,
+            `parent_notified`, `step_started`, `step_completed`, `step_failed`, `step_skipped`,
+            `step_compensating`, `step_compensated`, `step_compensation_failed`, `wait_started`,
+            `event_received`, `task_dispatched`, `child_started`, `worker_started`,
+            `worker_finished`, `task_retry_scheduled`, `task_completed`, `task_failed`,
+            `task_abandoned`, `compensation_dispatched`, `child_unwind_requested`,
+            `compensation_retry_scheduled`, `compensation_completed`, or `compensation_failed`;
+            new kinds may be added
+          type: string
+        outcome:
+          type: string
+        reason:
+          description: The reason of a cancel, unwind or suspend, or the cause of
+            an unwind
+          type: string
+        seq:
+          description: The event's sequence number within the instance
+          type: integer
+        step:
+          type: string
+        taskIndex:
+          type: integer
+        time:
+          format: date-time
+          type: string
+        timeSource:
+          description: How `time` was obtained
+          enum:
+          - engine
+          - dispatch
+          - report
+          - worker
+          type: string
+        undo:
+          description: Set when the event is about a compensation rather than the
+            forward task, omitted when false
+          type: boolean
+      required:
+      - kind
+      - seq
+      - time
+      type: object
+    ExclusiveLease:
+      properties:
+        expiresAt:
+          format: date-time
+          type: string
+        owner:
+          type: string
+      required:
+      - expiresAt
+      - owner
+      type: object
+    Health:
+      properties:
+        status:
+          enum:
+          - ok
+          type: string
+      required:
+      - status
+      type: object
+    Host:
+      properties:
+        actorTypeCount:
+          type: integer
+        address:
+          type: string
+        draining:
+          type: boolean
+        hostId:
+          type: string
+        lastHealthCheck:
+          format: date-time
+          type: string
+        ownerRuntimeId:
+          description: The runtime replica holding the host's session, or the runtime
+            the host registered with, omitted when unknown (such as in the local topology)
+          type: string
+        placementCount:
+          description: Total placements on the host across its actor types
+          type: integer
+        state:
+          description: '`draining` when the host is draining (regardless of reachability),
+            otherwise `unreachable` when no session to it is held, otherwise `connected`'
+          enum:
+          - connected
+          - draining
+          - unreachable
+          type: string
+      required:
+      - actorTypeCount
+      - address
+      - draining
+      - hostId
+      - lastHealthCheck
+      - placementCount
+      - state
+      type: object
+    HostActivations:
+      properties:
+        activeCount:
+          description: The number of matching activations on the host, across all
+            pages
+          type: integer
+        hostId:
+          type: string
+        items:
+          items:
+            $ref: '#/components/schemas/Activation'
+          type: array
+        nextCursor:
+          description: Opaque cursor to pass back as `cursor` to fetch the next page,
+            omitted on the last page
+          type: string
+        observedAt:
+          format: date-time
+          type: string
+      required:
+      - activeCount
+      - hostId
+      - items
+      - observedAt
+      type: object
+    HostActorType:
+      properties:
+        actorType:
+          type: string
+        idleTimeoutMs:
+          type: integer
+        jobRetention:
+          $ref: '#/components/schemas/Retention'
+        placements:
+          $ref: '#/components/schemas/Capacity'
+      required:
+      - actorType
+      - idleTimeoutMs
+      - jobRetention
+      - placements
+      type: object
+    HostDetail:
+      properties:
+        actorTypeCount:
+          type: integer
+        actorTypes:
+          items:
+            $ref: '#/components/schemas/HostActorType'
+          type: array
+        address:
+          type: string
+        draining:
+          type: boolean
+        hostId:
+          type: string
+        lastHealthCheck:
+          format: date-time
+          type: string
+        observedAt:
+          format: date-time
+          type: string
+        ownerRuntimeId:
+          description: The runtime replica holding the host's session, or the runtime
+            the host registered with, omitted when unknown (such as in the local topology)
+          type: string
+        placementCount:
+          description: Total placements on the host across its actor types
+          type: integer
+        runtime:
+          allOf:
+          - $ref: '#/components/schemas/HostRuntime'
+          description: The host's own report, omitted when the host could not be queried
+        runtimeError:
+          allOf:
+          - $ref: '#/components/schemas/HostError'
+          description: Why the host could not be queried, omitted on success
+        state:
+          description: '`draining` when the host is draining (regardless of reachability),
+            otherwise `unreachable` when no session to it is held, otherwise `connected`'
+          enum:
+          - connected
+          - draining
+          - unreachable
+          type: string
+      required:
+      - actorTypeCount
+      - actorTypes
+      - address
+      - draining
+      - hostId
+      - lastHealthCheck
+      - observedAt
+      - placementCount
+      - state
+      type: object
+    HostError:
+      properties:
+        code:
+          description: |-
+            `hostUnavailable`, `hostReattached`, or `notApplicable`
+            Any other failure, including a per-host timeout, is reported as `hostUnavailable`
+          enum:
+          - hostUnavailable
+          - hostReattached
+          - notApplicable
+          type: string
+        hostId:
+          type: string
+        message:
+          type: string
+      required:
+      - code
+      - hostId
+      - message
+      type: object
+    HostRuntime:
+      description: What a host reports about itself.
+      properties:
+        activeCount:
+          description: The number of actors the host holds in memory
+          type: integer
+        capacityGroups:
+          items:
+            $ref: '#/components/schemas/CapacityGroup'
+          type: array
+        draining:
+          type: boolean
+        observedAt:
+          format: date-time
+          type: string
+        workflows:
+          description: The workflow definitions the host serves
+          items:
+            $ref: '#/components/schemas/WorkflowDefinition'
+          type: array
+      required:
+      - activeCount
+      - capacityGroups
+      - draining
+      - observedAt
+      - workflows
+      type: object
+    Instance:
+      properties:
+        cause:
+          description: Why the instance failed, was cancelled, or is compensating
+          type: string
+        compensation:
+          description: The compensation outcome
+          enum:
+          - none
+          - completed
+          - partial
+          - failed
+          type: string
+        completedAt:
+          format: date-time
+          type: string
+        createdAt:
+          format: date-time
+          type: string
+        dataRedacted:
+          description: Present and `true` when `input` and `output` were withheld
+            because the token lacks `workflows:data:read`
+          type: boolean
+        deadJobs:
+          description: The orchestrator's dead-lettered jobs (at most 100), which
+            the engine retries automatically, so an entry can be transient
+          items:
+            $ref: '#/components/schemas/Job'
+          type: array
+        definitionFingerprint:
+          type: string
+        eventHistory:
+          description: False when the workflow opted out of event history
+          type: boolean
+        hasOutput:
+          description: True when the instance stored an output, where a stored JSON
+            `null` counts
+          type: boolean
+        input:
+          description: The instance input as JSON, present only with the `workflows:data:read`
+            scope and when an input was stored; any JSON value
+          type: object
+        instanceId:
+          type: string
+        output:
+          description: The instance output as JSON, present only with the `workflows:data:read`
+            scope and when `hasOutput` is true; any JSON value
+          type: object
+        parent:
+          allOf:
+          - $ref: '#/components/schemas/InstanceParent'
+          description: Present for child instances
+        startedAt:
+          format: date-time
+          type: string
+        status:
+          enum:
+          - pending
+          - running
+          - suspended
+          - compensating
+          - completed
+          - failed
+          - cancelled
+          type: string
+        steps:
+          items:
+            $ref: '#/components/schemas/Step'
+          type: array
+        suspended:
+          allOf:
+          - $ref: '#/components/schemas/InstanceSuspension'
+          description: Present while the instance is suspended
+        terminalStatus:
+          description: The status a compensating instance will terminate into
+          type: string
+        version:
+          type: integer
+        workflow:
+          type: string
+      required:
+      - deadJobs
+      - eventHistory
+      - hasOutput
+      - instanceId
+      - status
+      - steps
+      - version
+      - workflow
+      type: object
+    InstanceItem:
+      properties:
+        createdAt:
+          description: Omitted when unknown
+          format: date-time
+          type: string
+        instanceId:
+          type: string
+        parent:
+          description: The parent label, for child instances
+          type: string
+        status:
+          description: The instance status from its labels, or `unknown` when the
+            instance has no labels
+          type: string
+        version:
+          description: Omitted when unknown
+          type: integer
+      required:
+      - instanceId
+      - status
+      type: object
+    InstanceParent:
+      properties:
+        index:
+          description: The task index within the parent's step
+          type: integer
+        instanceId:
+          type: string
+        step:
+          description: The parent's step that started this instance
+          type: string
+        workflow:
+          type: string
+      required:
+      - index
+      - instanceId
+      - workflow
+      type: object
+    InstanceSuspension:
+      properties:
+        at:
+          format: date-time
+          type: string
+        reason:
+          type: string
+        resumeTo:
+          description: The status the instance returns to when resumed
+          type: string
+      type: object
+    Job:
+      properties:
+        actorId:
+          type: string
+        actorType:
+          type: string
+        attempts:
+          description: The number of attempts, present only for terminal jobs (`completed`,
+            `dead`)
+          type: integer
+        createdAt:
+          description: Omitted when unknown
+          format: date-time
+          type: string
+        cron:
+          description: The cron expression, for cron jobs
+          type: string
+        dueTime:
+          format: date-time
+          type: string
+        endedAt:
+          description: When the job ended, only for terminal jobs and omitted when
+            unknown
+          format: date-time
+          type: string
+        interval:
+          description: The repeat interval, for repeating jobs
+          type: string
+        jobId:
+          type: string
+        lastError:
+          description: The last error, only for terminal jobs and omitted when empty
+          type: string
+        method:
+          type: string
+        status:
+          description: '`dead` is dead-lettered'
+          enum:
+          - pending
+          - active
+          - completed
+          - dead
+          type: string
+        workflow:
+          allOf:
+          - $ref: '#/components/schemas/WorkflowLink'
+          description: Present for jobs of workflow actors
+      required:
+      - actorId
+      - actorType
+      - dueTime
+      - jobId
+      - method
+      - status
+      type: object
+    Page-ActorStateItem:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/ActorStateItem'
+          type: array
+        nextCursor:
+          description: Opaque cursor to pass back as `cursor` to fetch the next page,
+            omitted on the last page
+          type: string
+      required:
+      - items
+      type: object
+    Page-Alarm:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/Alarm'
+          type: array
+        nextCursor:
+          description: Opaque cursor to pass back as `cursor` to fetch the next page,
+            omitted on the last page
+          type: string
+      required:
+      - items
+      type: object
+    Page-Event:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/Event'
+          type: array
+        nextCursor:
+          description: Opaque cursor to pass back as `cursor` to fetch the next page,
+            omitted on the last page
+          type: string
+      required:
+      - items
+      type: object
+    Page-Host:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/Host'
+          type: array
+        nextCursor:
+          description: Opaque cursor to pass back as `cursor` to fetch the next page,
+            omitted on the last page
+          type: string
+      required:
+      - items
+      type: object
+    Page-InstanceItem:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/InstanceItem'
+          type: array
+        nextCursor:
+          description: Opaque cursor to pass back as `cursor` to fetch the next page,
+            omitted on the last page
+          type: string
+      required:
+      - items
+      type: object
+    Page-Job:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/Job'
+          type: array
+        nextCursor:
+          description: Opaque cursor to pass back as `cursor` to fetch the next page,
+            omitted on the last page
+          type: string
+      required:
+      - items
+      type: object
+    Page-Placement:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/Placement'
+          type: array
+        nextCursor:
+          description: Opaque cursor to pass back as `cursor` to fetch the next page,
+            omitted on the last page
+          type: string
+      required:
+      - items
+      type: object
+    Page-Runtime:
+      properties:
+        items:
+          items:
+            $ref: '#/components/schemas/Runtime'
+          type: array
+        nextCursor:
+          description: Opaque cursor to pass back as `cursor` to fetch the next page,
+            omitted on the last page
+          type: string
+      required:
+      - items
+      type: object
+    Placement:
+      properties:
+        actorId:
+          type: string
+        actorType:
+          type: string
+        hostId:
+          type: string
+        idleTimeoutMs:
+          type: integer
+      required:
+      - actorId
+      - actorType
+      - hostId
+      - idleTimeoutMs
+      type: object
+    Retention:
+      properties:
+        completedJobs:
+          $ref: '#/components/schemas/RetentionPolicy'
+        deadLetteredJobs:
+          $ref: '#/components/schemas/RetentionPolicy'
+      required:
+      - completedJobs
+      - deadLetteredJobs
+      type: object
+    RetentionPolicy:
+      description: Whether terminal jobs leave a record, and for how long.
+      properties:
+        forever:
+          description: True when the record is kept indefinitely
+          type: boolean
+        recorded:
+          description: True when a record of the terminal job is kept
+          type: boolean
+        retentionMs:
+          description: How long the record is kept, in milliseconds, omitted when
+            zero
+          type: integer
+      required:
+      - forever
+      - recorded
+      type: object
+    Runtime:
+      properties:
+        address:
+          type: string
+        connectedHosts:
+          description: The number of host sessions the replica holds, `null` when
+            it could not be queried
+          nullable: true
+          type: integer
+        error:
+          description: Set when the replica could not be queried
+          type: string
+        expiresAt:
+          description: When the replica's membership expires unless renewed
+          format: date-time
+          type: string
+        lastHeartbeat:
+          format: date-time
+          type: string
+        runtimeId:
+          type: string
+        self:
+          description: True for the replica serving this request
+          type: boolean
+      required:
+      - address
+      - connectedHosts
+      - expiresAt
+      - lastHeartbeat
+      - runtimeId
+      - self
+      type: object
+    Step:
+      properties:
+        children:
+          description: The child workflow instances started by this step, omitted
+            when none
+          items:
+            $ref: '#/components/schemas/ChildLink'
+          type: array
+        completedAt:
+          format: date-time
+          type: string
+        error:
+          type: string
+        iteration:
+          description: The loop iteration, omitted when zero
+          type: integer
+        kind:
+          description: The node kind, such as `step`, `parallel`, `foreach`, `child`,
+            `wait`, or `loop`
+          type: string
+        name:
+          type: string
+        startedAt:
+          format: date-time
+          type: string
+        status:
+          description: The step status, such as `pending`, `running`, `completed`,
+            `failed`, `skipped`, `compensating`, `compensated`, or `compensation-failed`
+          type: string
+        taskCount:
+          type: integer
+        tasksRemaining:
+          type: integer
+      required:
+      - kind
+      - name
+      - status
+      - taskCount
+      - tasksRemaining
+      type: object
+    Workflow:
+      properties:
+        conflicts:
+          items:
+            $ref: '#/components/schemas/WorkflowConflict'
+          type: array
+        hosts:
+          description: The live hosts serving the workflow's orchestrator
+          items:
+            $ref: '#/components/schemas/WorkflowHost'
+          type: array
+        name:
+          type: string
+        versions:
+          description: The versions recorded by the workflow's definition registry
+          items:
+            $ref: '#/components/schemas/WorkflowVersion'
+          type: array
+      required:
+      - conflicts
+      - hosts
+      - name
+      - versions
+      type: object
+    WorkflowConflict:
+      description: A version registered or served with more than one definition fingerprint.
+      properties:
+        fingerprints:
+          items:
+            type: string
+          type: array
+        hosts:
+          description: The hosts serving the version, not counting the registry itself
+          items:
+            type: string
+          type: array
+        version:
+          type: integer
+      required:
+      - fingerprints
+      - hosts
+      - version
+      type: object
+    WorkflowDefinition:
+      properties:
+        fingerprint:
+          type: string
+        name:
+          type: string
+        version:
+          type: integer
+      required:
+      - fingerprint
+      - name
+      - version
+      type: object
+    WorkflowHost:
+      properties:
+        definitions:
+          description: The versions the host serves, `null` when the host could not
+            be queried
+          items:
+            $ref: '#/components/schemas/WorkflowHostDefinition'
+          nullable: true
+          type: array
+        draining:
+          type: boolean
+        hostId:
+          type: string
+      required:
+      - definitions
+      - draining
+      - hostId
+      type: object
+    WorkflowHostDefinition:
+      properties:
+        fingerprint:
+          type: string
+        version:
+          type: integer
+      required:
+      - fingerprint
+      - version
+      type: object
+    WorkflowLabels:
+      description: The labels the workflow engine stores with an orchestrator's state.
+        Empty fields are omitted.
+      properties:
+        created:
+          description: The creation time, in the stored label format (`2006-01-02T15:04:05.000000000Z`)
+          type: string
+        parent:
+          type: string
+        status:
+          type: string
+        version:
+          type: integer
+      type: object
+    WorkflowLink:
+      description: Links an actor of a workflow to its workflow instance, derived
+        from the actor type and ID naming conventions.
+      properties:
+        capability:
+          description: The capability of a worker or undo actor type, when it has
+            one
+          type: string
+        instanceId:
+          description: The workflow instance, for orchestrator, worker, and undo actors
+            whose ID could be parsed
+          type: string
+        role:
+          enum:
+          - orchestrator
+          - worker
+          - undo
+          - registry
+          - other
+          type: string
+        step:
+          description: The step, for worker and undo actors
+          type: string
+        taskIndex:
+          description: The task index within the step, for worker and undo actors
+          type: integer
+        workflow:
+          type: string
+      required:
+      - role
+      - workflow
+      type: object
+    WorkflowVersion:
+      properties:
+        fingerprint:
+          type: string
+        firstSeenAt:
+          format: date-time
+          type: string
+        generation:
+          type: integer
+        version:
+          type: integer
+      required:
+      - fingerprint
+      - firstSeenAt
+      - generation
+      - version
+      type: object
+    Workflows:
+      properties:
+        errors:
+          items:
+            $ref: '#/components/schemas/HostError'
+          type: array
+        items:
+          items:
+            $ref: '#/components/schemas/Workflow'
+          type: array
+        observedAt:
+          format: date-time
+          type: string
+        partial:
+          description: True when some hosts could not be queried, so their definitions
+            are missing
+          type: boolean
+      required:
+      - errors
+      - items
+      - observedAt
+      - partial
+      type: object
+  securitySchemes:
+    bearerAuth:
+      description: 'A read-only or management token from the server configuration,
+        sent as `Authorization: Bearer <token>`. Read-only tokens grant every scope
+        except those ending in `:manage`; management tokens grant every scope.'
+      in: header
+      name: Authorization
+      type: apiKey
+info:
+  contact: {}
+  description: |
+    The management API exposes read-only views of a Francis cluster (hosts, runtimes, placements, in-memory activations, actor state, jobs, alarms, and workflows), plus a small set of audited actions (drain a host, deactivate an actor, cancel/suspend/resume a workflow instance).
+
+    ## Authentication and scopes
+
+    Every route under `/api/v1` requires an `Authorization: Bearer <token>` header.
+    `GET /api/v1/openapi.yaml` and `GET /healthz` (served at the root, outside `/api/v1`) are public and don't require a token.
+
+    Each operation declares the scope it requires in its description and in the `x-required-scope` extension.
+    The server is configured with two token lists:
+
+    - **Read-only tokens** receive every scope except those ending in `:manage`.
+    - **Management tokens** receive every scope.
+
+    | Scope | Grants |
+    | --- | --- |
+    | `cluster:read` | Cluster summary, runtimes, hosts |
+    | `actors:read` | Activations, placements, actor types, actor-state listings |
+    | `actors:state:read` | Reading the stored state of an actor (audited) |
+    | `workflows:read` | Workflows, instances, event history |
+    | `workflows:data:read` | Including workflow instance input and output in instance details (audited) |
+    | `jobs:read` | Jobs and alarms |
+    | `actors:manage` | Deactivating an actor |
+    | `hosts:manage` | Draining a host |
+    | `workflows:manage` | Cancelling, suspending, and resuming workflow instances |
+
+    A missing or unknown token yields `401` with a `WWW-Authenticate: Bearer realm="francis-management"` header; a valid token lacking the route's scope yields `403`.
+
+    ## Pagination
+
+    Paginated endpoints accept `limit` (1 to 1000, default 100) and an opaque `cursor`, and return `{ "items": [...], "nextCursor": "..." }`.
+    `nextCursor` is omitted on the last page.
+    Pass it back unchanged as `cursor` to fetch the next page; its contents are not part of the contract.
+    A malformed cursor or an out-of-range limit yields `400 badRequest`.
+    A page may contain fewer items than `limit` even when more pages follow (for example when a filter is applied after reading a page), so always rely on `nextCursor` to detect the end.
+
+    ## Fan-out endpoints and partial results
+
+    Some endpoints query every host's in-memory snapshot (`/activations`, `/actor-types`, `/workflows`, and the activation count of `/cluster/summary`).
+    Hosts are queried concurrently with a per-host timeout, and a host that cannot be queried does not fail the request: the response sets `partial: true` and lists the host in `errors` (see `HostError`).
+    Each host is sampled independently, so these responses are operational evidence rather than a transactionally consistent view of the cluster: an actor that moved during collection may appear twice or not at all, and actors may move between pages.
+    Use `GET /hosts/{hostId}/activations` for the freshest view of one host.
+
+    ## Errors
+
+    Every error response has a JSON body described by the `Error` schema.
+    Every response carries an `X-Request-Id` header, which is also echoed as `requestId` in error bodies and recorded in audit logs.
+    Errors with `retryable: true` may succeed if the request is repeated later.
+
+    Error `code` values:
+
+    | Code | Status | Meaning |
+    | --- | --- | --- |
+    | `badRequest` | 400 | Invalid path segment, query parameter, cursor, or request body |
+    | `unauthorized` | 401 | Missing or unknown bearer token |
+    | `forbidden` | 403 | The token does not grant the route's scope |
+    | `notFound` | 404 | The resource does not exist, or no such route |
+    | `notApplicable` | 404 | The resource does not exist in this topology (for example runtimes in the local topology) |
+    | `eventHistoryDisabled` | 404 | The workflow opted out of event history |
+    | `methodNotAllowed` | 405 | The path exists but does not serve the method; the `Allow` header lists the methods it serves |
+    | `lastServer` | 409 | Draining the host would leave one or more actor types without a live server; `details.actorTypes` lists them |
+    | `exclusiveLeaseHeld` | 409 | An exclusive-access lease is held on the cluster (for example during a restore), so actions are refused; `details.owner` and `details.expiresAt` describe it, and are omitted when the lease was released before it could be read; retryable |
+    | `hostReattached` | 409 | The host kept reconnecting, so the request could not be delivered to its current session; send it again; retryable |
+    | `payloadTooLarge` | 413 | The request body is larger than 64 KiB |
+    | `stateNotDecodable` | 422 | The stored actor state cannot be rendered as JSON, because it is not valid MessagePack or a map has two keys that would share a JSON name |
+    | `internal` | 500 | Unexpected server error |
+    | `hostUnavailable` | 503 | The host, or the runtime owning its session, could not be reached; retryable |
+    | `noHostsReachable` | 503 | None of the queried hosts could be reached; `details.errors` lists them; retryable |
+    | `timeout` | 504 | The request timed out; retryable |
+  title: Francis management API
+  version: v1
+openapi: 3.0.3
+paths:
+  /api/v1/activations:
+    get:
+      description: |-
+        Requires scope `actors:read`.
+
+        Walks the hosts in host ID order, querying a batch of hosts concurrently, until the page is full.
+        Items are ordered by host, then by actor type and actor ID within each host.
+
+        This is a fan-out endpoint: a host that cannot be queried is reported in `errors` and sets `partial: true`, and its activations are missing from the page.
+        If every queried host failed, the response is `503 noHostsReachable` with the host errors in `details.errors`.
+        Each host is sampled independently, so the listing is not transactionally consistent: an actor that moved between hosts during collection or between pages may be listed twice or not at all.
+      operationId: listActivations
+      parameters:
+      - description: Maximum number of items to return
+        in: query
+        name: limit
+        schema:
+          default: 100
+          maximum: 1000
+          minimum: 1
+          type: integer
+      - description: Opaque cursor returned as nextCursor by the previous page; omit
+          for the first page
+        in: query
+        name: cursor
+        schema:
+          type: string
+      - description: Only return activations of this actor type
+        in: query
+        name: type
+        schema:
+          type: string
+      - description: Only query this host, returning 404 notFound when the host is
+          not registered
+        in: query
+        name: host
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Activations'
+          description: A page of activations
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`badRequest`: an invalid path segment, query parameter, cursor,
+            or request body'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`forbidden`: the token does not grant the scope the route
+            requires'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`notFound`: the host in the host parameter is not registered'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`internal`: an unexpected server error'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`noHostsReachable`: none of the queried hosts could be reached,
+            with the host errors in details.errors; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`timeout`: the request timed out; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: List in-memory activations across hosts
+      tags:
+      - Actors
+      x-required-scope: actors:read
+  /api/v1/actor-states:
+    get:
+      description: |-
+        Requires scope `actors:read`.
+
+        Lists the IDs of the actors of one type that have stored state, ordered by actor ID, with their workflow labels when the state belongs to a workflow orchestrator.
+        The state itself is not returned; use `GET /api/v1/actor-states/{type}/{id}`.
+      operationId: listActorStates
+      parameters:
+      - description: The actor type, which must not be empty and must not contain
+          a slash
+        in: query
+        name: type
+        required: true
+        schema:
+          minLength: 1
+          type: string
+      - description: Maximum number of items to return
+        in: query
+        name: limit
+        schema:
+          default: 100
+          maximum: 1000
+          minimum: 1
+          type: integer
+      - description: Opaque cursor returned as nextCursor by the previous page; omit
+          for the first page
+        in: query
+        name: cursor
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page-ActorStateItem'
+          description: A page of actors with stored state
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`badRequest`: an invalid path segment, query parameter, cursor,
+            or request body'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`forbidden`: the token does not grant the scope the route
+            requires'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`internal`: an unexpected server error'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`timeout`: the request timed out; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: List the actors of a type that have stored state
+      tags:
+      - Actors
+      x-required-scope: actors:read
+  /api/v1/actor-states/{type}/{id}:
+    get:
+      description: |-
+        Requires scope `actors:state:read`. Every read is audited (the data itself is never logged).
+
+        Actor state is stored as MessagePack.
+        By default it is converted to JSON and returned inside an `ActorState` envelope.
+        Send `Accept: application/msgpack` (also accepted: `application/x-msgpack`, `application/vnd.msgpack`) to receive the exact stored bytes instead, with `Content-Type: application/msgpack`.
+        Quality values are honored: the bytes are returned only when a MessagePack type is listed by name with a quality above zero and at least as high as the quality of JSON, so `*/*` alone keeps the JSON envelope.
+
+        JSON conversion convention:
+
+        | MessagePack | JSON | Lossy |
+        | --- | --- | --- |
+        | nil, bool, array, map with UTF-8 string keys | `null`, boolean, array, object (MessagePack field names are the keys) | no |
+        | string that is valid UTF-8 | string | no |
+        | integer of any size | decimal string, such as `"42"` or `"18446744073709551615"` | no |
+        | float (32 or 64 bit), finite | string with the shortest representation of its precision, such as `"0.1"` or `"1e+21"` | no |
+        | float NaN, +Inf, -Inf | string `"NaN"`, `"Infinity"`, `"-Infinity"` | no |
+        | bin, or string that is not valid UTF-8 | `{"$binary": "<standard base64>"}` | yes |
+        | timestamp extension (type -1) | RFC 3339 string in UTC with nanoseconds, such as `"2026-01-02T03:04:05.123456789Z"` | yes |
+        | any other extension | `{"$ext": <type>, "data": "<standard base64>"}` | yes |
+        | map key that is not a UTF-8 string | the key as text, such as `"1"` for the integer key 1 | yes |
+
+        Every number is a string, so its exact value survives any JSON parser.
+        `lossy` is `true` when any value used a rendering that changes its shape (the rows marked lossy above); numbers don't count, since they are always strings. Request MessagePack when exactness matters.
+        If the stored bytes are not a single valid MessagePack value (or are nested more than 512 levels deep), the JSON rendering fails with `422 stateNotDecodable`; the raw bytes can still be read with `Accept: application/msgpack`.
+        The same happens when two keys of a map would become the same JSON name, such as `1` and `"1"` or the same key stored twice, since JSON parsers disagree on which value they keep.
+      operationId: getActorState
+      parameters:
+      - description: The actor type, which must not contain a slash
+        in: path
+        name: type
+        required: true
+        schema:
+          type: string
+      - description: The actor ID, which must not contain a slash
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - description: Send application/msgpack to receive the raw stored bytes instead
+          of the JSON envelope
+        in: header
+        name: Accept
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActorState'
+            application/msgpack:
+              schema:
+                $ref: '#/components/schemas/ActorState'
+          description: 'The actor''s state, or the exact stored MessagePack bytes
+            when requested with Accept: application/msgpack'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+            application/msgpack:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`badRequest`: an invalid path segment, query parameter, cursor,
+            or request body'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+            application/msgpack:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+            application/msgpack:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`forbidden`: the token does not grant the scope the route
+            requires'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+            application/msgpack:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`notFound`: the actor has no stored state'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "422":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+            application/msgpack:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`stateNotDecodable`: the stored state cannot be rendered as
+            JSON, because it is not valid MessagePack or a map has two keys that would
+            share a JSON name'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+            application/msgpack:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`internal`: an unexpected server error'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+            application/msgpack:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`timeout`: the request timed out; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: Read an actor's stored state
+      tags:
+      - Actors
+      x-required-scope: actors:state:read
+  /api/v1/actor-types:
+    get:
+      description: |-
+        Requires scope `actors:read`.
+
+        Aggregates the actor types registered by every live host, sorted by actor type, with per-host placement usage and job retention, and the execution capacity groups the hosts report.
+        Not paginated.
+
+        This is a fan-out endpoint for the capacity groups: a host that cannot be queried is reported in `errors`, sets `partial: true`, and contributes no `capacityGroups` entries (its registration is still listed under `hosts`).
+      operationId: listActorTypes
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActorTypes'
+          description: The actor types
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`forbidden`: the token does not grant the scope the route
+            requires'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`internal`: an unexpected server error'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`timeout`: the request timed out; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: List actor types
+      tags:
+      - Actors
+      x-required-scope: actors:read
+  /api/v1/actors/{type}/{id}/deactivate:
+    post:
+      description: |-
+        Requires scope `actors:manage`. The action is audited.
+
+        Looks up the host the actor is actively placed on (without creating a placement), and asks that host to halt the actor, returning `200` once the host acknowledged.
+        The actor's stored state is kept; it is re-activated on its next invocation.
+
+        - When the actor is not active anywhere, or its host went away since the lookup, the response is `200` with `notActive: true` and no request is sent to a host.
+        - When the host reports the actor was not active, the response is `200` with `notActive: true` and `hostId` set.
+        - While an exclusive-access lease is held on the cluster, the action is refused with `409 exclusiveLeaseHeld`.
+        - If the host reconnected before it received the request, including to another runtime replica, the request is sent again to its new session; only if the host keeps reconnecting is the response `409 hostReattached`, and the request can be sent again.
+
+        The request body is not read.
+      operationId: deactivateActor
+      parameters:
+      - description: The actor type, which must not contain a slash
+        in: path
+        name: type
+        required: true
+        schema:
+          type: string
+      - description: The actor ID, which must not contain a slash
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeactivateResponse'
+          description: The actor was deactivated, or was not active
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`badRequest`: an invalid path segment, query parameter, cursor,
+            or request body'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`forbidden`: the token does not grant the scope the route
+            requires'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`exclusiveLeaseHeld`: an exclusive-access lease is held on
+            the cluster (retryable); or `hostReattached`: the host kept reconnecting
+            (retryable)'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`internal`: an unexpected server error'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`hostUnavailable`: the host, or the runtime owning its session,
+            could not be reached; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`timeout`: the request timed out; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: Deactivate an actor
+      tags:
+      - Actions
+      x-required-scope: actors:manage
+  /api/v1/alarms:
+    get:
+      description: |-
+        Requires scope `jobs:read`.
+
+        Lists alarms, ordered by actor type, actor ID, and alarm name.
+      operationId: listAlarms
+      parameters:
+      - description: Maximum number of items to return
+        in: query
+        name: limit
+        schema:
+          default: 100
+          maximum: 1000
+          minimum: 1
+          type: integer
+      - description: Opaque cursor returned as nextCursor by the previous page; omit
+          for the first page
+        in: query
+        name: cursor
+        schema:
+          type: string
+      - description: Only return alarms of this actor type
+        in: query
+        name: type
+        schema:
+          type: string
+      - description: Only return alarms of this actor ID, which requires type
+        in: query
+        name: id
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page-Alarm'
+          description: A page of alarms
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`badRequest`: an invalid path segment, query parameter, cursor,
+            or request body'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`forbidden`: the token does not grant the scope the route
+            requires'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`internal`: an unexpected server error'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`timeout`: the request timed out; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: List alarms
+      tags:
+      - Jobs
+      x-required-scope: jobs:read
+  /api/v1/cluster/summary:
+    get:
+      description: |-
+        Requires scope `cluster:read`.
+
+        Summarizes the cluster: topology, exclusive-access lease, runtime replicas, hosts by state, placements, live activations, jobs by status, and workflow instances by status.
+        Job and workflow instance counts stop at 10,000 per bucket (`truncated: true` then means the real count is at least `count`).
+        The live activation count is collected from the hosts that are not unreachable; when some host could not be queried, `activations.partial` is `true` and `activations.live` is a lower bound.
+        The counts are gathered from separate reads and are not transactionally consistent with each other.
+      operationId: getClusterSummary
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClusterSummary'
+          description: The cluster summary
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`forbidden`: the token does not grant the scope the route
+            requires'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`internal`: an unexpected server error'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`hostUnavailable`: the host, or the runtime owning its session,
+            could not be reached; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`timeout`: the request timed out; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: Get a cluster summary
+      tags:
+      - Cluster
+      x-required-scope: cluster:read
+  /api/v1/hosts:
+    get:
+      description: |-
+        Requires scope `cluster:read`.
+
+        Lists the hosts with a live registration, ordered by host ID.
+        The `state` filter is applied to each page after it is read, so a filtered page may hold fewer items than `limit` while more pages follow.
+      operationId: listHosts
+      parameters:
+      - description: Maximum number of items to return
+        in: query
+        name: limit
+        schema:
+          default: 100
+          maximum: 1000
+          minimum: 1
+          type: integer
+      - description: Opaque cursor returned as nextCursor by the previous page; omit
+          for the first page
+        in: query
+        name: cursor
+        schema:
+          type: string
+      - description: Only return hosts in this state
+        in: query
+        name: state
+        schema:
+          enum:
+          - connected
+          - draining
+          - unreachable
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page-Host'
+          description: A page of hosts
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`badRequest`: an invalid path segment, query parameter, cursor,
+            or request body'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`forbidden`: the token does not grant the scope the route
+            requires'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`internal`: an unexpected server error'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`timeout`: the request timed out; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: List hosts
+      tags:
+      - Cluster
+      x-required-scope: cluster:read
+  /api/v1/hosts/{hostId}:
+    get:
+      description: |-
+        Requires scope `cluster:read`.
+
+        Returns a host's registration, the actor types it serves with their placement usage and job retention, and the host's own report of its execution capacity and served workflow definitions.
+        The host's report is fetched live; when the host cannot be queried, `runtime` is omitted and `runtimeError` describes the failure, while the rest of the response is still returned with `200`.
+      operationId: getHost
+      parameters:
+      - description: The host ID
+        in: path
+        name: hostId
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HostDetail'
+          description: The host
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`badRequest`: an invalid path segment, query parameter, cursor,
+            or request body'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`forbidden`: the token does not grant the scope the route
+            requires'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`notFound`: the host is not registered'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`internal`: an unexpected server error'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`timeout`: the request timed out; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: Get a host
+      tags:
+      - Cluster
+      x-required-scope: cluster:read
+  /api/v1/hosts/{hostId}/activations:
+    get:
+      description: |-
+        Requires scope `actors:read`.
+
+        Asks the host directly for a page of the actors it holds in memory, ordered by actor type and then actor ID.
+        This is the freshest view of a single host; unlike `/activations`, a host that cannot be reached fails the request with `503 hostUnavailable`.
+        `activeCount` is the number of matching activations on the host, across all pages.
+      operationId: listHostActivations
+      parameters:
+      - description: The host ID
+        in: path
+        name: hostId
+        required: true
+        schema:
+          type: string
+      - description: Maximum number of items to return
+        in: query
+        name: limit
+        schema:
+          default: 100
+          maximum: 1000
+          minimum: 1
+          type: integer
+      - description: Opaque cursor returned as nextCursor by the previous page; omit
+          for the first page
+        in: query
+        name: cursor
+        schema:
+          type: string
+      - description: Only return activations of this actor type
+        in: query
+        name: type
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HostActivations'
+          description: A page of the host's activations
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`badRequest`: an invalid path segment, query parameter, cursor,
+            or request body'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`forbidden`: the token does not grant the scope the route
+            requires'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`notFound`: the host is not registered'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`hostReattached`: the host kept reconnecting, so the request
+            could not be delivered to its current session; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`internal`: an unexpected server error'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`hostUnavailable`: the host, or the runtime owning its session,
+            could not be reached; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`timeout`: the request timed out; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: List the in-memory activations of one host
+      tags:
+      - Actors
+      x-required-scope: actors:read
+  /api/v1/hosts/{hostId}/drain:
+    post:
+      description: |-
+        Requires scope `hosts:manage`. The action is audited, including its reason.
+
+        Marks the host draining in the provider, so no new actor is placed on it anywhere, then asks the host to drain and returns `202` once the host acknowledged.
+        The host then deactivates its actors gracefully, bounded by `timeout`; the drain continues after the response is sent.
+
+        - Draining a host that is the last live, non-draining server of one or more actor types is refused with `409 lastServer` (with `details.actorTypes`), unless `force` is `true`; a forced drain lists those types in `forcedActorTypes`. The check is atomic with other drain requests, so concurrent drains of the last servers of a type can't both succeed without `force`.
+        - Repeating a drain on a host that is already draining is never refused, and `alreadyDraining` reports whether the host was already draining.
+        - While an exclusive-access lease is held on the cluster, the action is refused with `409 exclusiveLeaseHeld`.
+        - If the host reconnected before it received the request, including to another runtime replica, the request is sent again to its new session; only if the host keeps reconnecting is the response `409 hostReattached`, and the request can be sent again.
+        - When the request to the host fails, the host is asked whether it is draining. A host that is draining accepted the drain and the response is `202`. A host that is not draining has its draining mark removed, and the error has `details.hostDraining: false`. A host that can't be asked keeps its mark, since it may have accepted the drain, and the error has `details.hostDraining: true`.
+
+        The request body is optional; an empty body is equivalent to `{}`.
+        Unknown fields are rejected.
+      operationId: drainHost
+      parameters:
+      - description: The host ID
+        in: path
+        name: hostId
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DrainRequest'
+        description: Drain options
+        x-originalParamName: request
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DrainResponse'
+          description: The host accepted the drain request
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`badRequest`: an invalid path segment, query parameter, cursor,
+            or request body'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`forbidden`: the token does not grant the scope the route
+            requires'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`notFound`: the host is not registered'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`lastServer`: the host is the last live server of the actor
+            types in details.actorTypes, so set force to drain it anyway; `exclusiveLeaseHeld`:
+            an exclusive-access lease is held on the cluster (retryable); or `hostReattached`:
+            the host kept reconnecting (retryable)'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "413":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`payloadTooLarge`: the request body exceeds 64 KiB'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`internal`: an unexpected server error'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`hostUnavailable`: the host, or the runtime owning its session,
+            could not be reached; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`timeout`: the request timed out; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: Drain a host
+      tags:
+      - Actions
+      x-required-scope: hosts:manage
+  /api/v1/jobs:
+    get:
+      description: |-
+        Requires scope `jobs:read`.
+
+        Lists durable jobs, ordered by job ID.
+        Terminal jobs (`completed`, `dead`) are only listed while a record of them is retained, as configured by the actor type's job retention.
+      operationId: listJobs
+      parameters:
+      - description: Maximum number of items to return
+        in: query
+        name: limit
+        schema:
+          default: 100
+          maximum: 1000
+          minimum: 1
+          type: integer
+      - description: Opaque cursor returned as nextCursor by the previous page; omit
+          for the first page
+        in: query
+        name: cursor
+        schema:
+          type: string
+      - description: Only return jobs of this actor type
+        in: query
+        name: type
+        schema:
+          type: string
+      - description: Only return jobs of this actor ID, which requires type
+        in: query
+        name: id
+        schema:
+          type: string
+      - description: Only return jobs in this status
+        in: query
+        name: status
+        schema:
+          enum:
+          - pending
+          - active
+          - completed
+          - dead
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page-Job'
+          description: A page of jobs
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`badRequest`: an invalid path segment, query parameter, cursor,
+            or request body'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`forbidden`: the token does not grant the scope the route
+            requires'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`internal`: an unexpected server error'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`timeout`: the request timed out; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: List jobs
+      tags:
+      - Jobs
+      x-required-scope: jobs:read
+  /api/v1/jobs/{jobId}:
+    get:
+      description: Requires scope `jobs:read`.
+      operationId: getJob
+      parameters:
+      - description: The job ID
+        in: path
+        name: jobId
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+          description: The job
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`badRequest`: an invalid path segment, query parameter, cursor,
+            or request body'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`forbidden`: the token does not grant the scope the route
+            requires'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`notFound`: the job does not exist'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`internal`: an unexpected server error'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`timeout`: the request timed out; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: Get a job
+      tags:
+      - Jobs
+      x-required-scope: jobs:read
+  /api/v1/openapi.yaml:
+    get:
+      description: |-
+        Returns this document as YAML.
+        Public: no bearer token is required.
+      operationId: getOpenAPI
+      responses:
+        "200":
+          content:
+            application/yaml:
+              schema:
+                type: string
+          description: The OpenAPI document
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      summary: Get this OpenAPI document
+      tags:
+      - Meta
+  /api/v1/placements:
+    get:
+      description: |-
+        Requires scope `actors:read`.
+
+        Lists the placements recorded in the provider, ordered by actor type and then actor ID.
+        A placement records which host an actor is assigned to; it does not prove the actor is currently in memory (see `/activations`).
+      operationId: listPlacements
+      parameters:
+      - description: Maximum number of items to return
+        in: query
+        name: limit
+        schema:
+          default: 100
+          maximum: 1000
+          minimum: 1
+          type: integer
+      - description: Opaque cursor returned as nextCursor by the previous page; omit
+          for the first page
+        in: query
+        name: cursor
+        schema:
+          type: string
+      - description: Only return placements on this host
+        in: query
+        name: host
+        schema:
+          type: string
+      - description: Only return placements of this actor type
+        in: query
+        name: type
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page-Placement'
+          description: A page of placements
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`badRequest`: an invalid path segment, query parameter, cursor,
+            or request body'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`forbidden`: the token does not grant the scope the route
+            requires'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`internal`: an unexpected server error'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`timeout`: the request timed out; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: List actor placements
+      tags:
+      - Actors
+      x-required-scope: actors:read
+  /api/v1/runtimes:
+    get:
+      description: |-
+        Requires scope `cluster:read`.
+
+        Lists the runtime replicas with a live membership, sorted by runtime ID, with the number of host sessions each holds.
+        The response uses the page envelope, but is never paginated (`nextCursor` is always omitted) and takes no `limit` or `cursor`.
+        In the local topology there are no runtime replicas, and the endpoint returns `404 notApplicable`.
+      operationId: listRuntimes
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page-Runtime'
+          description: The runtime replicas
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`forbidden`: the token does not grant the scope the route
+            requires'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`notApplicable`: there are no runtime replicas in the local
+            topology'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`internal`: an unexpected server error'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`hostUnavailable`: the host, or the runtime owning its session,
+            could not be reached; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`timeout`: the request timed out; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: List runtime replicas
+      tags:
+      - Cluster
+      x-required-scope: cluster:read
+  /api/v1/workflows:
+    get:
+      description: |-
+        Requires scope `workflows:read`.
+
+        Lists the workflows known to the cluster, sorted by name.
+        A workflow is known from its definition registry (which exists once an instance started), from stored orchestrator state, and from the orchestrator types live hosts serve.
+        For each workflow, `versions` comes from the registry, `hosts` from the live hosts serving it, and `conflicts` lists versions registered or served with more than one definition fingerprint.
+        Not paginated.
+
+        This is a fan-out endpoint: a host that cannot be queried is reported in `errors`, sets `partial: true`, and is still listed under the workflows it serves with `definitions: null`.
+      operationId: listWorkflows
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Workflows'
+          description: The workflows
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`forbidden`: the token does not grant the scope the route
+            requires'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`internal`: an unexpected server error'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`timeout`: the request timed out; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: List workflows
+      tags:
+      - Workflows
+      x-required-scope: workflows:read
+  /api/v1/workflows/{name}/instances:
+    get:
+      description: |-
+        Requires scope `workflows:read`.
+
+        Lists the instances of a workflow, ordered by instance ID, from the labels stored with each instance (the journals are not read, so items stay at summary size).
+        When no label filter (`status`, `version`, `parent`) is set, instances without labels are listed too, with `status: "unknown"`.
+      operationId: listWorkflowInstances
+      parameters:
+      - description: The workflow name, which must not contain a slash or a dot
+        in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      - description: Maximum number of items to return
+        in: query
+        name: limit
+        schema:
+          default: 100
+          maximum: 1000
+          minimum: 1
+          type: integer
+      - description: Opaque cursor returned as nextCursor by the previous page; omit
+          for the first page
+        in: query
+        name: cursor
+        schema:
+          type: string
+      - description: Only return instances in this status
+        in: query
+        name: status
+        schema:
+          enum:
+          - pending
+          - running
+          - suspended
+          - compensating
+          - completed
+          - failed
+          - cancelled
+          type: string
+      - description: Only return instances running this definition version
+        in: query
+        name: version
+        schema:
+          minimum: 1
+          type: integer
+      - description: Only return child instances whose parent label equals this value
+        in: query
+        name: parent
+        schema:
+          type: string
+      - description: Only return instances created at or after this time (RFC 3339)
+        in: query
+        name: createdFrom
+        schema:
+          format: date-time
+          type: string
+      - description: Only return instances created strictly before this time (RFC
+          3339)
+        in: query
+        name: createdTo
+        schema:
+          format: date-time
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page-InstanceItem'
+          description: A page of instances
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`badRequest`: an invalid path segment, query parameter, cursor,
+            or request body'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`forbidden`: the token does not grant the scope the route
+            requires'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`internal`: an unexpected server error'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`timeout`: the request timed out; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: List workflow instances
+      tags:
+      - Workflows
+      x-required-scope: workflows:read
+  /api/v1/workflows/{name}/instances/{instanceId}:
+    get:
+      description: |-
+        Requires scope `workflows:read`.
+        The instance's `input` and `output` are included only when the token also grants `workflows:data:read`; that read is audited.
+        Without it, `dataRedacted` is `true` and `input`/`output` are omitted.
+
+        Returns the instance's journal: status, steps, parent, suspension, timestamps, and the orchestrator's dead-lettered jobs (up to 100).
+        A pending instance (one whose start job has not run yet) is reported only while its start job is live, and takes its input, version, fingerprint, creation time, and parent from the start job.
+      operationId: getWorkflowInstance
+      parameters:
+      - description: The workflow name, which must not contain a slash or a dot
+        in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      - description: The workflow instance ID, which must not contain a slash
+        in: path
+        name: instanceId
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Instance'
+          description: The instance
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`badRequest`: an invalid path segment, query parameter, cursor,
+            or request body'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`forbidden`: the token does not grant the scope the route
+            requires'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`notFound`: the instance does not exist'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`internal`: an unexpected server error'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`timeout`: the request timed out; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: Get a workflow instance
+      tags:
+      - Workflows
+      x-required-scope: workflows:read
+  /api/v1/workflows/{name}/instances/{instanceId}/cancel:
+    post:
+      description: |-
+        Requires scope `workflows:manage`. The action is audited, including its reason.
+
+        Dispatches the same durable cancel job `WorkflowService.Cancel` sends to the orchestrator; the instance then compensates its completed steps and terminates as cancelled.
+        A non-empty `reason` is required.
+
+        - `202`: the control job was dispatched, or coalesced onto an identical pending one (`coalesced: true`, in which case this request's reason was dropped).
+        - `200` with `noEffect: true`: the instance is terminal (`completed`, `failed`, `cancelled`) or already `compensating`, so the engine would ignore the request and no job was dispatched.
+        - While an exclusive-access lease is held on the cluster, the action is refused with `409 exclusiveLeaseHeld`.
+
+        `status` in the response is the instance status read before dispatching.
+      operationId: cancelWorkflowInstance
+      parameters:
+      - description: The workflow name, which must not contain a slash or a dot
+        in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      - description: The workflow instance ID, which must not contain a slash
+        in: path
+        name: instanceId
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControlRequest'
+        description: Why the instance is cancelled, which is required and must not
+          be blank
+        required: true
+        x-originalParamName: request
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControlResponse'
+          description: The engine would ignore the request for the instance's current
+            status, so no job was dispatched (noEffect is true)
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControlResponse'
+          description: The control job was dispatched, or coalesced onto an identical
+            pending one
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`badRequest`: an invalid path segment, query parameter, cursor,
+            or request body'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`forbidden`: the token does not grant the scope the route
+            requires'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`notFound`: the instance does not exist'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`exclusiveLeaseHeld`: an exclusive-access lease is held on
+            the cluster; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "413":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`payloadTooLarge`: the request body exceeds 64 KiB'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`internal`: an unexpected server error'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`hostUnavailable`: the host, or the runtime owning its session,
+            could not be reached; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`timeout`: the request timed out; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: Cancel a workflow instance
+      tags:
+      - Actions
+      x-required-scope: workflows:manage
+  /api/v1/workflows/{name}/instances/{instanceId}/events:
+    get:
+      description: |-
+        Requires scope `workflows:read`.
+
+        Lists the instance's history events in sequence order.
+        Returns `404 eventHistoryDisabled` when the workflow opted out of event history, and `404 notFound` when the instance does not exist.
+        For a pending instance the event-history check is skipped and whatever events are stored (usually none) are listed.
+      operationId: listWorkflowInstanceEvents
+      parameters:
+      - description: The workflow name, which must not contain a slash or a dot
+        in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      - description: The workflow instance ID, which must not contain a slash
+        in: path
+        name: instanceId
+        required: true
+        schema:
+          type: string
+      - description: Maximum number of items to return
+        in: query
+        name: limit
+        schema:
+          default: 100
+          maximum: 1000
+          minimum: 1
+          type: integer
+      - description: Opaque cursor returned as nextCursor by the previous page; omit
+          for the first page
+        in: query
+        name: cursor
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Page-Event'
+          description: A page of events
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`badRequest`: an invalid path segment, query parameter, cursor,
+            or request body'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`forbidden`: the token does not grant the scope the route
+            requires'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`notFound`: the instance does not exist; or `eventHistoryDisabled`:
+            the workflow opted out of event history'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`internal`: an unexpected server error'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`timeout`: the request timed out; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: List the event history of a workflow instance
+      tags:
+      - Workflows
+      x-required-scope: workflows:read
+  /api/v1/workflows/{name}/instances/{instanceId}/resume:
+    post:
+      description: |-
+        Requires scope `workflows:manage`. The action is audited.
+
+        Dispatches the same durable resume job `WorkflowService.Resume` sends to the orchestrator.
+        Resume does not take a reason: a request with a non-empty `reason` is rejected with `400 badRequest`.
+        The request body is optional; an empty body is equivalent to `{}`.
+
+        - `202`: the control job was dispatched, or coalesced onto an identical pending one (`coalesced: true`).
+        - `200` with `noEffect: true`: the instance is terminal (`completed`, `failed`, `cancelled`), so the engine would ignore the request and no job was dispatched.
+        - While an exclusive-access lease is held on the cluster, the action is refused with `409 exclusiveLeaseHeld`.
+
+        `status` in the response is the instance status read before dispatching.
+      operationId: resumeWorkflowInstance
+      parameters:
+      - description: The workflow name, which must not contain a slash or a dot
+        in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      - description: The workflow instance ID, which must not contain a slash
+        in: path
+        name: instanceId
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControlRequest'
+        description: Must not set a reason
+        x-originalParamName: request
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControlResponse'
+          description: The engine would ignore the request for the instance's current
+            status, so no job was dispatched (noEffect is true)
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControlResponse'
+          description: The control job was dispatched, or coalesced onto an identical
+            pending one
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`badRequest`: an invalid path segment, query parameter, cursor,
+            or request body'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`forbidden`: the token does not grant the scope the route
+            requires'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`notFound`: the instance does not exist'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`exclusiveLeaseHeld`: an exclusive-access lease is held on
+            the cluster; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "413":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`payloadTooLarge`: the request body exceeds 64 KiB'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`internal`: an unexpected server error'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`hostUnavailable`: the host, or the runtime owning its session,
+            could not be reached; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`timeout`: the request timed out; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: Resume a workflow instance
+      tags:
+      - Actions
+      x-required-scope: workflows:manage
+  /api/v1/workflows/{name}/instances/{instanceId}/suspend:
+    post:
+      description: |-
+        Requires scope `workflows:manage`. The action is audited, including its reason.
+
+        Dispatches the same durable suspend job `WorkflowService.Suspend` sends to the orchestrator.
+        The `reason` is optional and is recorded on the suspension.
+        The request body is optional; an empty body is equivalent to `{}`.
+
+        - `202`: the control job was dispatched, or coalesced onto an identical pending one (`coalesced: true`, in which case this request's reason was dropped).
+        - `200` with `noEffect: true`: the instance is terminal (`completed`, `failed`, `cancelled`), so the engine would ignore the request and no job was dispatched.
+        - While an exclusive-access lease is held on the cluster, the action is refused with `409 exclusiveLeaseHeld`.
+
+        `status` in the response is the instance status read before dispatching.
+      operationId: suspendWorkflowInstance
+      parameters:
+      - description: The workflow name, which must not contain a slash or a dot
+        in: path
+        name: name
+        required: true
+        schema:
+          type: string
+      - description: The workflow instance ID, which must not contain a slash
+        in: path
+        name: instanceId
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControlRequest'
+        description: An optional reason, recorded on the suspension
+        x-originalParamName: request
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControlResponse'
+          description: The engine would ignore the request for the instance's current
+            status, so no job was dispatched (noEffect is true)
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControlResponse'
+          description: The control job was dispatched, or coalesced onto an identical
+            pending one
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`badRequest`: an invalid path segment, query parameter, cursor,
+            or request body'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`forbidden`: the token does not grant the scope the route
+            requires'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`notFound`: the instance does not exist'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`exclusiveLeaseHeld`: an exclusive-access lease is held on
+            the cluster; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "413":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`payloadTooLarge`: the request body exceeds 64 KiB'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`internal`: an unexpected server error'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`hostUnavailable`: the host, or the runtime owning its session,
+            could not be reached; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "504":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`timeout`: the request timed out; retryable'
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: Suspend a workflow instance
+      tags:
+      - Actions
+      x-required-scope: workflows:manage
+  /healthz:
+    get:
+      description: |-
+        Served at the root of the management listener, outside `/api/v1`.
+        Public: no bearer token is required.
+        Always returns `{"status":"ok"}` while the server is running.
+      operationId: getHealthz
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+          description: The server is running
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      summary: Liveness check
+      tags:
+      - Meta
+tags:
+- description: Public endpoints.
+  name: Meta
+- description: Cluster-wide summary, runtime replicas, and hosts.
+  name: Cluster
+- description: Activations, placements, actor types, and actor state.
+  name: Actors
+- description: Durable jobs and alarms.
+  name: Jobs
+- description: Workflow definitions, instances, and event history.
+  name: Workflows
+- description: Audited operations that change cluster state.
+  name: Actions

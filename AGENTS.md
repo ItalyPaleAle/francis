@@ -1,4 +1,4 @@
-# Coding Style Guidelines
+# Agent Guidelines
 
 ## Go
 
@@ -52,6 +52,9 @@ If you add, remove, or change an option in the `config` struct or any struct ref
 If the option is exposed by the Helm chart, also update `charts/francis/values.yaml`, `charts/francis/values.schema.json`, the config file template in `charts/francis/templates/_helpers.tpl`, and the values table in `charts/francis/README.md`.
 
 If you change an interface that is mocked in `internal/mocks` (the list is in `.mockery.yml`), run `make mocks` to regenerate the mocks before finishing the task.
+
+The management API's OpenAPI document in `internal/management/openapi/openapi.yaml` is generated from the swag annotations on the handlers and the request and response types in `internal/management`, plus the overview in `internal/management/openapi/api.md`.
+If you change any of them, run `make gen-openapi` before finishing the task, and never edit `openapi.yaml` by hand.
 
 ## Comments
 

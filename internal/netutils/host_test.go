@@ -14,22 +14,9 @@ import (
 )
 
 func TestGetHostAddress(t *testing.T) {
-	t.Run("env var present", func(t *testing.T) {
-		t.Setenv(HostIPEnvVar, "test.local")
-
-		address, err := GetHostAddress()
-		require.NoError(t, err)
-		assert.Equal(t, "test.local", address)
-	})
-
-	t.Run("env var not present, non-empty response", func(t *testing.T) {
-		// An empty value is ignored, so this also clears any value set in the environment running the tests
-		t.Setenv(HostIPEnvVar, "")
-
-		address, err := GetHostAddress()
-		require.NoError(t, err)
-		assert.NotEmpty(t, address)
-	})
+	address, err := GetHostAddress()
+	require.NoError(t, err)
+	assert.NotEmpty(t, address)
 }
 
 // fakeConn implements net.Conn with a configurable LocalAddr
@@ -50,8 +37,6 @@ func fakeIPNet(ip net.IP) *net.IPNet {
 	}
 	return &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}
 }
-
-func noEnv(string) (string, bool) { return "", false }
 
 func failDial(string, string) (net.Conn, error) {
 	return nil, errors.New("no route")
@@ -88,58 +73,38 @@ func noIfaces() ([]net.Addr, error) { return nil, nil }
 func TestGetHostAddressDetailed(t *testing.T) {
 	tests := []struct {
 		name       string
-		lookupEnv  func(string) (string, bool)
 		dial       func(string, string) (net.Conn, error)
 		ifaceAddrs func() ([]net.Addr, error)
 		want       string
 		wantErr    bool
 	}{
 		{
-			name:       "env var override",
-			lookupEnv:  func(string) (string, bool) { return "1.2.3.4", true },
-			dial:       failDial,
-			ifaceAddrs: noIfaces,
-			want:       "1.2.3.4",
-		},
-		{
-			name:       "env var empty is ignored",
-			lookupEnv:  func(string) (string, bool) { return "", true },
-			dial:       dialReturning(net.ParseIP("10.0.0.1")),
-			ifaceAddrs: noIfaces,
-			want:       "10.0.0.1",
-		},
-		{
 			name:       "dial returns private IPv4",
-			lookupEnv:  noEnv,
 			dial:       dialReturning(net.ParseIP("10.0.0.5")),
 			ifaceAddrs: noIfaces,
 			want:       "10.0.0.5",
 		},
 		{
 			name:       "dial returns IPv6 GUA",
-			lookupEnv:  noEnv,
 			dial:       dialReturning(net.ParseIP("2600::1")),
 			ifaceAddrs: noIfaces,
 			want:       "2600::1",
 		},
 		{
 			name:       "IPv6-only: IPv4 dial fails, IPv6 dial succeeds",
-			lookupEnv:  noEnv,
 			dial:       dialReturningOn("[2001:db8::1]:80", net.ParseIP("2600::1")),
 			ifaceAddrs: noIfaces,
 			want:       "2600::1",
 		},
 		{
 			name:       "dial returns CLAT address, falls through to interfaces",
-			lookupEnv:  noEnv,
 			dial:       dialReturning(net.ParseIP("192.0.0.1")),
 			ifaceAddrs: ifaceAddrs(net.ParseIP("10.0.0.1")),
 			want:       "10.0.0.1",
 		},
 		{
-			name:      "dial fails, fallback picks public IPv4 over private",
-			lookupEnv: noEnv,
-			dial:      failDial,
+			name: "dial fails, fallback picks public IPv4 over private",
+			dial: failDial,
 			ifaceAddrs: ifaceAddrs(
 				net.ParseIP("10.0.0.1"),
 				net.ParseIP("203.0.113.5"),
@@ -147,9 +112,8 @@ func TestGetHostAddressDetailed(t *testing.T) {
 			want: "203.0.113.5",
 		},
 		{
-			name:      "fallback prefers IPv6 GUA over private IPv4",
-			lookupEnv: noEnv,
-			dial:      failDial,
+			name: "fallback prefers IPv6 GUA over private IPv4",
+			dial: failDial,
 			ifaceAddrs: ifaceAddrs(
 				net.ParseIP("10.0.0.1"),
 				net.ParseIP("2600::1"),
@@ -157,9 +121,8 @@ func TestGetHostAddressDetailed(t *testing.T) {
 			want: "2600::1",
 		},
 		{
-			name:      "fallback prefers private IPv4 over ULA",
-			lookupEnv: noEnv,
-			dial:      failDial,
+			name: "fallback prefers private IPv4 over ULA",
+			dial: failDial,
 			ifaceAddrs: ifaceAddrs(
 				net.ParseIP("fd12::1"),
 				net.ParseIP("192.168.1.1"),
@@ -167,9 +130,8 @@ func TestGetHostAddressDetailed(t *testing.T) {
 			want: "192.168.1.1",
 		},
 		{
-			name:      "fallback prefers CGNAT over ULA",
-			lookupEnv: noEnv,
-			dial:      failDial,
+			name: "fallback prefers CGNAT over ULA",
+			dial: failDial,
 			ifaceAddrs: ifaceAddrs(
 				net.ParseIP("fd12::1"),
 				net.ParseIP("100.64.0.1"),
@@ -178,15 +140,13 @@ func TestGetHostAddressDetailed(t *testing.T) {
 		},
 		{
 			name:       "fallback uses link-local as last resort",
-			lookupEnv:  noEnv,
 			dial:       failDial,
 			ifaceAddrs: ifaceAddrs(net.ParseIP("fe80::1")),
 			want:       "fe80::1",
 		},
 		{
-			name:      "fallback skips loopback",
-			lookupEnv: noEnv,
-			dial:      failDial,
+			name: "fallback skips loopback",
+			dial: failDial,
 			ifaceAddrs: ifaceAddrs(
 				net.ParseIP("127.0.0.1"),
 				net.ParseIP("10.0.0.1"),
@@ -194,9 +154,8 @@ func TestGetHostAddressDetailed(t *testing.T) {
 			want: "10.0.0.1",
 		},
 		{
-			name:      "fallback skips CLAT addresses",
-			lookupEnv: noEnv,
-			dial:      failDial,
+			name: "fallback skips CLAT addresses",
+			dial: failDial,
 			ifaceAddrs: ifaceAddrs(
 				net.ParseIP("192.0.0.1"),
 				net.ParseIP("10.0.0.1"),
@@ -205,15 +164,13 @@ func TestGetHostAddressDetailed(t *testing.T) {
 		},
 		{
 			name:       "no addresses available returns error",
-			lookupEnv:  noEnv,
 			dial:       failDial,
 			ifaceAddrs: noIfaces,
 			wantErr:    true,
 		},
 		{
-			name:      "only loopback returns error",
-			lookupEnv: noEnv,
-			dial:      failDial,
+			name: "only loopback returns error",
+			dial: failDial,
 			ifaceAddrs: ifaceAddrs(
 				net.ParseIP("127.0.0.1"),
 				net.ParseIP("::1"),
@@ -221,9 +178,8 @@ func TestGetHostAddressDetailed(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:      "InterfaceAddrs error propagates",
-			lookupEnv: noEnv,
-			dial:      failDial,
+			name: "InterfaceAddrs error propagates",
+			dial: failDial,
 			ifaceAddrs: func() ([]net.Addr, error) {
 				return nil, errors.New("network subsystem failure")
 			},
@@ -233,7 +189,7 @@ func TestGetHostAddressDetailed(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := getHostAddress(tt.lookupEnv, tt.dial, tt.ifaceAddrs)
+			got, err := getHostAddress(tt.dial, tt.ifaceAddrs)
 			if tt.wantErr {
 				require.Error(t, err)
 				return

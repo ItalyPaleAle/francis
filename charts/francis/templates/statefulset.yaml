@@ -112,6 +112,11 @@ spec:
             - name: runtime
               containerPort: {{ int .Values.service.port }}
               protocol: UDP
+            {{- if .Values.management.enabled }}
+            - name: management
+              containerPort: {{ int .Values.management.port }}
+              protocol: TCP
+            {{- end }}
           env:
             - name: FRANCIS_CONFIG
               value: /etc/francis/config.yaml
@@ -122,11 +127,9 @@ spec:
                   fieldPath: metadata.name
             - name: FRANCIS_RUNTIME_ID
               value: {{ if .Values.runtimeId }}{{ printf "%s-$(POD_NAME)" .Values.runtimeId | quote }}{{ else }}"$(POD_NAME)"{{ end }}
-            {{- /* Pass the pod's IP as FRANCIS_HOST_IP explicitly */}}
-            - name: FRANCIS_HOST_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.podIP
+            {{- /* Pass the pod's IP as FRANCIS_ADVERTISE_ADDRESS explicitly */}}
+            - name: FRANCIS_ADVERTISE_ADDRESS
+              value: {{ printf "$(POD_NAME).%s.%s.svc:%d" (include "francis.headlessServiceName" .) .Release.Namespace (int .Values.service.port) | quote }}
             {{- if .Values.openTelemetry.enabled }}
             {{- include "francis.openTelemetryEnv" . | nindent 12 }}
             {{- end }}
@@ -160,6 +163,11 @@ spec:
             {{- /* The container runs with a read-only root filesystem, so give the runtime a writable temporary directory */}}
             - name: tmp
               mountPath: /tmp
+            {{- if and .Values.management.enabled .Values.management.tls.existingSecret }}
+            - name: management-tls
+              mountPath: {{ include "francis.managementTLSMountPath" . | quote }}
+              readOnly: true
+            {{- end }}
             {{- if $sqlite }}
             - name: data
               mountPath: {{ $persistence.mountPath | quote }}
@@ -178,6 +186,18 @@ spec:
                 path: config.yaml
         - name: tmp
           emptyDir: {}
+        {{- if and .Values.management.enabled .Values.management.tls.existingSecret }}
+        - name: management-tls
+          secret:
+            secretName: {{ .Values.management.tls.existingSecret | quote }}
+            {{- /* Read-only for everyone, for the same reason as the config volume */}}
+            defaultMode: 0444
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+        {{- end }}
         {{- if and $sqlite (not $useVolumeClaimTemplate) }}
         - name: data
           {{- if $persistence.existingClaim }}

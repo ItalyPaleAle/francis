@@ -55,6 +55,10 @@ jobs:
         run: |
           go tool gomod-age
 
+      - name: "Check the management API's OpenAPI document is up to date"
+        run: |
+          make check-openapi-diff
+
       - name: "Lint"
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # 9.3.0
         with:

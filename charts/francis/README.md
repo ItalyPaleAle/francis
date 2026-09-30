@@ -69,7 +69,7 @@ helm install francis oci://ghcr.io/italypaleale/charts/francis \
 
 All replicas are interchangeable: they share the same `runtimePSKs`, so they derive the same cluster CA, and they coordinate through the database.
 
-Replicas also forward management requests to each other for the hosts connected to them. Each replica advertises its pod IP for this, which the chart passes to it in the `FRANCIS_HOST_IP` env var.
+Replicas also forward management requests to each other for the hosts connected to them. Each replica advertises its per-pod DNS name on the headless Service for this, which the chart passes to it in the `FRANCIS_ADVERTISE_ADDRESS` env var.
 
 Do not put the SQLite file on a networked filesystem such as NFS or SMB. Use a block-backed `ReadWriteOnce` volume, which is what the chart requests by default.
 
@@ -228,9 +228,56 @@ Choose whichever fits your setup:
   existingConfigSecretKey: config.yaml
   ```
 
-  With `existingConfigSecret` set the chart stops rendering a config file, so `database` (except its persistence settings), `runtimePSKs`, `bootstrap`, `tuning`, and `log` are all ignored. The Secret must hold a complete [runtime configuration](https://gofrancis.dev/docs/deploying-the-runtime/#configuration), and it must bind to `0.0.0.0` on the port in `service.port`.
+  With `existingConfigSecret` set the chart stops rendering a config file, so `database` (except its persistence settings), `runtimePSKs`, `bootstrap`, `tuning`, `log`, and the management tokens are all ignored. The Secret must hold a complete [runtime configuration](https://gofrancis.dev/docs/deploying-the-runtime/#configuration), and it must bind to `0.0.0.0` on the port in `service.port`. If you enable the [management API](#management-api), the Secret must also contain the `management` block, as described there.
 
 Treat the runtime PSKs as your most sensitive cluster secret: anyone holding a current one can mint a trusted certificate and join the cluster.
+
+## Management API
+
+The runtime can serve an optional [management REST API](https://gofrancis.dev/docs/management-api/) for inspecting the cluster (hosts, placements, live activations, actor state, jobs, alarms, and workflow instances) and for administrative actions (deactivating an actor, draining a host, and cancelling, suspending, or resuming a workflow instance). It's off by default, and no TCP port is opened until you enable it:
+
+```sh
+helm upgrade francis <chart> -n francis --reuse-values \
+  --set management.enabled=true \
+  --set-string 'management.readOnlyTokens[0]=<a random string of at least 32 characters>' \
+  --set-string 'management.managementTokens[0]=<another random string of at least 32 characters>'
+```
+
+Generate each token with something like `openssl rand -base64 32`. At least one token is required. Every token must be at least 32 characters long, and the same token can't appear in both lists. Read-only tokens get every read scope, while management tokens can also perform actions. List more than one token to rotate them without downtime.
+
+When enabled, the chart:
+
+- Renders a `management` block into the config Secret, binding the API to all interfaces on `management.port` (`7401` by default, TCP) so the Service can reach it. The tokens end up in that Secret too, so handle them like the other [secrets](#secrets).
+- Adds a `management` TCP container port and a separate `<release>-francis-management` Service in front of it. It's kept apart from the UDP runtime Service because a single `LoadBalancer` Service mixing TCP and UDP needs Kubernetes' `MixedProtocolLBService` support.
+
+By default the API is served over plain HTTP, and the runtime logs a warning at startup because it's listening on a non-loopback address without TLS. Actor state and workflow payloads are readable through the API, so either keep the Service private and terminate TLS in a proxy or ingress, or have the runtime serve HTTPS itself from a `kubernetes.io/tls` Secret (for example, one issued by cert-manager):
+
+```yaml
+management:
+  tls:
+    existingSecret: francis-management-tls
+```
+
+The certificate is loaded when the runtime starts, so restart the pods after it's renewed.
+
+If you use `existingConfigSecret`, the chart can't render the tokens, so add the block to your Secret yourself. The chart still creates the container port and the Service, and still mounts `management.tls.existingSecret` when it's set:
+
+```yaml
+management:
+  enabled: true
+  # Must match management.port in the chart values
+  bind: ":7401"
+  readOnlyTokens:
+    - "<read-only token>"
+  managementTokens:
+    - "<management token>"
+  # Only when management.tls.existingSecret is set
+  tls:
+    certFile: /etc/francis-management-tls/tls.crt
+    keyFile: /etc/francis-management-tls/tls.key
+```
+
+Any replica can answer any request. With several replicas, a request about a host connected to another replica is forwarded to that replica over the existing UDP port, at the per-pod DNS name the chart passes to each pod in the `FRANCIS_ADVERTISE_ADDRESS` env var. If you use NetworkPolicies, allow the runtime pods to reach each other on `service.port` over UDP.
 
 ## Verifying the install
 
@@ -336,6 +383,22 @@ Anything else can be set through `extraEnv`, since the runtime reads the standar
 | `service.externalTrafficPolicy` | string | `""` | `Cluster` or `Local`, for `NodePort` and `LoadBalancer`. |
 | `service.annotations` | object | `{}` | Extra annotations for that Service. |
 
+### Management API
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `management.enabled` | bool | `false` | Serve the [management API](#management-api). No TCP port is opened while this is off. |
+| `management.port` | int | `7401` | TCP port the management API listens on, on all interfaces. |
+| `management.readOnlyTokens` | list | `[]` | Bearer tokens that get every scope except actions. Each must be at least 32 characters. |
+| `management.managementTokens` | list | `[]` | Bearer tokens that get every scope, including actions. Each must be at least 32 characters, and no token may also be a read-only token. |
+| `management.tls.existingSecret` | string | `""` | Existing `kubernetes.io/tls` Secret to serve HTTPS from. Plain HTTP when empty. |
+| `management.service.type` | string | `ClusterIP` | Type of the management Service. |
+| `management.service.nodePort` | int | `null` | Node port, for `NodePort` and `LoadBalancer`. |
+| `management.service.loadBalancerIP` | string | `""` | Requested load balancer IP. |
+| `management.service.loadBalancerSourceRanges` | list | `[]` | Source ranges allowed through the load balancer. |
+| `management.service.externalTrafficPolicy` | string | `""` | `Cluster` or `Local`, for `NodePort` and `LoadBalancer`. |
+| `management.service.annotations` | object | `{}` | Extra annotations for the management Service. |
+
 ### Scheduling and pod settings
 
 | Key | Type | Default | Description |
@@ -411,3 +474,4 @@ The chart leaves the old PersistentVolumeClaim in place, since StatefulSet volum
 - [Topologies](https://gofrancis.dev/docs/topologies/)
 - [Security model](https://gofrancis.dev/docs/security/)
 - [Observability](https://gofrancis.dev/docs/observability/)
+- [Management API](https://gofrancis.dev/docs/management-api/)

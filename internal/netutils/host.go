@@ -8,13 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
-
-	"github.com/italypaleale/francis/internal/buildinfo"
 )
-
-// HostIPEnvVar is the environment variable that overrides the IP address detected by GetHostAddress
-var HostIPEnvVar = buildinfo.ConfigEnvPrefix + "HOST_IP"
 
 // clatSubnet is the range 464XLAT hosts synthesize IPv4 source addresses from, which other machines can't dial
 var clatSubnet = &net.IPNet{
@@ -23,24 +17,16 @@ var clatSubnet = &net.IPNet{
 }
 
 // GetHostAddress selects the IP address other machines are most likely to reach this host at
-// It returns the value of the HostIPEnvVar environment variable when that is set
-// Otherwise, it asks the kernel for the preferred outbound address with a UDP dial to documentation addresses
+// It asks the kernel for the preferred outbound address with a UDP dial to documentation addresses
 // If that fails, it falls back to the interface addresses, preferring in order: public IPv4, IPv6 global unicast, private IPv4 (RFC 1918 and CGNAT), IPv6 ULA, and link-local
 func GetHostAddress() (string, error) {
-	return getHostAddress(os.LookupEnv, net.Dial, net.InterfaceAddrs)
+	return getHostAddress(net.Dial, net.InterfaceAddrs)
 }
 
 func getHostAddress(
-	lookupEnv func(string) (string, bool),
 	dial func(string, string) (net.Conn, error),
 	interfaceAddrs func() ([]net.Addr, error),
 ) (string, error) {
-	// An explicit address always wins over detection
-	val, _ := lookupEnv(HostIPEnvVar)
-	if val != "" {
-		return val, nil
-	}
-
 	// Dialing UDP sends no packets, but makes the kernel pick a source address from its routing table
 	// Documentation addresses (RFC 5737 and RFC 3849) work on any stack without depending on external infrastructure
 	for _, a := range []string{"192.0.2.1:80", "[2001:db8::1]:80"} {

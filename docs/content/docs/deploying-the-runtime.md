@@ -180,6 +180,7 @@ Subcommands (including `print-ca`, `healthcheck`, `backup`, and `restore`) resol
 |-----|-------------|
 | `bind` | Address and port the runtime listens on. Default `:8443`. Other runtime replicas reach this one at the same address, except that a missing or unspecified host (such as `:8443` or `0.0.0.0:8443`) is replaced with this machine's IP. See [Running multiple runtime replicas](#running-multiple-runtime-replicas). |
 | `runtimeId` | Optional identifier for this runtime, used in its server certificate, logs, and traces. The `FRANCIS_RUNTIME_ID` environment variable overrides it, so replicas sharing one config file can each get a distinct ID. When neither is set, the runtime picks a random ID on every start. |
+| `advertiseAddress` | Optional address other runtime replicas dial to reach this one, replacing the one derived from `bind`. It's a host, such as `10.0.0.5` or `francis-0.example.com`, or a `host:port`. Without a port, the port of `bind` is used, since replicas talk to each other over the runtime's WebTransport server. Include a port only when other replicas reach this one on a different port, such as behind port mapping. The `FRANCIS_ADVERTISE_ADDRESS` environment variable overrides it. Set it when the derived address isn't one other replicas can reach. See [Running multiple runtime replicas](#running-multiple-runtime-replicas). |
 | `runtimePSKs` | List of runtime pre-shared keys from which the cluster CA is derived. **Required.** |
 | `bootstrap.method` | How hosts authenticate when joining: `psk` or `jwt`. **Required.** |
 | `bootstrap.hostPSK` | The shared host bootstrap secret, for `method: psk`. |
@@ -197,6 +198,11 @@ Subcommands (including `print-ca`, `healthcheck`, `backup`, and `restore`) resol
 | `shutdownGracePeriod` | Grace period for a clean shutdown. Default `30s`. |
 | `log.level` | `debug`, `info`, `warn`, or `error`. |
 | `log.json` | Log in structured JSON instead of text. Default `false`. |
+| `management.enabled` | Serve the [management REST API](/docs/management-api). Default `false`, in which case no TCP port is opened. |
+| `management.bind` | TCP address and port the management API listens on. Default `0.0.0.0:7401`, which listens on all interfaces so the API is reachable from outside a container. Set it to a loopback address such as `127.0.0.1:7401` to only accept local connections. The runtime logs a warning at startup when this is not a loopback address and TLS is not configured. |
+| `management.readOnlyTokens` | Bearer tokens that get every scope except those ending in `:manage`, so they can read everything but perform no actions. |
+| `management.managementTokens` | Bearer tokens that get every scope, including actions. When the API is enabled, at least one token is required across the two lists. Every token must be at least 32 characters long, and no token may appear more than once across both lists. |
+| `management.tls.certFile` / `keyFile` | Paths to a PEM certificate chain and private key, to serve the management API over HTTPS. Set both or neither. They're loaded at startup, so restart the runtime after renewing the certificate. |
 
 Durations accept Go duration strings (e.g. `"1h"`, `"1500ms"`).
 
@@ -273,12 +279,40 @@ h, err := remote.NewHost(
 
 For availability, you can run multiple runtime replicas that share the same `runtimePSKs` (so they form one certificate issuer) and the same database. Workers list all of them in `WithRuntimeAddresses` and fail over automatically.
 
-Each replica also registers the address other replicas use to reach it, derived from `bind`:
+Multiple replicas require PostgreSQL, since a SQLite database can be owned by one runtime only.
+
+Replicas also talk to each other, for operations related to the [management API](/docs/management-api), using the runtime's existing UDP port.
+
+Each replica registers the address other replicas use to reach it. Unless you set `advertiseAddress` (or the `FRANCIS_ADVERTISE_ADDRESS` environment variable), it's derived from `bind`:
 
 - When `bind` has a specific host, such as `10.0.0.1:8443`, replicas dial that address as-is.
-- When `bind` has no host or an unspecified one, such as the default `:8443`, the runtime picks the IP of the interface it would use for outbound traffic, falling back to its interface addresses in order of preference: public IPv4, IPv6 global, private IPv4, IPv6 ULA, and link-local.  
-  In Kubernetes, this is the pod IP.  
-  If the detected IP isn't reachable by the other replicas, set the `FRANCIS_HOST_IP` environment variable to the IP (or hostname) they should dial.
+- When `bind` has no host or an unspecified one, such as the default `:8443`, the runtime picks the IP of the interface it would use for outbound traffic, falling back to its interface addresses.
+
+If the derived address isn't reachable by the other replicas, set `advertiseAddress` (or the `FRANCIS_ADVERTISE_ADDRESS` environmental variable) to a host they can dial, such as a DNS name. The port of `bind` is used unless you add a different one.  
+The [Helm chart](#kubernetes-helm) does this for you, using each pod's DNS name on the headless Service, which stays the same when the pod restarts.
+
+For forwarding to work:
+
+- Make sure replicas can reach each other on that address over UDP. If you use Kubernetes NetworkPolicies or firewall rules, allow traffic between the runtime pods on the runtime's UDP port.
+- If you set `runtimeId`, give each replica a distinct one, for example with `FRANCIS_RUNTIME_ID`. A replica can't register with a runtime ID that another live replica holds with a different advertised address. Without a `runtimeId`, each replica picks a random one on every start.
+
+## Management API
+
+The runtime can serve an optional REST API for inspecting the cluster and for administrative actions, such as draining a host or cancelling a workflow instance. It's disabled by default and listens on a separate TCP port:
+
+```yaml
+management:
+  enabled: true
+  bind: "0.0.0.0:7401"
+  readOnlyTokens:
+    - "<a random string of at least 32 characters>"
+  managementTokens:
+    - "<another random string of at least 32 characters>"
+```
+
+The API listens on all interfaces by default (`0.0.0.0:7401`), so it's reachable from outside the runtime's container. With Docker, publish the TCP port (`-p 7401:7401/tcp`). Either configure `management.tls` or put a TLS-terminating proxy in front of the API, since the runtime logs a warning when it serves plain HTTP on a non-loopback address. To only accept connections from the same machine, set `bind` to `127.0.0.1:7401`.
+
+See [Management API](/docs/management-api) for authentication, scopes, and the list of endpoints.
 
 ## Database
 
