@@ -54,6 +54,9 @@ type runtimeOptions struct {
 	alarmExecutionTimeout   time.Duration
 	shutdownGracePeriod     time.Duration
 
+	// advertiseAddress is the address other runtime replicas dial to reach this one, defaulting to bind
+	advertiseAddress string
+
 	// Allows setting a clock for testing
 	clock clock.WithTicker
 }
@@ -126,4 +129,11 @@ func WithAlarmExecutionTimeout(d time.Duration) RuntimeOption {
 // WithShutdownGracePeriod sets the grace period for shutting down
 func WithShutdownGracePeriod(d time.Duration) RuntimeOption {
 	return func(o *runtimeOptions) { o.shutdownGracePeriod = d }
+}
+
+// WithAdvertiseAddress sets the address other runtime replicas use to reach this one, which defaults to the bind address
+func WithAdvertiseAddress(addr string) RuntimeOption {
+	return func(o *runtimeOptions) {
+		o.advertiseAddress = addr
+	}
 }

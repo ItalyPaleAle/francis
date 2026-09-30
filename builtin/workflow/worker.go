@@ -46,6 +46,9 @@ type attemptResult struct {
 	key    string
 	output json.RawMessage
 	err    error
+	// startedAt and finishedAt bracket the handler, and are memoized with the outcome so a retried report re-sends the same times
+	startedAt  time.Time
+	finishedAt time.Time
 }
 
 // newWorker builds a worker of either the forward or the undo family
@@ -164,7 +167,6 @@ func (w *worker) invokeHandler(ctx context.Context, method string, p *runPayload
 		attribute.Int("francis.workflow.index", p.Index),
 		attribute.Int("francis.workflow.attempt", p.Attempt),
 	))
-	start := time.Now()
 
 	task := &taskEnvelope{p: p, undo: w.undo}
 
@@ -179,11 +181,14 @@ func (w *worker) invokeHandler(ctx context.Context, method string, p *runPayload
 	}
 	defer cancel()
 
+	// Bracket the handler with the worker's own clock, since the event history records these times and the memoized result re-sends them with a retried report
+	res.startedAt = time.Now()
 	if method == methodCompensate {
 		res.err = w.runCompensate(ctx, d, task)
 	} else {
 		res.output, res.err = w.runForward(ctx, d, task)
 	}
+	res.finishedAt = time.Now()
 
 	// A handler that returns after its own deadline still failed the attempt even when it ignored cancellation
 	timeoutErr := context.Cause(ctx)
@@ -200,7 +205,7 @@ func (w *worker) invokeHandler(ctx context.Context, method string, p *runPayload
 			slog.String("step", p.Step),
 			slog.Int("index", p.Index),
 			slog.Int("attempt", p.Attempt),
-			slog.Duration("duration", time.Since(start)),
+			slog.Duration("duration", res.finishedAt.Sub(res.startedAt)),
 		}
 		if res.err != nil {
 			w.log.WarnContext(ctx, "Workflow task attempt failed", append(attrs, slog.Any("error", res.err))...)
@@ -273,6 +278,8 @@ func (w *worker) report(ctx context.Context, method string, p *runPayload, res *
 			Error:       errMsg,
 			Retryable:   retryable,
 			TraceParent: p.TraceParent,
+			StartedAt:   res.startedAt,
+			FinishedAt:  res.finishedAt,
 		}, actor.WithIdempotencyKey(key))
 		return err
 	}
@@ -286,6 +293,8 @@ func (w *worker) report(ctx context.Context, method string, p *runPayload, res *
 		Error:       errMsg,
 		Retryable:   retryable,
 		TraceParent: p.TraceParent,
+		StartedAt:   res.startedAt,
+		FinishedAt:  res.finishedAt,
 	}, actor.WithIdempotencyKey(key))
 	return err
 }

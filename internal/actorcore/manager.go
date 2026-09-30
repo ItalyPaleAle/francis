@@ -20,6 +20,7 @@ import (
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/tracing"
 	"github.com/italypaleale/francis/internal/types"
+	"github.com/italypaleale/francis/protocol"
 )
 
 const (
@@ -88,6 +89,13 @@ type Manager struct {
 	// createLock serializes the creation of new active actors so concurrent cold-start invocations of the same actor produce a single instance
 	createLock sync.Mutex
 
+	// workflowDefinitions are the definitions served by the built-in actors registered on this host, reported by host snapshots
+	workflowDefinitions []protocol.WorkflowDefinitionInfo
+
+	// forceHalt is closed by HaltAllWithin when its timeout expires, cutting the in-flight calls of halting actors short
+	forceHalt     chan struct{}
+	forceHaltOnce sync.Once
+
 	// inflightDedup coalesces concurrent peer requests that carry the same RequestID so a retry arriving while the first execution is still in progress shares the result rather than running the actor a second time
 	inflightDedup singleflight.Group
 }
@@ -114,6 +122,7 @@ func NewManager(opts Options) *Manager {
 		actorTypeCapacityGroup: map[string]string{},
 		actorTypeLockMode:      map[string]LockMode{},
 		Actors:                 haxmap.New[string, *ActiveActor](defaultActorsMapSize),
+		forceHalt:              make(chan struct{}),
 	}
 }
 
@@ -342,6 +351,11 @@ func (m *Manager) lockAndInvokeActor(parentCtx context.Context, act *ActiveActor
 				// Graceful timeout has passed: forcefully cancel the context
 				cancel(actor.ErrActorHalted)
 				return
+			case <-m.forceHalt:
+				// A bounded shutdown ran out of time, so do not wait for the grace period
+				t.Stop()
+				cancel(actor.ErrActorHalted)
+				return
 			case <-ctx.Done():
 				// The method is returning (either fn() is done, or context was canceled)
 				if !t.Stop() {
@@ -360,6 +374,13 @@ func (m *Manager) lockAndInvokeActor(parentCtx context.Context, act *ActiveActor
 		trace.WithAttributes(tracing.ActorRef(act.Key())),
 	)
 	res, err := fn(execCtx, act)
+
+	// A call that a halt cut short did not complete, even when the method returned without an error after its context was canceled, so it is reported as canceled
+	// It is not reported as ErrActorHalted, which tells callers to retry, because the method did run and may have had effects
+	if err == nil && errors.Is(context.Cause(ctx), actor.ErrActorHalted) {
+		res = nil
+		err = fmt.Errorf("%w: the actor was halted before the call completed", context.Canceled)
+	}
 	tracing.End(execSpan, err)
 	return res, err
 }

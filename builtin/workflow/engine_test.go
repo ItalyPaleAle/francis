@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -36,6 +37,8 @@ type fakeHost struct {
 	labels map[string]*components.WorkflowLabels
 	// ttls holds the expiry written with each actor's state, which is zero when the write asked for none
 	ttls map[string]time.Duration
+	// events holds each actor's event history, applied with the providers' semantics
+	events map[string][]components.WorkflowEvent
 	// alarms records the alarms currently set
 	alarms map[string]actor.AlarmProperties
 	// jobs holds the jobs dispatched, keyed by job ID
@@ -66,6 +69,7 @@ func newFakeHost() *fakeHost {
 		state:            map[string][]byte{},
 		labels:           map[string]*components.WorkflowLabels{},
 		ttls:             map[string]time.Duration{},
+		events:           map[string][]components.WorkflowEvent{},
 		alarms:           map[string]actor.AlarmProperties{},
 		jobs:             map[string]actor.JobInfo{},
 		jobPayloads:      map[string]any{},
@@ -303,8 +307,34 @@ func (f *fakeHost) SetState(ctx context.Context, actorType string, actorID strin
 	if opts != nil {
 		f.labels[key(actorType, actorID)] = opts.WorkflowLabels()
 		f.ttls[key(actorType, actorID)] = opts.TTL
+		f.appendEventsLocked(key(actorType, actorID), opts.AppendEvents())
 	}
 	return nil
+}
+
+// appendEventsLocked applies events the way the providers do: a first event with seq 1 resets the history, and a seq already present is ignored
+func (f *fakeHost) appendEventsLocked(k string, events []components.WorkflowEvent) {
+	if len(events) == 0 {
+		return
+	}
+	if events[0].Seq == 1 {
+		delete(f.events, k)
+	}
+	existing := f.events[k]
+	for _, ev := range events {
+		if slices.ContainsFunc(existing, func(e components.WorkflowEvent) bool { return e.Seq == ev.Seq }) {
+			continue
+		}
+		existing = append(existing, ev)
+	}
+	f.events[k] = existing
+}
+
+// eventsOf returns a copy of the actor's event history
+func (f *fakeHost) eventsOf(actorType string, actorID string) []components.WorkflowEvent {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.events[key(actorType, actorID)])
 }
 
 func (f *fakeHost) GetState(ctx context.Context, actorType string, actorID string, dest any) error {
@@ -325,6 +355,7 @@ func (f *fakeHost) DeleteState(ctx context.Context, actorType string, actorID st
 	delete(f.state, key(actorType, actorID))
 	delete(f.labels, key(actorType, actorID))
 	delete(f.ttls, key(actorType, actorID))
+	delete(f.events, key(actorType, actorID))
 	return nil
 }
 

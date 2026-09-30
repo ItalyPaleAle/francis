@@ -307,6 +307,59 @@ func TestWorkerRunsTheHandlerOnceWhenTheReportIsRetried(t *testing.T) {
 	assert.JSONEq(t, `"once"`, string(reportedRun(t, host).Output))
 }
 
+func TestWorkerReportsTheHandlerTimes(t *testing.T) {
+	host := newFakeHost()
+	wf, err := New("timed", WithSteps(Step("a",
+		WithRun(func(ctx context.Context, tk Task) (any, error) {
+			time.Sleep(5 * time.Millisecond)
+			return nil, nil
+		}),
+		WithCompensate(func(ctx context.Context, c Compensation) error {
+			time.Sleep(5 * time.Millisecond)
+			return nil
+		}),
+	)))
+	require.NoError(t, err)
+
+	// The forward report brackets the handler with the worker's own clock
+	before := time.Now()
+	w := newTestWorker(t, wf, host, false)
+	require.NoError(t, w.Job(t.Context(), methodRun, &payloadEnvelope{value: runPayloadFor(wf, "a")}))
+	run := reportedRun(t, host)
+	assert.False(t, run.StartedAt.Before(before), "the start time should be taken when the handler runs")
+	assert.GreaterOrEqual(t, run.FinishedAt.Sub(run.StartedAt), 5*time.Millisecond, "the finish time should be taken after the handler returns")
+
+	// The compensation report carries its own times
+	undo := newTestWorker(t, wf, host, true)
+	require.NoError(t, undo.Job(t.Context(), methodCompensate, &payloadEnvelope{value: runPayloadFor(wf, "a")}))
+	comp := reportedCompensation(t, host)
+	assert.False(t, comp.StartedAt.IsZero())
+	assert.GreaterOrEqual(t, comp.FinishedAt.Sub(comp.StartedAt), 5*time.Millisecond)
+}
+
+func TestWorkerResendsTheSameTimesWhenTheReportIsRetried(t *testing.T) {
+	host := newFakeHost()
+	wf, err := New("timed-retry", WithSteps(Step("a", WithRun(noopRun))))
+	require.NoError(t, err)
+
+	w := newTestWorker(t, wf, host, false)
+	p := runPayloadFor(wf, "a")
+
+	// The first report fails, so the times are only memoized
+	host.failDispatch = true
+	require.Error(t, w.Job(t.Context(), methodRun, &payloadEnvelope{value: p}))
+	memo := w.result
+	require.NotNil(t, memo)
+	require.False(t, memo.startedAt.IsZero())
+
+	// The retried report re-sends the memoized times, so a retried turn records the same events
+	host.failDispatch = false
+	require.NoError(t, w.Job(t.Context(), methodRun, &payloadEnvelope{value: p}))
+	run := reportedRun(t, host)
+	assert.True(t, memo.startedAt.Equal(run.StartedAt))
+	assert.True(t, memo.finishedAt.Equal(run.FinishedAt))
+}
+
 func TestWorkerRunsTheHandlerAgainForTheNextAttempt(t *testing.T) {
 	host := newFakeHost()
 

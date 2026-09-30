@@ -132,6 +132,11 @@ type instanceState struct {
 	// PendingStart is set only on the placeholder stored together with a start job, before the instance has a journal
 	// The placeholder keeps Status empty, so everything that asks whether the instance has a journal still finds none, and the first journal write replaces it
 	PendingStart *pendingStart `msgpack:"pendingStart,omitempty"`
+	// LastEventSeq is the sequence number of the last history event written with the journal, so a retried turn reproduces the same numbers
+	// The events themselves live outside the journal, so a wide fan-out does not fill the size-limited journal merely to support a timeline
+	LastEventSeq int64 `msgpack:"lastEventSeq,omitempty"`
+	// NoEventHistory records that the definition opted out of event history with WithoutEventHistory, when the instance started
+	NoEventHistory bool `msgpack:"noEventHistory,omitempty"`
 	// encoded reuses the exact size-check encoding when the provider serializes this state immediately afterward
 	encoded []byte
 }
@@ -141,20 +146,28 @@ type pendingStart struct {
 	Version   int        `msgpack:"version"`
 	Parent    *parentRef `msgpack:"parent,omitempty"`
 	CreatedAt time.Time  `msgpack:"createdAt"`
+	// Workflow and NoEventHistory let a reader without the definition describe the pending instance
+	Workflow       string `msgpack:"workflow,omitempty"`
+	NoEventHistory bool   `msgpack:"noEventHistory,omitempty"`
 }
 
 // newPendingPlaceholder returns the placeholder stored with a start job, and the workflow labels that make it listable
-func newPendingPlaceholder(p *startPayload) (state instanceState, labels components.WorkflowLabels) {
+func newPendingPlaceholder(def *definition, p *startPayload) (state instanceState, labels components.WorkflowLabels) {
 	state = instanceState{
 		PendingStart: &pendingStart{
-			Version:   p.Version,
-			Parent:    p.Parent,
-			CreatedAt: p.CreatedAt,
+			Version:        p.Version,
+			Parent:         p.Parent,
+			CreatedAt:      p.CreatedAt,
+			Workflow:       def.name,
+			NoEventHistory: def.noEventHistory,
 		},
 	}
 	labels = components.WorkflowLabels{
 		Status:  string(StatusPending),
 		Version: p.Version,
+	}
+	if !p.CreatedAt.IsZero() {
+		labels.Created = components.FormatWorkflowCreated(p.CreatedAt)
 	}
 	if p.Parent != nil {
 		labels.Parent = p.Parent.InstanceID

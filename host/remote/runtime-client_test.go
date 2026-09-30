@@ -418,9 +418,9 @@ func TestDispatchInboundChecksSessionIdentity(t *testing.T) {
 	rc := newRuntimeClient(runtimeClientConfig{
 		addresses: []string{"127.0.0.1:1"},
 		handlers: runtimeHandlers{
-			terminateActor: func(context.Context, protocol.TerminateActorRequest) *protocol.Error {
+			terminateActor: func(context.Context, protocol.TerminateActorRequest) (protocol.TerminateActorResponse, *protocol.Error) {
 				called = true
-				return nil
+				return protocol.TerminateActorResponse{NotActive: true}, nil
 			},
 		},
 	})
@@ -454,6 +454,11 @@ func TestDispatchInboundChecksSessionIdentity(t *testing.T) {
 				assert.False(t, isErr, "unexpected error %v", perr)
 				assert.Equal(t, protocol.KindTerminateActorResponse, resp.Kind)
 				assert.True(t, called)
+
+				// The handler's result is relayed to the runtime
+				var out protocol.TerminateActorResponse
+				require.NoError(t, resp.DecodePayload(&out))
+				assert.True(t, out.NotActive)
 				return
 			}
 

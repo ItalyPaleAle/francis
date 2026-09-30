@@ -15,6 +15,7 @@ import (
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/utils"
 )
 
 func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {
@@ -57,12 +58,13 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 		defer cancel()
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err = tx.ExecContext(queryCtx,
-			`INSERT INTO `+s.tablePrefix+`hosts (host_id, host_address, host_last_health_check, host_session_id)
-			VALUES (?, ?, ?, ?)`,
+			`INSERT INTO `+s.tablePrefix+`hosts (host_id, host_address, host_last_health_check, host_session_id, host_runtime_id)
+			VALUES (?, ?, ?, ?, ?)`,
 			hostID,
 			req.Address,
 			now,
-			nullString(req.SessionID),
+			utils.NullString(req.SessionID),
+			utils.NullString(req.RuntimeID),
 		)
 		if isConstraintError(err) {
 			return zero, components.ErrHostAlreadyRegistered
@@ -126,12 +128,9 @@ func (s *SQLiteProvider) reattachHost(ctx context.Context, req components.Regist
 
 		// Reject a reattach while an exclusive-access lease is held, so a locked cluster stays empty
 		// A reattach never adds a host beyond the limit, so the host count and limit agreement are not re-checked here
-		state, err := s.readClusterState(ctx, tx)
+		err = s.checkClusterNotLocked(ctx, tx, now)
 		if err != nil {
 			return zero, err
-		}
-		if state.LeaseLive(now) {
-			return zero, components.ErrClusterLocked
 		}
 
 		// Try to refresh the existing registration in place, handing it to the new session
@@ -142,9 +141,9 @@ func (s *SQLiteProvider) reattachHost(ctx context.Context, req components.Regist
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		res, err = tx.ExecContext(queryCtx,
 			`UPDATE `+s.tablePrefix+`hosts
-			SET host_address = ?, host_last_health_check = ?, host_session_id = ?, host_draining = 0
+			SET host_address = ?, host_last_health_check = ?, host_session_id = ?, host_runtime_id = ?, host_draining = 0
 			WHERE host_id = ?`,
-			req.Address, now, nullString(req.SessionID), req.ExistingHostID,
+			req.Address, now, utils.NullString(req.SessionID), utils.NullString(req.RuntimeID), req.ExistingHostID,
 		)
 		if isConstraintError(err) {
 			return zero, components.ErrHostAlreadyRegistered
@@ -167,9 +166,9 @@ func (s *SQLiteProvider) reattachHost(ctx context.Context, req components.Regist
 			defer cancel()
 			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 			_, err = tx.ExecContext(queryCtx,
-				`INSERT INTO `+s.tablePrefix+`hosts (host_id, host_address, host_last_health_check, host_session_id)
-				VALUES (?, ?, ?, ?)`,
-				newHostID, req.Address, now, nullString(req.SessionID),
+				`INSERT INTO `+s.tablePrefix+`hosts (host_id, host_address, host_last_health_check, host_session_id, host_runtime_id)
+				VALUES (?, ?, ?, ?, ?)`,
+				newHostID, req.Address, now, utils.NullString(req.SessionID), utils.NullString(req.RuntimeID),
 			)
 			if isConstraintError(err) {
 				return zero, components.ErrHostAlreadyRegistered
@@ -850,24 +849,27 @@ func (s *SQLiteProvider) insertHostActorTypes(ctx context.Context, tx *sql.Tx, h
 	q.WriteString(s.tablePrefix)
 	q.WriteString(
 		`host_actor_types
-			(host_id, actor_type, actor_idle_timeout, actor_concurrency_limit)
+			(host_id, actor_type, actor_idle_timeout, actor_concurrency_limit, completed_job_retention, dead_lettered_job_retention)
 		VALUES `,
 	)
-	q.Grow(len(actorTypes) * len("(?,?,?,?),"))
+	q.Grow(len(actorTypes) * len("(?,?,?,?,?,?),"))
 
-	args := make([]any, 0, len(actorTypes)*3)
+	// Retentions are stored as signed milliseconds, like the idle timeout
+	args := make([]any, 0, len(actorTypes)*6)
 	for i, t := range actorTypes {
 		args = append(args,
 			hostID,
 			t.ActorType,
 			t.IdleTimeout.Milliseconds(),
 			t.ConcurrencyLimit,
+			t.CompletedJobRetention.Milliseconds(),
+			t.DeadLetteredJobRetention.Milliseconds(),
 		)
 
 		if i > 0 {
 			q.WriteRune(',')
 		}
-		q.WriteString("(?,?,?,?)")
+		q.WriteString("(?,?,?,?,?,?)")
 	}
 
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
@@ -878,12 +880,4 @@ func (s *SQLiteProvider) insertHostActorTypes(ctx context.Context, tx *sql.Tx, h
 	}
 
 	return nil
-}
-
-// nullString returns nil (SQL NULL) for an empty string, otherwise the string
-func nullString(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
 }

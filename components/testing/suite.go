@@ -55,6 +55,17 @@ func (s Suite) RunTests(t *testing.T) {
 
 	t.Run("jobs", s.TestJobs)
 
+	t.Run("get exclusive lease", s.TestGetExclusiveLease)
+	t.Run("host details", s.TestHostDetails)
+	t.Run("mark host draining", s.TestMarkHostDraining)
+	t.Run("list placements", s.TestListPlacements)
+	t.Run("query jobs", s.TestQueryJobs)
+	t.Run("list alarms", s.TestListAlarms)
+	t.Run("list state actor types", s.TestListStateActorTypes)
+	t.Run("list states management", s.TestListStatesManagement)
+	t.Run("workflow events", s.TestWorkflowEvents)
+	t.Run("runtime membership", s.TestRuntimeMembership)
+
 	t.Run("backup and restore", s.TestBackupRestore)
 
 	t.Run("cluster admission", s.TestClusterAdmission)
@@ -6355,6 +6366,50 @@ func (s Suite) TestJobs(t *testing.T) {
 		assert.False(t, created)
 	})
 
+	t.Run("a dispatch that rejects a locked cluster stores nothing while an exclusive-access lease is held", func(t *testing.T) {
+		ctx := t.Context()
+		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+
+		_, err := s.p.AcquireExclusiveLease(ctx, "job-owner", time.Minute)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = s.p.ReleaseExclusiveLease(context.WithoutCancel(t.Context()), "job-owner") })
+
+		// lockedReq builds a dispatch due now, which takes the leasing path when leaseImmediate is set
+		lockedReq := func(leaseImmediate []string, reject bool) components.SetAlarmReq {
+			return components.SetAlarmReq{
+				AlarmProperties:       ref.AlarmProperties{DueTime: s.p.Now()},
+				Kind:                  components.AlarmKindJob,
+				JobMethod:             "process",
+				LeaseImmediate:        leaseImmediate,
+				InitialState:          &components.InitialState{Data: []byte("initial")},
+				RejectIfClusterLocked: reject,
+			}
+		}
+
+		// Both the storage-only path and the leasing path refuse, and store neither the job nor its initial state
+		jobRef := ref.NewAlarmRef("JOB", "locked", "key")
+		for _, leaseImmediate := range [][]string{nil, {jobHost}} {
+			_, _, _, err = s.p.DispatchJob(ctx, jobRef, lockedReq(leaseImmediate, true))
+			require.ErrorIs(t, err, components.ErrClusterLocked)
+		}
+		jobs, err := s.p.ListJobs(ctx, "JOB", "locked")
+		require.NoError(t, err)
+		assert.Empty(t, jobs)
+		_, err = s.p.GetState(ctx, jobRef.ActorRef())
+		require.ErrorIs(t, err, components.ErrNoState)
+
+		// Without the option the job is stored, since hosts keep working until they are evicted
+		_, created, _, err := s.p.DispatchJob(ctx, jobRef, lockedReq(nil, false))
+		require.NoError(t, err)
+		assert.True(t, created)
+
+		// Once the lease is released the option lets the dispatch through
+		require.NoError(t, s.p.ReleaseExclusiveLease(ctx, "job-owner"))
+		_, created, _, err = s.p.DispatchJob(ctx, ref.NewAlarmRef("JOB", "unlocked", "key"), lockedReq([]string{jobHost}, true))
+		require.NoError(t, err)
+		assert.True(t, created)
+	})
+
 	// A cancellation only ever removes work that has not run, so the record a finished job left behind has to survive it
 	// The scope belongs inside the deletion rather than in a status check before it, since a job that finalizes in between would otherwise have its record destroyed
 	t.Run("a live-only delete leaves a terminal record alone", func(t *testing.T) {
@@ -6750,6 +6805,7 @@ func (s Suite) TestBackupRestore(t *testing.T) {
 		require.NotEmpty(t, setA.States, "expected actor state in the backup")
 		require.GreaterOrEqual(t, len(setA.Alarms), 2, "expected a plain alarm and a live job in the backup")
 		require.NotEmpty(t, setA.TerminalJobs, "expected a terminal job in the backup")
+		require.Len(t, setA.WorkflowEvents, 3, "expected the workflow events in the backup")
 
 		// Add records that are absent from the snapshot, so a correct restore must remove them
 		AddExtraBackupData(t, ctx, s.p, s.p.Now())
@@ -6766,6 +6822,14 @@ func (s Suite) TestBackupRestore(t *testing.T) {
 		setB := DecodeBackup(t, bufB.Bytes())
 
 		AssertBackupContentsEqual(t, setA, setB)
+
+		// The restored history is served again, without the event appended after the snapshot
+		events, err := s.p.ListWorkflowEvents(ctx, components.ListWorkflowEventsReq{ActorType: "BK", ActorID: "state-1"})
+		require.NoError(t, err)
+		require.Len(t, events.Events, 3)
+		for i, ev := range events.Events {
+			assert.Equal(t, int64(i+1), ev.Seq)
+		}
 	})
 
 	t.Run("backup runs online but restore refuses while a host is connected", func(t *testing.T) {

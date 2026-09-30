@@ -115,6 +115,9 @@ type reportPayload struct {
 	ChildStatus       Status              `msgpack:"childStatus,omitempty"`
 	ChildCompensation CompensationOutcome `msgpack:"childCompensation,omitempty"`
 	TraceParent       string              `msgpack:"traceParent,omitempty"`
+	// StartedAt and FinishedAt are the worker's own clock readings around the handler, which the event history records as worker time
+	StartedAt  time.Time `msgpack:"startedAt,omitzero"`
+	FinishedAt time.Time `msgpack:"finishedAt,omitzero"`
 }
 
 // compReportPayload carries one compensation's outcome back to the orchestrator
@@ -129,6 +132,9 @@ type compReportPayload struct {
 	Retryable         bool                `msgpack:"retryable,omitempty"`
 	Transport         bool                `msgpack:"transport,omitempty"`
 	TraceParent       string              `msgpack:"traceParent,omitempty"`
+	// StartedAt and FinishedAt are the worker's own clock readings around the handler, which the event history records as worker time
+	StartedAt  time.Time `msgpack:"startedAt,omitzero"`
+	FinishedAt time.Time `msgpack:"finishedAt,omitzero"`
 }
 
 // eventPayload delivers an external event to a WaitForEvent step

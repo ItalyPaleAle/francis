@@ -1,0 +1,425 @@
+package remote
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"log/slog"
+	"net/http"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/quic-go/webtransport-go"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/italypaleale/francis/host"
+	"github.com/italypaleale/francis/internal/ca"
+	"github.com/italypaleale/francis/internal/certholder"
+	"github.com/italypaleale/francis/internal/hosttls"
+	"github.com/italypaleale/francis/internal/wt"
+	"github.com/italypaleale/francis/protocol"
+)
+
+// scriptedRuntime is a fake runtime that accepts mTLS reconnects, answers host requests, and lets a test send requests to the connected host
+type scriptedRuntime struct {
+	addr string
+
+	registrations atomic.Int32
+	unregisters   atomic.Int32
+	healthChecks  atomic.Int32
+
+	// healthDeadlineMs is the health check deadline the runtime advertises, 60s unless a test lowers it before the host connects
+	healthDeadlineMs atomic.Int64
+
+	// sessionCh receives each session once it has registered
+	sessionCh chan *webtransport.Session
+}
+
+// startScriptedRuntime starts a scriptedRuntime that reattaches the host as host-1 on every registration
+func startScriptedRuntime(t *testing.T) *scriptedRuntime {
+	t.Helper()
+
+	rt := &scriptedRuntime{
+		addr:      freeUDPAddr(t),
+		sessionCh: make(chan *webtransport.Session, 8),
+	}
+	rt.healthDeadlineMs.Store(60_000)
+
+	mux := http.NewServeMux()
+	wtServer := wt.NewServer(rt.addr, testRuntimeServerTLS(t), mux)
+	mux.HandleFunc(protocol.RuntimeConnectPath, func(w http.ResponseWriter, r *http.Request) {
+		session, uErr := wtServer.Upgrade(w, r)
+		if uErr != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		// The first stream carries the registration, which always reattaches
+		stream, sErr := session.AcceptStream(r.Context())
+		if sErr != nil {
+			return
+		}
+		req, rErr := protocol.ReadMessageWithTimeout(stream, 5*time.Second)
+		if rErr != nil {
+			_ = stream.Close()
+			return
+		}
+		rt.registrations.Add(1)
+		resp, _ := req.ReplyWith(protocol.KindRegisterHostResponse, protocol.RegisterHostResponse{
+			HostID:                "host-1",
+			SessionID:             "session-1",
+			Reattached:            true,
+			HealthCheckDeadlineMs: rt.healthDeadlineMs.Load(),
+		})
+		_ = protocol.WriteMessage(stream, resp)
+		_ = stream.Close()
+
+		rt.sessionCh <- session
+
+		// Answer every later host request, recording unregistrations
+		for {
+			s, aErr := session.AcceptStream(session.Context())
+			if aErr != nil {
+				return
+			}
+			go func() {
+				defer s.Close()
+				in, inErr := protocol.ReadMessageWithTimeout(s, 5*time.Second)
+				if inErr != nil {
+					return
+				}
+				switch in.Kind {
+				case protocol.KindUnregisterHost:
+					rt.unregisters.Add(1)
+					_ = protocol.WriteMessage(s, in.Reply(protocol.KindUnregisterHostResponse, nil))
+				case protocol.KindHealthCheck:
+					rt.healthChecks.Add(1)
+					_ = protocol.WriteMessage(s, in.Reply(protocol.KindHealthCheckResponse, nil))
+				default:
+					_ = protocol.WriteMessage(s, in.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "unexpected kind")))
+				}
+			}()
+		}
+	})
+
+	go func() {
+		_ = wtServer.ListenAndServe()
+	}()
+	t.Cleanup(func() {
+		_ = wtServer.Close()
+	})
+
+	return rt
+}
+
+// send sends one request to the host over the session and returns the reply
+func (rt *scriptedRuntime) send(t *testing.T, session *webtransport.Session, kind string, payload any) *protocol.Envelope {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	req, err := protocol.NewRequest(kind, payload)
+	require.NoError(t, err)
+	req.HostID = "host-1"
+	req.SessionID = "session-1"
+
+	stream, err := session.OpenStreamSync(ctx)
+	require.NoError(t, err)
+	defer wt.CloseStream(stream)
+
+	resp, err := protocol.RoundTrip(ctx, stream, req)
+	require.NoError(t, err)
+	return resp
+}
+
+// newReconnectingClient returns a runtime client holding a valid host-1 certificate, so it reconnects over mTLS without bootstrapping
+func newReconnectingClient(t *testing.T, addr string, cfg runtimeClientConfig) *runtimeClient {
+	t.Helper()
+
+	cas, err := ca.CABundle([][]byte{testRuntimePSK})
+	require.NoError(t, err)
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	der, err := cas[0].IssueWorkloadCert(ca.HostURI("host-1"), pub, time.Hour)
+	require.NoError(t, err)
+	leaf, err := x509.ParseCertificate(der)
+	require.NoError(t, err)
+
+	holder := certholder.New(&tls.Certificate{Certificate: [][]byte{der}, PrivateKey: priv, Leaf: leaf}, ca.NewCertPool(cas))
+	cfg.addresses = []string{addr}
+	cfg.peerAddress = "127.0.0.1:7010"
+	cfg.actorTypes = []protocol.ActorHostType{{ActorType: "T", IdleTimeoutMs: 60000}}
+	cfg.tlsConfig = hosttls.RuntimeClientTLSConfig(holder)
+	cfg.holder = holder
+	cfg.minBackoff = 20 * time.Millisecond
+	cfg.maxBackoff = 50 * time.Millisecond
+	cfg.requestTimeout = 2 * time.Second
+	cfg.log = slog.New(slog.DiscardHandler)
+
+	rc := newRuntimeClient(cfg)
+	rc.hostID = "host-1"
+	return rc
+}
+
+func waitSession(t *testing.T, rt *scriptedRuntime) *webtransport.Session {
+	t.Helper()
+	select {
+	case s := <-rt.sessionCh:
+		return s
+	case <-time.After(15 * time.Second):
+		t.Fatal("host did not register with the fake runtime")
+		return nil
+	}
+}
+
+func waitRun(t *testing.T, runErr <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-runErr:
+		return err
+	case <-time.After(15 * time.Second):
+		t.Fatal("Run did not return")
+		return nil
+	}
+}
+
+func TestRuntimeClientAdministrativeDrain(t *testing.T) {
+	t.Run("drain acknowledges, tears down, and ends Run", func(t *testing.T) {
+		rt := startScriptedRuntime(t)
+
+		var (
+			drainStarted atomic.Bool
+			drainTimeout atomic.Int64
+		)
+		onDrainCalled := make(chan struct{})
+		rc := newReconnectingClient(t, rt.addr, runtimeClientConfig{
+			onDrainStart: func() { drainStarted.Store(true) },
+			onDrain: func(timeout time.Duration) {
+				drainTimeout.Store(int64(timeout))
+				close(onDrainCalled)
+			},
+		})
+
+		runErr := make(chan error, 1)
+		go func() {
+			runErr <- rc.Run(t.Context())
+		}()
+		session := waitSession(t, rt)
+
+		// The drain is acknowledged before the teardown starts
+		resp := rt.send(t, session, protocol.KindHostDrain, protocol.HostDrainRequest{TimeoutMs: 1500, Reason: "test"})
+		perr, isErr := resp.AsError()
+		require.False(t, isErr, "unexpected error %v", perr)
+		require.Equal(t, protocol.KindHostDrainResponse, resp.Kind)
+		var ack protocol.HostDrainResponse
+		require.NoError(t, resp.DecodePayload(&ack))
+		assert.False(t, ack.AlreadyDraining)
+
+		// The graceful sequence runs, bounded by the requested timeout, and Run reports the drain
+		err := waitRun(t, runErr)
+		require.ErrorIs(t, err, host.ErrAdministrativeDrain)
+		select {
+		case <-onDrainCalled:
+		default:
+			t.Fatal("onDrain was not called")
+		}
+		assert.True(t, drainStarted.Load())
+		assert.Equal(t, 1500*time.Millisecond, time.Duration(drainTimeout.Load()))
+		assert.Equal(t, int32(1), rt.unregisters.Load())
+
+		// The host never registers again, and a later Run refuses to start
+		require.ErrorIs(t, rc.Run(t.Context()), host.ErrAdministrativeDrain)
+		time.Sleep(200 * time.Millisecond)
+		assert.Equal(t, int32(1), rt.registrations.Load())
+	})
+
+	t.Run("session dropping mid-drain does not reconnect", func(t *testing.T) {
+		rt := startScriptedRuntime(t)
+
+		onDrainEntered := make(chan struct{})
+		releaseDrain := make(chan struct{})
+		rc := newReconnectingClient(t, rt.addr, runtimeClientConfig{
+			onDrain: func(time.Duration) {
+				close(onDrainEntered)
+				<-releaseDrain
+			},
+		})
+
+		runErr := make(chan error, 1)
+		go func() {
+			runErr <- rc.Run(t.Context())
+		}()
+		session := waitSession(t, rt)
+
+		resp := rt.send(t, session, protocol.KindHostDrain, protocol.HostDrainRequest{Reason: "test"})
+		require.Equal(t, protocol.KindHostDrainResponse, resp.Kind)
+
+		// Drop the session while local actors are still draining
+		select {
+		case <-onDrainEntered:
+		case <-time.After(10 * time.Second):
+			t.Fatal("onDrain was not called")
+		}
+		_ = session.CloseWithError(0, "runtime went away")
+
+		// Give a reconnect loop time to misbehave before the drain completes
+		time.Sleep(200 * time.Millisecond)
+		close(releaseDrain)
+
+		err := waitRun(t, runErr)
+		require.ErrorIs(t, err, host.ErrAdministrativeDrain)
+		time.Sleep(200 * time.Millisecond)
+		assert.Equal(t, int32(1), rt.registrations.Load())
+	})
+
+	t.Run("health checks keep running while actors drain", func(t *testing.T) {
+		rt := startScriptedRuntime(t)
+		rt.healthDeadlineMs.Store(1500)
+
+		// Halting the actors takes longer than the health check deadline
+		var before, after int32
+		rc := newReconnectingClient(t, rt.addr, runtimeClientConfig{
+			onDrain: func(time.Duration) {
+				before = rt.healthChecks.Load()
+				time.Sleep(2 * time.Second)
+				after = rt.healthChecks.Load()
+			},
+		})
+
+		runErr := make(chan error, 1)
+		go func() {
+			runErr <- rc.Run(t.Context())
+		}()
+		session := waitSession(t, rt)
+		resp := rt.send(t, session, protocol.KindHostDrain, protocol.HostDrainRequest{Reason: "test"})
+		require.Equal(t, protocol.KindHostDrainResponse, resp.Kind)
+
+		// The runtime kept receiving health checks, so the registration did not expire while the actors halted
+		require.ErrorIs(t, waitRun(t, runErr), host.ErrAdministrativeDrain)
+		assert.Greater(t, after, before, "no health check was sent while the actors drained")
+	})
+
+	t.Run("context cancellation is not a drain", func(t *testing.T) {
+		rt := startScriptedRuntime(t)
+
+		drainTimeout := make(chan time.Duration, 1)
+		rc := newReconnectingClient(t, rt.addr, runtimeClientConfig{
+			onDrain: func(timeout time.Duration) { drainTimeout <- timeout },
+		})
+
+		ctx, cancel := context.WithCancel(t.Context())
+		runErr := make(chan error, 1)
+		go func() {
+			runErr <- rc.Run(ctx)
+		}()
+		waitSession(t, rt)
+		<-rc.Ready()
+
+		cancel()
+		require.NoError(t, waitRun(t, runErr))
+		select {
+		case timeout := <-drainTimeout:
+			assert.Equal(t, time.Duration(0), timeout, "a shutdown is not bounded")
+		default:
+			t.Fatal("onDrain was not called")
+		}
+		assert.Equal(t, int32(1), rt.unregisters.Load())
+	})
+}
+
+func TestDispatchInboundDrain(t *testing.T) {
+	identity := sessionIdentity{hostID: "host-1", sessionID: "session-1"}
+	drain := func(t *testing.T, rc *runtimeClient) protocol.HostDrainResponse {
+		t.Helper()
+		req, err := protocol.NewRequest(protocol.KindHostDrain, protocol.HostDrainRequest{TimeoutMs: 250})
+		require.NoError(t, err)
+		resp := rc.dispatchInbound(t.Context(), req, identity)
+		perr, isErr := resp.AsError()
+		require.False(t, isErr, "unexpected error %v", perr)
+		var out protocol.HostDrainResponse
+		require.NoError(t, resp.DecodePayload(&out))
+		return out
+	}
+
+	t.Run("second drain reports already draining", func(t *testing.T) {
+		rc := newRuntimeClient(runtimeClientConfig{addresses: []string{"127.0.0.1:1"}})
+		require.True(t, rc.drain.Start(), "a drain is only accepted while the client runs")
+		assert.False(t, drain(t, rc).AlreadyDraining)
+		assert.True(t, drain(t, rc).AlreadyDraining)
+
+		// The accepted drain keeps its timeout for the teardown
+		teardown, timeout := rc.beginTeardown(false)
+		assert.True(t, teardown)
+		assert.Equal(t, 250*time.Millisecond, timeout)
+	})
+
+	t.Run("drain during shutdown reports already draining", func(t *testing.T) {
+		rc := newRuntimeClient(runtimeClientConfig{addresses: []string{"127.0.0.1:1"}})
+		require.True(t, rc.drain.Start(), "a drain is only accepted while the client runs")
+		teardown, timeout := rc.beginTeardown(true)
+		assert.True(t, teardown)
+		assert.Zero(t, timeout)
+		assert.True(t, drain(t, rc).AlreadyDraining)
+		assert.False(t, rc.drain.Accepted())
+	})
+
+	t.Run("a client that is not running refuses a drain", func(t *testing.T) {
+		rc := newRuntimeClient(runtimeClientConfig{addresses: []string{"127.0.0.1:1"}})
+		req, err := protocol.NewRequest(protocol.KindHostDrain, protocol.HostDrainRequest{})
+		require.NoError(t, err)
+		perr, isErr := rc.dispatchInbound(t.Context(), req, identity).AsError()
+		require.True(t, isErr)
+		assert.Equal(t, protocol.ErrCodeHostUnavailable, perr.Code)
+		assert.False(t, rc.drain.Accepted())
+	})
+
+	t.Run("a new run after a shutdown accepts a drain again", func(t *testing.T) {
+		rc := newRuntimeClient(runtimeClientConfig{addresses: []string{"127.0.0.1:1"}})
+		require.True(t, rc.drain.Start())
+		teardown, _ := rc.beginTeardown(true)
+		require.True(t, teardown)
+		rc.drain.Stopped()
+
+		// The shutdown belonged to the previous run, so the next one can be drained
+		require.True(t, rc.drain.Start())
+		assert.False(t, drain(t, rc).AlreadyDraining)
+	})
+
+	t.Run("no drain and no shutdown means no teardown", func(t *testing.T) {
+		rc := newRuntimeClient(runtimeClientConfig{addresses: []string{"127.0.0.1:1"}})
+		require.True(t, rc.drain.Start(), "a drain is only accepted while the client runs")
+		teardown, _ := rc.beginTeardown(false)
+		assert.False(t, teardown)
+	})
+}
+
+func TestDispatchInboundSnapshot(t *testing.T) {
+	var got protocol.HostSnapshotRequest
+	rc := newRuntimeClient(runtimeClientConfig{
+		addresses: []string{"127.0.0.1:1"},
+		handlers: runtimeHandlers{
+			snapshot: func(_ context.Context, req protocol.HostSnapshotRequest) (protocol.HostSnapshotResponse, *protocol.Error) {
+				got = req
+				return protocol.HostSnapshotResponse{HostID: "host-1", ActiveCount: 3}, nil
+			},
+		},
+	})
+
+	req, err := protocol.NewRequest(protocol.KindHostSnapshot, protocol.HostSnapshotRequest{ActorType: "T", Limit: 10, SkipActivations: true})
+	require.NoError(t, err)
+	resp := rc.dispatchInbound(t.Context(), req, sessionIdentity{hostID: "host-1", sessionID: "s"})
+	perr, isErr := resp.AsError()
+	require.False(t, isErr, "unexpected error %v", perr)
+	require.Equal(t, protocol.KindHostSnapshotResponse, resp.Kind)
+
+	var out protocol.HostSnapshotResponse
+	require.NoError(t, resp.DecodePayload(&out))
+	assert.Equal(t, "host-1", out.HostID)
+	assert.Equal(t, 3, out.ActiveCount)
+	assert.Equal(t, protocol.HostSnapshotRequest{ActorType: "T", Limit: 10, SkipActivations: true}, got)
+}

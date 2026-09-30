@@ -174,11 +174,11 @@ func TestRestoreOfLegacyBackups(t *testing.T) {
 	// open returns nil for a provider this environment cannot reach, which skips that leg rather than failing it
 	providers := []struct {
 		name string
-		open func(t *testing.T) components.ActorProvider
+		open func(t *testing.T) components.ManagementProvider
 	}{
-		{"memory", func(t *testing.T) components.ActorProvider { return newMemory(t) }},
-		{"sqlite", func(t *testing.T) components.ActorProvider { return newSQLite(t) }},
-		{"postgres", func(t *testing.T) components.ActorProvider {
+		{"memory", func(t *testing.T) components.ManagementProvider { return newMemory(t) }},
+		{"sqlite", func(t *testing.T) components.ManagementProvider { return newSQLite(t) }},
+		{"postgres", func(t *testing.T) components.ManagementProvider {
 			p := newPostgres(t)
 			if p == nil {
 				// Already skipped, and a typed nil would not compare equal to nil once it is in the interface
@@ -198,7 +198,13 @@ func TestRestoreOfLegacyBackups(t *testing.T) {
 						return
 					}
 
-					err := p.Restore(t.Context(), bytes.NewReader(encodeLegacyStream(t, tc)))
+					// A history written before the restore must be wiped, since a v1 stream carries no events to replace it
+					err := p.SetState(t.Context(), ref.NewActorRef("OLD", "actor-1"), []byte("pre-restore"), components.SetStateOpts{
+						AppendEvents: []components.WorkflowEvent{{Seq: 1, Time: time.Now(), Kind: "stale"}},
+					})
+					require.NoError(t, err)
+
+					err = p.Restore(t.Context(), bytes.NewReader(encodeLegacyStream(t, tc)))
 					require.NoError(t, err)
 
 					tc.assert(t, t.Context(), p)
@@ -207,6 +213,10 @@ func TestRestoreOfLegacyBackups(t *testing.T) {
 					stateData, err := p.GetState(t.Context(), ref.NewActorRef("OLD", "actor-1"))
 					require.NoError(t, err)
 					assert.Equal(t, []byte("state-data"), stateData, "the rest of the stream should have restored too")
+
+					events, err := p.ListWorkflowEvents(t.Context(), components.ListWorkflowEventsReq{ActorType: "OLD", ActorID: "actor-1"})
+					require.NoError(t, err)
+					assert.Empty(t, events.Events, "the restore should have wiped the event history")
 				})
 			}
 		})
@@ -228,4 +238,59 @@ func encodeLegacyStream(t *testing.T, tc legacyCase) []byte {
 	tc.stream(t, enc)
 
 	return buf.Bytes()
+}
+
+// TestRestoreDropsOrphanedWorkflowEvents restores a stream carrying events for an actor without state, which every provider must drop rather than keep invisibly
+func TestRestoreDropsOrphanedWorkflowEvents(t *testing.T) {
+	now := time.Now().Truncate(time.Millisecond)
+
+	// The stream has state for one actor, and events for that actor and for another one without state
+	var buf bytes.Buffer
+	w, err := backup.NewWriter(&buf, now)
+	require.NoError(t, err)
+	require.NoError(t, w.WriteState(&backup.StateRecord{ActorType: "OE", ActorID: "kept", Data: []byte("state")}))
+	require.NoError(t, w.WriteWorkflowEvent(&backup.WorkflowEventRecord{ActorType: "OE", ActorID: "kept", Seq: 1, Time: now, Kind: "kept"}))
+	require.NoError(t, w.WriteWorkflowEvent(&backup.WorkflowEventRecord{ActorType: "OE", ActorID: "orphan", Seq: 5, Time: now, Kind: "orphan"}))
+
+	providers := []struct {
+		name string
+		open func(t *testing.T) components.ManagementProvider
+	}{
+		{"memory", func(t *testing.T) components.ManagementProvider { return newMemory(t) }},
+		{"sqlite", func(t *testing.T) components.ManagementProvider { return newSQLite(t) }},
+		{"postgres", func(t *testing.T) components.ManagementProvider {
+			p := newPostgres(t)
+			if p == nil {
+				// Already skipped, and a typed nil would not compare equal to nil once it is in the interface
+				return nil
+			}
+			return p
+		}},
+	}
+	for _, prov := range providers {
+		t.Run(prov.name, func(t *testing.T) {
+			p := prov.open(t)
+			if p == nil {
+				// Test already skipped
+				return
+			}
+			require.NoError(t, p.Restore(t.Context(), bytes.NewReader(buf.Bytes())))
+
+			// The actor with state keeps its event
+			res, err := p.ListWorkflowEvents(t.Context(), components.ListWorkflowEventsReq{ActorType: "OE", ActorID: "kept"})
+			require.NoError(t, err)
+			require.Len(t, res.Events, 1)
+			assert.Equal(t, "kept", res.Events[0].Kind)
+
+			// A later history for the other actor that doesn't start over finds none of the dropped events
+			err = p.SetState(t.Context(), ref.NewActorRef("OE", "orphan"), []byte("state"), components.SetStateOpts{
+				AppendEvents: []components.WorkflowEvent{{Seq: 2, Time: now, Kind: "new"}},
+			})
+			require.NoError(t, err)
+			res, err = p.ListWorkflowEvents(t.Context(), components.ListWorkflowEventsReq{ActorType: "OE", ActorID: "orphan"})
+			require.NoError(t, err)
+			require.Len(t, res.Events, 1, "an orphaned event survived the restore")
+			assert.Equal(t, "new", res.Events[0].Kind)
+		})
+	}
 }

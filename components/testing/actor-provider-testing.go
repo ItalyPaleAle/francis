@@ -7,9 +7,9 @@ import (
 	"github.com/italypaleale/francis/components"
 )
 
-// ActorProviderTesting extends the ActorProvider interface adding test-only methods
+// ActorProviderTesting extends the ManagementProvider interface, which every provider in this module implements, adding test-only methods
 type ActorProviderTesting interface {
-	components.ActorProvider
+	components.ManagementProvider
 
 	// CleanupExpired performs garbage collection of expired records
 	CleanupExpired(ctx context.Context) error

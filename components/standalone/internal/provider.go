@@ -23,7 +23,7 @@ type Provider struct {
 	Clock           clock.WithTicker
 	CleanupInterval time.Duration
 	Mu              sync.RWMutex // Lock for Hosts, HostsByAddress, HostActorTypes, ActiveActors, Alarms, AlarmsByID
-	StateMu         sync.RWMutex // Lock for ActorState
+	StateMu         sync.RWMutex // Lock for ActorState and WorkflowEvents
 
 	// writeMu and stateWriteMu serialize writers (mutations):
 	// - writeMu for the Mu domain (hosts/actors/alarms)
@@ -45,6 +45,13 @@ type Provider struct {
 	AlarmsByID     map[string]*Alarm           // alarm_id -> alarm
 	TerminalJobs   map[string]*TerminalJob     // job_id -> dead job
 	ActorState     map[ActorKey]*StateEntry    // actor_type/actor_id -> state
+	// WorkflowEvents holds each actor's workflow events sorted by sequence number, and belongs to the StateMu domain because it lives and dies with the actor's state
+	// A slice stored here is never modified within its length: an append writes past it or into a new slice, so a snapshot taken under the read lock stays valid after the lock is released
+	WorkflowEvents map[ActorKey][]components.WorkflowEvent
+
+	// runtimes is the membership of runtime replicas, kept in memory only since a standalone provider serves a single runtime
+	runtimesMu sync.Mutex
+	runtimes   map[string]components.RuntimeInfo
 
 	// Cluster is the single-row cluster-admission state (host limit and exclusive-access lease)
 	// It is guarded by Mu, like the rest of the host domain, so host registration reads it atomically with the host maps
@@ -106,6 +113,8 @@ func NewProvider(log *slog.Logger, opts ProviderOptions, providerConfig componen
 		AlarmsByID:     make(map[string]*Alarm),
 		TerminalJobs:   make(map[string]*TerminalJob),
 		ActorState:     make(map[ActorKey]*StateEntry),
+		WorkflowEvents: make(map[ActorKey][]components.WorkflowEvent),
+		runtimes:       make(map[string]components.RuntimeInfo),
 	}
 
 	if p.Clock == nil {
@@ -190,6 +199,9 @@ func (p *Provider) CleanupExpired(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to clean up expired state: %w", err)
 	}
+
+	// Drop runtime memberships whose lease expired, which live in memory only
+	p.cleanupExpiredRuntimes()
 
 	return nil
 }
@@ -341,9 +353,17 @@ func (p *Provider) CleanupExpiredState(changes *Changes) (apply func()) {
 	// Return the function that applies the changes in-memory
 	return func() {
 		for _, key := range deleteKeys {
-			delete(p.ActorState, key)
+			p.deleteStateEntry(key)
 		}
 	}
+}
+
+// deleteStateEntry removes an actor's state from memory together with its workflow events, which never outlive the state they belong to
+// The persistence hook removes the events of every deleted state row in the same way
+// Must be called while holding the StateMu write lock
+func (p *Provider) deleteStateEntry(key ActorKey) {
+	delete(p.ActorState, key)
+	delete(p.WorkflowEvents, key)
 }
 
 // CleanupExpiredTerminalJobs removes the terminal-job records whose retention has elapsed, and returns the function that applies the removal in memory.

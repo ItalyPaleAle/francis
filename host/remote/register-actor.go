@@ -123,5 +123,8 @@ func (h *Host) RegisterBuiltInActor(b builtinactor.BuiltInActor) error {
 		return err
 	}
 
+	// Record the definition the built-in actor serves, if any, so host snapshots can report it
+	h.core.RecordManagementDefinition(b)
+
 	return nil
 }

@@ -16,6 +16,7 @@ import (
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/host"
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/bootstrapauth"
 	"github.com/italypaleale/francis/internal/ca"
@@ -247,6 +248,7 @@ func newHost(options *newHostOptions) (*Host, error) {
 			executeAlarm:   h.executeAlarm,
 			terminateActor: h.terminateActor,
 			jobFailed:      h.jobFailed,
+			snapshot:       h.snapshot,
 		},
 	})
 
@@ -275,12 +277,18 @@ func (h *Host) Service() *actor.Service {
 }
 
 // Run the host service.
-// Note this function is blocking, and will return only when the service is shut down via context cancellation.
+// Note this function is blocking, and will return only when the service is shut down via context cancellation, or after an administrative drain.
+// After an administrative drain the returned error matches host.ErrAdministrativeDrain, and the host cannot be run again.
 func (h *Host) Run(parentCtx context.Context) error {
 	if !h.running.CompareAndSwap(false, true) {
 		return errors.New("service is already running")
 	}
 	defer h.running.Store(false)
+
+	// A drained host is gone for good
+	if h.runtimeClient.drain.Accepted() {
+		return host.ErrAdministrativeDrain
+	}
 
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
@@ -305,7 +313,7 @@ func (h *Host) Run(parentCtx context.Context) error {
 
 	// On graceful shutdown the runtime client drains actors while its session is still alive, so this is only a fallback for an ungraceful exit where no runtime session was available
 	// Halting an already-halted actor is a no-op, so running it after a graceful drain is harmless
-	defer h.drainActors()
+	defer h.drainActors(0)
 
 	// The peer server runs under its own context so it keeps serving while local actors drain, then is stopped only after the runtime client returns
 	// This lets it reject new invocations with a retry-later error throughout the drain window, rather than tearing down alongside it
@@ -387,11 +395,15 @@ func (h *Host) abandonActors() {
 
 // drainActors halts all active actors during graceful shutdown, logging any error
 // The runtime client calls this while its session is still alive, so actor deactivation can still persist state and clear placement through the runtime
-func (h *Host) drainActors() {
-	err := h.HaltAll()
-	if err != nil {
-		h.log.Warn("Error draining actors during shutdown", slog.Any("error", err))
-	}
+// A positive timeout bounds the wait, after which the actors still halting have their in-flight calls canceled and are logged
+func (h *Host) drainActors(timeout time.Duration) {
+	h.core.DrainAll(timeout)
+}
+
+// snapshot returns a page of the actors active on this host for the management API
+// The host reports itself draining as soon as it accepted a drain, which is what tells a management server whose drain request failed that the drain took effect anyway
+func (h *Host) snapshot(_ context.Context, req protocol.HostSnapshotRequest) (protocol.HostSnapshotResponse, *protocol.Error) {
+	return h.core.HostSnapshot(req, h.HostID(), h.isDraining() || h.runtimeClient.drain.Accepted()), nil
 }
 
 // Halt gracefully halts an actor that is hosted on the current host

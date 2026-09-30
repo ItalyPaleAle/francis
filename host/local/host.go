@@ -27,6 +27,7 @@ import (
 	"github.com/italypaleale/francis/components/postgres"
 	"github.com/italypaleale/francis/components/sqlite"
 	"github.com/italypaleale/francis/components/standalone"
+	"github.com/italypaleale/francis/host"
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/ca"
 	"github.com/italypaleale/francis/internal/certholder"
@@ -82,6 +83,10 @@ type Host struct {
 
 	running  atomic.Bool
 	draining atomic.Bool
+	// drainPersisted is set once the draining flag was written to the provider for the current registration
+	drainPersisted atomic.Bool
+	// adminDrain tracks an administrative drain, which stops Run and keeps the host from running again
+	adminDrain actorcore.AdminDrain
 
 	actorProvider components.ActorProvider
 	service       *actor.Service
@@ -269,6 +274,7 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 		Log:                 options.Logger,
 		HostID:              h.HostID,
 		Draining:            func() bool { return h.draining.Load() },
+		ManagementHandler:   h.handleManagement,
 		MaxInFlightRequests: options.MaxInFlightRequests,
 		MaxRequestBodySize:  options.MaxRequestBodySize,
 	})
@@ -282,15 +288,28 @@ func (h *Host) Service() *actor.Service {
 }
 
 // Run the host service.
-// Note this function is blocking, and will return only when the service is shut down via context cancellation.
+// Note this function is blocking, and will return only when the service is shut down via context cancellation, when a service fails, or after an administrative drain.
+// After an administrative drain the returned error matches host.ErrAdministrativeDrain, and the host cannot be run again.
 func (h *Host) Run(parentCtx context.Context) error {
 	if !h.running.CompareAndSwap(false, true) {
 		return errors.New("service is already running")
 	}
 	defer h.running.Store(false)
 
+	// A drained host is gone for good
+	if !h.adminDrain.Start() {
+		return host.ErrAdministrativeDrain
+	}
+	defer h.adminDrain.Stopped()
+
+	// An administrative drain stops Run by canceling its context, which leads into the graceful teardown
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
+	h.adminDrain.SetStop(cancel)
+
+	// A new registration starts out not draining
+	h.draining.Store(false)
+	h.drainPersisted.Store(false)
 
 	// Start the actor core (idle processor) and the placement cache
 	h.core.Start()
@@ -362,14 +381,22 @@ func (h *Host) Run(parentCtx context.Context) error {
 	}
 
 	// Set the draining flag as soon as the context is canceled so the peer server rejects new invocations with a retry-later error before any actors are halted, giving callers a chance to re-resolve
+	// A drain request that arrives from now on finds the host already stopping
 	go func() {
 		<-ctx.Done()
 		h.draining.Store(true)
+		h.adminDrain.BeginStopping()
 	}()
+
+	// The peer server runs under its own context, so it keeps serving while local actors drain and the host unregisters
+	// Throughout that window it rejects new invocations with a retry-later error, and it can still write the reply to an administrative drain
+	// Registered before the unregister and halt defers, so it runs after both (LIFO)
+	stopPeer, watchPeer := runDetached(parentCtx, "peer server", h.peerServer.Run)
+	defer stopPeer()
 
 	// Upon returning, we unregister the host so it can be removed cleanly
 	// If the application crashes and this code isn't executed, eventually the host will be removed for not sending health checks periodically
-	// Registered first so it runs second (LIFO): actors must be halted before the host registration is removed
+	// Registered before the health check and halt defers, so it runs after both (LIFO): actors must be halted before the host registration is removed
 	defer func() {
 		// Use a background context here as the parent one is likely canceled at this point
 		unregisterCtx, unregisterCancel := context.WithTimeout(context.Background(), h.providerRequestTimeout)
@@ -385,35 +412,52 @@ func (h *Host) Run(parentCtx context.Context) error {
 		h.setHostID("")
 	}()
 
+	// Health checks run under their own context too, and stop only once the actors have halted
+	// Halting can take longer than the health check deadline, and a registration that expired meanwhile would let other hosts activate actors that are still halting here
+	// Registered between the unregister and halt defers, so it runs after the halt and before the unregister (LIFO)
+	stopHealthChecks, watchHealthChecks := runDetached(parentCtx, "health checks", h.runHealthChecks)
+	defer stopHealthChecks()
+
 	// Halt all remaining actors before the host unregisters
-	// Registered second so it runs first (LIFO): actors are halted before the provider record is removed
+	// Registered last so it runs first (LIFO): actors are halted before health checks stop and the provider record is removed
 	defer func() {
-		haltErr := h.HaltAll()
-		if haltErr != nil {
-			h.log.Warn("Error halting actors", slog.Any("error", haltErr))
-		}
+		// Mark the host draining in the provider first, so no new actor is placed on it while the others halt
+		h.draining.Store(true)
+		h.persistDraining()
+
+		// An administrative drain bounds the wait, while a regular shutdown waits for every actor
+		_, timeout := h.adminDrain.BeginStopping()
+		h.core.DrainAll(timeout)
 	}()
+
+	services := []servicerunner.Service{
+		// Stop the host if health checks, which run on their own context, fail
+		watchHealthChecks,
+
+		// Run the alarm fetcher in background
+		h.runAlarmFetcher,
+
+		// In background also renew leases
+		h.runLeaseRenewal,
+
+		// Stop the host if the peer server, which runs on its own context, exits early
+		watchPeer,
+
+		// Run the actor provider
+		h.actorProvider.Run,
+	}
 
 	// Run all services
 	// This blocks until the context is canceled or one of the services returns
-	return servicerunner.
-		NewServiceRunner(
-			// Perform health checks in background
-			h.runHealthChecks,
-
-			// Run the alarm fetcher in background
-			h.runAlarmFetcher,
-
-			// In background also renew leases
-			h.runLeaseRenewal,
-
-			// Run the peer server that allows receiving invocations from other hosts
-			h.peerServer.Run,
-
-			// Run the actor provider
-			h.actorProvider.Run,
-		).
+	runErr := servicerunner.
+		NewServiceRunner(services...).
 		Run(ctx)
+
+	// Report an administrative drain, which is the reason the services stopped
+	if h.adminDrain.Accepted() {
+		return errors.Join(host.ErrAdministrativeDrain, runErr)
+	}
+	return runErr
 }
 
 // issueSelfCert generates a key pair and signs this host's workload certificate from the primary CA, installing it in the holder
@@ -440,6 +484,60 @@ func (h *Host) issueSelfCert() error {
 	})
 
 	return nil
+}
+
+// persistDraining marks the host draining in the provider, once per registration, so no new actor is placed on it
+// A failure is logged and otherwise ignored, since the host is shutting down either way and its registration is removed shortly after
+func (h *Host) persistDraining() {
+	if !h.drainPersisted.CompareAndSwap(false, true) {
+		return
+	}
+
+	hostID := h.HostID()
+	if hostID == "" {
+		return
+	}
+
+	// Use a background context, as the host's own context is likely canceled at this point
+	ctx, cancel := context.WithTimeout(context.Background(), h.providerRequestTimeout)
+	defer cancel()
+	err := h.actorProvider.UpdateActorHost(ctx, hostID, components.UpdateActorHostReq{Draining: true})
+	switch {
+	case errors.Is(err, components.ErrHostUnregistered):
+		// The registration is already gone, so there is nothing to mark
+		h.log.Debug("Host registration is gone; not marking it draining")
+	case err != nil:
+		h.log.Warn("Error marking the host draining", slog.Any("error", err))
+	}
+}
+
+// runDetached runs fn under a context that is not canceled with the host's, so it can keep going during the graceful teardown
+// It returns a function that stops fn and waits for it to return, and a service that stops the host if fn returns before the host stops
+func runDetached(parentCtx context.Context, name string, fn func(ctx context.Context) error) (stop func(), watch servicerunner.Service) {
+	ctx, cancel := context.WithCancel(context.WithoutCancel(parentCtx))
+	done := make(chan struct{})
+	var err error
+	go func() {
+		err = fn(ctx)
+		close(done)
+	}()
+
+	stop = func() {
+		cancel()
+		<-done
+	}
+	watch = func(ctx context.Context) error {
+		select {
+		case <-done:
+			if err != nil {
+				return fmt.Errorf("%s stopped: %w", name, err)
+			}
+			return fmt.Errorf("%s stopped unexpectedly", name)
+		case <-ctx.Done():
+			return nil
+		}
+	}
+	return stop, watch
 }
 
 // HaltAll halts all actors active on the host, gracefully

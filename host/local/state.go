@@ -46,6 +46,7 @@ func (h *Host) SetState(ctx context.Context, actorType string, actorID string, s
 	err = h.actorProvider.SetState(ctx, ref.NewActorRef(actorType, actorID), data, components.SetStateOpts{
 		TTL:            ttl,
 		WorkflowLabels: opts.WorkflowLabels(),
+		AppendEvents:   opts.AppendEvents(),
 	})
 	if err != nil {
 		return fmt.Errorf("failed saving state: %w", err)

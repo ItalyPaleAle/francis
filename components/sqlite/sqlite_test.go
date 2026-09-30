@@ -823,3 +823,175 @@ func queryPlan(t *testing.T, p *SQLiteProvider, actorType string, labelField str
 	require.NoError(t, rows.Err())
 	return plan.String()
 }
+
+func TestPrefixSuccessor(t *testing.T) {
+	tests := []struct {
+		prefix    string
+		want      string
+		wantUpper bool
+	}{
+		{prefix: "", wantUpper: false},
+		{prefix: "abc", want: "abd", wantUpper: true},
+		{prefix: "francis.builtin.workflow.", want: "francis.builtin.workflow/", wantUpper: true},
+		{prefix: "a\xff", want: "b", wantUpper: true},
+		{prefix: "\xff\xff", wantUpper: false},
+	}
+	for _, tt := range tests {
+		got, ok := prefixSuccessor(tt.prefix)
+		assert.Equal(t, tt.wantUpper, ok, "prefix %q", tt.prefix)
+		assert.Equal(t, tt.want, got, "prefix %q", tt.prefix)
+	}
+}
+
+func TestSQLiteManagement(t *testing.T) {
+	t.Run("the migration creates the created label index and a range listing uses it", func(t *testing.T) {
+		p := initTestProvider(t, testutil.SQLiteConnString(t))
+
+		// Enough rows that the planner has a reason to prefer the index over walking the actor type
+		base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		for i := range 400 {
+			require.NoError(t, p.SetState(t.Context(), ref.NewActorRef("W", fmt.Sprintf("actor-%03d", i)), []byte("data"), components.SetStateOpts{
+				WorkflowLabels: &components.WorkflowLabels{Status: "running", Created: components.FormatWorkflowCreated(base.Add(time.Duration(i) * time.Hour))},
+			}))
+		}
+		_, err := p.db.ExecContext(t.Context(), "ANALYZE")
+		require.NoError(t, err)
+
+		// #nosec G202 -- the only concatenated values are the static table prefix and a fixed label field name, not user input
+		rows, err := p.db.QueryContext(t.Context(),
+			`EXPLAIN QUERY PLAN
+			SELECT actor_id FROM `+p.tablePrefix+`actor_state
+			WHERE actor_type = ? AND actor_id > ? AND workflow_labels IS NOT NULL
+				AND `+workflowLabelExtract(components.WorkflowLabelCreated)+` >= ?
+				AND `+workflowLabelExtract(components.WorkflowLabelCreated)+` < ?
+			ORDER BY actor_id LIMIT 101`,
+			"W", "", components.FormatWorkflowCreated(base.Add(10*time.Hour)), components.FormatWorkflowCreated(base.Add(12*time.Hour)),
+		)
+		require.NoError(t, err)
+		defer rows.Close()
+		var plan strings.Builder
+		for rows.Next() {
+			var id, parent, notUsed int
+			var detail string
+			require.NoError(t, rows.Scan(&id, &parent, &notUsed, &detail))
+			plan.WriteString(detail)
+			plan.WriteString("; ")
+		}
+		require.NoError(t, rows.Err())
+		assert.Contains(t, plan.String(), "francis_actor_state_wf_created_idx")
+
+		// The listing returns exactly the rows in the half-open range
+		res, err := p.ListStates(t.Context(), components.ListStatesReq{
+			ActorType:   "W",
+			CreatedFrom: base.Add(10 * time.Hour),
+			CreatedTo:   base.Add(12 * time.Hour),
+		})
+		require.NoError(t, err)
+		require.Len(t, res.States, 2)
+		assert.Equal(t, "actor-010", res.States[0].ActorID)
+		assert.Equal(t, "actor-011", res.States[1].ActorID)
+		require.NotNil(t, res.States[0].WorkflowLabels)
+		assert.Equal(t, "running", res.States[0].WorkflowLabels.Status)
+	})
+
+	t.Run("overwriting state keeps its events and garbage collection removes them", func(t *testing.T) {
+		p := initTestProvider(t, testutil.SQLiteConnString(t))
+		aRef := ref.NewActorRef("W", "wf-1")
+
+		countEvents := func() int {
+			var n int
+			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+			err := p.db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM "+p.tablePrefix+"workflow_events").Scan(&n)
+			require.NoError(t, err)
+			return n
+		}
+
+		// Write state with events, then overwrite it without events: the upsert must not fire the delete trigger
+		err := p.SetState(t.Context(), aRef, []byte("v1"), components.SetStateOpts{
+			TTL:          time.Minute,
+			AppendEvents: []components.WorkflowEvent{{Seq: 1, Time: p.Now(), Kind: "start"}, {Seq: 2, Time: p.Now(), Kind: "step"}},
+		})
+		require.NoError(t, err)
+		err = p.SetState(t.Context(), aRef, []byte("v2"), components.SetStateOpts{TTL: time.Minute})
+		require.NoError(t, err)
+		assert.Equal(t, 2, countEvents())
+
+		// Once the state expires, the garbage collector's delete removes the events through the trigger
+		err = p.AdvanceClock(2 * time.Minute)
+		require.NoError(t, err)
+		err = p.CleanupExpired(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, 0, countEvents())
+	})
+
+	t.Run("runtime membership follows the provider clock", func(t *testing.T) {
+		p := initTestProvider(t, testutil.SQLiteConnString(t))
+
+		err := p.RegisterRuntime(t.Context(), components.RegisterRuntimeReq{RuntimeID: "r1", Address: "a1", TTL: 10 * time.Second})
+		require.NoError(t, err)
+		err = p.RegisterRuntime(t.Context(), components.RegisterRuntimeReq{RuntimeID: "r1", Address: "a2", TTL: 10 * time.Second})
+		require.ErrorIs(t, err, components.ErrRuntimeIDInUse)
+
+		// After the lease expires, another address can take the ID, and the expired record is not listed
+		err = p.AdvanceClock(11 * time.Second)
+		require.NoError(t, err)
+		list, err := p.ListRuntimes(t.Context())
+		require.NoError(t, err)
+		assert.Empty(t, list)
+		err = p.RegisterRuntime(t.Context(), components.RegisterRuntimeReq{RuntimeID: "r1", Address: "a2", TTL: 10 * time.Second})
+		require.NoError(t, err)
+
+		// Unregistering from the wrong address is a no-op
+		err = p.UnregisterRuntime(t.Context(), "r1", "a1")
+		require.NoError(t, err)
+		list, err = p.ListRuntimes(t.Context())
+		require.NoError(t, err)
+		require.Len(t, list, 1)
+		assert.Equal(t, "a2", list[0].Address)
+		// Times are stored with millisecond precision
+		assert.WithinDuration(t, p.Now().Add(10*time.Second), list[0].ExpiresAt, time.Millisecond)
+	})
+}
+
+func TestRuntimeMembershipSharedDatabase(t *testing.T) {
+	// Two providers on the same database file stand in for two runtime replicas on the same machine
+	connString := "file:" + filepath.Join(t.TempDir(), "shared.db") + "?_pragma=busy_timeout(5000)"
+	a := initTestProvider(t, connString)
+	b := initTestProvider(t, connString)
+
+	err := a.RegisterRuntime(t.Context(), components.RegisterRuntimeReq{RuntimeID: "rt-a", Address: "127.0.0.1:7400", TTL: time.Minute})
+	require.NoError(t, err)
+	err = b.RegisterRuntime(t.Context(), components.RegisterRuntimeReq{RuntimeID: "rt-b", Address: "127.0.0.1:7410", TTL: time.Minute})
+	require.NoError(t, err)
+
+	t.Run("each replica sees the other", func(t *testing.T) {
+		for _, p := range []*SQLiteProvider{a, b} {
+			runtimes, lErr := p.ListRuntimes(t.Context())
+			require.NoError(t, lErr)
+			require.Len(t, runtimes, 2)
+			assert.Equal(t, "rt-a", runtimes[0].RuntimeID)
+			assert.Equal(t, "127.0.0.1:7400", runtimes[0].Address)
+			assert.Equal(t, "rt-b", runtimes[1].RuntimeID)
+			assert.Equal(t, "127.0.0.1:7410", runtimes[1].Address)
+		}
+	})
+
+	t.Run("a live runtime ID cannot be claimed from another address", func(t *testing.T) {
+		rErr := b.RegisterRuntime(t.Context(), components.RegisterRuntimeReq{RuntimeID: "rt-a", Address: "127.0.0.1:7410", TTL: time.Minute})
+		require.ErrorIs(t, rErr, components.ErrRuntimeIDInUse)
+
+		// Renewing from the same address still works
+		rErr = a.RegisterRuntime(t.Context(), components.RegisterRuntimeReq{RuntimeID: "rt-a", Address: "127.0.0.1:7400", TTL: time.Minute})
+		require.NoError(t, rErr)
+	})
+
+	t.Run("unregistering is visible to the other replica", func(t *testing.T) {
+		rErr := b.UnregisterRuntime(t.Context(), "rt-b", "127.0.0.1:7410")
+		require.NoError(t, rErr)
+
+		runtimes, rErr := a.ListRuntimes(t.Context())
+		require.NoError(t, rErr)
+		require.Len(t, runtimes, 1)
+		assert.Equal(t, "rt-a", runtimes[0].RuntimeID)
+	})
+}

@@ -1,6 +1,7 @@
 package standalone
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -2174,4 +2175,217 @@ func TestPersistHook_Rollback_LookupActor(t *testing.T) {
 	p.Mu.RLock()
 	require.Empty(t, p.ActiveActors, "ActiveActors should have been rolled back")
 	p.Mu.RUnlock()
+}
+
+func TestStandaloneSQLiteWorkflowEventPersistence(t *testing.T) {
+	p := initSQLiteTestProvider(t)
+
+	// A new provider over the same (single-connection) in-memory database loads everything persisted by the first one
+	reload := func(t *testing.T) *internal.Provider {
+		t.Helper()
+		p2, err := NewStandaloneSQLiteBacked(slog.New(slog.DiscardHandler), StandaloneSQLiteOptions{
+			DB:    p.db,
+			Clock: p.Clock,
+		}, comptesting.GetProviderConfig())
+		require.NoError(t, err)
+		err = p2.Init(t.Context())
+		require.NoError(t, err)
+		return p2.Provider
+	}
+
+	// countStored returns the number of event rows stored in the database for an actor
+	countStored := func(t *testing.T, actorType string, actorID string) int {
+		t.Helper()
+		var n int
+		err := p.db.QueryRowContext(t.Context(),
+			"SELECT COUNT(*) FROM "+p.tablePrefix+"workflow_events WHERE actor_type = ? AND actor_id = ?",
+			actorType, actorID,
+		).Scan(&n)
+		require.NoError(t, err)
+		return n
+	}
+
+	testWorkflowEventPersistence(t, p.Provider, reload, countStored)
+}
+
+func TestStandalonePostgresWorkflowEventPersistence(t *testing.T) {
+	p := initPostgresTestProvider(t)
+
+	// A new provider over the same database and schema loads everything persisted by the first one
+	reload := func(t *testing.T) *internal.Provider {
+		t.Helper()
+		p2, err := NewStandalonePostgresBacked(slog.New(slog.DiscardHandler), StandalonePostgresOptions{
+			DB:    p.db,
+			Clock: p.Clock,
+		}, comptesting.GetProviderConfig())
+		require.NoError(t, err)
+		err = p2.Init(t.Context())
+		require.NoError(t, err)
+		return p2.Provider
+	}
+
+	// countStored returns the number of event rows stored in the database for an actor
+	countStored := func(t *testing.T, actorType string, actorID string) int {
+		t.Helper()
+		var n int
+		err := p.db.QueryRow(t.Context(),
+			"SELECT COUNT(*) FROM "+p.tablePrefix+"workflow_events WHERE actor_type = $1 AND actor_id = $2",
+			actorType, actorID,
+		).Scan(&n)
+		require.NoError(t, err)
+		return n
+	}
+
+	testWorkflowEventPersistence(t, p.Provider, reload, countStored)
+}
+
+// testWorkflowEventPersistence verifies that workflow events and job retention survive a reload from the database, and that every path removing state removes the persisted events too
+func testWorkflowEventPersistence(t *testing.T, p *internal.Provider, reload func(t *testing.T) *internal.Provider, countStored func(t *testing.T, actorType string, actorID string) int) {
+	const actorType = "EventActor"
+
+	// Event times are whole milliseconds so they round-trip exactly on every backend
+	baseTime := time.UnixMilli(p.Clock.Now().UnixMilli())
+	makeEvents := func(from int64, to int64, kind string) []components.WorkflowEvent {
+		res := make([]components.WorkflowEvent, 0, to-from+1)
+		for seq := from; seq <= to; seq++ {
+			res = append(res, components.WorkflowEvent{
+				Seq:  seq,
+				Time: baseTime.Add(time.Duration(seq) * time.Second),
+				Kind: kind,
+				Data: []byte(fmt.Sprintf("%s-%d", kind, seq)),
+			})
+		}
+		return res
+	}
+
+	// listEvents returns all events for an actor, as seen by the given provider
+	listEvents := func(t *testing.T, prov *internal.Provider, actorID string) []components.WorkflowEvent {
+		t.Helper()
+		res, err := prov.ListWorkflowEvents(t.Context(), components.ListWorkflowEventsReq{
+			ActorType: actorType,
+			ActorID:   actorID,
+			Limit:     1000,
+		})
+		require.NoError(t, err)
+		require.False(t, res.HasMore)
+		return res.Events
+	}
+
+	// requireEvents asserts the events match the expected ones, comparing times as instants
+	requireEvents := func(t *testing.T, expect []components.WorkflowEvent, actual []components.WorkflowEvent) {
+		t.Helper()
+		require.Len(t, actual, len(expect))
+		for i := range expect {
+			require.Equal(t, expect[i].Seq, actual[i].Seq)
+			require.Equal(t, expect[i].Kind, actual[i].Kind)
+			require.Equal(t, expect[i].Data, actual[i].Data)
+			require.Equal(t, expect[i].Time.UnixMilli(), actual[i].Time.UnixMilli())
+		}
+	}
+
+	setState := func(t *testing.T, actorID string, ttl time.Duration, events []components.WorkflowEvent) {
+		t.Helper()
+		err := p.SetState(t.Context(), ref.NewActorRef(actorType, actorID), []byte("state-"+actorID), components.SetStateOpts{
+			TTL:          ttl,
+			AppendEvents: events,
+		})
+		require.NoError(t, err)
+	}
+
+	t.Run("appended events are persisted and reloaded", func(t *testing.T) {
+		setState(t, "append", 0, makeEvents(1, 3, "a"))
+		setState(t, "append", 0, makeEvents(4, 5, "a"))
+		require.Equal(t, 5, countStored(t, actorType, "append"))
+
+		requireEvents(t, makeEvents(1, 5, "a"), listEvents(t, reload(t), "append"))
+	})
+
+	t.Run("duplicate events are ignored", func(t *testing.T) {
+		// Seqs 4 and 5 already exist, so only 6 is added and the stored copies of 4 and 5 are kept
+		setState(t, "append", 0, append(makeEvents(4, 5, "dup"), makeEvents(6, 6, "a")...))
+		require.Equal(t, 6, countStored(t, actorType, "append"))
+
+		expect := makeEvents(1, 6, "a")
+		requireEvents(t, expect, listEvents(t, p, "append"))
+		requireEvents(t, expect, listEvents(t, reload(t), "append"))
+	})
+
+	t.Run("first event with seq 1 resets the history", func(t *testing.T) {
+		setState(t, "append", 0, makeEvents(1, 2, "b"))
+		require.Equal(t, 2, countStored(t, actorType, "append"))
+
+		expect := makeEvents(1, 2, "b")
+		requireEvents(t, expect, listEvents(t, p, "append"))
+		requireEvents(t, expect, listEvents(t, reload(t), "append"))
+	})
+
+	t.Run("deleting state deletes persisted events", func(t *testing.T) {
+		setState(t, "delete", 0, makeEvents(1, 3, "d"))
+		require.Equal(t, 3, countStored(t, actorType, "delete"))
+
+		err := p.DeleteState(t.Context(), ref.NewActorRef(actorType, "delete"))
+		require.NoError(t, err)
+		require.Equal(t, 0, countStored(t, actorType, "delete"))
+		require.Empty(t, listEvents(t, p, "delete"))
+		require.Empty(t, listEvents(t, reload(t), "delete"))
+	})
+
+	t.Run("expired state cleanup deletes persisted events", func(t *testing.T) {
+		setState(t, "ttl", time.Minute, makeEvents(1, 3, "t"))
+		require.Equal(t, 3, countStored(t, actorType, "ttl"))
+
+		// Events are hidden as soon as the state expires, and removed from the database by the cleanup
+		p.Clock.Sleep(2 * time.Minute)
+		require.Empty(t, listEvents(t, p, "ttl"))
+
+		err := p.CleanupExpired(t.Context())
+		require.NoError(t, err)
+		require.Equal(t, 0, countStored(t, actorType, "ttl"))
+		require.Empty(t, listEvents(t, reload(t), "ttl"))
+	})
+
+	t.Run("job retention is persisted and reloaded", func(t *testing.T) {
+		res, err := p.RegisterHost(t.Context(), components.RegisterHostReq{
+			Address: "10.0.0.9:8080",
+			ActorTypes: []components.ActorHostType{
+				{
+					ActorType:                "RetentionActor",
+					IdleTimeout:              5 * time.Minute,
+					CompletedJobRetention:    90 * time.Second,
+					DeadLetteredJobRetention: 36 * time.Hour,
+				},
+			},
+		})
+		require.NoError(t, err)
+
+		p2 := reload(t)
+		p2.Mu.RLock()
+		types := p2.HostActorTypes[res.HostID]
+		p2.Mu.RUnlock()
+		require.Len(t, types, 1)
+		require.Equal(t, 90*time.Second, types[0].CompletedJobRetention)
+		require.Equal(t, 36*time.Hour, types[0].DeadLetteredJobRetention)
+
+		// Restore refuses to run while a host is connected
+		err = p.UnregisterHost(t.Context(), res.HostID, components.UnregisterHostOpts{})
+		require.NoError(t, err)
+	})
+
+	t.Run("backup and restore include events", func(t *testing.T) {
+		setState(t, "backup", 0, makeEvents(1, 4, "k"))
+
+		var buf bytes.Buffer
+		err := p.Backup(t.Context(), &buf)
+		require.NoError(t, err)
+
+		// Change the history after the backup, then restore it
+		setState(t, "backup", 0, makeEvents(1, 1, "changed"))
+		err = p.Restore(t.Context(), &buf)
+		require.NoError(t, err)
+
+		expect := makeEvents(1, 4, "k")
+		requireEvents(t, expect, listEvents(t, p, "backup"))
+		require.Equal(t, 4, countStored(t, actorType, "backup"))
+		requireEvents(t, expect, listEvents(t, reload(t), "backup"))
+	})
 }

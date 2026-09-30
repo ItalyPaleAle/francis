@@ -113,7 +113,7 @@ func (s *WorkflowService) Start(ctx context.Context, input any, opts ...StartOpt
 
 	// The insertion is what says who started the instance, since the journal may not exist until the start job runs
 	// The placeholder is stored atomically with the job, which is what lets List return the instance while it is pending
-	placeholder, labels := newPendingPlaceholder(&payload)
+	placeholder, labels := newPendingPlaceholder(s.wf.def, &payload)
 	_, created, err = client.Dispatch(ctx, methodStart, payload,
 		actor.WithIdempotencyKey(methodStart),
 		actor.WithInitialState(builtinkey.Key{}, placeholder, labels),
@@ -194,24 +194,28 @@ func (s *WorkflowService) eventLimit(st *instanceState, name string) (int, error
 
 // Cancel asks a running or suspended instance to stop and unwind, recording the reason as the cause every compensation receives
 func (s *WorkflowService) Cancel(ctx context.Context, instanceID string, reason string) error {
-	return s.dispatchControl(ctx, instanceID, methodCancel, reasonPayload{Reason: reason})
+	return s.dispatchControl(ctx, instanceID, ControlCancel, reason)
 }
 
 // Suspend pauses an instance without losing its place, and pauses its deadlines with it
 // Work already dispatched runs to completion and its report is recorded, nothing new is started until Resume
 func (s *WorkflowService) Suspend(ctx context.Context, instanceID string, reason string) error {
-	return s.dispatchControl(ctx, instanceID, methodSuspend, reasonPayload{Reason: reason})
+	return s.dispatchControl(ctx, instanceID, ControlSuspend, reason)
 }
 
 // Resume continues a suspended instance, re-arming its deadlines from the remainders the suspension recorded
 func (s *WorkflowService) Resume(ctx context.Context, instanceID string) error {
-	return s.dispatchControl(ctx, instanceID, methodResume, nil)
+	return s.dispatchControl(ctx, instanceID, ControlResume, "")
 }
 
 // dispatchControl sends one of the control jobs, each under a constant key so a repeated call coalesces with a pending one
-func (s *WorkflowService) dispatchControl(ctx context.Context, instanceID string, method string, payload any) error {
+func (s *WorkflowService) dispatchControl(ctx context.Context, instanceID string, action ControlAction, reason string) error {
+	method, payload, err := controlPayload(action, reason)
+	if err != nil {
+		return err
+	}
 	client := builtinactor.NewClient[struct{}](s.wf.baseType, instanceID, s.svc)
-	_, _, err := client.Dispatch(ctx, method, payload, actor.WithIdempotencyKey(method))
+	_, _, err = client.Dispatch(ctx, method, payload, actor.WithIdempotencyKey(method))
 	if err != nil {
 		return fmt.Errorf("failed to %s the workflow instance: %w", method, err)
 	}

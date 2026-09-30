@@ -1,10 +1,10 @@
-// Package backup defines a portable, versioned, streaming format for exporting and importing the persistent data of a Francis actor provider: actor state, alarms (including live jobs), and terminal jobs
+// Package backup defines a portable, versioned, streaming format for exporting and importing the persistent data of a Francis actor provider: actor state, alarms (including live jobs), terminal jobs, and workflow events
 //
 // The format is provider-neutral: timestamps are carried as time.Time and binary payloads as byte slices, so a backup taken from one provider (for example PostgreSQL) can be restored into a different one (for example SQLite)
 // It is encoded with MessagePack and handled as a stream, so arbitrarily large datasets can be read and written without being buffered in memory
 //
 // The wire layout is a single Header value followed by a sequence of Record values
-// Records are emitted grouped by type in a fixed order (state, then alarms, then terminal jobs), which lets a reader load one entity type at a time (and, for providers that support it, bulk-load each section) while relying on Reader.Unread to detect a section boundary with a single record of lookahead
+// Records are emitted grouped by type in a fixed order (state, then alarms, then terminal jobs, then workflow events), which lets a reader load one entity type at a time (and, for providers that support it, bulk-load each section) while relying on Reader.Unread to detect a section boundary with a single record of lookahead
 package backup
 
 import (
@@ -26,7 +26,8 @@ const (
 
 	// Version is the current backup format version
 	// It is written into the header, and a reader rejects a stream whose version is newer than it supports
-	Version = 1
+	// Version 2 added workflow event records
+	Version = 2
 )
 
 var (
@@ -41,9 +42,10 @@ var (
 type RecordType string
 
 const (
-	RecordTypeState       RecordType = "state"
-	RecordTypeAlarm       RecordType = "alarm"
-	RecordTypeTerminalJob RecordType = "terminaljob"
+	RecordTypeState         RecordType = "state"
+	RecordTypeAlarm         RecordType = "alarm"
+	RecordTypeTerminalJob   RecordType = "terminaljob"
+	RecordTypeWorkflowEvent RecordType = "workflowevent"
 
 	// RecordTypeDeadJob is what a terminal job was called in backups taken before the dead-letter store became the terminal-job store, when it held only the jobs that failed
 	// It is read and never written: a record carrying it is folded into a TerminalJobRecord on the way out of the reader, so a consumer only ever sees one shape
@@ -103,6 +105,17 @@ type TerminalJobRecord struct {
 	Expiration  *time.Time `msgpack:"expiration,omitempty"`
 }
 
+// WorkflowEventRecord is a single entry of a workflow instance's event history
+// It is only restored alongside the actor state it belongs to
+type WorkflowEventRecord struct {
+	ActorType string    `msgpack:"actorType"`
+	ActorID   string    `msgpack:"actorId"`
+	Seq       int64     `msgpack:"seq"`
+	Time      time.Time `msgpack:"time"`
+	Kind      string    `msgpack:"kind"`
+	Data      []byte    `msgpack:"data,omitempty"`
+}
+
 // DeadJobRecord is a single dead-lettered job as an older Francis wrote it, before the store was widened to hold completed jobs too
 // It is preserved for backwards-compatibility only - nothing writes to it
 type DeadJobRecord struct {
@@ -122,17 +135,18 @@ type DeadJobRecord struct {
 // Record is one entry in a backup stream
 // Exactly one payload pointer is set, selected by Type
 type Record struct {
-	Type        RecordType         `msgpack:"type"`
-	State       *StateRecord       `msgpack:"state,omitempty"`
-	Alarm       *AlarmRecord       `msgpack:"alarm,omitempty"`
-	TerminalJob *TerminalJobRecord `msgpack:"terminalJob,omitempty"`
+	Type          RecordType           `msgpack:"type"`
+	State         *StateRecord         `msgpack:"state,omitempty"`
+	Alarm         *AlarmRecord         `msgpack:"alarm,omitempty"`
+	TerminalJob   *TerminalJobRecord   `msgpack:"terminalJob,omitempty"`
+	WorkflowEvent *WorkflowEventRecord `msgpack:"workflowEvent,omitempty"`
 
 	// DeadJob is set only while reading a backup written before the rename, and is folded into TerminalJob before the record is yielded
 	DeadJob *DeadJobRecord `msgpack:"deadJob,omitempty"`
 }
 
 // Writer streams backup records to an io.Writer
-// The header is written when the Writer is created, and callers then write records grouped by type in the order state, alarms, terminal jobs
+// The header is written when the Writer is created, and callers then write records grouped by type in the order state, alarms, terminal jobs, workflow events
 type Writer struct {
 	enc *msgpack.Encoder
 }
@@ -167,6 +181,11 @@ func (w *Writer) WriteAlarm(r *AlarmRecord) error {
 // WriteTerminalJob writes a terminal-job record
 func (w *Writer) WriteTerminalJob(r *TerminalJobRecord) error {
 	return w.write(Record{Type: RecordTypeTerminalJob, TerminalJob: r})
+}
+
+// WriteWorkflowEvent writes a workflow-event record
+func (w *Writer) WriteWorkflowEvent(r *WorkflowEventRecord) error {
+	return w.write(Record{Type: RecordTypeWorkflowEvent, WorkflowEvent: r})
 }
 
 func (w *Writer) write(rec Record) error {

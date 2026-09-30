@@ -22,6 +22,7 @@ import (
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/standalone/internal"
+	"github.com/italypaleale/francis/internal/eventsql"
 )
 
 //go:embed migrations/postgres/*.sql
@@ -279,6 +280,12 @@ func (s *StandalonePostgresBacked) loadFromDB(ctx context.Context) error {
 		return fmt.Errorf("failed to load actor state: %w", err)
 	}
 
+	// Load workflow events
+	err = s.loadWorkflowEvents(queryCtx)
+	if err != nil {
+		return fmt.Errorf("failed to load workflow events: %w", err)
+	}
+
 	return nil
 }
 
@@ -305,7 +312,7 @@ func (s *StandalonePostgresBacked) loadHosts(ctx context.Context) error {
 
 func (s *StandalonePostgresBacked) loadHostActorTypes(ctx context.Context) error {
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	rows, err := s.db.Query(ctx, "SELECT host_id, actor_type, actor_idle_timeout, actor_concurrency_limit FROM "+s.tablePrefix+"host_actor_types")
+	rows, err := s.db.Query(ctx, "SELECT host_id, actor_type, actor_idle_timeout, actor_concurrency_limit, actor_completed_job_retention, actor_dead_lettered_job_retention FROM "+s.tablePrefix+"host_actor_types")
 	if err != nil {
 		return err
 	}
@@ -313,14 +320,17 @@ func (s *StandalonePostgresBacked) loadHostActorTypes(ctx context.Context) error
 
 	for rows.Next() {
 		var (
-			hat           internal.HostActorType
-			idleTimeoutMs int64
+			hat                                   internal.HostActorType
+			idleTimeoutMs                         int64
+			completedRetentionMs, deadRetentionMs int64
 		)
-		err := rows.Scan(&hat.HostID, &hat.ActorType, &idleTimeoutMs, &hat.ConcurrencyLimit)
+		err := rows.Scan(&hat.HostID, &hat.ActorType, &idleTimeoutMs, &hat.ConcurrencyLimit, &completedRetentionMs, &deadRetentionMs)
 		if err != nil {
 			return err
 		}
 		hat.IdleTimeout = time.Duration(idleTimeoutMs) * time.Millisecond
+		hat.CompletedJobRetention = time.Duration(completedRetentionMs) * time.Millisecond
+		hat.DeadLetteredJobRetention = time.Duration(deadRetentionMs) * time.Millisecond
 		if s.HostActorTypes[hat.HostID] == nil {
 			s.HostActorTypes[hat.HostID] = make([]*internal.HostActorType, 0)
 		}
@@ -510,6 +520,33 @@ func (s *StandalonePostgresBacked) loadActorState(ctx context.Context) error {
 	return rows.Err()
 }
 
+func (s *StandalonePostgresBacked) loadWorkflowEvents(ctx context.Context) error {
+	// Rows are read in sequence order, so each actor's history is appended already sorted
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	rows, err := s.db.Query(ctx, "SELECT actor_type, actor_id, event_seq, event_time, event_kind, event_data FROM "+s.tablePrefix+"workflow_events ORDER BY actor_type, actor_id, event_seq")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			actorType, actorID string
+			ev                 components.WorkflowEvent
+		)
+
+		err := rows.Scan(&actorType, &actorID, &ev.Seq, &ev.Time, &ev.Kind, &ev.Data)
+		if err != nil {
+			return err
+		}
+
+		key := internal.NewActorKey(actorType, actorID)
+		s.WorkflowEvents[key] = append(s.WorkflowEvents[key], ev)
+	}
+
+	return rows.Err()
+}
+
 // PersistChanges implements PersistHook.
 func (s *StandalonePostgresBacked) PersistChanges(ctx context.Context, changes *internal.Changes) error {
 	if changes.IsEmpty() {
@@ -572,6 +609,12 @@ func (s *StandalonePostgresBacked) PersistChanges(ctx context.Context, changes *
 		return err
 	}
 
+	// Process workflow event changes
+	err = s.persistWorkflowEventChanges(queryCtx, tx, changes)
+	if err != nil {
+		return err
+	}
+
 	err = tx.Commit(queryCtx)
 	if err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
@@ -628,12 +671,16 @@ func (s *StandalonePostgresBacked) persistHostActorTypeChanges(ctx context.Conte
 	for _, hat := range changes.HostActorTypes.Set {
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.Exec(ctx,
-			`INSERT INTO `+s.tablePrefix+`host_actor_types (host_id, actor_type, actor_idle_timeout, actor_concurrency_limit)
-			VALUES ($1, $2, $3, $4)
+			`INSERT INTO `+s.tablePrefix+`host_actor_types (
+				host_id, actor_type, actor_idle_timeout, actor_concurrency_limit, actor_completed_job_retention, actor_dead_lettered_job_retention)
+			VALUES ($1, $2, $3, $4, $5, $6)
 			ON CONFLICT(host_id, actor_type) DO UPDATE SET
 				actor_idle_timeout = EXCLUDED.actor_idle_timeout,
-				actor_concurrency_limit = EXCLUDED.actor_concurrency_limit`,
+				actor_concurrency_limit = EXCLUDED.actor_concurrency_limit,
+				actor_completed_job_retention = EXCLUDED.actor_completed_job_retention,
+				actor_dead_lettered_job_retention = EXCLUDED.actor_dead_lettered_job_retention`,
 			hat.HostID, hat.ActorType, hat.IdleTimeout.Milliseconds(), hat.ConcurrencyLimit,
+			hat.CompletedJobRetention.Milliseconds(), hat.DeadLetteredJobRetention.Milliseconds(),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to upsert host actor type: %w", err)
@@ -823,6 +870,12 @@ func (s *StandalonePostgresBacked) persistActorStateChanges(ctx context.Context,
 		if err != nil {
 			return fmt.Errorf("failed to delete actor state: %w", err)
 		}
+
+		// Workflow events never outlive the state they belong to
+		err = s.deleteWorkflowEvents(ctx, tx, key)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Upserts
@@ -849,5 +902,39 @@ func (s *StandalonePostgresBacked) persistActorStateChanges(ctx context.Context,
 		}
 	}
 
+	return nil
+}
+
+func (s *StandalonePostgresBacked) persistWorkflowEventChanges(ctx context.Context, tx pgx.Tx, changes *internal.Changes) error {
+	// Resets remove an actor's whole history, and run before the inserts that start the new one
+	for _, key := range changes.WorkflowEvents.Reset {
+		err := s.deleteWorkflowEvents(ctx, tx, key)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Inserts ignore events whose sequence number is already stored, so a retried write never duplicates them
+	// Each actor's events are written in bulk rather than one statement per event, since a wide fan-out appends many of them at once
+	for _, wc := range changes.WorkflowEvents.Insert {
+		err := eventsql.InsertPostgres(ctx, tx, s.tablePrefix+"workflow_events", wc.Key.ActorType, wc.Key.ActorID, wc.Events)
+		if err != nil {
+			return fmt.Errorf("failed to insert workflow events: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// deleteWorkflowEvents removes every workflow event of an actor
+func (s *StandalonePostgresBacked) deleteWorkflowEvents(ctx context.Context, tx pgx.Tx, key internal.ActorKey) error {
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	_, err := tx.Exec(ctx,
+		"DELETE FROM "+s.tablePrefix+"workflow_events WHERE actor_type = $1 AND actor_id = $2",
+		key.ActorType, key.ActorID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to delete workflow events: %w", err)
+	}
 	return nil
 }

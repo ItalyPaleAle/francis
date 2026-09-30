@@ -15,6 +15,7 @@ import (
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/backup"
+	"github.com/italypaleale/francis/internal/utils"
 )
 
 // Backup writes a snapshot of all persistent data to w
@@ -41,7 +42,7 @@ func (p *PostgresProvider) Backup(ctx context.Context, w io.Writer) error {
 		return err
 	}
 
-	// Stream state, then alarms, then dead jobs
+	// Stream state, then alarms, then terminal jobs, then workflow events
 	err = p.backupState(ctx, tx, bw)
 	if err != nil {
 		return err
@@ -54,6 +55,10 @@ func (p *PostgresProvider) Backup(ctx context.Context, w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	err = p.backupWorkflowEvents(ctx, tx, bw)
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -63,9 +68,10 @@ func (p *PostgresProvider) Backup(ctx context.Context, w io.Writer) error {
 func (p *PostgresProvider) Restore(ctx context.Context, r io.Reader) error {
 	// Column lists for the restore COPY, matching the order produced by the value functions below
 	var (
-		backupStateColumns       = []string{"actor_type", "actor_id", "actor_state_data", "actor_state_expiration_time", "workflow_labels"}
-		backupAlarmColumns       = []string{"alarm_id", "actor_type", "actor_id", "alarm_name", "alarm_due_time", "alarm_interval", "alarm_cron", "alarm_ttl_time", "alarm_data", "alarm_lease_id", "alarm_lease_expiration_time", "alarm_kind", "job_method"}
-		backupTerminalJobColumns = []string{"job_id", "actor_type", "actor_id", "job_method", "job_data", "job_status", "attempts", "last_error", "ended_at", "original_due", "job_interval", "job_cron", "expiration_time"}
+		backupStateColumns         = []string{"actor_type", "actor_id", "actor_state_data", "actor_state_expiration_time", "workflow_labels"}
+		backupAlarmColumns         = []string{"alarm_id", "actor_type", "actor_id", "alarm_name", "alarm_due_time", "alarm_interval", "alarm_cron", "alarm_ttl_time", "alarm_data", "alarm_lease_id", "alarm_lease_expiration_time", "alarm_kind", "job_method"}
+		backupTerminalJobColumns   = []string{"job_id", "actor_type", "actor_id", "job_method", "job_data", "job_status", "attempts", "last_error", "ended_at", "original_due", "job_interval", "job_cron", "expiration_time"}
+		backupWorkflowEventColumns = []string{"actor_type", "actor_id", "event_seq", "event_time", "event_kind", "event_data"}
 	)
 
 	return p.withLockedTx(ctx, pgx.TxOptions{}, func(tx pgx.Tx) error {
@@ -106,12 +112,19 @@ func (p *PostgresProvider) Restore(ctx context.Context, r io.Reader) error {
 			return fmt.Errorf("failed to restore dead jobs: %w", err)
 		}
 
+		// Workflow events come last, and a v1 backup simply has none
+		var eventCount int64
+		eventCount, err = tx.CopyFrom(ctx, p.tableIdentifier("workflow_events"), backupWorkflowEventColumns, &copySection{pull: pull, wantType: backup.RecordTypeWorkflowEvent, toValues: workflowEventToCopyValues})
+		if err != nil {
+			return fmt.Errorf("failed to restore workflow events: %w", err)
+		}
+
 		// Surface a decode error that COPY may have observed as an early end of section
 		if pull.err != nil {
 			return pull.err
 		}
 
-		// The sections must be exhausted, since records are ordered state, alarms, dead jobs
+		// The sections must be exhausted, since records are ordered state, alarms, terminal jobs, workflow events
 		rec, ok := pull.get()
 		if pull.err != nil {
 			return pull.err
@@ -119,6 +132,22 @@ func (p *PostgresProvider) Restore(ctx context.Context, r io.Reader) error {
 		if ok {
 			return fmt.Errorf("unexpected %q record after all backup sections", rec.Type)
 		}
+
+		// Events are only restored alongside the state they belong to, so any whose state row is not in the backup are dropped
+		if eventCount > 0 {
+			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+			_, err = tx.Exec(ctx,
+				`DELETE FROM `+p.tablePrefix+`workflow_events AS e
+				WHERE NOT EXISTS (
+					SELECT 1 FROM `+p.tablePrefix+`actor_state AS s
+					WHERE s.actor_type = e.actor_type AND s.actor_id = e.actor_id
+				)`,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to remove orphaned workflow events: %w", err)
+			}
+		}
+
 		return nil
 	})
 }
@@ -180,9 +209,10 @@ func (p *PostgresProvider) ensureNoHostsConnected(ctx context.Context, tx pgx.Tx
 	return nil
 }
 
-// wipePersistentData deletes all actor state, alarms, and terminal jobs
+// wipePersistentData deletes all workflow events, actor state, alarms, and terminal jobs
+// Events are deleted first, so the trigger that removes the events of deleted state rows finds nothing left to delete
 func (p *PostgresProvider) wipePersistentData(ctx context.Context, tx pgx.Tx) error {
-	for _, table := range []string{"actor_state", "alarms", "terminal_jobs"} {
+	for _, table := range []string{"workflow_events", "actor_state", "alarms", "terminal_jobs"} {
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.Exec(ctx, "DELETE FROM "+p.tablePrefix+table)
 		if err != nil {
@@ -339,6 +369,46 @@ func (p *PostgresProvider) backupTerminalJobs(ctx context.Context, tx pgx.Tx, bw
 	return nil
 }
 
+func (p *PostgresProvider) backupWorkflowEvents(ctx context.Context, tx pgx.Tx, bw *backup.Writer) error {
+	// Only the events of state rows included in the backup are written, which is the same non-expired filter backupState applies
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	rows, err := tx.Query(ctx,
+		`SELECT e.actor_type, e.actor_id, e.event_seq, e.event_time, e.event_kind, e.event_data
+		FROM `+p.tablePrefix+`workflow_events AS e
+		INNER JOIN `+p.tablePrefix+`actor_state AS s ON s.actor_type = e.actor_type AND s.actor_id = e.actor_id
+		WHERE s.actor_state_expiration_time IS NULL OR s.actor_state_expiration_time > (now() AT TIME ZONE 'utc')
+		ORDER BY e.actor_type, e.actor_id, e.event_seq`,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to query workflow events: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			rec       backup.WorkflowEventRecord
+			eventTime time.Time
+		)
+		err = rows.Scan(&rec.ActorType, &rec.ActorID, &rec.Seq, &eventTime, &rec.Kind, &rec.Data)
+		if err != nil {
+			return fmt.Errorf("failed to scan workflow event row: %w", err)
+		}
+		rec.Time = eventTime.UTC()
+
+		err = bw.WriteWorkflowEvent(&rec)
+		if err != nil {
+			return err
+		}
+	}
+
+	err = rows.Err()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // stateToCopyValues maps a state record to a COPY row matching backupStateColumns
 func stateToCopyValues(rec backup.Record) ([]any, error) {
 	r := rec.State
@@ -389,7 +459,7 @@ func alarmToCopyValues(rec backup.Record) ([]any, error) {
 
 	return []any{
 		pgUUID(id), r.ActorType, r.ActorID, r.Name, r.DueTime.UTC(),
-		nullString(r.Interval), nullString(r.Cron), ttl, nullBytes(r.Data), nil, nil, kind, nullString(r.JobMethod),
+		utils.NullString(r.Interval), utils.NullString(r.Cron), ttl, utils.NullBytes(r.Data), nil, nil, kind, utils.NullString(r.JobMethod),
 	}, nil
 }
 
@@ -408,30 +478,20 @@ func terminalJobToCopyValues(rec backup.Record) ([]any, error) {
 	}
 
 	return []any{
-		pgUUID(id), r.ActorType, r.ActorID, r.Method, nullBytes(r.Data),
-		r.Status, r.Attempts, nullString(r.LastError), r.EndedAt.UTC(), r.OriginalDue.UTC(), nullString(r.Interval), nullString(r.Cron), exp,
+		pgUUID(id), r.ActorType, r.ActorID, r.Method, utils.NullBytes(r.Data),
+		r.Status, r.Attempts, utils.NullString(r.LastError), r.EndedAt.UTC(), r.OriginalDue.UTC(), utils.NullString(r.Interval), utils.NullString(r.Cron), exp,
 	}, nil
+}
+
+// workflowEventToCopyValues maps a workflow-event record to a COPY row matching backupWorkflowEventColumns
+func workflowEventToCopyValues(rec backup.Record) ([]any, error) {
+	r := rec.WorkflowEvent
+	return []any{r.ActorType, r.ActorID, r.Seq, r.Time.UTC(), r.Kind, utils.NullBytes(r.Data)}, nil
 }
 
 // pgUUID wraps a uuid.UUID as a pgtype.UUID so it encodes reliably in COPY's binary protocol
 func pgUUID(id uuid.UUID) pgtype.UUID {
 	return pgtype.UUID{Bytes: id, Valid: true}
-}
-
-// nullString returns nil (SQL NULL) for an empty string, otherwise the string
-func nullString(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
-}
-
-// nullBytes returns nil (SQL NULL) for an empty byte slice, otherwise the slice
-func nullBytes(b []byte) any {
-	if len(b) == 0 {
-		return nil
-	}
-	return b
 }
 
 // recordPull is a pull view over a backup record iterator, with a single record of lookahead

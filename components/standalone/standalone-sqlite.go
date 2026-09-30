@@ -21,6 +21,7 @@ import (
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/standalone/internal"
+	"github.com/italypaleale/francis/internal/eventsql"
 )
 
 //go:embed migrations/sqlite/*.sql
@@ -284,6 +285,12 @@ func (s *StandaloneSQLiteBacked) loadFromDB(ctx context.Context) error {
 		return fmt.Errorf("failed to load actor state: %w", err)
 	}
 
+	// Load workflow events
+	err = s.loadWorkflowEvents(queryCtx)
+	if err != nil {
+		return fmt.Errorf("failed to load workflow events: %w", err)
+	}
+
 	return nil
 }
 
@@ -314,7 +321,7 @@ func (s *StandaloneSQLiteBacked) loadHosts(ctx context.Context) error {
 
 func (s *StandaloneSQLiteBacked) loadHostActorTypes(ctx context.Context) error {
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	rows, err := s.db.QueryContext(ctx, "SELECT host_id, actor_type, actor_idle_timeout, actor_concurrency_limit FROM "+s.tablePrefix+"host_actor_types")
+	rows, err := s.db.QueryContext(ctx, "SELECT host_id, actor_type, actor_idle_timeout, actor_concurrency_limit, actor_completed_job_retention, actor_dead_lettered_job_retention FROM "+s.tablePrefix+"host_actor_types")
 	if err != nil {
 		return err
 	}
@@ -322,14 +329,17 @@ func (s *StandaloneSQLiteBacked) loadHostActorTypes(ctx context.Context) error {
 
 	for rows.Next() {
 		var (
-			hat           internal.HostActorType
-			idleTimeoutMs int64
+			hat                                   internal.HostActorType
+			idleTimeoutMs                         int64
+			completedRetentionMs, deadRetentionMs int64
 		)
-		err := rows.Scan(&hat.HostID, &hat.ActorType, &idleTimeoutMs, &hat.ConcurrencyLimit)
+		err := rows.Scan(&hat.HostID, &hat.ActorType, &idleTimeoutMs, &hat.ConcurrencyLimit, &completedRetentionMs, &deadRetentionMs)
 		if err != nil {
 			return err
 		}
 		hat.IdleTimeout = time.Duration(idleTimeoutMs) * time.Millisecond
+		hat.CompletedJobRetention = time.Duration(completedRetentionMs) * time.Millisecond
+		hat.DeadLetteredJobRetention = time.Duration(deadRetentionMs) * time.Millisecond
 		if s.HostActorTypes[hat.HostID] == nil {
 			s.HostActorTypes[hat.HostID] = make([]*internal.HostActorType, 0)
 		}
@@ -530,6 +540,35 @@ func (s *StandaloneSQLiteBacked) loadActorState(ctx context.Context) error {
 	return rows.Err()
 }
 
+func (s *StandaloneSQLiteBacked) loadWorkflowEvents(ctx context.Context) error {
+	// Rows are read in sequence order, so each actor's history is appended already sorted
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	rows, err := s.db.QueryContext(ctx, "SELECT actor_type, actor_id, event_seq, event_time, event_kind, event_data FROM "+s.tablePrefix+"workflow_events ORDER BY actor_type, actor_id, event_seq")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			actorType, actorID string
+			ev                 components.WorkflowEvent
+			timeMs             int64
+		)
+
+		err := rows.Scan(&actorType, &actorID, &ev.Seq, &timeMs, &ev.Kind, &ev.Data)
+		if err != nil {
+			return err
+		}
+		ev.Time = time.UnixMilli(timeMs)
+
+		key := internal.NewActorKey(actorType, actorID)
+		s.WorkflowEvents[key] = append(s.WorkflowEvents[key], ev)
+	}
+
+	return rows.Err()
+}
+
 // PersistChanges implements PersistHook.
 func (s *StandaloneSQLiteBacked) PersistChanges(ctx context.Context, changes *internal.Changes) error {
 	if changes.IsEmpty() {
@@ -590,6 +629,12 @@ func (s *StandaloneSQLiteBacked) PersistChanges(ctx context.Context, changes *in
 		return err
 	}
 
+	// Process workflow event changes
+	err = s.persistWorkflowEventChanges(queryCtx, tx, changes)
+	if err != nil {
+		return err
+	}
+
 	err = tx.Commit()
 	if err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
@@ -642,8 +687,11 @@ func (s *StandaloneSQLiteBacked) persistHostActorTypeChanges(ctx context.Context
 	for _, hat := range changes.HostActorTypes.Set {
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := tx.ExecContext(ctx,
-			`REPLACE INTO `+s.tablePrefix+`host_actor_types (host_id, actor_type, actor_idle_timeout, actor_concurrency_limit) VALUES (?, ?, ?, ?)`,
+			`REPLACE INTO `+s.tablePrefix+`host_actor_types (
+				host_id, actor_type, actor_idle_timeout, actor_concurrency_limit, actor_completed_job_retention, actor_dead_lettered_job_retention
+			) VALUES (?, ?, ?, ?, ?, ?)`,
 			hat.HostID, hat.ActorType, hat.IdleTimeout.Milliseconds(), hat.ConcurrencyLimit,
+			hat.CompletedJobRetention.Milliseconds(), hat.DeadLetteredJobRetention.Milliseconds(),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to upsert host actor type: %w", err)
@@ -802,6 +850,12 @@ func (s *StandaloneSQLiteBacked) persistActorStateChanges(ctx context.Context, t
 		if err != nil {
 			return fmt.Errorf("failed to delete actor state: %w", err)
 		}
+
+		// Workflow events never outlive the state they belong to
+		err = s.deleteWorkflowEvents(ctx, tx, key)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Upserts
@@ -823,5 +877,39 @@ func (s *StandaloneSQLiteBacked) persistActorStateChanges(ctx context.Context, t
 		}
 	}
 
+	return nil
+}
+
+func (s *StandaloneSQLiteBacked) persistWorkflowEventChanges(ctx context.Context, tx *sql.Tx, changes *internal.Changes) error {
+	// Resets remove an actor's whole history, and run before the inserts that start the new one
+	for _, key := range changes.WorkflowEvents.Reset {
+		err := s.deleteWorkflowEvents(ctx, tx, key)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Inserts ignore events whose sequence number is already stored, so a retried write never duplicates them
+	// Each actor's events are written in bulk rather than one statement per event, since a wide fan-out appends many of them at once
+	for _, wc := range changes.WorkflowEvents.Insert {
+		err := eventsql.InsertSQLite(ctx, tx, 0, s.tablePrefix+"workflow_events", wc.Key.ActorType, wc.Key.ActorID, wc.Events)
+		if err != nil {
+			return fmt.Errorf("failed to insert workflow events: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// deleteWorkflowEvents removes every workflow event of an actor
+func (s *StandaloneSQLiteBacked) deleteWorkflowEvents(ctx context.Context, tx *sql.Tx, key internal.ActorKey) error {
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	_, err := tx.ExecContext(ctx,
+		"DELETE FROM "+s.tablePrefix+"workflow_events WHERE actor_type = ? AND actor_id = ?",
+		key.ActorType, key.ActorID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to delete workflow events: %w", err)
+	}
 	return nil
 }
