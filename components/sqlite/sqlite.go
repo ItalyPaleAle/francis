@@ -107,9 +107,9 @@ func NewSQLiteProvider(log *slog.Logger, sqliteOpts SQLiteProviderOptions, provi
 		s.clock = clock.RealClock{}
 	}
 
-	// The query timeout should be greater than HostHealthCheckDeadline
+	// The host health check deadline must be greater than the query timeout
 	if s.timeout >= s.cfg.HostHealthCheckDeadline {
-		return nil, fmt.Errorf("the configured host health check deadline ('%v') must be bigger than the query timeout ('%v')", s.timeout, s.cfg.HostHealthCheckDeadline)
+		return nil, fmt.Errorf("the configured host health check deadline ('%v') must be bigger than the query timeout ('%v')", s.cfg.HostHealthCheckDeadline, s.timeout)
 	}
 
 	// Open a database connection unless we have one passed in already

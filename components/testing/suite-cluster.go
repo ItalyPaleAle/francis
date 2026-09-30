@@ -1,6 +1,7 @@
 package comptesting
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -32,7 +33,9 @@ func (s Suite) TestClusterAdmission(t *testing.T) {
 	}
 
 	// Restore the default (unlimited) so later suite tests are unaffected
-	defer maxHosts.SetMaxHosts(0)
+	t.Cleanup(func() {
+		maxHosts.SetMaxHosts(0)
+	})
 
 	t.Run("enforces the host limit", func(t *testing.T) {
 		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
@@ -118,7 +121,9 @@ func (s Suite) TestClusterAdmission(t *testing.T) {
 
 		_, err := s.p.AcquireExclusiveLease(t.Context(), "admin-1", 5*time.Minute)
 		require.NoError(t, err)
-		defer func() { _ = s.p.ReleaseExclusiveLease(t.Context(), "admin-1") }()
+		t.Cleanup(func() {
+			_ = s.p.ReleaseExclusiveLease(context.WithoutCancel(t.Context()), "admin-1")
+		})
 
 		_, err = s.p.AcquireExclusiveLease(t.Context(), "admin-2", 5*time.Minute)
 		require.ErrorIs(t, err, components.ErrExclusiveHeld)
@@ -138,7 +143,9 @@ func (s Suite) TestClusterAdmission(t *testing.T) {
 		require.NoError(t, s.p.AdvanceClock(3*time.Minute))
 		_, err = s.p.AcquireExclusiveLease(t.Context(), "admin-2", 2*time.Minute)
 		require.NoError(t, err)
-		defer func() { _ = s.p.ReleaseExclusiveLease(t.Context(), "admin-2") }()
+		t.Cleanup(func() {
+			_ = s.p.ReleaseExclusiveLease(context.WithoutCancel(t.Context()), "admin-2")
+		})
 	})
 
 	t.Run("exclusive lease renew", func(t *testing.T) {
@@ -146,7 +153,9 @@ func (s Suite) TestClusterAdmission(t *testing.T) {
 
 		_, err := s.p.AcquireExclusiveLease(t.Context(), "admin-1", 2*time.Minute)
 		require.NoError(t, err)
-		defer func() { _ = s.p.ReleaseExclusiveLease(t.Context(), "admin-1") }()
+		t.Cleanup(func() {
+			_ = s.p.ReleaseExclusiveLease(context.WithoutCancel(t.Context()), "admin-1")
+		})
 
 		exp, err := s.p.RenewExclusiveLease(t.Context(), "admin-1", 2*time.Minute)
 		require.NoError(t, err)
