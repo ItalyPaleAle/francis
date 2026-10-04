@@ -4,7 +4,7 @@
 
 # Francis: the simple & low-maintenance Go distributed actor framework
 
-📚 **[Read the documentation](https://francis.italypaleale.me)**
+📚 **[Read the documentation](https://gofrancis.dev)**
 
 Francis is a framework and runtime for **Distributed Actors** (also known as _durable objects_) for Go apps, and a **durable workflow engine** built on them.
 
@@ -12,10 +12,10 @@ With Francis, you can build **highly-available** apps that **scale horizontally*
 
 **What you can use Francis for:**
 
-- Build [**stateful services**](https://francis.italypaleale.me/docs/concepts/) where each entity (a user, a device, a shopping cart, a game session…) is an actor with its own durable state
-- Run [**multi-step workflows**](https://francis.italypaleale.me/workflows/) that survive restarts and undo the work that already succeeded when a later step fails
-- Run [**background work on a schedule**](https://francis.italypaleale.me/docs/alarms/) with durable alarms that survive restarts
-- Process a [**distributed pool of long-running tasks**](https://francis.italypaleale.me/builtin-actors/task-pool/) with a bounded number per host that scales out as you add hosts
+- Build [**stateful services**](https://gofrancis.dev/docs/concepts/) where each entity (a user, a device, a shopping cart, a game session…) is an actor with its own durable state
+- Run [**multi-step workflows**](https://gofrancis.dev/workflows/) that survive restarts and undo the work that already succeeded when a later step fails
+- Run [**background work on a schedule**](https://gofrancis.dev/docs/alarms/) with durable alarms that survive restarts
+- Process a [**distributed pool of long-running tasks**](https://gofrancis.dev/builtin-actors/task-pool/) with a bounded number per host that scales out as you add hosts
 - Add resilience to **microservices** without standing up extra infrastructure beyond a database
 
 ```go
@@ -96,22 +96,22 @@ if err != nil {
 err = h.Run(context.Background())
 ```
 
-See the [Quickstart](https://francis.italypaleale.me/docs/quickstart/) for the complete, runnable walkthrough.
+See the [Quickstart](https://gofrancis.dev/docs/quickstart/) for the complete, runnable walkthrough.
 
 ## Documentation
 
-All documentation lives on the [website](https://francis.italypaleale.me).
+All documentation lives on the [website](https://gofrancis.dev).
 
 Quick links:
 
-- [What is Francis](https://francis.italypaleale.me/docs/what-is-francis/) — the actor model, how it works, and what Francis gives you
-- [Core concepts](https://francis.italypaleale.me/docs/concepts/) — actors, state, alarms, placement, and the activation lifecycle
-- [Quickstart](https://francis.italypaleale.me/docs/quickstart/) — build and run your first actor
-- [Writing actors](https://francis.italypaleale.me/docs/writing-actors/) — the full actor API
-- [Topologies](https://francis.italypaleale.me/docs/topologies/) — local vs. remote, and choosing the right one
-- [Deploying the runtime](https://francis.italypaleale.me/docs/deploying-the-runtime/) — running the standalone control plane
-- [Built-in actors](https://francis.italypaleale.me/builtin-actors/) - framework-managed actors for common patterns
-- [Workflows](https://francis.italypaleale.me/workflows/) — durable multi-step processes, with parallelism, compensation, and child workflows
+- [What is Francis](https://gofrancis.dev/docs/what-is-francis/) — the actor model, how it works, and what Francis gives you
+- [Core concepts](https://gofrancis.dev/docs/concepts/) — actors, state, alarms, placement, and the activation lifecycle
+- [Quickstart](https://gofrancis.dev/docs/quickstart/) — build and run your first actor
+- [Writing actors](https://gofrancis.dev/docs/writing-actors/) — the full actor API
+- [Topologies](https://gofrancis.dev/docs/topologies/) — local vs. remote, and choosing the right one
+- [Deploying the runtime](https://gofrancis.dev/docs/deploying-the-runtime/) — running the standalone control plane
+- [Built-in actors](https://gofrancis.dev/builtin-actors/) - framework-managed actors for common patterns
+- [Workflows](https://gofrancis.dev/workflows/) — durable multi-step processes, with parallelism, compensation, and child workflows
 
 You can also find runnable samples in the [`examples`](./examples) directory.
 

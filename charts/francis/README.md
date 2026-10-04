@@ -1,10 +1,10 @@
 # Francis Helm chart
 
-Runs the **Francis runtime**, the standalone control plane used by the [remote topology](https://francis.italypaleale.me/docs/topologies/), on Kubernetes.
+Runs the **Francis runtime**, the standalone control plane used by the [remote topology](https://gofrancis.dev/docs/topologies/), on Kubernetes.
 
 The runtime owns the data store and coordinates placement, state, and alarms for a fleet of stateless worker hosts. Your workers are ordinary `host/remote` hosts in your own application deployments (which are not deployed by this chart).
 
-> If you're using the [local topology](https://francis.italypaleale.me/docs/topologies/#local-topology), where Francis is embedded in your app, you don't need the runtime and you don't need this chart.
+> If you're using the [local topology](https://gofrancis.dev/docs/topologies/#local-topology), where Francis is embedded in your app, you don't need the runtime and you don't need this chart.
 
 ## Requirements
 
@@ -108,7 +108,7 @@ Workers should pin the cluster CA so they can verify the runtime on their very f
 kubectl exec -n francis francis-0 -- /bin/francis print-ca
 ```
 
-Pass the PEM to `remote.WithPinnedCA(caPEM)`. See [Security](https://francis.italypaleale.me/docs/security/) for the full model.
+Pass the PEM to `remote.WithPinnedCA(caPEM)`. See [Security](https://gofrancis.dev/docs/security/) for the full model.
 
 ### JWT bootstrap with Kubernetes service account tokens
 
@@ -226,7 +226,7 @@ Choose whichever fits your setup:
   existingConfigSecretKey: config.yaml
   ```
 
-  With `existingConfigSecret` set the chart stops rendering a config file, so `database` (except its persistence settings), `runtimePSKs`, `bootstrap`, `tuning`, and `log` are all ignored. The Secret must hold a complete [runtime configuration](https://francis.italypaleale.me/docs/deploying-the-runtime/#configuration), and it must bind to `0.0.0.0` on the port in `service.port`.
+  With `existingConfigSecret` set the chart stops rendering a config file, so `database` (except its persistence settings), `runtimePSKs`, `bootstrap`, `tuning`, and `log` are all ignored. The Secret must hold a complete [runtime configuration](https://gofrancis.dev/docs/deploying-the-runtime/#configuration), and it must bind to `0.0.0.0` on the port in `service.port`.
 
 Treat the runtime PSKs as your most sensitive cluster secret: anyone holding a current one can mint a trusted certificate and join the cluster.
 
@@ -318,7 +318,7 @@ Empty values fall back to the runtime's own defaults.
 | `openTelemetry.sampler` | string | `""` | Head sampler, for example `parentbased_traceidratio`. |
 | `openTelemetry.samplerArg` | string | `""` | Sampler argument, for example `0.1`. |
 
-Anything else can be set through `extraEnv`, since the runtime reads the standard [`OTEL_*` variables](https://francis.italypaleale.me/docs/observability/#standalone-runtime).
+Anything else can be set through `extraEnv`, since the runtime reads the standard [`OTEL_*` variables](https://gofrancis.dev/docs/observability/#standalone-runtime).
 
 ### Networking
 
@@ -376,7 +376,7 @@ The runtime binary can export the whole data store to a portable file, which als
 kubectl exec -n francis francis-0 -- /bin/francis backup -f - > francis-backup.bin
 ```
 
-See [Backup and restore](https://francis.italypaleale.me/docs/backup-and-restore/).
+See [Backup and restore](https://gofrancis.dev/docs/backup-and-restore/).
 
 ### Rotating the runtime PSKs
 
@@ -405,7 +405,7 @@ The chart leaves the old PersistentVolumeClaim in place, since StatefulSet volum
 
 ## Documentation
 
-- [Deploying the runtime](https://francis.italypaleale.me/docs/deploying-the-runtime/)
-- [Topologies](https://francis.italypaleale.me/docs/topologies/)
-- [Security model](https://francis.italypaleale.me/docs/security/)
-- [Observability](https://francis.italypaleale.me/docs/observability/)
+- [Deploying the runtime](https://gofrancis.dev/docs/deploying-the-runtime/)
+- [Topologies](https://gofrancis.dev/docs/topologies/)
+- [Security model](https://gofrancis.dev/docs/security/)
+- [Observability](https://gofrancis.dev/docs/observability/)
