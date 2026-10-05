@@ -520,7 +520,6 @@ components:
           description: |-
             Additional machine-readable context, present for some codes:
             `lastServer` has `actorTypes` (array of strings);
-            `exclusiveLeaseHeld` has `owner` (string) and `expiresAt` (RFC 3339 timestamp);
             `noHostsReachable` has `errors` (array of `HostError`)
           type: object
         message:
@@ -1455,7 +1454,7 @@ info:
     | `eventHistoryDisabled` | 404 | The workflow opted out of event history |
     | `methodNotAllowed` | 405 | The path exists but does not serve the method; the `Allow` header lists the methods it serves |
     | `lastServer` | 409 | Draining the host would leave one or more actor types without a live server; `details.actorTypes` lists them |
-    | `exclusiveLeaseHeld` | 409 | An exclusive-access lease is held on the cluster (for example during a restore), so actions are refused; `details.owner` and `details.expiresAt` describe it, and are omitted when the lease was released before it could be read; retryable |
+    | `exclusiveLeaseHeld` | 409 | An exclusive-access lease is held on the cluster (for example during a restore), so drains and workflow controls are refused; `GET /api/v1/cluster/summary` reports who holds it; retryable |
     | `hostReattached` | 409 | The host kept reconnecting, so the request could not be delivered to its current session; send it again; retryable |
     | `payloadTooLarge` | 413 | The request body is larger than 64 KiB |
     | `stateNotDecodable` | 422 | The stored actor state cannot be rendered as JSON, because it is not valid MessagePack or a map has two keys that would share a JSON name |
@@ -2011,7 +2010,7 @@ paths:
 
         - When the actor is not active anywhere, or its host went away since the lookup, the response is `200` with `notActive: true` and no request is sent to a host.
         - When the host reports the actor was not active, the response is `200` with `notActive: true` and `hostId` set.
-        - While an exclusive-access lease is held on the cluster, the action is refused with `409 exclusiveLeaseHeld`.
+        - An exclusive-access lease on the cluster doesn't stop a deactivation, which writes nothing to the provider; the lease makes every host halt its actors anyway.
         - If the host reconnected before it received the request, including to another runtime replica, the request is sent again to its new session; only if the host keeps reconnecting is the response `409 hostReattached`, and the request can be sent again.
 
         The request body is not read.
@@ -2090,9 +2089,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-          description: '`exclusiveLeaseHeld`: an exclusive-access lease is held on
-            the cluster (retryable); or `hostReattached`: the host kept reconnecting
-            (retryable)'
+          description: '`hostReattached`: the host kept reconnecting, so the request
+            could not be delivered to its current session; retryable'
           headers:
             X-Request-Id:
               description: A unique ID assigned to the request, also returned as requestId

@@ -21,6 +21,7 @@ import (
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/bootstrapauth"
 	"github.com/italypaleale/francis/internal/ca"
+	"github.com/italypaleale/francis/internal/management"
 	"github.com/italypaleale/francis/internal/peer"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/wt"
@@ -83,6 +84,8 @@ type Runtime struct {
 	advertiseAddress string
 	// peers sends management requests to other runtime replicas
 	peers *peer.Client
+	// management serves the management API, nil when it is disabled
+	management *management.Server
 
 	log   *slog.Logger
 	clock clock.WithTicker
@@ -130,6 +133,15 @@ func NewRuntime(provider components.ActorProvider, opts ...RuntimeOption) (*Runt
 		return nil, err
 	}
 
+	// Give an explicit advertise address the port of the bind address when it has none, rejecting a malformed one up front rather than when another replica dials it
+	advertiseAddress := options.advertiseAddress
+	if advertiseAddress != "" {
+		advertiseAddress, err = advertiseWithBindPort(advertiseAddress, options.bind)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// Build the metric instruments from the configured meter, which is a no-op meter unless one was provided
 	metrics, err := newRuntimeMetrics(options.meter)
 	if err != nil {
@@ -162,10 +174,22 @@ func NewRuntime(provider components.ActorProvider, opts ...RuntimeOption) (*Runt
 		activeAlarms:            make(map[string]struct{}),
 		retryingAlarms:          make(map[string]struct{}),
 		metrics:                 metrics,
-		advertiseAddress:        options.advertiseAddress,
+		advertiseAddress:        advertiseAddress,
 		peers:                   newRuntimePeerClient(cas, serverCert, options.logger),
 		log:                     options.logger,
 		clock:                   options.clock,
+	}
+
+	// Create the management API server when it is enabled
+	if options.management != nil {
+		rt.management, err = management.NewServer(management.ServerOptions{
+			Config:  *options.management,
+			Backend: &managementBackend{rt: rt},
+			Logger:  options.logger.With(slog.String("scope", "management")),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create management API server: %w", err)
+		}
 	}
 
 	// By default, alarms are dispatched to hosts over their WebTransport session
@@ -226,6 +250,11 @@ func (rt *Runtime) Run(parentCtx context.Context) error {
 
 		// Keep this replica's membership registered, so other replicas can route management requests to it
 		rt.runMembership,
+	}
+
+	// Serve the management API when it is enabled
+	if rt.management != nil {
+		services = append(services, rt.management.Run)
 	}
 
 	// Run all background services

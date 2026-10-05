@@ -58,7 +58,7 @@ Error `code` values:
 | `eventHistoryDisabled` | 404 | The workflow opted out of event history |
 | `methodNotAllowed` | 405 | The path exists but does not serve the method; the `Allow` header lists the methods it serves |
 | `lastServer` | 409 | Draining the host would leave one or more actor types without a live server; `details.actorTypes` lists them |
-| `exclusiveLeaseHeld` | 409 | An exclusive-access lease is held on the cluster (for example during a restore), so actions are refused; `details.owner` and `details.expiresAt` describe it, and are omitted when the lease was released before it could be read; retryable |
+| `exclusiveLeaseHeld` | 409 | An exclusive-access lease is held on the cluster (for example during a restore), so drains and workflow controls are refused; `GET /api/v1/cluster/summary` reports who holds it; retryable |
 | `hostReattached` | 409 | The host kept reconnecting, so the request could not be delivered to its current session; send it again; retryable |
 | `payloadTooLarge` | 413 | The request body is larger than 64 KiB |
 | `stateNotDecodable` | 422 | The stored actor state cannot be rendered as JSON, because it is not valid MessagePack or a map has two keys that would share a JSON name |

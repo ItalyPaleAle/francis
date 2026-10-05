@@ -64,9 +64,10 @@ func pageParams(r *http.Request, cursor any) (limit int, apiErr *apiError) {
 
 // page is the envelope of every paginated response
 type page[T any] struct {
-	Items      []T    `json:"items"`
+	Items []T `json:"items"`
+	// Opaque cursor to pass back as `cursor` to fetch the next page, omitted on the last page
 	NextCursor string `json:"nextCursor,omitempty"`
-}
+} //	@name	Page
 
 func newPage[T any](items []T, next string) page[T] {
 	if items == nil {

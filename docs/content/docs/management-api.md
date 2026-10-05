@@ -224,7 +224,7 @@ Actions are synchronous. Each request returns once its target has accepted it, o
 
 Repeating an action is safe. Deactivating an actor that isn't active, or draining a host that's already draining, succeeds without doing anything. A request that failed because its target was unreachable can be safely retried.
 
-While a [`clusteradmin`](https://pkg.go.dev/github.com/italypaleale/francis/clusteradmin) exclusive-access lease is held on the cluster, for example during a restore, every action returns `409` with the code `exclusiveLeaseHeld` and the lease's owner and expiry. Drains and workflow controls check the lease again in the same write that carries them out, so a lease taken while one of them runs still stops it. A deactivation that's already under way still finishes, which does no harm since the lease shuts down every host anyway.
+While a [`clusteradmin`](https://pkg.go.dev/github.com/italypaleale/francis/clusteradmin) exclusive-access lease is held on the cluster, for example during a restore, drains and workflow controls return `409` with the code `exclusiveLeaseHeld`, and `GET /api/v1/cluster/summary` reports who holds the lease and until when.
 
 Action request bodies are JSON objects. An empty body is the same as `{}`, and unknown fields are rejected. A `reason` can be at most 1024 bytes, and is recorded in the audit log.
 
