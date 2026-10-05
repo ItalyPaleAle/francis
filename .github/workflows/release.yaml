@@ -320,20 +320,20 @@ jobs:
           subject-digest: ${{ steps.helm-push.outputs.digest }}
           push-to-registry: true
 
-      # The Helm repository at https://gofrancis.dev/charts builds its index from the registry when the docs are deployed, so redeploying them lists the new chart
+      # The Helm repository at https://charts.gofrancis.dev builds its index from the registry when it is deployed, so redeploying it lists the new chart
       - name: Refresh the Helm repository index
         env:
-          VERCEL_DEPLOY_HOOK_URL: ${{ secrets.VERCEL_DEPLOY_HOOK_URL }}
+          HELM_REPO_DEPLOY_HOOK_URL: ${{ secrets.HELM_REPO_DEPLOY_HOOK_URL }}
         run: |
-          # Without the deploy hook the chart is still published, and the index picks it up the next time the docs are deployed
-          if [[ -z "${VERCEL_DEPLOY_HOOK_URL}" ]]; then
-            echo "::warning::The VERCEL_DEPLOY_HOOK_URL secret is not set, so https://gofrancis.dev/charts lists this chart only after the docs are next deployed"
+          # Without the deploy hook the chart is still published, and the index picks it up the next time the Helm repository is deployed
+          if [[ -z "${HELM_REPO_DEPLOY_HOOK_URL}" ]]; then
+            echo "::warning::The HELM_REPO_DEPLOY_HOOK_URL secret is not set, so https://charts.gofrancis.dev lists this chart only after its next deployment"
             exit 0
           fi
 
           # A failed redeploy must not hold back the release, since the chart is already in the registry
-          if ! curl -fsS -X POST -o /dev/null "${VERCEL_DEPLOY_HOOK_URL}"; then
-            echo "::warning::Failed to trigger the docs deploy hook, so https://gofrancis.dev/charts lists this chart only after the docs are next deployed"
+          if ! curl -fsS -X POST -o /dev/null "${HELM_REPO_DEPLOY_HOOK_URL}"; then
+            echo "::warning::Failed to trigger the Helm repository deploy hook, so https://charts.gofrancis.dev lists this chart only after its next deployment"
           fi
 
   release:

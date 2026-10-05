@@ -2,8 +2,9 @@
 
 set -e
 
-GO_VERSION="1.26.2"
+GO_VERSION="1.27.1"
 
+# The Vercel build image does not include Go, so download the official release and check it against its published checksum
 ensure_go() {
     if command -v go >/dev/null 2>&1; then
         return 0
@@ -30,13 +31,14 @@ ensure_go() {
 
     if [ ! -x "$go_bin" ]; then
         archive="go${GO_VERSION}.${os}-${arch}.tar.gz"
-        url="https://go.dev/dl/$archive"
+        url="https://dl.google.com/go/$archive"
         tmp_dir="$PWD/.cache/go-toolchain/tmp"
 
-        echo "\033[0;1mInstalling Go $GO_VERSION for Hugo modules\033[0;0m"
+        echo "Installing Go $GO_VERSION"
         rm -rf "$tmp_dir" "$install_dir"
         mkdir -p "$tmp_dir" "$install_dir"
         curl -fsSL "$url" -o "$tmp_dir/$archive"
+        echo "$(curl -fsSL "$url.sha256")  $tmp_dir/$archive" | sha256sum -c -
         tar -C "$install_dir" -xzf "$tmp_dir/$archive"
         rm -rf "$tmp_dir"
     fi
@@ -44,13 +46,14 @@ ensure_go() {
     export PATH="$install_dir/go/bin:$PATH"
 }
 
-echo "\033[0;1mBuilding for environment: \033[0;1;35mproduction\033[0;0m"
-
 export GOCACHE="$PWD/.cache/go-build"
 
-ensure_go
+# This folder is its own module, and the repository's go.work would make Go resolve every other module in the workspace too
+export GOWORK=off
 
-echo "\033[0;1mGo version\033[0;0m"
+ensure_go
 go version
 
-go run github.com/italypaleale/hugo-assets/cmd/vercel-docs-build
+# Vercel serves the public folder as is, so it holds nothing but the generated index
+rm -rf public
+go run . -out public/index.yaml

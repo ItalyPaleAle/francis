@@ -1,6 +1,6 @@
-// Command helm-index writes the index of the Helm chart repository served at https://gofrancis.dev/charts
+// Command helm-repo writes the index of the Helm chart repository served at https://charts.gofrancis.dev
 // The release workflow publishes every chart as an OCI artifact to the GitHub Container Registry, so the index is generated from what the registry holds and each entry points at its OCI reference
-// Helm downloads a chart whose URL uses the oci:// scheme straight from the registry, so the docs site only serves the index and never the archives
+// Helm downloads a chart whose URL uses the oci:// scheme straight from the registry, so the site only serves the index and never the archives
 package main
 
 import (
@@ -56,14 +56,14 @@ type ociDescriptor struct {
 func main() {
 	registry := flag.String("registry", "https://ghcr.io", "Base URL of the OCI registry that holds the charts")
 	repository := flag.String("repository", "italypaleale/charts/francis", "Repository of the charts in the registry")
-	out := flag.String("out", filepath.Join("static", "charts", "index.yaml"), "Path where the index is written")
+	out := flag.String("out", filepath.Join("public", "index.yaml"), "Path where the index is written")
 	flag.Parse()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	err := run(ctx, *registry, *repository, *out)
 	cancel()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "helm-index: %v\n", err)
+		fmt.Fprintf(os.Stderr, "helm-repo: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -89,7 +89,7 @@ func run(ctx context.Context, registryURL string, repository string, out string)
 		return fmt.Errorf("no charts found in %s/%s", client.host(), repository)
 	}
 
-	// Write the index under static/, which Hugo copies into the site as is
+	// Write the index into the folder Vercel serves
 	data, err := json.MarshalIndent(index, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to encode the index: %w", err)
@@ -105,7 +105,7 @@ func run(ctx context.Context, registryURL string, repository string, out string)
 		return fmt.Errorf("failed to write %s: %w", out, err)
 	}
 
-	fmt.Fprintf(os.Stdout, "helm-index: wrote %d chart versions to %s\n", count, out)
+	fmt.Fprintf(os.Stdout, "helm-repo: wrote %d chart versions to %s\n", count, out)
 	return nil
 }
 
@@ -125,7 +125,7 @@ func buildIndex(ctx context.Context, client *registryClient, now time.Time) (*in
 
 		entry, err := chartVersion(ctx, client, tag)
 		if errors.Is(err, errNotChart) {
-			fmt.Fprintf(os.Stderr, "helm-index: skipping tag %s: %v\n", tag, err)
+			fmt.Fprintf(os.Stderr, "helm-repo: skipping tag %s: %v\n", tag, err)
 			continue
 		}
 		if err != nil {

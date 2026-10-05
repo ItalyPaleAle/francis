@@ -27,7 +27,7 @@ type fakeChart struct {
 	created         string
 }
 
-// fakeRegistry serves the subset of the OCI distribution API that helm-index uses, with ghcr-style anonymous token auth
+// fakeRegistry serves the subset of the OCI distribution API that the generator uses, with ghcr-style anonymous token auth
 type fakeRegistry struct {
 	t      *testing.T
 	server *httptest.Server

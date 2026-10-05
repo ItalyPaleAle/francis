@@ -1,0 +1,25 @@
+{
+    "$schema": "https://openapi.vercel.sh/vercel.json",
+    "framework": null,
+    "buildCommand": "sh build.sh",
+    "outputDirectory": "public",
+    "ignoreCommand": "[ \"$VERCEL_ENV\" != production ] && git diff --quiet HEAD^ HEAD -- .",
+    "cleanUrls": false,
+    "trailingSlash": false,
+    "redirects": [
+        {
+            "source": "/",
+            "destination": "https://gofrancis.dev/docs/deploying-the-runtime/#kubernetes-helm",
+            "permanent": false
+        }
+    ],
+    "headers": [
+        {
+            "source": "/(.*)",
+            "headers": [
+                { "key": "X-Content-Type-Options", "value": "nosniff" },
+                { "key": "Strict-Transport-Security", "value": "max-age=63072000" }
+            ]
+        }
+    ]
+}

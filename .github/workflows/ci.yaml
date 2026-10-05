@@ -66,10 +66,21 @@ jobs:
           version: "${{ env.GOLANGCI_LINT_VERSION }}"
           working-directory: "tests/e2e"
 
+      - name: "Lint Helm repository"
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # 9.3.0
+        with:
+          version: "${{ env.GOLANGCI_LINT_VERSION }}"
+          working-directory: "helm-repo"
+
       - name: "Test"
         # On Linux, run tests with -race
         run: |
           go test -v -race -tags unit ./...
+
+      - name: "Test Helm repository"
+        working-directory: "helm-repo"
+        run: |
+          go test -v -race ./...
 
       - name: "Integration tests"
         run: |

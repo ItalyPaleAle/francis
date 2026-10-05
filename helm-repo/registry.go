@@ -197,7 +197,7 @@ func (c *registryClient) authenticate(ctx context.Context, challenge string) err
 	return nil
 }
 
-// send performs a GET, retrying network errors and server-side failures since a passing registry hiccup would otherwise fail the whole docs build
+// send performs a GET, retrying network errors and server-side failures since a passing registry hiccup would otherwise fail the whole build
 func (c *registryClient) send(ctx context.Context, u *url.URL, accept string) (*registryResponse, error) {
 	var lastErr error
 	for attempt := range maxAttempts {

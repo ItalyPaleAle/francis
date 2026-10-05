@@ -74,10 +74,10 @@ docker compose up -d
 
 ### Kubernetes (Helm)
 
-A Helm chart that runs the runtime as a StatefulSet is published to the Helm repository at `https://gofrancis.dev/charts` with every release, alongside the container image. Its version always matches the runtime version it deploys. Add the repository once:
+A Helm chart that runs the runtime as a StatefulSet is published to the Helm repository at `https://charts.gofrancis.dev` with every release, alongside the container image. Its version always matches the runtime version it deploys. Add the repository once:
 
 ```sh
-helm repo add francis https://gofrancis.dev/charts
+helm repo add francis https://charts.gofrancis.dev
 ```
 
 JWT bootstrap is enabled by default, so find your Kubernetes cluster's issuer and JWKS endpoint with `kubectl get --raw /.well-known/openid-configuration | jq '{issuer, jwks_uri}'` and provide them when you install:

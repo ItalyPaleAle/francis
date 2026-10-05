@@ -14,10 +14,10 @@ The runtime owns the data store and coordinates placement, state, and alarms for
 
 ## Installing
 
-Every release publishes the chart to the Helm repository at `https://gofrancis.dev/charts`, alongside the runtime image. Add the repository once, and run `helm repo update` later to pick up new releases:
+Every release publishes the chart to the Helm repository at `https://charts.gofrancis.dev`, alongside the runtime image. Add the repository once, and run `helm repo update` later to pick up new releases:
 
 ```sh
-helm repo add francis https://gofrancis.dev/charts
+helm repo add francis https://charts.gofrancis.dev
 ```
 
 JWT bootstrap is enabled by default. Find your Kubernetes cluster's issuer and JWKS endpoint with `kubectl get --raw /.well-known/openid-configuration | jq '{issuer, jwks_uri}'`, then provide them when you install:
