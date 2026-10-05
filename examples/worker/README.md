@@ -103,4 +103,4 @@ export OTEL_LOGS_EXPORTER=otlp
 
 Then start the workers as above. To print spans to the console instead of shipping them to a collector, set `OTEL_TRACES_EXPORTER=console`. Use `OTEL_TRACES_SAMPLER` (for example `parentbased_traceidratio` with `OTEL_TRACES_SAMPLER_ARG=0.1`) to control trace volume.
 
-See the [Observability docs](https://francis.italypaleale.me/docs/observability) for the full picture.
+See the [Observability docs](https://gofrancis.dev/docs/observability) for the full picture.

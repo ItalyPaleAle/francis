@@ -80,7 +80,7 @@ func newTestResources(cfg config, restConfig *rest.Config, client kubernetes.Int
 		labels: map[string]string{
 			"app.kubernetes.io/name":       name,
 			"app.kubernetes.io/managed-by": "francis-e2e-test-helper",
-			"francis.italypaleale.me/test": cfg.Test.Name,
+			"gofrancis.dev/test":           cfg.Test.Name,
 		},
 	}
 }

@@ -57,4 +57,4 @@ To scale beyond a single replica, switch to PostgreSQL: SQLite can be owned by o
        --set replicaCount=3
 {{- end }}
 
-Documentation: https://francis.italypaleale.me/docs/deploying-the-runtime/
+Documentation: https://gofrancis.dev/docs/deploying-the-runtime/
