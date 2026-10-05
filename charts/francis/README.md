@@ -14,12 +14,16 @@ The runtime owns the data store and coordinates placement, state, and alarms for
 
 ## Installing
 
-Every release publishes the chart as an OCI artifact to the GitHub Container Registry, alongside the runtime image:
+Every release publishes the chart to the Helm repository at `https://gofrancis.dev/charts`, alongside the runtime image. Add the repository once, and run `helm repo update` later to pick up new releases:
+
+```sh
+helm repo add francis https://gofrancis.dev/charts
+```
 
 JWT bootstrap is enabled by default. Find your Kubernetes cluster's issuer and JWKS endpoint with `kubectl get --raw /.well-known/openid-configuration | jq '{issuer, jwks_uri}'`, then provide them when you install:
 
 ```sh
-helm install francis oci://ghcr.io/italypaleale/charts/francis \
+helm install francis francis/francis \
   --version <version> \
   --namespace francis --create-namespace \
   --set-string 'runtimePSKs[0]=<a long random string>' \
@@ -28,7 +32,9 @@ helm install francis oci://ghcr.io/italypaleale/charts/francis \
   --set-string 'bootstrap.jwt.jwksURL=<your Kubernetes OIDC JWKS URL>'
 ```
 
-The chart's version always matches the runtime version it deploys, and `helm show chart oci://ghcr.io/italypaleale/charts/francis` lists what's available. To install from a checkout of the repository instead, point Helm at the directory:
+The chart's version always matches the runtime version it deploys, and `helm search repo francis/francis --versions` lists what's available (add `--devel` to include pre-releases).
+
+The Helm repository lists the same charts that every release pushes as OCI artifacts to the GitHub Container Registry, so you can also install straight from `oci://ghcr.io/italypaleale/charts/francis` without adding the repository. To install from a Git checkout instead, point Helm at the directory:
 
 ```sh
 helm install francis ./charts/francis \
@@ -46,7 +52,7 @@ The runtime PSK is a cluster secret. Generate it with something like `openssl ra
 ### Multiple replicas with PostgreSQL
 
 ```sh
-helm install francis oci://ghcr.io/italypaleale/charts/francis \
+helm install francis francis/francis \
   --version <version> \
   --namespace francis --create-namespace \
   --set replicaCount=3 \

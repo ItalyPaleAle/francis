@@ -53,4 +53,8 @@ ensure_go
 echo "\033[0;1mGo version\033[0;0m"
 go version
 
+# The Helm chart repository at /charts lists the charts in the container registry, so its index is regenerated on every build
+echo "\033[0;1mGenerating the Helm chart repository index\033[0;0m"
+go run ./cmd/helm-index
+
 go run github.com/italypaleale/hugo-assets/cmd/vercel-docs-build
