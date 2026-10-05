@@ -14,6 +14,7 @@ import (
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/utils"
 )
 
 func (p *PostgresProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) (string, bool, *ref.AlarmLease, error) {
@@ -60,7 +61,7 @@ func (p *PostgresProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, r
 		// alarm_due_time and alarm_ttl_time are stored as UTC
 		[]any{
 			alarmID, aRef.ActorType, aRef.ActorID, aRef.Name,
-			req.DueTime.UTC(), interval, cron, utcPtr(req.TTL), req.Data, req.JobMethod,
+			req.DueTime.UTC(), interval, cron, utils.TimePtrUTC(req.TTL), req.Data, req.JobMethod,
 		},
 		&jobID,
 	)
@@ -91,7 +92,7 @@ func (p *PostgresProvider) dispatchAndLeaseJob(ctx context.Context, aRef ref.Ala
 			FROM `+p.tablePrefix+`dispatch_and_lease_job_v1($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
 		[]any{
 			alarmID, aRef.ActorType, aRef.ActorID, aRef.Name,
-			req.DueTime.UTC(), interval, cron, utcPtr(req.TTL), req.Data, req.JobMethod, hostUUIDs,
+			req.DueTime.UTC(), interval, cron, utils.TimePtrUTC(req.TTL), req.Data, req.JobMethod, hostUUIDs,
 			p.cfg.HostHealthCheckDeadline, p.cfg.AlarmsFetchAheadInterval, p.cfg.AlarmsLeaseDuration,
 		},
 		&jobID, &dueTime, &leaseID,

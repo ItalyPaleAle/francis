@@ -14,8 +14,12 @@ import (
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components/sqlite"
+	"github.com/italypaleale/francis/internal/management"
 	"github.com/italypaleale/francis/internal/testutil"
 )
+
+// Compile-time interface assertion
+var _ management.Backend = (*managementBackend)(nil)
 
 func TestHostLocalManagementAPI(t *testing.T) {
 	readOnlyToken := strings.Repeat("r", 32)
@@ -64,7 +68,7 @@ func TestHostLocalManagementAPI(t *testing.T) {
 
 		var body map[string]any
 		rErr = json.NewDecoder(res.Body).Decode(&body)
-		require.NoError(t, err)
+		require.NoError(t, rErr)
 
 		return res.StatusCode, body
 	}

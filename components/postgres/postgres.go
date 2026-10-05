@@ -330,17 +330,6 @@ func (p *PostgresProvider) tableIdentifier(name string) pgx.Identifier {
 	return pgx.Identifier{p.schema, p.namePrefix + name}
 }
 
-// utcPtr returns a pointer to the UTC representation of t, or nil if t is nil
-// All time columns store UTC values, so times must be normalized to UTC before being written
-func utcPtr(t *time.Time) *time.Time {
-	if t == nil {
-		return nil
-	}
-
-	u := t.UTC()
-	return &u
-}
-
 // Convert string slice to UUID slice for PostgreSQL
 func hostIDsToUUIDs(hosts []string) ([]uuid.UUID, error) {
 	hostUUIDs := make([]uuid.UUID, len(hosts))

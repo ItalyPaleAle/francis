@@ -1,13 +1,8 @@
 package management
 
 import (
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -162,70 +157,17 @@ func TestAuthenticatorScopes(t *testing.T) {
 func declaredScopes(t *testing.T) []Scope {
 	t.Helper()
 
-	files, err := filepath.Glob("*.go")
-	require.NoError(t, err)
-
-	var scopes []Scope
-	fset := token.NewFileSet()
-	for _, name := range files {
-		if strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-
-		f, err := parser.ParseFile(fset, name, nil, 0)
-		require.NoError(t, err)
-
-		// Collect the constants declared with the Scope type, or as a conversion to it
-		for _, decl := range f.Decls {
-			gen, ok := decl.(*ast.GenDecl)
-			if !ok || gen.Tok != token.CONST {
-				continue
-			}
-			for _, spec := range gen.Specs {
-				vs, ok := spec.(*ast.ValueSpec)
-				if !ok {
-					continue
-				}
-				for _, v := range vs.Values {
-					lit := scopeLiteral(vs.Type, v)
-					if lit == nil {
-						continue
-					}
-					val, err := strconv.Unquote(lit.Value)
-					require.NoError(t, err)
-					scopes = append(scopes, Scope(val))
-				}
-			}
-		}
+	values := declaredConstants(t, ".", "Scope")
+	scopes := make([]Scope, len(values))
+	for i, v := range values {
+		scopes[i] = Scope(v)
 	}
 
-	// Guard against the parsing silently finding nothing, which would make the check above pass vacuously
+	// Guard against the parsing silently finding nothing, which would make the check pass vacuously
 	require.Contains(t, scopes, ScopeClusterRead)
 	require.Contains(t, scopes, ScopeWorkflowsManage)
 
 	return scopes
-}
-
-// scopeLiteral returns the string literal of a constant declared as `X Scope = "..."` or `X = Scope("...")`, or nil for any other constant
-func scopeLiteral(typ ast.Expr, value ast.Expr) *ast.BasicLit {
-	ident, ok := typ.(*ast.Ident)
-	if ok && ident.Name == "Scope" {
-		lit, _ := value.(*ast.BasicLit)
-		return lit
-	}
-
-	call, ok := value.(*ast.CallExpr)
-	if !ok || len(call.Args) != 1 {
-		return nil
-	}
-
-	fn, ok := call.Fun.(*ast.Ident)
-	if !ok || fn.Name != "Scope" {
-		return nil
-	}
-
-	lit, _ := call.Args[0].(*ast.BasicLit)
-	return lit
 }
 
 func TestTokenSuffix(t *testing.T) {
