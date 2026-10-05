@@ -21,6 +21,7 @@ import (
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/bootstrapauth"
 	"github.com/italypaleale/francis/internal/ca"
+	"github.com/italypaleale/francis/internal/peer"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/wt"
 	"github.com/italypaleale/francis/protocol"
@@ -77,6 +78,11 @@ type Runtime struct {
 
 	// metrics holds the OpenTelemetry instruments recorded by the runtime
 	metrics *runtimeMetrics
+
+	// advertiseAddress is the address other runtime replicas dial to reach this one, defaulting to one derived from bind
+	advertiseAddress string
+	// peers sends management requests to other runtime replicas
+	peers *peer.Client
 
 	log   *slog.Logger
 	clock clock.WithTicker
@@ -156,6 +162,8 @@ func NewRuntime(provider components.ActorProvider, opts ...RuntimeOption) (*Runt
 		activeAlarms:            make(map[string]struct{}),
 		retryingAlarms:          make(map[string]struct{}),
 		metrics:                 metrics,
+		advertiseAddress:        options.advertiseAddress,
+		peers:                   newRuntimePeerClient(cas, serverCert, options.logger),
 		log:                     options.logger,
 		clock:                   options.clock,
 	}
@@ -200,22 +208,30 @@ func (rt *Runtime) Run(parentCtx context.Context) error {
 
 	rt.log.InfoContext(ctx, "Starting Francis runtime", slog.String("bind", rt.bind))
 
+	// Close the pooled sessions to other replicas on shutdown
+	defer rt.peers.Close()
+
+	services := []servicerunner.Service{
+		// Run the WebTransport server that accepts host sessions and runtime peers
+		rt.runServer,
+
+		// Fetch and dispatch alarms for the hosts connected to this runtime
+		rt.runAlarmFetcher,
+
+		// Renew leases for the alarms owned by connected hosts
+		rt.runLeaseRenewal,
+
+		// Run the actor provider
+		rt.provider.Run,
+
+		// Keep this replica's membership registered, so other replicas can route management requests to it
+		rt.runMembership,
+	}
+
 	// Run all background services
 	// This blocks until the context is canceled or one of the services returns
 	return servicerunner.
-		NewServiceRunner(
-			// Run the WebTransport server that accepts host sessions
-			rt.runServer,
-
-			// Fetch and dispatch alarms for the hosts connected to this runtime
-			rt.runAlarmFetcher,
-
-			// Renew leases for the alarms owned by connected hosts
-			rt.runLeaseRenewal,
-
-			// Run the actor provider
-			rt.provider.Run,
-		).
+		NewServiceRunner(services...).
 		Run(ctx)
 }
 
@@ -252,6 +268,9 @@ func (rt *Runtime) runServer(ctx context.Context) error {
 			rt.serveSession(ctx, session, &handlers)
 		})
 	})
+
+	// WebTransport endpoint for other runtime replicas, which send management requests for the hosts this replica owns
+	mux.HandleFunc(protocol.RuntimePeerPath, rt.handleRuntimePeerConnect(ctx, wtServer, &handlers))
 
 	// Bind before serving so shutdown never races WebTransport's internal startup bookkeeping
 	udpAddr, err := net.ResolveUDPAddr("udp", rt.bind)

@@ -178,7 +178,7 @@ Subcommands (including `print-ca`, `healthcheck`, `backup`, and `restore`) resol
 
 | Key | Description |
 |-----|-------------|
-| `bind` | Address and port the runtime listens on. Default `:8443`. |
+| `bind` | Address and port the runtime listens on. Default `:8443`. Other runtime replicas reach this one at the same address, except that a missing or unspecified host (such as `:8443` or `0.0.0.0:8443`) is replaced with this machine's IP. See [Running multiple runtime replicas](#running-multiple-runtime-replicas). |
 | `runtimeId` | Optional identifier for this runtime, used in its server certificate, logs, and traces. The `FRANCIS_RUNTIME_ID` environment variable overrides it, so replicas sharing one config file can each get a distinct ID. When neither is set, the runtime picks a random ID on every start. |
 | `runtimePSKs` | List of runtime pre-shared keys from which the cluster CA is derived. **Required.** |
 | `bootstrap.method` | How hosts authenticate when joining: `psk` or `jwt`. **Required.** |
@@ -272,6 +272,13 @@ h, err := remote.NewHost(
 ## Running multiple runtime replicas
 
 For availability, you can run multiple runtime replicas that share the same `runtimePSKs` (so they form one certificate issuer) and the same database. Workers list all of them in `WithRuntimeAddresses` and fail over automatically.
+
+Each replica also registers the address other replicas use to reach it, derived from `bind`:
+
+- When `bind` has a specific host, such as `10.0.0.1:8443`, replicas dial that address as-is.
+- When `bind` has no host or an unspecified one, such as the default `:8443`, the runtime picks the IP of the interface it would use for outbound traffic, falling back to its interface addresses in order of preference: public IPv4, IPv6 global, private IPv4, IPv6 ULA, and link-local.  
+  In Kubernetes, this is the pod IP.  
+  If the detected IP isn't reachable by the other replicas, set the `FRANCIS_HOST_IP` environment variable to the IP (or hostname) they should dial.
 
 ## Database
 

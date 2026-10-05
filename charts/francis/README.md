@@ -69,6 +69,8 @@ helm install francis oci://ghcr.io/italypaleale/charts/francis \
 
 All replicas are interchangeable: they share the same `runtimePSKs`, so they derive the same cluster CA, and they coordinate through the database.
 
+Replicas also forward management requests to each other for the hosts connected to them. Each replica advertises its pod IP for this, which the chart passes to it in the `FRANCIS_HOST_IP` env var.
+
 Do not put the SQLite file on a networked filesystem such as NFS or SMB. Use a block-backed `ReadWriteOnce` volume, which is what the chart requests by default.
 
 ## Connecting workers

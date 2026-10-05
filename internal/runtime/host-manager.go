@@ -84,3 +84,15 @@ func (m *HostManager) Count() int {
 	defer m.mu.RUnlock()
 	return len(m.hosts)
 }
+
+// All returns every connected host, including draining ones
+func (m *HostManager) All() []*hostConn {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	res := make([]*hostConn, 0, len(m.hosts))
+	for _, c := range m.hosts {
+		res = append(res, c)
+	}
+	return res
+}

@@ -56,6 +56,14 @@ func (s *SQLiteProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req
 
 // insertJob creates a job when its idempotency key is new and always returns the stored job
 func (s *SQLiteProvider) insertJob(ctx context.Context, q querier, aRef ref.AlarmRef, req components.SetAlarmReq, alarmID string, interval *string, cron *string, ttl *int64) (stored setAlarmResult, err error) {
+	// Both callers run inside a write transaction, so the lease can't be taken between this check and the insert
+	if req.RejectIfClusterLocked {
+		err = s.checkClusterNotLocked(ctx, q, s.clock.Now().UnixMilli())
+		if err != nil {
+			return stored, err
+		}
+	}
+
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	_, err = q.ExecContext(ctx, `
 		INSERT INTO `+s.tablePrefix+`alarms

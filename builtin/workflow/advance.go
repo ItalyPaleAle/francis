@@ -109,6 +109,7 @@ func (st *instanceState) applyStart(def *definition, p *startPayload, now time.T
 	st.Timeout = def.timeout
 	st.UnknownVersion = def.unknownVersion
 	st.MaxEventSize = def.maxOutputSize
+	st.NoEventHistory = def.noEventHistory
 	st.TraceParent = p.TraceParent
 	st.Parent = p.Parent
 	if st.Parent != nil && p.Attempt > 0 {

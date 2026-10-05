@@ -28,7 +28,7 @@ import (
 	"github.com/italypaleale/francis/internal/testutil"
 )
 
-// Name of the environmental variable containing the connection string to the test database.
+// Name of the environmental variable containing the connection string to the test database
 // Example:
 // TEST_POSTGRES_CONNSTRING=postgres://actors:actors@localhost:5432/actors
 const connstringEnvVar = "TEST_POSTGRES_CONNSTRING"
@@ -47,10 +47,12 @@ func TestPostgresCreateTestDB(t *testing.T) {
 	t.Log(`Session option query: SET SESSION search_path = "` + testSchema + `", pg_catalog, public`)
 
 	// Seed with the test data
-	require.NoError(t, p.Seed(t.Context(), comptesting.GetSpec()))
+	err := p.Seed(t.Context(), comptesting.GetSpec())
+	require.NoError(t, err)
 }
 
 func TestPostgresProvider(t *testing.T) {
+	// Connect to the test database in a fresh schema that is dropped when the test ends
 	p, _ := initTestProvider(t, true)
 
 	// Run the test suites
@@ -61,9 +63,11 @@ func TestPostgresProvider(t *testing.T) {
 
 func TestPostgresTablePrefix(t *testing.T) {
 	t.Run("default prefix is francis", func(t *testing.T) {
+		// An empty prefix option falls back to the default prefix
 		p, testSchema := initTestProvider(t, true)
 		assert.Equal(t, "francis_", p.tablePrefix)
 
+		// The tables, views, and stored functions must exist under their prefixed names
 		names := schemaObjects(t, p, testSchema)
 		assert.Contains(t, names, "francis_hosts")
 		assert.Contains(t, names, "francis_alarms")
@@ -80,11 +84,12 @@ func TestPostgresTablePrefix(t *testing.T) {
 	})
 
 	t.Run("custom prefix", func(t *testing.T) {
+		// The provider appends the separator to a custom prefix
 		p, testSchema := initTestProviderWithOptions(t, "myapp", "", true)
 		assert.Equal(t, "myapp_", p.tablePrefix)
 
-		names := schemaObjects(t, p, testSchema)
 		// The test schema only contains francis objects (plus the freeze_time test helpers), so every francis object must carry the prefix
+		names := schemaObjects(t, p, testSchema)
 		assert.Contains(t, names, "myapp_hosts")
 		assert.Contains(t, names, "myapp_alarms")
 		assert.Contains(t, names, "myapp_metadata")
@@ -157,6 +162,8 @@ func TestPostgresSchema(t *testing.T) {
 // schemaObjects returns the names of all tables, views, and functions in a schema
 func schemaObjects(t *testing.T, p *PostgresProvider, schema string) []string {
 	t.Helper()
+
+	// Read the catalog directly so the check sees every object the migrations created, not just the ones the provider queries
 	rows, err := p.db.Query(t.Context(), `
 		SELECT table_name FROM information_schema.tables WHERE table_schema = $1
 		UNION ALL
@@ -168,6 +175,7 @@ func schemaObjects(t *testing.T, p *PostgresProvider, schema string) []string {
 	require.NoError(t, err)
 	defer rows.Close()
 
+	// Collect the object names
 	var names []string
 	for rows.Next() {
 		var name string
@@ -216,13 +224,14 @@ func initTestProviderWithOptions(t *testing.T, tablePrefix string, schema string
 		testutil.PostgresTestSchema(t, conn, schema, cleanup)
 	}
 
+	// Configure the provider to use the test connection, whose search_path points at the test schema
 	providerOpts := PostgresProviderOptions{
 		DB:          conn,
 		TablePrefix: tablePrefix,
 		Schema:      schema,
 
 		// Disable automated cleanups in this test
-		// We will run the cleanups automatically
+		// We will run the cleanups manually
 		CleanupInterval: -1,
 
 		clock: clock,
@@ -234,6 +243,8 @@ func initTestProviderWithOptions(t *testing.T, tablePrefix string, schema string
 	p, err = NewPostgresProvider(log, providerOpts, providerConfig)
 	require.NoError(t, err, "Error creating provider")
 
+	// Close the provider when the test ends
+	// The provider does not own the connection pool, which is closed by the cleanup registered in connectTestDatabase
 	t.Cleanup(func() {
 		cleanupErr := p.Close()
 		assert.NoError(t, cleanupErr)
@@ -283,6 +294,7 @@ func (p *PostgresProvider) SetMaxHosts(n int) {
 }
 
 func (p *PostgresProvider) setCurrentFrozenTime() error {
+	// Freeze the database's now() at the mock clock's time, so times computed in SQL agree with times computed in Go
 	queryCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, err := p.db.Exec(queryCtx,
@@ -429,6 +441,7 @@ func (p *PostgresProvider) Seed(ctx context.Context, spec comptesting.Spec) erro
 }
 
 func (p *PostgresProvider) GetAllActorState(ctx context.Context) (comptesting.ActorStateSpecCollection, error) {
+	// Load every state row, including expired ones, so the suite can assert on exactly what is stored
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	rows, err := p.db.Query(ctx, "SELECT actor_type, actor_id, actor_state_data FROM "+p.tablePrefix+"actor_state")
 	if err != nil {
@@ -436,6 +449,7 @@ func (p *PostgresProvider) GetAllActorState(ctx context.Context) (comptesting.Ac
 	}
 	defer rows.Close()
 
+	// Convert the rows into the suite's spec type
 	res := make(comptesting.ActorStateSpecCollection, 0)
 	for rows.Next() {
 		var r comptesting.ActorStateSpec
@@ -747,4 +761,195 @@ func connectTestDatabase(t *testing.T, connString string, testSchema string, cle
 	require.NoError(t, err, "Failed to perform test setup")
 
 	return conn
+}
+
+func TestPostgresManagement(t *testing.T) {
+	p, testSchema := initTestProvider(t, true)
+
+	// countEvents returns the number of stored workflow events of an actor, reading the table directly so rows hidden by ListWorkflowEvents are counted too
+	countEvents := func(t *testing.T, actorType, actorID string) int {
+		t.Helper()
+		var n int
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		err := p.db.QueryRow(t.Context(),
+			`SELECT count(*) FROM `+p.tablePrefix+`workflow_events WHERE actor_type = $1 AND actor_id = $2`,
+			actorType, actorID,
+		).Scan(&n)
+		require.NoError(t, err)
+		return n
+	}
+
+	// makeEvents builds events with consecutive sequence numbers starting at from
+	makeEvents := func(from, to int64) []components.WorkflowEvent {
+		res := make([]components.WorkflowEvent, 0, to-from+1)
+		for i := from; i <= to; i++ {
+			res = append(res, components.WorkflowEvent{
+				Seq:  i,
+				Time: p.clock.Now(),
+				Kind: fmt.Sprintf("kind-%d", i),
+				Data: fmt.Appendf(nil, "data-%d", i),
+			})
+		}
+		return res
+	}
+
+	t.Run("migration creates the management objects", func(t *testing.T) {
+		names := schemaObjects(t, p, testSchema)
+		assert.Contains(t, names, "francis_workflow_events")
+		assert.Contains(t, names, "francis_runtimes")
+		assert.Contains(t, names, "francis_actor_state_delete_workflow_events_fn")
+
+		// Indexes are not in information_schema, so look up the created label index in pg_indexes
+		var indexExists bool
+		err := p.db.QueryRow(t.Context(),
+			`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = $1 AND indexname = 'francis_actor_state_wf_created_idx')`,
+			testSchema,
+		).Scan(&indexExists)
+		require.NoError(t, err)
+		assert.True(t, indexExists)
+	})
+
+	t.Run("events are appended in the same write as the state", func(t *testing.T) {
+		aRef := ref.ActorRef{ActorType: "wf-events", ActorID: "append"}
+
+		// The first write stores the first events, and a retry of the same events is ignored
+		err := p.SetState(t.Context(), aRef, []byte("s1"), components.SetStateOpts{AppendEvents: makeEvents(1, 3)})
+		require.NoError(t, err)
+		err = p.SetState(t.Context(), aRef, []byte("s1"), components.SetStateOpts{AppendEvents: makeEvents(2, 4)})
+		require.NoError(t, err)
+		assert.Equal(t, 4, countEvents(t, aRef.ActorType, aRef.ActorID))
+
+		// The retried event keeps the kind stored first
+		res, err := p.ListWorkflowEvents(t.Context(), components.ListWorkflowEventsReq{ActorType: aRef.ActorType, ActorID: aRef.ActorID})
+		require.NoError(t, err)
+		require.Len(t, res.Events, 4)
+		assert.Equal(t, "kind-3", res.Events[2].Kind)
+		assert.Equal(t, []byte("data-3"), res.Events[2].Data)
+
+		// A history restarting at sequence number 1 replaces the earlier one
+		err = p.SetState(t.Context(), aRef, []byte("s2"), components.SetStateOpts{AppendEvents: makeEvents(1, 2)})
+		require.NoError(t, err)
+		assert.Equal(t, 2, countEvents(t, aRef.ActorType, aRef.ActorID))
+	})
+
+	t.Run("deleting state removes its events through the trigger", func(t *testing.T) {
+		keep := ref.ActorRef{ActorType: "wf-events", ActorID: "keep"}
+		deleted := ref.ActorRef{ActorType: "wf-events", ActorID: "deleted"}
+		expiring1 := ref.ActorRef{ActorType: "wf-events", ActorID: "expiring-1"}
+		expiring2 := ref.ActorRef{ActorType: "wf-events", ActorID: "expiring-2"}
+
+		// Store state with events for four actors, two of which expire so garbage collection can remove them together
+		err := p.SetState(t.Context(), keep, []byte("k"), components.SetStateOpts{AppendEvents: makeEvents(1, 2)})
+		require.NoError(t, err)
+		err = p.SetState(t.Context(), deleted, []byte("d"), components.SetStateOpts{AppendEvents: makeEvents(1, 2)})
+		require.NoError(t, err)
+		err = p.SetState(t.Context(), expiring1, []byte("e"), components.SetStateOpts{TTL: time.Minute, AppendEvents: makeEvents(1, 2)})
+		require.NoError(t, err)
+		err = p.SetState(t.Context(), expiring2, []byte("e"), components.SetStateOpts{TTL: time.Minute, AppendEvents: makeEvents(1, 3)})
+		require.NoError(t, err)
+
+		// An explicit deletion removes only that actor's events
+		err = p.DeleteState(t.Context(), deleted)
+		require.NoError(t, err)
+		assert.Equal(t, 0, countEvents(t, deleted.ActorType, deleted.ActorID))
+		assert.Equal(t, 2, countEvents(t, keep.ActorType, keep.ActorID))
+
+		// Once the state expires, its events are hidden even before garbage collection runs
+		err = p.AdvanceClock(2 * time.Minute)
+		require.NoError(t, err)
+		res, err := p.ListWorkflowEvents(t.Context(), components.ListWorkflowEventsReq{ActorType: expiring1.ActorType, ActorID: expiring1.ActorID})
+		require.NoError(t, err)
+		assert.Empty(t, res.Events)
+		assert.Equal(t, 2, countEvents(t, expiring1.ActorType, expiring1.ActorID))
+
+		// Garbage collection deletes several state rows in one statement, and the statement-level trigger removes all of their events
+		err = p.CleanupExpired(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, 0, countEvents(t, expiring1.ActorType, expiring1.ActorID))
+		assert.Equal(t, 0, countEvents(t, expiring2.ActorType, expiring2.ActorID))
+		assert.Equal(t, 2, countEvents(t, keep.ActorType, keep.ActorID))
+	})
+
+	t.Run("state actor types match prefixes exactly under the database collation", func(t *testing.T) {
+		// Some linguistic collations weigh punctuation differently from byte order, so types like these can interleave in index order
+		for _, actorType := range []string{"lst.x.a", "lst.xa", "lst.x.b", "lst.xb", "lstx.a", "lst.x"} {
+			err := p.SetState(t.Context(), ref.ActorRef{ActorType: actorType, ActorID: "a"}, []byte("v"), components.SetStateOpts{})
+			require.NoError(t, err)
+		}
+
+		// A type whose only state expired is not listed
+		err := p.SetState(t.Context(), ref.ActorRef{ActorType: "lst.x.expired", ActorID: "a"}, []byte("v"), components.SetStateOpts{TTL: time.Second})
+		require.NoError(t, err)
+		err = p.AdvanceClock(2 * time.Second)
+		require.NoError(t, err)
+
+		// A prefix ending in a dot matches only the types nested under it
+		types, err := p.ListStateActorTypes(t.Context(), "lst.x.")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"lst.x.a", "lst.x.b"}, types)
+
+		// Without the trailing dot, the prefix also matches the type itself and siblings that extend its name
+		types, err = p.ListStateActorTypes(t.Context(), "lst.x")
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"lst.x", "lst.x.a", "lst.x.b", "lst.xa", "lst.xb"}, types)
+	})
+
+	t.Run("expired runtimes are garbage collected", func(t *testing.T) {
+		// Register one runtime with a short lease and one with a long lease, then collect garbage once only the short lease has expired
+		err := p.RegisterRuntime(t.Context(), components.RegisterRuntimeReq{RuntimeID: "rt-gc-short", Address: "10.0.0.1:1", TTL: 10 * time.Second})
+		require.NoError(t, err)
+		err = p.RegisterRuntime(t.Context(), components.RegisterRuntimeReq{RuntimeID: "rt-gc-long", Address: "10.0.0.2:1", TTL: time.Hour})
+		require.NoError(t, err)
+		err = p.AdvanceClock(time.Minute)
+		require.NoError(t, err)
+		err = p.CleanupExpired(t.Context())
+		require.NoError(t, err)
+
+		// Read the table directly, since listing through the API would hide an expired row that garbage collection missed
+		var ids []string
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		rows, err := p.db.Query(t.Context(), `SELECT runtime_id FROM `+p.tablePrefix+`runtimes WHERE runtime_id LIKE 'rt-gc-%' ORDER BY runtime_id`)
+		require.NoError(t, err)
+		defer rows.Close()
+		for rows.Next() {
+			var id string
+			err = rows.Scan(&id)
+			require.NoError(t, err)
+			ids = append(ids, id)
+		}
+		err = rows.Err()
+		require.NoError(t, err)
+		assert.Equal(t, []string{"rt-gc-long"}, ids)
+	})
+
+	t.Run("host runtime ID and negative retentions are persisted", func(t *testing.T) {
+		// Register a host that carries a runtime ID and one negative retention
+		res, err := p.RegisterHost(t.Context(), components.RegisterHostReq{
+			Address:   "10.1.0.1:8080",
+			SessionID: "session-1",
+			RuntimeID: "runtime-1",
+			ActorTypes: []components.ActorHostType{
+				{ActorType: "RetActor", IdleTimeout: time.Minute, CompletedJobRetention: -1 * time.Second, DeadLetteredJobRetention: 36 * time.Hour},
+			},
+		})
+		require.NoError(t, err)
+
+		// Read the stored columns directly to confirm the values round-trip through the interval columns unchanged
+		var (
+			runtimeID             string
+			completedRet, deadRet time.Duration
+		)
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		err = p.db.QueryRow(t.Context(),
+			`SELECT h.host_runtime_id, hat.actor_completed_job_retention, hat.actor_dead_lettered_job_retention
+			FROM `+p.tablePrefix+`hosts AS h
+			INNER JOIN `+p.tablePrefix+`host_actor_types AS hat ON hat.host_id = h.host_id
+			WHERE h.host_id = $1`,
+			res.HostID,
+		).Scan(&runtimeID, &completedRet, &deadRet)
+		require.NoError(t, err)
+		assert.Equal(t, "runtime-1", runtimeID)
+		assert.Equal(t, -1*time.Second, completedRet)
+		assert.Equal(t, 36*time.Hour, deadRet)
+	})
 }

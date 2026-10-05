@@ -283,6 +283,13 @@ func (p *PostgresProvider) initGC() (err error) {
 					return nil
 				}
 			},
+			"runtimes": func() (string, func() []any) {
+				// Runtime leases are Unix milliseconds in the database clock
+				q := `DELETE FROM ` + p.tablePrefix + `runtimes WHERE runtime_expires_at < ` + nowMsExpr
+				return q, func() []any {
+					return nil
+				}
+			},
 			"terminal_jobs": func() (string, func() []any) {
 				q := `
 				DELETE FROM ` + p.tablePrefix + `terminal_jobs

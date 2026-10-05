@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/italypaleale/go-kit/utils"
 	"go.opentelemetry.io/otel/attribute"
@@ -509,7 +510,18 @@ func (o *orchestrator) markReported(ctx context.Context, st *instanceState) erro
 	}
 	opts.SetWorkflowLabels(builtinkey.Key{}, o.labels(st))
 
-	err := o.client.SetState(ctx, *st, opts)
+	// The report is recorded in the history together with the flag that says it was sent
+	now := time.Now()
+	err := o.attachHistory(ctx, opts, st, now, historyEntry{
+		kind: EventKindParentNotified,
+		at:   now,
+		data: eventData{TimeSource: TimeSourceEngine, Outcome: string(st.Status), Undo: st.Parent.UnwoundBy > 0},
+	})
+	if err != nil {
+		return err
+	}
+
+	err = o.client.SetState(ctx, *st, opts)
 	if err != nil {
 		return fmt.Errorf("failed to record the report to the parent: %w", err)
 	}

@@ -35,7 +35,7 @@ func (s *SQLiteProvider) Backup(ctx context.Context, w io.Writer) error {
 		return err
 	}
 
-	// Stream state, then alarms, then dead jobs
+	// Stream state, then alarms, then terminal jobs, then workflow events
 	err = s.backupState(ctx, tx, bw)
 	if err != nil {
 		return err
@@ -45,6 +45,10 @@ func (s *SQLiteProvider) Backup(ctx context.Context, w io.Writer) error {
 		return err
 	}
 	err = s.backupTerminalJobs(ctx, tx, bw)
+	if err != nil {
+		return err
+	}
+	err = s.backupWorkflowEvents(ctx, tx, bw)
 	if err != nil {
 		return err
 	}
@@ -74,6 +78,7 @@ func (s *SQLiteProvider) Restore(ctx context.Context, r io.Reader) error {
 		}
 
 		// Load each record, upserting into the matching table
+		var restoredEvents bool
 		for rec, recErr := range br.All() {
 			if recErr != nil {
 				return recErr
@@ -86,11 +91,31 @@ func (s *SQLiteProvider) Restore(ctx context.Context, r io.Reader) error {
 				err = s.restoreAlarm(ctx, conn, rec.Alarm)
 			case backup.RecordTypeTerminalJob:
 				err = s.restoreTerminalJob(ctx, conn, rec.TerminalJob)
+			case backup.RecordTypeWorkflowEvent:
+				restoredEvents = true
+				err = s.restoreWorkflowEvent(ctx, conn, rec.WorkflowEvent)
 			default:
 				err = fmt.Errorf("unknown backup record type %q", rec.Type)
 			}
 			if err != nil {
 				return err
+			}
+		}
+
+		// Events are only restored alongside the state they belong to, so any whose state row is not in the backup are dropped, as the other providers do
+		if restoredEvents {
+			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+			_, err = conn.ExecContext(ctx,
+				`DELETE FROM `+s.tablePrefix+`workflow_events
+				WHERE NOT EXISTS (
+					SELECT 1 FROM `+s.tablePrefix+`actor_state AS st
+					WHERE
+						st.actor_type = `+s.tablePrefix+`workflow_events.actor_type
+						AND st.actor_id = `+s.tablePrefix+`workflow_events.actor_id
+				)`,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to remove orphaned workflow events: %w", err)
 			}
 		}
 
@@ -152,9 +177,10 @@ func (s *SQLiteProvider) ensureNoHostsConnected(ctx context.Context, conn *sql.C
 	return nil
 }
 
-// wipePersistentData deletes all actor state, alarms, and terminal jobs
+// wipePersistentData deletes all workflow events, actor state, alarms, and terminal jobs
+// Events are deleted first, so the trigger that removes an actor's events with its state finds nothing left to delete
 func (s *SQLiteProvider) wipePersistentData(ctx context.Context, conn *sql.Conn) error {
-	for _, table := range []string{"actor_state", "alarms", "terminal_jobs"} {
+	for _, table := range []string{"workflow_events", "actor_state", "alarms", "terminal_jobs"} {
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err := conn.ExecContext(ctx, "DELETE FROM "+s.tablePrefix+table)
 		if err != nil {
@@ -324,6 +350,49 @@ func (s *SQLiteProvider) backupTerminalJobs(ctx context.Context, tx *sql.Tx, bw 
 	return nil
 }
 
+func (s *SQLiteProvider) backupWorkflowEvents(ctx context.Context, tx *sql.Tx, bw *backup.Writer) error {
+	// Only the events of state rows included in the backup are written, using the same expiration check as backupState
+	// #nosec G202 -- the only concatenated values are static table prefixes, not user input
+	rows, err := tx.QueryContext(ctx,
+		`SELECT e.actor_type, e.actor_id, e.event_seq, e.event_time, e.event_kind, e.event_data
+		FROM `+s.tablePrefix+`workflow_events AS e
+		JOIN `+s.tablePrefix+`actor_state AS st ON
+			st.actor_type = e.actor_type
+			AND st.actor_id = e.actor_id
+		WHERE st.actor_state_expiration_time IS NULL OR st.actor_state_expiration_time > ?
+		ORDER BY e.actor_type, e.actor_id, e.event_seq`,
+		s.clock.Now().UnixMilli(),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to query workflow events: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			rec    backup.WorkflowEventRecord
+			timeMs int64
+		)
+		err = rows.Scan(&rec.ActorType, &rec.ActorID, &rec.Seq, &timeMs, &rec.Kind, &rec.Data)
+		if err != nil {
+			return fmt.Errorf("failed to scan workflow event row: %w", err)
+		}
+		rec.Time = time.UnixMilli(timeMs).UTC()
+
+		err = bw.WriteWorkflowEvent(&rec)
+		if err != nil {
+			return err
+		}
+	}
+
+	err = rows.Err()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (s *SQLiteProvider) restoreState(ctx context.Context, conn *sql.Conn, r *backup.StateRecord) error {
 	var exp any
 	if r.Expiration != nil {
@@ -421,6 +490,21 @@ func (s *SQLiteProvider) restoreTerminalJob(ctx context.Context, conn *sql.Conn,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to restore terminal job: %w", err)
+	}
+
+	return nil
+}
+
+func (s *SQLiteProvider) restoreWorkflowEvent(ctx context.Context, conn *sql.Conn, r *backup.WorkflowEventRecord) error {
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	_, err := conn.ExecContext(ctx,
+		`INSERT INTO `+s.tablePrefix+`workflow_events (actor_type, actor_id, event_seq, event_time, event_kind, event_data)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT (actor_type, actor_id, event_seq) DO NOTHING`,
+		r.ActorType, r.ActorID, r.Seq, r.Time.UnixMilli(), r.Kind, r.Data,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to restore workflow event: %w", err)
 	}
 
 	return nil

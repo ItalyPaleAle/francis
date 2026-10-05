@@ -20,4 +20,5 @@ var (
 	ErrClusterLocked            = errors.New("the cluster is locked for exclusive access")
 	ErrMaxHostsMismatch         = errors.New("host was configured with a different max hosts value than the rest of the cluster")
 	ErrExclusiveHeld            = errors.New("another exclusive-access lease is currently held")
+	ErrRuntimeIDInUse           = errors.New("the runtime ID is already in use by a runtime at a different address")
 )

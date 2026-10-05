@@ -361,6 +361,14 @@ func (s *SQLiteProvider) initGC() (err error) {
 					}
 				}
 			},
+			"runtimes": func() (string, func() []any) {
+				q := `DELETE FROM ` + s.tablePrefix + `runtimes WHERE runtime_expires_at < ?`
+				return q, func() []any {
+					return []any{
+						s.clock.Now().UnixMilli(),
+					}
+				}
+			},
 			"terminal_jobs": func() (string, func() []any) {
 				q := `
 				DELETE FROM ` + s.tablePrefix + `terminal_jobs

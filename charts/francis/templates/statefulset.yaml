@@ -122,6 +122,11 @@ spec:
                   fieldPath: metadata.name
             - name: FRANCIS_RUNTIME_ID
               value: {{ if .Values.runtimeId }}{{ printf "%s-$(POD_NAME)" .Values.runtimeId | quote }}{{ else }}"$(POD_NAME)"{{ end }}
+            {{- /* Pass the pod's IP as FRANCIS_HOST_IP explicitly */}}
+            - name: FRANCIS_HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             {{- if .Values.openTelemetry.enabled }}
             {{- include "francis.openTelemetryEnv" . | nindent 12 }}
             {{- end }}

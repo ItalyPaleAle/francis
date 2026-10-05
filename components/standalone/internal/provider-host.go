@@ -62,24 +62,12 @@ func (p *Provider) RegisterHost(ctx context.Context, req components.RegisterHost
 		Address:         req.Address,
 		LastHealthCheck: p.Clock.Now(),
 		SessionID:       req.SessionID,
+		RuntimeID:       req.RuntimeID,
 	}
 	changes.Hosts.Set = append(changes.Hosts.Set, HostChange{Key: hostID, Value: h})
 
 	// Build actor types
-	var hats []*HostActorType
-	if len(req.ActorTypes) > 0 {
-		hats = make([]*HostActorType, len(req.ActorTypes))
-		for i, at := range req.ActorTypes {
-			hat := &HostActorType{
-				HostID:           hostID,
-				ActorType:        at.ActorType,
-				IdleTimeout:      at.IdleTimeout,
-				ConcurrencyLimit: at.ConcurrencyLimit,
-			}
-			hats[i] = hat
-			changes.HostActorTypes.Set = append(changes.HostActorTypes.Set, hat)
-		}
-	}
+	hats := buildHostActorTypes(hostID, req.ActorTypes, changes)
 
 	err := p.persistThenApply(ctx, &p.Mu, changes, func() {
 		cleanupApply()
@@ -182,6 +170,7 @@ func (p *Provider) reattachHost(ctx context.Context, req components.RegisterHost
 
 		// Hand the registration to the new session, which starts out not draining like a brand-new registration
 		updatedHost.SessionID = req.SessionID
+		updatedHost.RuntimeID = req.RuntimeID
 		updatedHost.Draining = false
 		changes.Hosts.Set = append(changes.Hosts.Set, HostChange{Key: req.ExistingHostID, Value: updatedHost})
 
@@ -248,6 +237,7 @@ func (p *Provider) reattachHost(ctx context.Context, req components.RegisterHost
 		Address:         req.Address,
 		LastHealthCheck: p.Clock.Now(),
 		SessionID:       req.SessionID,
+		RuntimeID:       req.RuntimeID,
 	}
 	changes.Hosts.Set = append(changes.Hosts.Set, HostChange{Key: hostID, Value: h})
 	freshHats := buildHostActorTypes(hostID, req.ActorTypes, changes)
@@ -277,12 +267,7 @@ func buildHostActorTypes(hostID string, actorTypes []components.ActorHostType, c
 
 	hats := make([]*HostActorType, len(actorTypes))
 	for i, at := range actorTypes {
-		hat := &HostActorType{
-			HostID:           hostID,
-			ActorType:        at.ActorType,
-			IdleTimeout:      at.IdleTimeout,
-			ConcurrencyLimit: at.ConcurrencyLimit,
-		}
+		hat := NewHostActorType(hostID, at)
 		hats[i] = hat
 		changes.HostActorTypes.Set = append(changes.HostActorTypes.Set, hat)
 	}
@@ -347,12 +332,7 @@ func (p *Provider) UpdateActorHost(ctx context.Context, hostID string, req compo
 
 			newHats = make([]*HostActorType, len(req.ActorTypes))
 			for i, at := range req.ActorTypes {
-				hat := &HostActorType{
-					HostID:           hostID,
-					ActorType:        at.ActorType,
-					IdleTimeout:      at.IdleTimeout,
-					ConcurrencyLimit: at.ConcurrencyLimit,
-				}
+				hat := NewHostActorType(hostID, at)
 				newHats[i] = hat
 				changes.HostActorTypes.Set = append(changes.HostActorTypes.Set, hat)
 			}

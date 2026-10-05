@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/backup"
@@ -17,7 +18,7 @@ const restoreBatchSize = 1000
 func (p *Provider) Backup(ctx context.Context, w io.Writer) error {
 	// Snapshot each domain under its read lock
 	// Records placed in the maps are treated as immutable (mutations replace the entry rather than editing it in place), so the collected records stay valid after the lock is released
-	stateRecs := p.snapshotStateRecords()
+	stateRecs, eventRecs := p.snapshotStateRecords()
 	alarmRecs, terminalJobRecs := p.snapshotAlarmAndTerminalJobRecords()
 
 	// Write the header, which records the format version
@@ -26,7 +27,7 @@ func (p *Provider) Backup(ctx context.Context, w io.Writer) error {
 		return err
 	}
 
-	// Stream state, then alarms, then dead jobs, matching the format's section ordering
+	// Stream state, then alarms, then terminal jobs, then workflow events, matching the format's section ordering
 	for _, rec := range stateRecs {
 		err = bw.WriteState(rec)
 		if err != nil {
@@ -45,17 +46,24 @@ func (p *Provider) Backup(ctx context.Context, w io.Writer) error {
 			return err
 		}
 	}
+	for _, rec := range eventRecs {
+		err = bw.WriteWorkflowEvent(rec)
+		if err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
 
-// snapshotStateRecords collects the non-expired actor state under the state read lock
-func (p *Provider) snapshotStateRecords() []*backup.StateRecord {
+// snapshotStateRecords collects the non-expired actor state, and the workflow events of that state, under the state read lock
+func (p *Provider) snapshotStateRecords() ([]*backup.StateRecord, []*backup.WorkflowEventRecord) {
 	p.StateMu.RLock()
 	defer p.StateMu.RUnlock()
 
 	now := p.Clock.Now()
 	recs := make([]*backup.StateRecord, 0, len(p.ActorState))
+	var events []*backup.WorkflowEventRecord
 	for key, entry := range p.ActorState {
 		if entry.IsExpired(now) {
 			continue
@@ -73,8 +81,21 @@ func (p *Provider) snapshotStateRecords() []*backup.StateRecord {
 		}
 
 		recs = append(recs, rec)
+
+		// Events are only included for state that is part of the backup
+		for _, ev := range p.WorkflowEvents[key] {
+			events = append(events, &backup.WorkflowEventRecord{
+				ActorType: key.ActorType,
+				ActorID:   key.ActorID,
+				Seq:       ev.Seq,
+				Time:      ev.Time,
+				Kind:      ev.Kind,
+				Data:      ev.Data,
+			})
+		}
 	}
-	return recs
+
+	return recs, events
 }
 
 // snapshotAlarmAndTerminalJobRecords collects all alarms (plain alarms and jobs, without the ephemeral lease fields) and dead jobs under the alarms read lock
@@ -157,6 +178,9 @@ func (p *Provider) Restore(ctx context.Context, r io.Reader) error {
 		alarmSets       []AlarmChange
 		terminalJobSets []TerminalJobChange
 		stateSets       []ActorStateChange
+		eventSets       []WorkflowEventChange
+		eventCount      int
+		stateLoaded     bool
 	)
 
 	// flushMuDomain persists and applies the buffered alarm and dead-job records
@@ -189,26 +213,41 @@ func (p *Provider) Restore(ctx context.Context, r io.Reader) error {
 		return nil
 	}
 
-	// flushStateDomain persists and applies the buffered state records
+	// flushStateDomain persists and applies the buffered state and workflow event records
+	// The backup writes events after all state, so the state an event belongs to has always been flushed before the event
 	flushStateDomain := func() error {
-		if len(stateSets) == 0 {
+		if len(stateSets) == 0 && len(eventSets) == 0 {
 			return nil
 		}
 
 		changes := NewChanges()
 		defer changes.Release()
 		changes.ActorState.Set = append(changes.ActorState.Set, stateSets...)
+		changes.WorkflowEvents.Insert = append(changes.WorkflowEvents.Insert, eventSets...)
+
+		// Merge the events into the in-memory history ahead of time, so apply cannot fail
+		merged := make(map[ActorKey][]components.WorkflowEvent, len(eventSets))
+		for _, ec := range eventSets {
+			current, ok := merged[ec.Key]
+			if !ok {
+				current = p.WorkflowEvents[ec.Key]
+			}
+			merged[ec.Key] = mergeSortedEvents(current, newWorkflowEvents(current, ec.Events))
+		}
 
 		flushErr := p.persistThenApply(ctx, &p.StateMu, changes, func() {
 			for _, sc := range stateSets {
 				p.ActorState[sc.Key] = sc.Value
 			}
+			maps.Copy(p.WorkflowEvents, merged)
 		})
 		if flushErr != nil {
 			return flushErr
 		}
 
 		stateSets = stateSets[:0]
+		eventSets = eventSets[:0]
+		eventCount = 0
 		return nil
 	}
 
@@ -244,6 +283,40 @@ func (p *Provider) Restore(ctx context.Context, r io.Reader) error {
 			terminalJobSets = append(terminalJobSets, TerminalJobChange{Key: d.JobID, Value: d})
 			if len(alarmSets)+len(terminalJobSets) >= restoreBatchSize {
 				err = flushMuDomain()
+				if err != nil {
+					return err
+				}
+			}
+		case backup.RecordTypeWorkflowEvent:
+			// Events follow all state in the stream, so flushing the buffered state first lets each event be checked against the state it belongs to
+			if !stateLoaded {
+				err = flushStateDomain()
+				if err != nil {
+					return err
+				}
+				stateLoaded = true
+			}
+
+			// An event whose state is not part of the backup would never be visible, so it is not restored
+			// Reading the state map without StateMu is safe here, since every writer of that map holds stateWriteMu, which Restore holds throughout
+			ev := rec.WorkflowEvent
+			key := NewActorKey(ev.ActorType, ev.ActorID)
+			_, hasState := p.ActorState[key]
+			if !hasState {
+				continue
+			}
+			event := components.WorkflowEvent{Seq: ev.Seq, Time: ev.Time, Kind: ev.Kind, Data: ev.Data}
+
+			// Consecutive events of the same actor are grouped into one change, which is how the backup writes them
+			if len(eventSets) > 0 && eventSets[len(eventSets)-1].Key == key {
+				last := &eventSets[len(eventSets)-1]
+				last.Events = append(last.Events, event)
+			} else {
+				eventSets = append(eventSets, WorkflowEventChange{Key: key, Events: []components.WorkflowEvent{event}})
+			}
+			eventCount++
+			if len(stateSets)+eventCount >= restoreBatchSize {
+				err = flushStateDomain()
 				if err != nil {
 					return err
 				}
@@ -309,8 +382,10 @@ func (p *Provider) wipePersistentData(ctx context.Context) error {
 	for key := range p.ActorState {
 		stateChanges.ActorState.Delete = append(stateChanges.ActorState.Delete, key)
 	}
+	// Deleting the state removes its workflow events too, both in the backing store and here
 	err = p.persistThenApply(ctx, &p.StateMu, stateChanges, func() {
 		clear(p.ActorState)
+		clear(p.WorkflowEvents)
 	})
 	if err != nil {
 		return err

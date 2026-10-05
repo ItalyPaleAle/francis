@@ -154,6 +154,15 @@ func classifyOperation(method string, err error) operationDisposition {
 		if errors.Is(err, components.ErrHostUnregistered) || errors.Is(err, components.ErrHostSuperseded) {
 			return operationExpected
 		}
+	case "GetHostDetails", "MarkHostDraining", "ClearHostDraining":
+		if errors.Is(err, components.ErrHostUnregistered) {
+			return operationExpected
+		}
+	case "RegisterRuntime":
+		if errors.Is(err, components.ErrRuntimeIDInUse) {
+			// Another replica holding the runtime ID is a misconfiguration, not a provider failure
+			return operationWarning
+		}
 	case "RemoveActor":
 		if errors.Is(err, components.ErrNoActor) {
 			return operationExpected
@@ -501,4 +510,121 @@ func (w *providerWrapper) ReleaseExclusiveLease(ctx context.Context, owner strin
 	w.finishOp(spanCtx, span, "ReleaseExclusiveLease", start, err)
 
 	return err
+}
+
+// GetExclusiveLease implements components.ManagementProvider
+func (w *providerWrapper) GetExclusiveLease(ctx context.Context) (res components.ExclusiveLeaseInfo, err error) {
+	spanCtx, span, start := w.beginOp(ctx, "GetExclusiveLease")
+	res, err = w.base.GetExclusiveLease(spanCtx)
+	w.finishOp(spanCtx, span, "GetExclusiveLease", start, err)
+
+	return res, err
+}
+
+// ListHostDetails implements components.ManagementProvider
+func (w *providerWrapper) ListHostDetails(ctx context.Context, req components.ListHostDetailsReq) (res components.ListHostDetailsRes, err error) {
+	spanCtx, span, start := w.beginOp(ctx, "ListHostDetails")
+	res, err = w.base.ListHostDetails(spanCtx, req)
+	w.finishOp(spanCtx, span, "ListHostDetails", start, err)
+
+	return res, err
+}
+
+// GetHostDetails implements components.ManagementProvider
+func (w *providerWrapper) GetHostDetails(ctx context.Context, hostID string) (res components.HostDetails, err error) {
+	spanCtx, span, start := w.beginOp(ctx, "GetHostDetails")
+	res, err = w.base.GetHostDetails(spanCtx, hostID)
+	w.finishOp(spanCtx, span, "GetHostDetails", start, err)
+
+	return res, err
+}
+
+// MarkHostDraining implements components.ManagementProvider
+func (w *providerWrapper) MarkHostDraining(ctx context.Context, req components.MarkHostDrainingReq) (res components.MarkHostDrainingRes, err error) {
+	spanCtx, span, start := w.beginOp(ctx, "MarkHostDraining")
+	res, err = w.base.MarkHostDraining(spanCtx, req)
+	w.finishOp(spanCtx, span, "MarkHostDraining", start, err)
+
+	return res, err
+}
+
+// ClearHostDraining implements components.ManagementProvider
+func (w *providerWrapper) ClearHostDraining(ctx context.Context, hostID string) (err error) {
+	spanCtx, span, start := w.beginOp(ctx, "ClearHostDraining")
+	err = w.base.ClearHostDraining(spanCtx, hostID)
+	w.finishOp(spanCtx, span, "ClearHostDraining", start, err)
+
+	return err
+}
+
+// ListPlacements implements components.ManagementProvider
+func (w *providerWrapper) ListPlacements(ctx context.Context, req components.ListPlacementsReq) (res components.ListPlacementsRes, err error) {
+	spanCtx, span, start := w.beginOp(ctx, "ListPlacements")
+	res, err = w.base.ListPlacements(spanCtx, req)
+	w.finishOp(spanCtx, span, "ListPlacements", start, err)
+
+	return res, err
+}
+
+// QueryJobs implements components.ManagementProvider
+func (w *providerWrapper) QueryJobs(ctx context.Context, req components.QueryJobsReq) (res components.QueryJobsRes, err error) {
+	spanCtx, span, start := w.beginOp(ctx, "QueryJobs")
+	res, err = w.base.QueryJobs(spanCtx, req)
+	w.finishOp(spanCtx, span, "QueryJobs", start, err)
+
+	return res, err
+}
+
+// ListAlarms implements components.ManagementProvider
+func (w *providerWrapper) ListAlarms(ctx context.Context, req components.ListAlarmsReq) (res components.ListAlarmsRes, err error) {
+	spanCtx, span, start := w.beginOp(ctx, "ListAlarms")
+	res, err = w.base.ListAlarms(spanCtx, req)
+	w.finishOp(spanCtx, span, "ListAlarms", start, err)
+
+	return res, err
+}
+
+// ListStateActorTypes implements components.ManagementProvider
+func (w *providerWrapper) ListStateActorTypes(ctx context.Context, prefix string) (res []string, err error) {
+	spanCtx, span, start := w.beginOp(ctx, "ListStateActorTypes")
+	res, err = w.base.ListStateActorTypes(spanCtx, prefix)
+	w.finishOp(spanCtx, span, "ListStateActorTypes", start, err)
+
+	return res, err
+}
+
+// ListWorkflowEvents implements components.ManagementProvider
+func (w *providerWrapper) ListWorkflowEvents(ctx context.Context, req components.ListWorkflowEventsReq) (res components.ListWorkflowEventsRes, err error) {
+	spanCtx, span, start := w.beginOp(ctx, "ListWorkflowEvents")
+	res, err = w.base.ListWorkflowEvents(spanCtx, req)
+	w.finishOp(spanCtx, span, "ListWorkflowEvents", start, err)
+
+	return res, err
+}
+
+// RegisterRuntime implements components.ManagementProvider
+func (w *providerWrapper) RegisterRuntime(ctx context.Context, req components.RegisterRuntimeReq) (err error) {
+	spanCtx, span, start := w.beginOp(ctx, "RegisterRuntime")
+	err = w.base.RegisterRuntime(spanCtx, req)
+	w.finishOp(spanCtx, span, "RegisterRuntime", start, err)
+
+	return err
+}
+
+// UnregisterRuntime implements components.ManagementProvider
+func (w *providerWrapper) UnregisterRuntime(ctx context.Context, runtimeID string, address string) (err error) {
+	spanCtx, span, start := w.beginOp(ctx, "UnregisterRuntime")
+	err = w.base.UnregisterRuntime(spanCtx, runtimeID, address)
+	w.finishOp(spanCtx, span, "UnregisterRuntime", start, err)
+
+	return err
+}
+
+// ListRuntimes implements components.ManagementProvider
+func (w *providerWrapper) ListRuntimes(ctx context.Context) (res []components.RuntimeInfo, err error) {
+	spanCtx, span, start := w.beginOp(ctx, "ListRuntimes")
+	res, err = w.base.ListRuntimes(spanCtx)
+	w.finishOp(spanCtx, span, "ListRuntimes", start, err)
+
+	return res, err
 }

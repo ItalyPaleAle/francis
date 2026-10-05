@@ -179,6 +179,36 @@ func (p *PostgresProvider) RenewExclusiveLease(ctx context.Context, owner string
 	return time.UnixMilli(expiresMs), nil
 }
 
+// GetExclusiveLease returns the holder and expiry of the cluster exclusive-access lease, or a zero value when no live lease is held
+func (p *PostgresProvider) GetExclusiveLease(ctx context.Context) (components.ExclusiveLeaseInfo, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+
+	// A lease is live until its expiry, compared with the database clock exactly as AcquireExclusiveLease does
+	var (
+		owner     string
+		expiresMs int64
+	)
+	// #nosec G202 -- the only concatenated values are the static table prefix and a static expression, not user input
+	err := p.db.QueryRow(queryCtx,
+		`SELECT exclusive_owner, exclusive_expires_at
+		FROM `+p.tablePrefix+`cluster_config
+		WHERE cluster_config_id = 1
+			AND exclusive_owner IS NOT NULL
+			AND exclusive_expires_at >= `+nowMsExpr,
+	).Scan(&owner, &expiresMs)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return components.ExclusiveLeaseInfo{}, nil
+	} else if err != nil {
+		return components.ExclusiveLeaseInfo{}, fmt.Errorf("error reading exclusive lease: %w", err)
+	}
+
+	return components.ExclusiveLeaseInfo{
+		Owner:     owner,
+		ExpiresAt: time.UnixMilli(expiresMs).UTC(),
+	}, nil
+}
+
 // ReleaseExclusiveLease clears the exclusive-access lease if it is held by owner
 // It is idempotent: releasing a lease this owner does not hold is not an error
 func (p *PostgresProvider) ReleaseExclusiveLease(ctx context.Context, owner string) error {

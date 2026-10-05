@@ -40,6 +40,8 @@ type orchestrator struct {
 	// unsavedDispatches are attempts this activation dispatched whose DispatchedAttempt marker is not in the journal yet
 	// They are saved with the next journal write rather than with a write of their own, and an activation that ends first only causes those tasks to be dispatched again
 	unsavedDispatches []dispatchAck
+	// history is what the current turn contributes to the event history beyond what the journal records, consumed by the next persist
+	history *turnHistory
 }
 
 // dispatchAck records that the job for one attempt of a task, or of its compensation, was accepted
@@ -48,6 +50,8 @@ type dispatchAck struct {
 	index   int
 	undo    bool
 	attempt int
+	// at is when the job was accepted, which the event history records as dispatch time
+	at time.Time
 }
 
 // newOrchestrator builds the Workflow actor for one instance
@@ -369,6 +373,8 @@ func (o *orchestrator) turn(ctx context.Context, ev *event) (err error) {
 	))
 	start := time.Now()
 	defer func() {
+		// Whatever the turn learned for the history is only valid for the writes of this turn
+		o.history = nil
 		o.wf.metrics.turnDuration.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(
 			attribute.String("workflow", o.def.name),
 		))
@@ -413,6 +419,7 @@ func (o *orchestrator) turn(ctx context.Context, ev *event) (err error) {
 	// Phase 2: fold the event into the journal
 	// A duplicate, or a report for a task the journal already has an outcome for, records nothing here, including this very turn being retried after its SetState succeeded and its reconcile failed
 	duplicate := apply(&st, o.def, ev, now)
+	o.beginTurnHistory(ev, duplicate, now)
 	if duplicate {
 		o.wf.metrics.duplicateEvents.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("workflow", o.def.name),
@@ -577,31 +584,51 @@ func (o *orchestrator) persist(ctx context.Context, st *instanceState, now time.
 	// Dispatch markers held back by an earlier turn are saved with this write, and are part of the size it is checked against
 	o.applyUnsavedDispatches(st)
 
+	// The history this write adds is numbered before the size check, since its sequence counter is part of the journal
 	opts := &actor.SetStateOpts{}
 	opts.SetWorkflowLabels(builtinkey.Key{}, o.labels(st))
 	opts.TTL = o.terminalStateTTL(st)
+
+	err := o.attachHistory(ctx, opts, st, now)
+	if err != nil {
+		o.history = nil
+		return err
+	}
+
 	st.encoded = nil
 
 	// The size is checked before the write, because an instance that can no longer persist can no longer progress, and failing it is a much better outcome
 	size, err := journalSize(st)
 	if err != nil {
+		o.history = nil
 		return fmt.Errorf("failed to measure the workflow journal: %w", err)
 	}
 	if size > o.def.maxJournalSize {
 		failForOversizedJournal(st, size, o.def.maxJournalSize, now)
 		err = o.cancelAllOutstanding(ctx, st)
 		if err != nil {
+			o.history = nil
 			return err
 		}
 		opts.SetWorkflowLabels(builtinkey.Key{}, o.labels(st))
 		opts.TTL = o.terminalStateTTL(st)
+
+		err = o.attachHistory(ctx, opts, st, now)
+		if err != nil {
+			o.history = nil
+			return err
+		}
+
 		st.encoded = nil
 		_, err = journalSize(st)
 		if err != nil {
+			o.history = nil
 			return fmt.Errorf("failed to encode the terminal workflow journal: %w", err)
 		}
 	}
 
+	// The turn's own history is spent by this write whatever its outcome, because a failed write fails the turn and its retry rebuilds it
+	o.history = nil
 	err = o.client.SetState(ctx, *st, opts)
 	if err != nil {
 		return fmt.Errorf("failed to write the workflow journal: %w", err)
@@ -643,6 +670,11 @@ func (o *orchestrator) labels(st *instanceState) components.WorkflowLabels {
 	}
 	if st.Parent != nil {
 		labels.Parent = st.Parent.InstanceID
+	}
+
+	if !st.CreatedAt.IsZero() {
+		labels.Created = components.FormatWorkflowCreated(st.CreatedAt)
+
 	}
 	return labels
 }
@@ -773,14 +805,16 @@ func (o *orchestrator) reconcile(ctx context.Context, st *instanceState, now tim
 	}
 
 	// Several markers are written now, because a new activation that lost them would dispatch a whole fan-out or compensation frame again
+	// They are held as unsaved until the write succeeds, which is also how the event history learns when each job was accepted
+	// A failed write leaves them held, since the jobs were accepted either way, and they wait for the next journal write
 	statusBefore := st.Status
 	before := st.stepStatuses()
+	o.unsavedDispatches = append(o.unsavedDispatches, acks...)
 	err = o.persist(ctx, st, now)
 	if err != nil {
-		// The jobs were accepted even though the markers were not saved, so they wait for the next journal write
-		o.unsavedDispatches = append(o.unsavedDispatches, acks...)
 		return err
 	}
+
 	if st.Status.IsTerminal() {
 		o.recordTransitions(ctx, st, &event{}, statusBefore, before)
 		return o.reconcile(ctx, st, now, forceParentReport)
@@ -819,7 +853,13 @@ func (o *orchestrator) dispatchForward(ctx context.Context, st *instanceState, s
 			return acks, err
 		}
 		tr.DispatchedAttempt = tr.Attempts
-		acks = append(acks, dispatchAck{step: sr.Name, index: tr.Index, attempt: tr.Attempts})
+
+		acks = append(acks, dispatchAck{
+			step:    sr.Name,
+			index:   tr.Index,
+			attempt: tr.Attempts,
+			at:      time.Now(),
+		})
 	}
 	return acks, nil
 }
@@ -890,7 +930,7 @@ func (o *orchestrator) startChild(ctx context.Context, st *instanceState, sr *st
 	}
 
 	// The placeholder stored with the job is what lets List, with a Parent filter, return the child while it is pending
-	placeholder, labels := newPendingPlaceholder(&payload)
+	placeholder, labels := newPendingPlaceholder(child.def, &payload)
 	client := builtinactor.NewClient[struct{}](child.baseType, tr.ChildID, o.svc)
 	_, _, err = client.Dispatch(ctx, methodStart, payload,
 		actor.WithIdempotencyKey(methodStart),
@@ -925,7 +965,15 @@ func (o *orchestrator) dispatchCompensations(ctx context.Context, st *instanceSt
 				return acks, err
 			}
 			tr.Comp.DispatchedAttempt = tr.Comp.Attempts
-			acks = append(acks, dispatchAck{step: sr.Name, index: tr.Index, undo: true, attempt: tr.Comp.Attempts})
+
+			acks = append(acks, dispatchAck{
+				step:    sr.Name,
+				index:   tr.Index,
+				undo:    true,
+				attempt: tr.Comp.Attempts,
+				at:      time.Now(),
+			})
+
 			continue
 		}
 
@@ -950,7 +998,13 @@ func (o *orchestrator) dispatchCompensations(ctx context.Context, st *instanceSt
 			return acks, fmt.Errorf("failed to dispatch compensation %s[%d]: %w", sr.Name, tr.Index, err)
 		}
 		tr.Comp.DispatchedAttempt = tr.Comp.Attempts
-		acks = append(acks, dispatchAck{step: sr.Name, index: tr.Index, undo: true, attempt: tr.Comp.Attempts})
+		acks = append(acks, dispatchAck{
+			step:    sr.Name,
+			index:   tr.Index,
+			undo:    true,
+			attempt: tr.Comp.Attempts,
+			at:      time.Now(),
+		})
 
 		o.wf.metrics.compensationsRun.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("workflow", o.def.name),

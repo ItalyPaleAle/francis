@@ -104,7 +104,7 @@ func initTestProviderWithPrefix(t *testing.T, connString string, tablePrefix str
 		TablePrefix:      tablePrefix,
 
 		// Disable automated cleanups in this test
-		// We will run the cleanups automatically
+		// We will run the cleanups manually
 		CleanupInterval: -1,
 
 		clock: clock,
@@ -117,7 +117,7 @@ func initTestProviderWithPrefix(t *testing.T, connString string, tablePrefix str
 
 	// Close the database connection when the test ends, or Windows refuses to remove an on-disk database that is still open
 	t.Cleanup(func() {
-		cleanupErr := p.Close()
+		cleanupErr := s.Close()
 		assert.NoError(t, cleanupErr)
 	})
 
@@ -291,6 +291,7 @@ func (s *SQLiteProvider) Seed(ctx context.Context, spec comptesting.Spec) error 
 }
 
 func (s *SQLiteProvider) GetAllActorState(ctx context.Context) (comptesting.ActorStateSpecCollection, error) {
+	// Load every state row, including expired ones, so the suite can assert on exactly what is stored
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	rows, err := s.db.QueryContext(ctx, "SELECT actor_type, actor_id, actor_state_data FROM "+s.tablePrefix+"actor_state")
 	if err != nil {
@@ -298,6 +299,7 @@ func (s *SQLiteProvider) GetAllActorState(ctx context.Context) (comptesting.Acto
 	}
 	defer rows.Close()
 
+	// Convert the rows into the suite's spec type
 	res := make(comptesting.ActorStateSpecCollection, 0)
 	for rows.Next() {
 		var r comptesting.ActorStateSpec
@@ -423,7 +425,7 @@ func (s *SQLiteProvider) GetAllHosts(ctx context.Context) (comptesting.Spec, err
 }
 
 func TestHostGarbageCollection(t *testing.T) {
-	// Connect to an in-memory database, but note it has a different name form the previous
+	// Connect to an in-memory database, but note it has a different name from the previous
 	s := initTestProvider(t, "file:gctest?mode=memory")
 
 	t.Run("garbage collector removes expired hosts", func(t *testing.T) {
@@ -540,24 +542,31 @@ func TestTablePrefix(t *testing.T) {
 	// schemaObjects returns the names of all tables and views in the database
 	schemaObjects := func(t *testing.T, s *SQLiteProvider) []string {
 		t.Helper()
+
+		// Read the catalog directly so the check sees every object the migrations created, not just the ones the provider queries
 		rows, err := s.db.QueryContext(t.Context(), "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') ORDER BY name")
 		require.NoError(t, err)
 		defer rows.Close()
 
+		// Collect the object names
 		var names []string
 		for rows.Next() {
 			var name string
-			require.NoError(t, rows.Scan(&name))
+			err = rows.Scan(&name)
+			require.NoError(t, err)
 			names = append(names, name)
 		}
-		require.NoError(t, rows.Err())
+		err = rows.Err()
+		require.NoError(t, err)
 		return names
 	}
 
 	t.Run("default prefix is francis", func(t *testing.T) {
+		// An empty prefix option falls back to the default prefix
 		s := initTestProvider(t, testutil.SQLiteConnString(t))
 		assert.Equal(t, "francis_", s.tablePrefix)
 
+		// The tables and views must exist under their prefixed names
 		names := schemaObjects(t, s)
 		assert.Contains(t, names, "francis_hosts")
 		assert.Contains(t, names, "francis_alarms")
@@ -570,9 +579,11 @@ func TestTablePrefix(t *testing.T) {
 	})
 
 	t.Run("custom prefix", func(t *testing.T) {
+		// The provider appends the separator to a custom prefix
 		s := initTestProviderWithPrefix(t, testutil.SQLiteConnString(t), "myapp")
 		assert.Equal(t, "myapp_", s.tablePrefix)
 
+		// Every table and view must carry the custom prefix, with nothing left under the default one
 		names := schemaObjects(t, s)
 		for _, name := range names {
 			assert.Truef(t, strings.HasPrefix(name, "myapp_"), "schema object %q is not prefixed", name)
@@ -644,6 +655,7 @@ func TestActiveHostsList_HostForActorType(t *testing.T) {
 			},
 		}
 
+		// Pick enough times that the distribution across the two hosts is observable
 		observed := map[string]int{}
 		for range 100 {
 			host := ahl.HostForActorType("typeA")
@@ -691,6 +703,7 @@ func TestActiveHostsList_HostForActorType(t *testing.T) {
 			},
 		}
 
+		// Pick more times than H1 has capacity for
 		observed := map[string]int{}
 		for range 100 {
 			host := ahl.HostForActorType("typeA")
@@ -734,6 +747,7 @@ func TestSQLiteWorkflowLabelIndexes(t *testing.T) {
 	newProvider := func(t *testing.T) *SQLiteProvider {
 		t.Helper()
 
+		// Create a quiet provider without background cleanups, since these tests only inspect the schema and query plans
 		clock := clocktesting.NewFakeClock(time.Now())
 		log := slog.New(slog.DiscardHandler)
 		p, err := NewSQLiteProvider(log, SQLiteProviderOptions{
@@ -742,14 +756,21 @@ func TestSQLiteWorkflowLabelIndexes(t *testing.T) {
 			clock:            clock,
 		}, comptesting.GetProviderConfig())
 		require.NoError(t, err)
-		t.Cleanup(func() { assert.NoError(t, p.Close()) })
-		require.NoError(t, p.Init(t.Context()))
+		t.Cleanup(func() {
+			cleanupErr := p.Close()
+			assert.NoError(t, cleanupErr)
+		})
+
+		// Init runs the migrations that create the indexes under test
+		err = p.Init(t.Context())
+		require.NoError(t, err)
 		return p
 	}
 
 	t.Run("the migration creates one index per label field", func(t *testing.T) {
 		p := newProvider(t)
 
+		// Read every index name from the catalog in one string, which is enough for substring checks
 		var names string
 		err := p.db.QueryRowContext(t.Context(),
 			`SELECT coalesce(group_concat(name), '') FROM sqlite_master WHERE type = 'index'`,
@@ -771,10 +792,13 @@ func TestSQLiteWorkflowLabelIndexes(t *testing.T) {
 			if i == 7 {
 				status = "completed"
 			}
-			require.NoError(t, p.SetState(t.Context(), ref.NewActorRef("W", id), []byte("data"), components.SetStateOpts{
+			err := p.SetState(t.Context(), ref.NewActorRef("W", id), []byte("data"), components.SetStateOpts{
 				WorkflowLabels: &components.WorkflowLabels{Status: status, Version: 1},
-			}))
+			})
+			require.NoError(t, err)
 		}
+
+		// Refresh the planner statistics so the plan reflects the rows just written
 		_, err := p.db.ExecContext(t.Context(), "ANALYZE")
 		require.NoError(t, err)
 
@@ -794,6 +818,7 @@ func TestSQLiteWorkflowLabelIndexes(t *testing.T) {
 func queryPlan(t *testing.T, p *SQLiteProvider, actorType string, labelField string, labelValue string) string {
 	t.Helper()
 
+	// Ask SQLite to explain the listing query instead of running it
 	// #nosec G202 -- the only concatenated values are the static table prefix and one of the closed set of label field names, not user input
 	rows, err := p.db.QueryContext(t.Context(),
 		`EXPLAIN QUERY PLAN
@@ -812,14 +837,197 @@ func queryPlan(t *testing.T, p *SQLiteProvider, actorType string, labelField str
 	require.NoError(t, err)
 	defer rows.Close()
 
+	// Join the detail column of every plan step, which is where SQLite names the index it picked
 	var plan strings.Builder
 	for rows.Next() {
 		var id, parent, notUsed int
 		var detail string
-		require.NoError(t, rows.Scan(&id, &parent, &notUsed, &detail))
+		err = rows.Scan(&id, &parent, &notUsed, &detail)
+		require.NoError(t, err)
 		plan.WriteString(detail)
 		plan.WriteString("; ")
 	}
-	require.NoError(t, rows.Err())
+	err = rows.Err()
+	require.NoError(t, err)
 	return plan.String()
+}
+
+func TestPrefixSuccessor(t *testing.T) {
+	tests := []struct {
+		prefix    string
+		want      string
+		wantUpper bool
+	}{
+		{prefix: "", wantUpper: false},
+		{prefix: "abc", want: "abd", wantUpper: true},
+		{prefix: "francis.builtin.workflow.", want: "francis.builtin.workflow/", wantUpper: true},
+		{prefix: "a\xff", want: "b", wantUpper: true},
+		{prefix: "\xff\xff", wantUpper: false},
+	}
+	for _, tt := range tests {
+		got, ok := prefixSuccessor(tt.prefix)
+		assert.Equal(t, tt.wantUpper, ok, "prefix %q", tt.prefix)
+		assert.Equal(t, tt.want, got, "prefix %q", tt.prefix)
+	}
+}
+
+func TestSQLiteManagement(t *testing.T) {
+	t.Run("the migration creates the created label index and a range listing uses it", func(t *testing.T) {
+		p := initTestProvider(t, testutil.SQLiteConnString(t))
+
+		// Enough rows that the planner has a reason to prefer the index over walking the actor type
+		base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		for i := range 400 {
+			err := p.SetState(t.Context(), ref.NewActorRef("W", fmt.Sprintf("actor-%03d", i)), []byte("data"), components.SetStateOpts{
+				WorkflowLabels: &components.WorkflowLabels{Status: "running", Created: components.FormatWorkflowCreated(base.Add(time.Duration(i) * time.Hour))},
+			})
+			require.NoError(t, err)
+		}
+
+		// Refresh the planner statistics so the plan reflects the rows just written
+		_, err := p.db.ExecContext(t.Context(), "ANALYZE")
+		require.NoError(t, err)
+
+		// The range query must name the created index in its plan
+		// #nosec G202 -- the only concatenated values are the static table prefix and a fixed label field name, not user input
+		rows, err := p.db.QueryContext(t.Context(),
+			`EXPLAIN QUERY PLAN
+			SELECT actor_id FROM `+p.tablePrefix+`actor_state
+			WHERE actor_type = ? AND actor_id > ? AND workflow_labels IS NOT NULL
+				AND `+workflowLabelExtract(components.WorkflowLabelCreated)+` >= ?
+				AND `+workflowLabelExtract(components.WorkflowLabelCreated)+` < ?
+			ORDER BY actor_id LIMIT 101`,
+			"W", "", components.FormatWorkflowCreated(base.Add(10*time.Hour)), components.FormatWorkflowCreated(base.Add(12*time.Hour)),
+		)
+		require.NoError(t, err)
+		defer rows.Close()
+		var plan strings.Builder
+		for rows.Next() {
+			var id, parent, notUsed int
+			var detail string
+			err = rows.Scan(&id, &parent, &notUsed, &detail)
+			require.NoError(t, err)
+			plan.WriteString(detail)
+			plan.WriteString("; ")
+		}
+		err = rows.Err()
+		require.NoError(t, err)
+		assert.Contains(t, plan.String(), "francis_actor_state_wf_created_idx")
+
+		// The listing returns exactly the rows in the half-open range
+		res, err := p.ListStates(t.Context(), components.ListStatesReq{
+			ActorType:   "W",
+			CreatedFrom: base.Add(10 * time.Hour),
+			CreatedTo:   base.Add(12 * time.Hour),
+		})
+		require.NoError(t, err)
+		require.Len(t, res.States, 2)
+		assert.Equal(t, "actor-010", res.States[0].ActorID)
+		assert.Equal(t, "actor-011", res.States[1].ActorID)
+		require.NotNil(t, res.States[0].WorkflowLabels)
+		assert.Equal(t, "running", res.States[0].WorkflowLabels.Status)
+	})
+
+	t.Run("overwriting state keeps its events and garbage collection removes them", func(t *testing.T) {
+		p := initTestProvider(t, testutil.SQLiteConnString(t))
+		aRef := ref.NewActorRef("W", "wf-1")
+
+		countEvents := func() int {
+			var n int
+			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+			err := p.db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM "+p.tablePrefix+"workflow_events").Scan(&n)
+			require.NoError(t, err)
+			return n
+		}
+
+		// Write state with events, then overwrite it without events: the upsert must not fire the delete trigger
+		err := p.SetState(t.Context(), aRef, []byte("v1"), components.SetStateOpts{
+			TTL:          time.Minute,
+			AppendEvents: []components.WorkflowEvent{{Seq: 1, Time: p.Now(), Kind: "start"}, {Seq: 2, Time: p.Now(), Kind: "step"}},
+		})
+		require.NoError(t, err)
+		err = p.SetState(t.Context(), aRef, []byte("v2"), components.SetStateOpts{TTL: time.Minute})
+		require.NoError(t, err)
+		assert.Equal(t, 2, countEvents())
+
+		// Once the state expires, the garbage collector's delete removes the events through the trigger
+		err = p.AdvanceClock(2 * time.Minute)
+		require.NoError(t, err)
+		err = p.CleanupExpired(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, 0, countEvents())
+	})
+
+	t.Run("runtime membership follows the provider clock", func(t *testing.T) {
+		p := initTestProvider(t, testutil.SQLiteConnString(t))
+
+		// While the lease is live, the runtime ID cannot be claimed from another address
+		err := p.RegisterRuntime(t.Context(), components.RegisterRuntimeReq{RuntimeID: "r1", Address: "a1", TTL: 10 * time.Second})
+		require.NoError(t, err)
+		err = p.RegisterRuntime(t.Context(), components.RegisterRuntimeReq{RuntimeID: "r1", Address: "a2", TTL: 10 * time.Second})
+		require.ErrorIs(t, err, components.ErrRuntimeIDInUse)
+
+		// After the lease expires, another address can take the ID, and the expired record is not listed
+		err = p.AdvanceClock(11 * time.Second)
+		require.NoError(t, err)
+		list, err := p.ListRuntimes(t.Context())
+		require.NoError(t, err)
+		assert.Empty(t, list)
+		err = p.RegisterRuntime(t.Context(), components.RegisterRuntimeReq{RuntimeID: "r1", Address: "a2", TTL: 10 * time.Second})
+		require.NoError(t, err)
+
+		// Unregistering from the wrong address is a no-op
+		err = p.UnregisterRuntime(t.Context(), "r1", "a1")
+		require.NoError(t, err)
+		list, err = p.ListRuntimes(t.Context())
+		require.NoError(t, err)
+		require.Len(t, list, 1)
+		assert.Equal(t, "a2", list[0].Address)
+		// Times are stored with millisecond precision
+		assert.WithinDuration(t, p.Now().Add(10*time.Second), list[0].ExpiresAt, time.Millisecond)
+	})
+}
+
+func TestRuntimeMembershipSharedDatabase(t *testing.T) {
+	// Two providers on the same database file stand in for two runtime replicas on the same machine
+	connString := "file:" + filepath.Join(t.TempDir(), "shared.db") + "?_pragma=busy_timeout(5000)"
+	a := initTestProvider(t, connString)
+	b := initTestProvider(t, connString)
+
+	// Register one runtime through each provider
+	err := a.RegisterRuntime(t.Context(), components.RegisterRuntimeReq{RuntimeID: "rt-a", Address: "127.0.0.1:7400", TTL: time.Minute})
+	require.NoError(t, err)
+	err = b.RegisterRuntime(t.Context(), components.RegisterRuntimeReq{RuntimeID: "rt-b", Address: "127.0.0.1:7410", TTL: time.Minute})
+	require.NoError(t, err)
+
+	t.Run("each replica sees the other", func(t *testing.T) {
+		for _, p := range []*SQLiteProvider{a, b} {
+			runtimes, lErr := p.ListRuntimes(t.Context())
+			require.NoError(t, lErr)
+			require.Len(t, runtimes, 2)
+			assert.Equal(t, "rt-a", runtimes[0].RuntimeID)
+			assert.Equal(t, "127.0.0.1:7400", runtimes[0].Address)
+			assert.Equal(t, "rt-b", runtimes[1].RuntimeID)
+			assert.Equal(t, "127.0.0.1:7410", runtimes[1].Address)
+		}
+	})
+
+	t.Run("a live runtime ID cannot be claimed from another address", func(t *testing.T) {
+		rErr := b.RegisterRuntime(t.Context(), components.RegisterRuntimeReq{RuntimeID: "rt-a", Address: "127.0.0.1:7410", TTL: time.Minute})
+		require.ErrorIs(t, rErr, components.ErrRuntimeIDInUse)
+
+		// Renewing from the same address still works
+		rErr = a.RegisterRuntime(t.Context(), components.RegisterRuntimeReq{RuntimeID: "rt-a", Address: "127.0.0.1:7400", TTL: time.Minute})
+		require.NoError(t, rErr)
+	})
+
+	t.Run("unregistering is visible to the other replica", func(t *testing.T) {
+		rErr := b.UnregisterRuntime(t.Context(), "rt-b", "127.0.0.1:7410")
+		require.NoError(t, rErr)
+
+		runtimes, rErr := a.ListRuntimes(t.Context())
+		require.NoError(t, rErr)
+		require.Len(t, runtimes, 1)
+		assert.Equal(t, "rt-a", runtimes[0].RuntimeID)
+	})
 }

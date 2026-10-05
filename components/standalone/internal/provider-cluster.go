@@ -49,6 +49,18 @@ func (p *Provider) checkClusterAdmission(nowMs int64) (claim *clusterstate.State
 	return claim, nil
 }
 
+// checkClusterNotLocked returns components.ErrClusterLocked if an exclusive-access lease is live
+// It must be called while holding writeMu, which AcquireExclusiveLease also takes, so the lease can't be taken until the caller's change is applied
+func (p *Provider) checkClusterNotLocked() error {
+	p.Mu.RLock()
+	live := p.Cluster.LeaseLive(p.Clock.Now().UnixMilli())
+	p.Mu.RUnlock()
+	if live {
+		return components.ErrClusterLocked
+	}
+	return nil
+}
+
 // AcquireExclusiveLease acquires or re-acquires the cluster exclusive-access lease for owner, extending it to now+ttl
 // It returns components.ErrExclusiveHeld if a different owner currently holds a live (non-expired) lease
 func (p *Provider) AcquireExclusiveLease(_ context.Context, owner string, ttl time.Duration) (time.Time, error) {
@@ -93,6 +105,24 @@ func (p *Provider) RenewExclusiveLease(_ context.Context, owner string, ttl time
 
 	p.Cluster.ExclusiveExpiresAt = expiresAt.UnixMilli()
 	return expiresAt, nil
+}
+
+// GetExclusiveLease returns the holder and expiry of the cluster exclusive-access lease, or a zero value when no live lease is held
+func (p *Provider) GetExclusiveLease(_ context.Context) (components.ExclusiveLeaseInfo, error) {
+	nowMs := p.Clock.Now().UnixMilli()
+
+	p.Mu.RLock()
+	defer p.Mu.RUnlock()
+
+	// An expired lease reads as absent, with the same comparison AcquireExclusiveLease uses
+	if !p.Cluster.LeaseLive(nowMs) {
+		return components.ExclusiveLeaseInfo{}, nil
+	}
+
+	return components.ExclusiveLeaseInfo{
+		Owner:     p.Cluster.ExclusiveOwner,
+		ExpiresAt: time.UnixMilli(p.Cluster.ExclusiveExpiresAt),
+	}, nil
 }
 
 // ReleaseExclusiveLease clears the exclusive-access lease if it is held by owner

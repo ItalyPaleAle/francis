@@ -15,6 +15,7 @@ import (
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/utils"
 )
 
 func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {
@@ -55,11 +56,12 @@ func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.Regi
 		defer cancel()
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err = tx.Exec(queryCtx,
-			`INSERT INTO `+p.tablePrefix+`hosts (host_id, host_address, host_last_health_check, host_session_id)
-			VALUES ($1, $2, now() AT TIME ZONE 'utc', $3)`,
+			`INSERT INTO `+p.tablePrefix+`hosts (host_id, host_address, host_last_health_check, host_session_id, host_runtime_id)
+			VALUES ($1, $2, now() AT TIME ZONE 'utc', $3, $4)`,
 			hostID,
 			req.Address,
-			nullString(req.SessionID),
+			utils.NullString(req.SessionID),
+			utils.NullString(req.RuntimeID),
 		)
 		if isConstraintError(err) {
 			return zero, components.ErrHostAlreadyRegistered
@@ -132,9 +134,9 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		tag, err = tx.Exec(queryCtx,
 			`UPDATE `+p.tablePrefix+`hosts
-			SET host_address = $1, host_last_health_check = now() AT TIME ZONE 'utc', host_session_id = $3, host_draining = false
+			SET host_address = $1, host_last_health_check = now() AT TIME ZONE 'utc', host_session_id = $3, host_runtime_id = $4, host_draining = false
 			WHERE host_id = $2`,
-			req.Address, req.ExistingHostID, nullString(req.SessionID),
+			req.Address, req.ExistingHostID, utils.NullString(req.SessionID), utils.NullString(req.RuntimeID),
 		)
 		if isConstraintError(err) {
 			return zero, components.ErrHostAlreadyRegistered
@@ -152,9 +154,9 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 			defer cancel()
 			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 			_, err = tx.Exec(queryCtx,
-				`INSERT INTO `+p.tablePrefix+`hosts (host_id, host_address, host_last_health_check, host_session_id)
-				VALUES ($1, $2, now() AT TIME ZONE 'utc', $3)`,
-				newHostID, req.Address, nullString(req.SessionID),
+				`INSERT INTO `+p.tablePrefix+`hosts (host_id, host_address, host_last_health_check, host_session_id, host_runtime_id)
+				VALUES ($1, $2, now() AT TIME ZONE 'utc', $3, $4)`,
+				newHostID, req.Address, utils.NullString(req.SessionID), utils.NullString(req.RuntimeID),
 			)
 			if isConstraintError(err) {
 				return zero, components.ErrHostAlreadyRegistered
@@ -599,7 +601,7 @@ func (p *PostgresProvider) insertHostActorTypes(ctx context.Context, tx pgx.Tx, 
 	_, err := tx.CopyFrom(
 		queryCtx,
 		p.tableIdentifier("host_actor_types"),
-		[]string{"host_id", "actor_type", "actor_idle_timeout", "actor_concurrency_limit"},
+		[]string{"host_id", "actor_type", "actor_idle_timeout", "actor_concurrency_limit", "actor_completed_job_retention", "actor_dead_lettered_job_retention"},
 		&actorHostTypeColl{
 			hostID:     hostID,
 			actorTypes: actorTypes,
@@ -633,6 +635,8 @@ func (ahtc *actorHostTypeColl) Values() ([]any, error) {
 		row.ActorType,
 		row.IdleTimeout,
 		row.ConcurrencyLimit,
+		row.CompletedJobRetention,
+		row.DeadLetteredJobRetention,
 	}
 	return res, nil
 }

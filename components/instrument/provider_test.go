@@ -328,6 +328,8 @@ func TestClassifyOperation(t *testing.T) {
 		{name: "expected acquisition contention", method: "AcquireExclusiveLease", err: components.ErrExclusiveHeld, want: operationExpected},
 		{name: "placement warning", method: "LookupActor", err: components.ErrNoHost, want: operationWarning},
 		{name: "restore warning", method: "Restore", err: components.ErrHostsConnected, want: operationWarning},
+		{name: "expected host details absence", method: "GetHostDetails", err: components.ErrHostUnregistered, want: operationExpected},
+		{name: "runtime ID conflict warning", method: "RegisterRuntime", err: components.ErrRuntimeIDInUse, want: operationWarning},
 		{name: "renewal lease loss", method: "RenewExclusiveLease", err: components.ErrExclusiveHeld, want: operationFailure},
 		{name: "unexpected failure", method: "GetState", err: errors.New("database unavailable"), want: operationFailure},
 	}

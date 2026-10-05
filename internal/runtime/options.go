@@ -53,6 +53,7 @@ type runtimeOptions struct {
 	providerRequestTimeout  time.Duration
 	alarmExecutionTimeout   time.Duration
 	shutdownGracePeriod     time.Duration
+	advertiseAddress        string
 
 	// Allows setting a clock for testing
 	clock clock.WithTicker
@@ -126,4 +127,12 @@ func WithAlarmExecutionTimeout(d time.Duration) RuntimeOption {
 // WithShutdownGracePeriod sets the grace period for shutting down
 func WithShutdownGracePeriod(d time.Duration) RuntimeOption {
 	return func(o *runtimeOptions) { o.shutdownGracePeriod = d }
+}
+
+// WithAdvertiseAddress sets the address other runtime replicas use to reach this one
+// It defaults to the bind address, with an unspecified host (such as in ":8443" or "0.0.0.0:8443") replaced by an auto-detected host IP
+func WithAdvertiseAddress(addr string) RuntimeOption {
+	return func(o *runtimeOptions) {
+		o.advertiseAddress = addr
+	}
 }

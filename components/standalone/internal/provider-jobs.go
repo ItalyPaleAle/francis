@@ -23,6 +23,14 @@ func (p *Provider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req compo
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 
+	// The lease can't be taken while writeMu is held, so this check is atomic with the insert
+	if req.RejectIfClusterLocked {
+		err := p.checkClusterNotLocked()
+		if err != nil {
+			return "", false, nil, err
+		}
+	}
+
 	// The state domain is locked only when the job carries an initial state, in the same order Restore uses
 	if req.InitialState != nil {
 		p.stateWriteMu.Lock()
@@ -97,6 +105,14 @@ func (p *Provider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, r
 	key := NewAlarmKey(aRef.ActorType, aRef.ActorID, aRef.Name)
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
+
+	// The lease can't be taken while writeMu is held, so this check is atomic with the insert
+	if req.RejectIfClusterLocked {
+		err := p.checkClusterNotLocked()
+		if err != nil {
+			return "", false, nil, err
+		}
+	}
 
 	// The state domain is locked only when the job carries an initial state, in the same order Restore uses
 	if req.InitialState != nil {
@@ -398,21 +414,7 @@ func (p *Provider) GetJob(ctx context.Context, jobID string) (components.JobInfo
 	// First look for a live job
 	a, ok := p.AlarmsByID[jobID]
 	if ok && a.Kind == string(components.AlarmKindJob) {
-		status := components.JobStatusPending
-		if a.LeaseID != nil && a.LeaseExpiration != nil && !a.LeaseExpiration.Before(now) {
-			status = components.JobStatusActive
-		}
-		return components.JobInfo{
-			JobID:     a.ID,
-			ActorType: a.ActorType,
-			ActorID:   a.ActorID,
-			Method:    a.JobMethod,
-			Status:    status,
-			DueTime:   a.DueTime,
-			Interval:  a.Interval,
-			Cron:      a.Cron,
-			CreatedAt: components.JobCreatedAt(jobID),
-		}, nil
+		return liveJobToInfo(a, now), nil
 	}
 
 	// Then look for a job that ended, whether it completed or dead-lettered
@@ -439,22 +441,7 @@ func (p *Provider) ListJobs(ctx context.Context, actorType string, actorID strin
 		if a.Kind != string(components.AlarmKindJob) || a.ActorType != actorType || a.ActorID != actorID {
 			continue
 		}
-		status := components.JobStatusPending
-		if a.LeaseID != nil && a.LeaseExpiration != nil && !a.LeaseExpiration.Before(now) {
-			status = components.JobStatusActive
-		}
-
-		res = append(res, components.JobInfo{
-			JobID:     a.ID,
-			ActorType: a.ActorType,
-			ActorID:   a.ActorID,
-			Method:    a.JobMethod,
-			Status:    status,
-			DueTime:   a.DueTime,
-			Interval:  a.Interval,
-			Cron:      a.Cron,
-			CreatedAt: components.JobCreatedAt(a.ID),
-		})
+		res = append(res, liveJobToInfo(a, now))
 	}
 
 	// Jobs that ended, whether they completed or dead-lettered
@@ -634,4 +621,24 @@ func jobCreatedAtOrEnded(d *TerminalJob) time.Time {
 		return d.EndedAt
 	}
 	return t
+}
+
+// liveJobToInfo maps a live job to the public JobInfo, deriving its status from the lease as ListJobs does
+func liveJobToInfo(a *Alarm, now time.Time) components.JobInfo {
+	status := components.JobStatusPending
+	if a.LeaseValid(now) {
+		status = components.JobStatusActive
+	}
+
+	return components.JobInfo{
+		JobID:     a.ID,
+		ActorType: a.ActorType,
+		ActorID:   a.ActorID,
+		Method:    a.JobMethod,
+		Status:    status,
+		DueTime:   a.DueTime,
+		Interval:  a.Interval,
+		Cron:      a.Cron,
+		CreatedAt: components.JobCreatedAt(a.ID),
+	}
 }

@@ -7,6 +7,8 @@ import (
 	"time"
 	"uuid"
 
+	postgresadapter "github.com/italypaleale/go-sql-utils/adapter/postgres"
+	postgrestransactions "github.com/italypaleale/go-sql-utils/transactions/postgres"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
@@ -44,7 +46,7 @@ func (p *PostgresProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, r
 	// The self-assignment on conflict is intentional because it makes RETURNING atomically yield the winner of a concurrent insert
 	var jobID uuid.UUID
 	// #nosec G202 -- the only concatenated values are static table prefixes, not user input
-	err := p.queryJobRow(queryCtx, aRef, req.InitialState, `
+	err := p.queryJobRow(queryCtx, aRef, req, `
 			INSERT INTO `+p.tablePrefix+`alarms AS stored
 				(alarm_id, actor_type, actor_id, alarm_name,
 				alarm_due_time, alarm_interval, alarm_cron, alarm_ttl_time, alarm_data,
@@ -84,7 +86,7 @@ func (p *PostgresProvider) dispatchAndLeaseJob(ctx context.Context, aRef ref.Ala
 		leaseID pgtype.UUID
 	)
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	err = p.queryJobRow(ctx, aRef, req.InitialState,
+	err = p.queryJobRow(ctx, aRef, req,
 		`SELECT r_job_id, r_job_due_time, r_lease_id
 			FROM `+p.tablePrefix+`dispatch_and_lease_job_v1($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
 		[]any{
@@ -109,11 +111,42 @@ func (p *PostgresProvider) dispatchAndLeaseJob(ctx context.Context, aRef ref.Ala
 	return jobID.String(), created, lease, nil
 }
 
+type jobQuerier interface {
+	postgresadapter.PGXQuerier
+
+	SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults
+}
+
 // queryJobRow runs the query that stores a job and scans its single result row into dest
+func (p *PostgresProvider) queryJobRow(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq, query string, args []any, dest ...any) error {
+	if !req.RejectIfClusterLocked {
+		return p.storeJobRow(ctx, p.db, aRef, req.InitialState, query, args, dest...)
+	}
+
+	// The job is stored first and a live lease rolls it back
+	// The lease is checked last because host registration deletes expired hosts, and with them their placements, before it locks the cluster_config row, and taking the locks in the same order can't deadlock with it
+	// The row lock is then held until the transaction ends, so a lease is either taken after the commit or seen here
+	_, err := postgrestransactions.ExecuteInTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (zero struct{}, rErr error) {
+		rErr = p.storeJobRow(ctx, tx, aRef, req.InitialState, query, args, dest...)
+		if rErr != nil {
+			return zero, rErr
+		}
+
+		rErr = p.checkClusterNotLocked(ctx, tx)
+		if rErr != nil {
+			return zero, rErr
+		}
+
+		return zero, nil
+	})
+	return err
+}
+
+// storeJobRow runs the query that stores a job with q and scans its single result row into dest
 // When the dispatch carries an initial state, the state is stored first in the same batch, which Postgres runs as one implicit transaction, so the state and the job are committed together in a single round trip
-func (p *PostgresProvider) queryJobRow(ctx context.Context, aRef ref.AlarmRef, initial *components.InitialState, query string, args []any, dest ...any) error {
+func (p *PostgresProvider) storeJobRow(ctx context.Context, q jobQuerier, aRef ref.AlarmRef, initial *components.InitialState, query string, args []any, dest ...any) error {
 	if initial == nil {
-		return p.db.QueryRow(ctx, query, args...).Scan(dest...)
+		return q.QueryRow(ctx, query, args...).Scan(dest...)
 	}
 
 	var wfLabels *string
@@ -144,7 +177,7 @@ func (p *PostgresProvider) queryJobRow(ctx context.Context, aRef ref.AlarmRef, i
 	)
 	batch.Queue(query, args...)
 
-	br := p.db.SendBatch(ctx, batch)
+	br := q.SendBatch(ctx, batch)
 	_, err := br.Exec()
 	if err != nil {
 		_ = br.Close()

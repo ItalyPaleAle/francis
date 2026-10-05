@@ -29,6 +29,8 @@ type definitionData struct {
 	maxDepth                  int
 	unknownVersion            UnknownVersionPolicy
 	compensationFailurePolicy CompensationFailurePolicy
+	// noEventHistory is not included in the canonical form because it changes what is recorded about a run rather than how it runs
+	noEventHistory bool
 }
 
 // stepData is the pure node data shared by the Go frontend and the IR
