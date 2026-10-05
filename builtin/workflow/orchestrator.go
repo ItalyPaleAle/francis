@@ -674,7 +674,6 @@ func (o *orchestrator) labels(st *instanceState) components.WorkflowLabels {
 
 	if !st.CreatedAt.IsZero() {
 		labels.Created = components.FormatWorkflowCreated(st.CreatedAt)
-
 	}
 	return labels
 }

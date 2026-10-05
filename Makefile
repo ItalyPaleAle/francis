@@ -25,7 +25,6 @@ mocks:
 
 # Regenerate the management API's OpenAPI document from the swag annotations in internal/management
 # swag writes Swagger 2.0, which openapi-convert turns into OpenAPI 3 in both JSON and YAML, so both run in a temporary directory and only the YAML the server embeds is kept
-# Each step is chained with && so a failed run leaves the checked-in document untouched
 .PHONY: gen-openapi
 gen-openapi:
 	OPENAPI_TMPDIR="$$(mktemp -d)"; \

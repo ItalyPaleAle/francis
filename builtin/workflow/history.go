@@ -102,7 +102,8 @@ func (o *orchestrator) beginTurnHistory(ev *event, duplicate bool, now time.Time
 			data: eventData{TimeSource: TimeSourceEngine, Reason: ev.reason},
 		})
 	case evUnwind:
-		h.requests = append(h.requests, historyEntry{kind: EventKindUnwindRequested,
+		h.requests = append(h.requests, historyEntry{
+			kind: EventKindUnwindRequested,
 			at:   now,
 			data: eventData{TimeSource: TimeSourceEngine, Reason: ev.reason, Attempt: ev.compAttempt},
 		})
