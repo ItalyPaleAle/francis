@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -179,9 +180,9 @@ func TestRuntimeClientIntegration(t *testing.T) {
 	}
 }
 
-// startRejectingRuntime starts a minimal WebTransport server that rejects every registration with a permanent protocol-version error
+// startRejectingRuntime starts a minimal WebTransport server that rejects every registration with the given error code
 // It returns the address the client should dial
-func startRejectingRuntime(t *testing.T) string {
+func startRejectingRuntime(t *testing.T, code protocol.ErrorCode) string {
 	t.Helper()
 
 	addr := freeUDPAddr(t)
@@ -206,7 +207,7 @@ func startRejectingRuntime(t *testing.T) string {
 			_ = stream.Close()
 			return
 		}
-		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeProtocolVersion, "unsupported protocol version")))
+		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(code, "registration rejected")))
 		_ = stream.Close()
 
 		// Hold the session open until the client tears it down after receiving the rejection
@@ -374,7 +375,7 @@ func TestRuntimeClientReconnectIdentity(t *testing.T) {
 
 // TestRuntimeClientFailsFastOnPermanentRegistrationRejection verifies that a permanent registration rejection stops the reconnect loop instead of spinning forever
 func TestRuntimeClientFailsFastOnPermanentRegistrationRejection(t *testing.T) {
-	addr := startRejectingRuntime(t)
+	addr := startRejectingRuntime(t, protocol.ErrCodeProtocolVersion)
 
 	holder, psk, clientTLS := testBootstrap(t)
 
@@ -410,6 +411,96 @@ func TestRuntimeClientFailsFastOnPermanentRegistrationRejection(t *testing.T) {
 		t.Fatal("Ready must not close when registration is permanently rejected")
 	default:
 	}
+}
+
+func TestRuntimeClientKeepsRetryingWhileClusterLocked(t *testing.T) {
+	addr := startRejectingRuntime(t, protocol.ErrCodeClusterLocked)
+
+	holder, psk, clientTLS := testBootstrap(t)
+	logs := &recordingHandler{}
+
+	rc := newRuntimeClient(runtimeClientConfig{
+		addresses:    []string{addr},
+		peerAddress:  "127.0.0.1:7001",
+		actorTypes:   []protocol.ActorHostType{{ActorType: "T", IdleTimeoutMs: 60000}},
+		tlsConfig:    clientTLS,
+		holder:       holder,
+		bootstrapPSK: psk,
+		minBackoff:   10 * time.Millisecond,
+		maxBackoff:   50 * time.Millisecond,
+		log:          slog.New(logs),
+	})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- rc.Run(ctx)
+	}()
+
+	// The host keeps trying to register, and reports the lock only once rather than as a failure on every attempt
+	require.Eventually(t, func() bool {
+		return logs.count("Cluster is still locked for exclusive access") >= 2
+	}, 15*time.Second, 10*time.Millisecond)
+	assert.Equal(t, 1, logs.count("Cluster is locked for exclusive access; will keep trying to register until it's released"))
+	assert.Zero(t, logs.count("Runtime connection failed, will reconnect"))
+
+	// A locked cluster isn't a permanent rejection, so Run is still going
+	select {
+	case rErr := <-runErr:
+		require.FailNow(t, "Run returned while the cluster was locked", "error: %v", rErr)
+	default:
+	}
+
+	// Run stops once the host shuts down
+	cancel()
+	select {
+	case rErr := <-runErr:
+		if rErr != nil {
+			require.ErrorIs(t, rErr, context.Canceled)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not stop after its context was canceled")
+	}
+}
+
+// recordingHandler is a slog.Handler that keeps the messages it receives, at every level
+type recordingHandler struct {
+	mu       sync.Mutex
+	messages []string
+}
+
+func (h *recordingHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.messages = append(h.messages, r.Message)
+	return nil
+}
+
+func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *recordingHandler) WithGroup(string) slog.Handler {
+	return h
+}
+
+// count returns how many times a message was logged
+func (h *recordingHandler) count(message string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	n := 0
+	for _, m := range h.messages {
+		if m == message {
+			n++
+		}
+	}
+	return n
 }
 
 func TestDispatchInboundChecksSessionIdentity(t *testing.T) {

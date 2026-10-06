@@ -82,6 +82,60 @@ jobs:
         run: |
           go test -tags integration -v -count=1 -timeout 15m ./tests/integration/...
 
+  dashboard:
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 20
+
+    steps:
+      - name: "Check out code"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The Playwright tests run against the runtime and a fixture host, built from source
+      - name: "Set up Go"
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: "go.mod"
+
+      - name: "Set up Node.js and pnpm"
+        uses: pnpm/setup@fbda4c85fc2e1e08721cd8763afea8f48d60f024 # v3.0.0
+        with:
+          package-json-file: "dashboard/package.json"
+          cache: true
+          cache-dependency-path: "dashboard/pnpm-lock.yaml"
+
+      - name: "Install dashboard dependencies"
+        working-directory: "dashboard"
+        run: |
+          pnpm install --frozen-lockfile
+
+      - name: "Check the dashboard"
+        working-directory: "dashboard"
+        run: |
+          pnpm run check:ci
+          pnpm run svelte-check
+          pnpm run test
+
+      - name: "Install the Playwright browsers"
+        working-directory: "dashboard"
+        run: |
+          pnpm run e2e:install
+
+      # This builds the dashboard, then the runtime that embeds it
+      - name: "Run the Playwright tests"
+        working-directory: "dashboard"
+        run: |
+          pnpm run e2e
+
+      - name: "Upload the Playwright results"
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: "dashboard-playwright"
+          path: |
+            dashboard/test-results
+            .bin/e2e/cluster.log
+          retention-days: 7
+
   tests-windows:
     runs-on: "windows-latest"
     timeout-minutes: 30

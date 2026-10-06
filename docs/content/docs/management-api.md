@@ -1,6 +1,6 @@
 ---
 title: "Management API"
-weight: 31
+weight: 32
 ---
 
 Francis can serve an optional **management REST API**. You can use it to look at the cluster (hosts, placements, live activations, actor state, jobs, alarms, and workflow instances) and to run administrative actions: deactivating an actor, draining a host, and cancelling, suspending, or resuming a workflow instance.
@@ -28,6 +28,9 @@ management:
   tls:
     certFile: "/etc/francis/management.crt"
     keyFile: "/etc/francis/management.key"
+  # Optional: browser origins allowed to call the API, such as a standalone dashboard
+  allowedOrigins:
+    - "http://localhost:7402"
 ```
 
 Every replica serves the whole cluster. When a request concerns a host that's connected to a different replica, the replica forwards it to that one over the runtime's existing UDP port. This requires PostgreSQL (the only provider that supports multiple replicas), an address on each replica that the others can dial, and UDP connectivity between replicas: see [Running multiple runtime replicas](/docs/deploying-the-runtime#running-multiple-runtime-replicas).
@@ -46,6 +49,8 @@ h, err := local.NewHost(
 		ManagementTokens: []string{managementToken},
 		// Optional: serve HTTPS directly
 		TLSConfig: tlsConfig,
+		// Optional: browser origins allowed to call the API, such as a standalone dashboard
+		AllowedOrigins: []string{"http://localhost:7402"},
 	}),
 	// ...
 )
@@ -54,6 +59,10 @@ h, err := local.NewHost(
 Without this option the host starts no listener. The options follow the same rules as the runtime's configuration, except that `Bind` defaults to `127.0.0.1:7401`, which only accepts connections from the same machine. Your application is responsible for sourcing the tokens.
 
 While you can enable the API on every host, you only need it on one host: that host can serve the whole cluster. It reads durable data from the provider and reaches the other hosts through their existing peer ports, which local hosts already need to be able to reach each other on. Every host answers these internal requests whether or not it enables its own listener. The management port is an additional TCP port, only on the hosts that enable it.
+
+## Dashboard
+
+The runtime also serves a web dashboard for the API, at the root of the management listener, and the `francis dashboard` command serves it on its own. See [Dashboard](/docs/dashboard).
 
 ## Security
 
@@ -67,7 +76,7 @@ The API exposes actor state and workflow inputs and outputs, so treat access to 
 
 ### Scopes
 
-Every route requires a scope. Tokens in `readOnlyTokens` receive every scope except those ending in `:manage`, while tokens in `managementTokens` receive every scope.
+Every route requires a scope (except `GET /api/v1/token`). Tokens in `readOnlyTokens` receive every scope except those ending in `:manage`, while tokens in `managementTokens` receive every scope.
 
 | Scope | Grants | Management token required |
 | --- | --- | --- |
@@ -90,6 +99,12 @@ In addition, there are two public routes which don't require a token:
 - `GET /healthz` for healthchecks
 - `GET /api/v1/openapi.yaml` returning the OpenAPI description of the API
 
+`GET /api/v1/token` accepts any valid token, without requiring a scope, and returns the scopes the token grants. Clients can use it to tell a read-only token from a management token before offering actions.
+
+Paths outside `/api/` and `/healthz` belong to the [dashboard](/docs/dashboard).
+
+Browsers can call the API from other origins only when `management.allowedOrigins` lists them, as the [standalone dashboard](/docs/dashboard#standalone) does. Third-party origins not in the allowlist fail with a CORS error.
+
 > Path segments must be percent-encoded. This matters for workflow child instance IDs, which contain `|`, and for actor IDs, which may contain any character other than `/`.
 
 ### Cluster and hosts
@@ -100,7 +115,7 @@ In addition, there are two public routes which don't require a token:
 | `GET /api/v1/runtimes` | `cluster:read` | Runtime replicas with a live membership (those with the management API enabled), their advertised addresses, and last heartbeat. Remote topology only. |
 | `GET /api/v1/hosts` | `cluster:read` | Paginated hosts, with their state (`connected`, `draining`, or, in the remote topology, `unreachable`), last health check, owner runtime, and actor counts. Filter with `state`. |
 | `GET /api/v1/hosts/{hostId}` | `cluster:read` | One host's registration, actor types with their placement limits and usage, and the capacity, drain state, and workflow definitions the host reports. |
-| `GET /api/v1/hosts/{hostId}/activations` | `actors:read` | Paginated actors that are active in memory on one host right now, read from the host itself. Filter with `type`. |
+| `GET /api/v1/hosts/{hostId}/activations` | `actors:read` | Paginated actors that are active in memory on one host right now, read from the host itself. Filter with `type`, which can be repeated. |
 | `POST /api/v1/hosts/{hostId}/drain` | `hosts:manage` | Drain a host so it deactivates its actors and shuts down. See [Draining a host](#draining-a-host). |
 
 Only hosts with a live registration are listed. A host whose health check is older than the deadline is removed by the provider, so there's no "expired" state.
@@ -109,8 +124,8 @@ Only hosts with a live registration are listed. A host whose health check is old
 
 | Route | Scope | Description |
 | --- | --- | --- |
-| `GET /api/v1/activations` | `actors:read` | Paginated, cluster-wide list of active actors, collected from every reachable host. Filter with `host` and `type`. |
-| `GET /api/v1/placements` | `actors:read` | Paginated placements recorded in the provider (actor type, ID, host, and idle timeout). Filter with `host` and `type`. |
+| `GET /api/v1/activations` | `actors:read` | Paginated, cluster-wide list of active actors, collected from every reachable host. Filter with `host` and `type`, which can be repeated. |
+| `GET /api/v1/placements` | `actors:read` | Paginated placements recorded in the provider (actor type, ID, host, and idle timeout). Filter with `host` and `type`, which can be repeated. |
 | `GET /api/v1/actor-types` | `actors:read` | Registered actor types, the hosts serving each, placement usage and limits, job retention, and execution capacity groups. |
 | `GET /api/v1/actor-states?type={type}` | `actors:read` | Paginated IDs of the actors of a type that have stored state, whether or not they're active. `type` is required. |
 | `GET /api/v1/actor-states/{type}/{id}` | `actors:state:read` | An actor's stored state. A workflow's actor types also need `workflows:data:read`. See [Actor state](#actor-state). |
@@ -120,16 +135,16 @@ Only hosts with a live registration are listed. A host whose health check is old
 
 | Route | Scope | Description |
 | --- | --- | --- |
-| `GET /api/v1/jobs` | `jobs:read` | Paginated [jobs](/docs/jobs): pending, active, and, while their actor type retains them, completed and dead-lettered. Filter with `type`, `id`, and `status` (`pending`, `active`, `completed`, or `dead`). |
+| `GET /api/v1/jobs` | `jobs:read` | Paginated [jobs](/docs/jobs): pending, active, and, while their actor type retains them, completed and dead-lettered. Filter with `type`, `id`, and `status` (`pending`, `active`, `completed`, or `dead`), which can all be repeated. |
 | `GET /api/v1/jobs/{jobId}` | `jobs:read` | One job. Terminal jobs include their attempts, last error, and end time. |
-| `GET /api/v1/alarms` | `jobs:read` | Paginated [alarms](/docs/alarms), excluding jobs, with due time, repeat interval, and lease state. Filter with `type` and `id`. |
+| `GET /api/v1/alarms` | `jobs:read` | Paginated [alarms](/docs/alarms), excluding jobs, with due time, repeat interval, and lease state. Filter with `type` and `id`, which can be repeated. |
 
 ### Workflows
 
 | Route | Scope | Description |
 | --- | --- | --- |
 | `GET /api/v1/workflows` | `workflows:read` | Known workflows, their registered versions and definition fingerprints, the hosts serving them, and any definition conflicts. |
-| `GET /api/v1/workflows/{name}/instances` | `workflows:read` | Paginated instances of a workflow, with status, version, parent, and creation time. Filter with `status`, `version`, `parent`, `createdFrom`, and `createdTo` (RFC 3339). |
+| `GET /api/v1/workflows/{name}/instances` | `workflows:read` | Paginated instances of a workflow, with status, version, parent, and creation time. Filter with `status`, which can be repeated, `version`, `parent`, `createdFrom`, and `createdTo` (RFC 3339). |
 | `GET /api/v1/workflows/{name}/instances/{instanceId}` | `workflows:read` | An instance's status, steps with their timings, child instances, compensation outcome, and dead-lettered jobs. With `workflows:data:read` it also includes the input and output. |
 | `GET /api/v1/workflows/{name}/instances/{instanceId}/events` | `workflows:read` | Paginated event history of an instance, in order. |
 | `POST /api/v1/workflows/{name}/instances/{instanceId}/cancel` | `workflows:manage` | Cancel an instance. A `reason` is required. |

@@ -24,6 +24,9 @@ The server is configured with two token lists:
 | `workflows:manage` | Cancelling, suspending, and resuming workflow instances |
 
 A missing or unknown token yields `401` with a `WWW-Authenticate: Bearer realm="francis-management"` header; a valid token lacking the route's scope yields `403`.
+`GET /api/v1/token` accepts any valid token and returns the scopes it grants, so a client can find out whether it holds a read-only token before offering an action.
+
+Browser pages on other origins can call the API only when the server's configuration lists their origin; the server answers their CORS preflight requests, and refuses those from other origins with `403 forbidden`.
 
 ## Pagination
 

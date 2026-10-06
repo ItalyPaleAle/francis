@@ -211,6 +211,12 @@ management:
     - {{ . | quote }}
   {{- else }} []
   {{- end }}
+  {{- with .Values.management.allowedOrigins }}
+  allowedOrigins:
+  {{- range . }}
+    - {{ . | quote }}
+  {{- end }}
+  {{- end }}
   {{- if .Values.management.tls.existingSecret }}
   tls:
     certFile: {{ printf "%s/tls.crt" (include "francis.managementTLSMountPath" .) | quote }}

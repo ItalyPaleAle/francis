@@ -50,6 +50,37 @@ gen-openapi:
 check-openapi-diff: gen-openapi
 	git diff --exit-code internal/management/openapi/openapi.yaml
 
+# Build the management dashboard into dashboard/dist, which the runtime binary embeds
+# Run this before building the runtime, or the binary serves the management API without the dashboard
+.PHONY: dashboard
+dashboard:
+	cd dashboard && \
+		pnpm install --frozen-lockfile && \
+		pnpm run build
+
+# Check the dashboard's formatting, lint rules, and types, then run its unit tests
+.PHONY: dashboard-check
+dashboard-check:
+	cd dashboard && \
+		pnpm run check:ci && \
+		pnpm run svelte-check && \
+		pnpm run test
+
+# Run the dashboard's Playwright tests, against a runtime and a fixture host built from source
+# Runs against chromium only by default
+# Set E2E_BROWSERS to "all", or to a comma-separated list of "chromium", "firefox", and "webkit", to run against other engines
+# Install the browsers once with "cd dashboard && pnpm run e2e:install"
+.PHONY: dashboard-e2e
+dashboard-e2e:
+	cd dashboard && \
+		pnpm run e2e
+
+# Run a whole cluster with sample data in one process, for working on the dashboard
+# Pass flags with DEMO_FLAGS, for example DEMO_FLAGS="-lease -verbose"
+.PHONY: dashboard-demo
+dashboard-demo:
+	go run -tags demo ./cmd/runtime demo $(DEMO_FLAGS)
+
 .PHONY: gomod-age
 gomod-age:
 	go tool gomod-age

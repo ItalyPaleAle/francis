@@ -15,6 +15,13 @@ import (
 	"github.com/italypaleale/go-kit/observability"
 )
 
+func init() {
+	// The backup subcommand streams a portable snapshot of all persistent data to a file or stdout
+	registerSubcommand("backup", runBackup)
+	// The restore subcommand loads one from a file or stdin, wiping the existing data
+	registerSubcommand("restore", runRestore)
+}
+
 // runBackup writes a portable snapshot of all persistent data to a file, or to stdout with "-f -"
 // It opens a fresh connection to the configured database but does not register a host, so it is safe to run against a live cluster: the provider takes the snapshot inside a consistent read-only transaction
 // The caller owns ctx and its cancellation, since a backup can stream a large amount of data

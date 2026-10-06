@@ -3,6 +3,7 @@ package management
 import (
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -114,6 +115,53 @@ func TestScopes(t *testing.T) {
 		c := &Caller{scopes: map[Scope]struct{}{ScopeWorkflowsRead: {}}}
 		assert.True(t, c.Has(ScopeWorkflowsRead))
 		assert.False(t, c.Has(ScopeWorkflowsDataRead))
+	})
+}
+
+func TestCallerScopes(t *testing.T) {
+	t.Run("sorted", func(t *testing.T) {
+		c := &Caller{scopes: map[Scope]struct{}{ScopeWorkflowsRead: {}, ScopeActorsRead: {}, ScopeClusterRead: {}}}
+		assert.Equal(t, []Scope{ScopeActorsRead, ScopeClusterRead, ScopeWorkflowsRead}, c.Scopes())
+	})
+
+	t.Run("nil caller has none", func(t *testing.T) {
+		var c *Caller
+		assert.Empty(t, c.Scopes())
+		assert.NotNil(t, c.Scopes())
+	})
+}
+
+func TestGetToken(t *testing.T) {
+	ts := newTestServer(t)
+
+	// Every declared scope is granted to the management token, and the read-only token gets those that don't end in ":manage"
+	declared := declaredScopes(t)
+	slices.Sort(declared)
+	wantManagement := make([]any, 0, len(declared))
+	wantReadOnly := make([]any, 0, len(declared))
+	for _, s := range declared {
+		wantManagement = append(wantManagement, string(s))
+		if !strings.HasSuffix(string(s), ":manage") {
+			wantReadOnly = append(wantReadOnly, string(s))
+		}
+	}
+
+	t.Run("read-only token", func(t *testing.T) {
+		w := ts.do(t, http.MethodGet, "/api/v1/token", testReadOnlyToken, "")
+		res := decodeJSON(t, w, http.StatusOK)
+		assert.Equal(t, wantReadOnly, res["scopes"])
+		assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+	})
+
+	t.Run("management token", func(t *testing.T) {
+		w := ts.do(t, http.MethodGet, "/api/v1/token", testManagementToken, "")
+		res := decodeJSON(t, w, http.StatusOK)
+		assert.Equal(t, wantManagement, res["scopes"])
+	})
+
+	t.Run("method not allowed", func(t *testing.T) {
+		w := ts.do(t, http.MethodPost, "/api/v1/token", testManagementToken, "")
+		decodeError(t, w, http.StatusMethodNotAllowed, CodeMethodNotAllowed)
 	})
 }
 

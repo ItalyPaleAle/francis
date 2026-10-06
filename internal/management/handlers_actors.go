@@ -47,6 +47,8 @@ func snapshotPageLimit(limit int) int {
 }
 
 type hostActivationsCursor struct {
+	// Group is the index of the actor type the next page continues in, when the listing has several
+	Group int    `json:"g,omitempty"`
 	After string `json:"a"`
 }
 
@@ -69,6 +71,7 @@ type hostActivationsJSON struct {
 //	@Description		Asks the host directly for a page of the actors it holds in memory, ordered by actor type and then actor ID.
 //	@Description		This is the freshest view of a single host; unlike `/activations`, a host that cannot be reached fails the request with `503 hostUnavailable`.
 //	@Description		`activeCount` is the number of matching activations on the host, across all pages.
+//	@Description		With several actor types, the activations are listed one type after another, in the same order.
 //	@Tags				Actors
 //	@Security			bearerAuth
 //	@x-required-scope	"actors:read"
@@ -76,7 +79,7 @@ type hostActivationsJSON struct {
 //	@Param				hostId	path		string				true	"The host ID"
 //	@Param				limit	query		int					false	"Maximum number of items to return"	minimum(1)	maximum(1000)	default(100)
 //	@Param				cursor	query		string				false	"Opaque cursor returned as nextCursor by the previous page; omit for the first page"
-//	@Param				type	query		string				false	"Only return activations of this actor type"
+//	@Param				type	query		[]string			false	"Only return activations of these actor types; repeat the parameter for several"	collectionFormat(multi)
 //	@Success			200		{object}	hostActivationsJSON	"A page of the host's activations"
 //	@Failure			400		{object}	apiError			"`badRequest`: an invalid path segment, query parameter, cursor, or request body"
 //	@Failure			401		{object}	apiError			"`unauthorized`: the bearer token is missing or unknown"
@@ -101,23 +104,62 @@ func (s *Server) handleHostActivations(w http.ResponseWriter, r *http.Request) *
 		return apiErr
 	}
 
-	snap, err := s.hostSnapshot(r.Context(), h, protocol.HostSnapshotRequest{
-		ActorType: r.URL.Query().Get("type"),
-		After:     cursor.After,
-		Limit:     snapshotPageLimit(limit),
+	// The actor type can be repeated, and sorting the types keeps the host's own order of type and then ID
+	types := queryValues(r.URL.Query(), "type", strings.Compare)
+	if !validGroup(cursor.Group, types) {
+		return errBadRequest("invalid cursor")
+	}
+
+	// List the activations one type after another, keeping each type's count as its snapshots arrive
+	counts := make(map[string]int, len(types))
+	var observedAt int64
+	page, err := pageAcrossValues(types, cursor.Group, cursor.After, limit, func(actorType string, after string, limit int) ([]activationJSON, string, bool, error) {
+		snap, err := s.hostSnapshot(r.Context(), h, protocol.HostSnapshotRequest{
+			ActorType: actorType,
+			After:     after,
+			Limit:     snapshotPageLimit(limit),
+		})
+		if err != nil {
+			return nil, after, false, err
+		}
+
+		counts[actorType] = snap.ActiveCount
+		if observedAt == 0 {
+			observedAt = snap.ObservedAtUnixMs
+		}
+
+		return newActivations(h.HostID, snap), snap.Next, snap.Next != "", nil
 	})
 	if err != nil {
 		return s.fail(r, "failed to query the host", err)
 	}
 
+	// The count covers every type, so the types this page didn't reach are counted without listing them
+	activeCount := 0
+	for _, actorType := range types {
+		count, ok := counts[actorType]
+		if !ok {
+			snap, err := s.hostSnapshot(r.Context(), h, protocol.HostSnapshotRequest{ActorType: actorType, SkipActivations: true})
+			if err != nil {
+				return s.fail(r, "failed to query the host", err)
+			}
+
+			count = snap.ActiveCount
+		}
+		activeCount += count
+	}
+
 	res := hostActivationsJSON{
 		HostID:      h.HostID,
-		ObservedAt:  time.UnixMilli(snap.ObservedAtUnixMs).UTC(),
-		ActiveCount: snap.ActiveCount,
-		Items:       newActivations(h.HostID, snap),
+		ObservedAt:  time.UnixMilli(observedAt).UTC(),
+		ActiveCount: activeCount,
+		Items:       page.Items,
 	}
-	if snap.Next != "" {
-		res.NextCursor = encodeCursor(hostActivationsCursor{After: snap.Next})
+	if res.Items == nil {
+		res.Items = []activationJSON{}
+	}
+	if page.HasMore {
+		res.NextCursor = encodeCursor(hostActivationsCursor{Group: page.Group, After: page.After})
 	}
 
 	writeJSON(w, http.StatusOK, res)
@@ -127,6 +169,8 @@ func (s *Server) handleHostActivations(w http.ResponseWriter, r *http.Request) *
 type activationsCursor struct {
 	// Host is the host the next page starts from
 	Host string `json:"h"`
+	// Type is the actor type the next page continues with on that host, when the listing has several types
+	Type string `json:"t,omitempty"`
 	// After is the position within that host
 	After string `json:"a,omitempty"`
 }
@@ -153,6 +197,7 @@ type activationsJSON struct {
 //	@Description
 //	@Description	Walks the hosts in host ID order, querying a batch of hosts concurrently, until the page is full.
 //	@Description	Items are ordered by host, then by actor type and actor ID within each host.
+//	@Description	The filters can be repeated, and each host is then queried for one of the actor types after another, in alphabetical order.
 //	@Description
 //	@Description		This is a fan-out endpoint: a host that cannot be queried is reported in `errors` and sets `partial: true`, and its activations are missing from the page.
 //	@Description		If every queried host failed, the response is `503 noHostsReachable` with the host errors in `details.errors`.
@@ -163,8 +208,8 @@ type activationsJSON struct {
 //	@Produce			json
 //	@Param				limit	query		int					false	"Maximum number of items to return"	minimum(1)	maximum(1000)	default(100)
 //	@Param				cursor	query		string				false	"Opaque cursor returned as nextCursor by the previous page; omit for the first page"
-//	@Param				type	query		string				false	"Only return activations of this actor type"
-//	@Param				host	query		string				false	"Only query this host, returning 404 notFound when the host is not registered"
+//	@Param				type	query		[]string			false	"Only return activations of these actor types; repeat the parameter for several"	collectionFormat(multi)
+//	@Param				host	query		[]string			false	"Only query these hosts, returning 404 notFound when none of them is registered; repeat the parameter for several"	collectionFormat(multi)
 //	@Success			200		{object}	activationsJSON		"A page of activations"
 //	@Failure			400		{object}	apiError			"`badRequest`: an invalid path segment, query parameter, cursor, or request body"
 //	@Failure			401		{object}	apiError			"`unauthorized`: the bearer token is missing or unknown"
@@ -183,9 +228,10 @@ func (s *Server) handleListActivations(w http.ResponseWriter, r *http.Request) *
 		return apiErr
 	}
 
+	// Parse the filters, each of which can be repeated
 	q := r.URL.Query()
-	actorType := q.Get("type")
-	hostFilter := q.Get("host")
+	types := queryValues(q, "type", strings.Compare)
+	hostFilter := queryValues(q, "host", strings.Compare)
 
 	res := activationsJSON{
 		Items:     []activationJSON{},
@@ -199,44 +245,66 @@ func (s *Server) handleListActivations(w http.ResponseWriter, r *http.Request) *
 		return s.fail(r, "failed to list hosts", err)
 	}
 	hosts = slices.DeleteFunc(hosts, func(h components.HostDetails) bool {
-		return (hostFilter != "" && h.HostID != hostFilter) || (cursor.Host != "" && h.HostID < cursor.Host)
+		return (hostFilter[0] != "" && !slices.Contains(hostFilter, h.HostID)) || (cursor.Host != "" && h.HostID < cursor.Host)
 	})
-	if hostFilter != "" && len(hosts) == 0 && cursor.Host == "" {
-		return errNotFound("host '%s' is not registered", hostFilter)
+
+	if hostFilter[0] != "" && len(hosts) == 0 && cursor.Host == "" {
+		if len(hostFilter) == 1 {
+			return errNotFound("host '%s' is not registered", hostFilter[0])
+		}
+		return errNotFound("none of the hosts is registered")
+	}
+
+	// Each host is listed one actor type after another, so a host and a type make a stream of activations
+	// The cursor's host resumes at the cursor's type, since the types before it were listed on earlier pages
+	streams := make([]activationStream, 0, len(hosts)*len(types))
+	for _, h := range hosts {
+		for _, actorType := range types {
+			if h.HostID == cursor.Host && actorType < cursor.Type {
+				continue
+			}
+
+			streams = append(streams, activationStream{host: h, actorType: actorType})
+		}
 	}
 
 	var (
 		queried   int
 		succeeded int
 		done      bool
+		failed    = map[string]bool{}
 	)
-	for len(hosts) > 0 && len(res.Items) < limit && !done {
-		batch := hosts[:min(len(hosts), s.fanOutConcurrency)]
-		hosts = hosts[len(batch):]
+	for len(streams) > 0 && len(res.Items) < limit && !done {
+		batch := streams[:min(len(streams), s.fanOutConcurrency)]
+		streams = streams[len(batch):]
 
-		// Every host of the batch is asked for a full page, since it is not known in advance how many items each contributes
+		// Every stream of the batch is asked for a full page, since it is not known in advance how many items each contributes
 		results := make([]snapshotResult, len(batch))
 		reqs := make([]protocol.HostSnapshotRequest, len(batch))
-		for i, h := range batch {
+		for i, st := range batch {
 			reqs[i] = protocol.HostSnapshotRequest{
-				ActorType: actorType,
+				ActorType: st.actorType,
 				Limit:     snapshotPageLimit(limit),
 			}
-			if h.HostID == cursor.Host {
+			if st.host.HostID == cursor.Host && st.actorType == cursor.Type {
 				reqs[i].After = cursor.After
 			}
 		}
 		parallelFor(len(batch), s.fanOutConcurrency, func(i int) {
-			results[i].Host = batch[i]
-			results[i].Snapshot, results[i].Err = s.hostSnapshot(r.Context(), batch[i], reqs[i])
+			results[i].Host = batch[i].host
+			results[i].Snapshot, results[i].Err = s.hostSnapshot(r.Context(), batch[i].host, reqs[i])
 		})
 
-		// Consume the results in host order until the page is full
+		// Consume the results in stream order until the page is full
 		for i, sr := range results {
 			queried++
 			if sr.Err != nil {
+				// A host that can't be queried fails for every type, so it's reported once
 				res.Partial = true
-				res.Errors = append(res.Errors, newHostError(sr.Host.HostID, sr.Err))
+				if !failed[sr.Host.HostID] {
+					failed[sr.Host.HostID] = true
+					res.Errors = append(res.Errors, newHostError(sr.Host.HostID, sr.Err))
+				}
 				continue
 			}
 			succeeded++
@@ -245,27 +313,27 @@ func (s *Server) handleListActivations(w http.ResponseWriter, r *http.Request) *
 			room := limit - len(res.Items)
 			switch {
 			case len(items) > room:
-				// The page is full within this host, so the next page continues after the last item taken
+				// The page is full within this stream, so the next page continues after the last item taken
 				items = items[:room]
 				last := items[len(items)-1]
-				res.NextCursor = encodeCursor(activationsCursor{Host: sr.Host.HostID, After: last.ActorType + "/" + last.ActorID})
+				res.NextCursor = encodeCursor(activationsCursor{Host: sr.Host.HostID, Type: batch[i].actorType, After: last.ActorType + "/" + last.ActorID})
 				done = true
 			case sr.Snapshot.Next != "":
-				// The host has more activations than it returned, so the page ends here even if it is not full, and the next page continues from this host
-				res.NextCursor = encodeCursor(activationsCursor{Host: sr.Host.HostID, After: sr.Snapshot.Next})
+				// The stream has more activations than it returned, so the page ends here even if it is not full, and the next page continues from this stream
+				res.NextCursor = encodeCursor(activationsCursor{Host: sr.Host.HostID, Type: batch[i].actorType, After: sr.Snapshot.Next})
 				done = true
 			case len(items) == room:
-				// This host is exhausted, so the next page starts from the following host
-				nextHost := nextHostID(batch[i+1:], hosts)
-				if nextHost != "" {
-					res.NextCursor = encodeCursor(activationsCursor{Host: nextHost})
+				// This stream is exhausted, so the next page starts from the following one
+				next, ok := nextStream(batch[i+1:], streams)
+				if ok {
+					res.NextCursor = encodeCursor(activationsCursor{Host: next.host.HostID, Type: next.actorType})
 				}
 				done = true
 			}
 
 			res.Items = append(res.Items, items...)
 			if done {
-				// Hosts of the batch after this one are served again on the next page
+				// Streams of the batch after this one are served again on the next page
 				break
 			}
 		}
@@ -282,15 +350,21 @@ func (s *Server) handleListActivations(w http.ResponseWriter, r *http.Request) *
 	return nil
 }
 
-// nextHostID returns the first host ID among the remaining hosts of a batch and the hosts after it
-func nextHostID(restOfBatch []components.HostDetails, rest []components.HostDetails) string {
+// nextStream returns the first stream among the remaining streams of a batch and the streams after it
+func nextStream(restOfBatch []activationStream, rest []activationStream) (activationStream, bool) {
 	if len(restOfBatch) > 0 {
-		return restOfBatch[0].HostID
+		return restOfBatch[0], true
 	}
 	if len(rest) > 0 {
-		return rest[0].HostID
+		return rest[0], true
 	}
-	return ""
+	return activationStream{}, false
+}
+
+// activationStream is the activations of one actor type on one host, or of every type when the type is empty
+type activationStream struct {
+	host      components.HostDetails
+	actorType string
 }
 
 type placementJSON struct {
@@ -301,8 +375,10 @@ type placementJSON struct {
 } //	@name	Placement
 
 type placementsCursor struct {
-	Type string `json:"t"`
-	ID   string `json:"i"`
+	// Group is the index of the combination of filter values the next page continues in, when the filters have several
+	Group int    `json:"g,omitempty"`
+	Type  string `json:"t"`
+	ID    string `json:"i"`
 }
 
 // handleListPlacements serves GET /api/v1/placements
@@ -313,14 +389,15 @@ type placementsCursor struct {
 //	@Description
 //	@Description		Lists the placements recorded in the provider, ordered by actor type and then actor ID.
 //	@Description		A placement records which host an actor is assigned to; it does not prove the actor is currently in memory (see `/activations`).
+//	@Description		The filters can be repeated, and the placements are then listed one combination of their values after another, by actor type and then host, both in alphabetical order.
 //	@Tags				Actors
 //	@Security			bearerAuth
 //	@x-required-scope	"actors:read"
 //	@Produce			json
 //	@Param				limit	query		int					false	"Maximum number of items to return"	minimum(1)	maximum(1000)	default(100)
 //	@Param				cursor	query		string				false	"Opaque cursor returned as nextCursor by the previous page; omit for the first page"
-//	@Param				host	query		string				false	"Only return placements on this host"
-//	@Param				type	query		string				false	"Only return placements of this actor type"
+//	@Param				host	query		[]string			false	"Only return placements on these hosts; repeat the parameter for several"	collectionFormat(multi)
+//	@Param				type	query		[]string			false	"Only return placements of these actor types; repeat the parameter for several"	collectionFormat(multi)
 //	@Success			200		{object}	page[placementJSON]	"A page of placements"
 //	@Failure			400		{object}	apiError			"`badRequest`: an invalid path segment, query parameter, cursor, or request body"
 //	@Failure			401		{object}	apiError			"`unauthorized`: the bearer token is missing or unknown"
@@ -336,20 +413,39 @@ func (s *Server) handleListPlacements(w http.ResponseWriter, r *http.Request) *a
 	if apiErr != nil {
 		return apiErr
 	}
-	q := r.URL.Query()
 
-	res, err := s.backend.Provider().ListPlacements(r.Context(), components.ListPlacementsReq{
-		HostID:    q.Get("host"),
-		ActorType: q.Get("type"),
-		After:     ref.NewActorRef(cursor.Type, cursor.ID),
-		Limit:     limit,
+	// Parse the filters, each of which can be repeated, and list every combination of their values on its own
+	q := r.URL.Query()
+	types := queryValues(q, "type", strings.Compare)
+	hosts := queryValues(q, "host", strings.Compare)
+	filters := make([]components.ListPlacementsReq, 0, len(types)*len(hosts))
+	for _, actorType := range types {
+		for _, hostID := range hosts {
+			filters = append(filters, components.ListPlacementsReq{ActorType: actorType, HostID: hostID})
+		}
+	}
+	if !validGroup(cursor.Group, filters) {
+		return errBadRequest("invalid cursor")
+	}
+
+	// List the combinations one after another, continuing after the last actor of each page
+	res, err := pageAcrossValues(filters, cursor.Group, ref.NewActorRef(cursor.Type, cursor.ID), limit, func(req components.ListPlacementsReq, after ref.ActorRef, limit int) ([]components.PlacementInfo, ref.ActorRef, bool, error) {
+		req.After = after
+		req.Limit = limit
+		page, err := s.backend.Provider().ListPlacements(r.Context(), req)
+		if err != nil || !page.HasMore || len(page.Placements) == 0 {
+			return page.Placements, after, false, err
+		}
+
+		last := page.Placements[len(page.Placements)-1]
+		return page.Placements, ref.NewActorRef(last.ActorType, last.ActorID), true, nil
 	})
 	if err != nil {
 		return s.fail(r, "failed to list placements", err)
 	}
 
-	items := make([]placementJSON, len(res.Placements))
-	for i, p := range res.Placements {
+	items := make([]placementJSON, len(res.Items))
+	for i, p := range res.Items {
 		items[i] = placementJSON{
 			ActorType:     p.ActorType,
 			ActorID:       p.ActorID,
@@ -359,9 +455,8 @@ func (s *Server) handleListPlacements(w http.ResponseWriter, r *http.Request) *a
 	}
 
 	var next string
-	if res.HasMore && len(items) > 0 {
-		last := items[len(items)-1]
-		next = encodeCursor(placementsCursor{Type: last.ActorType, ID: last.ActorID})
+	if res.HasMore {
+		next = encodeCursor(placementsCursor{Group: res.Group, Type: res.After.ActorType, ID: res.After.ActorID})
 	}
 
 	writeJSON(w, http.StatusOK, newPage(items, next))

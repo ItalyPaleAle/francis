@@ -23,9 +23,14 @@ import (
 // The container runtime wraps the command with its own HEALTHCHECK timeout, but an internal bound stops a half-open QUIC connection from hanging the probe
 const defaultHealthcheckTimeout = 5 * time.Second
 
+func init() {
+	// The healthcheck subcommand probes the locally-running runtime over WebTransport, for use as the Docker HEALTHCHECK
+	registerSubcommand("healthcheck", runHealthcheck)
+}
+
 // runHealthcheck dials the runtime over WebTransport and reports whether it accepted a session
 // It is intended as the HEALTHCHECK for containers, so it needs no extra binaries and defaults to the locally-running server
-func runHealthcheck(args []string) int {
+func runHealthcheck(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("healthcheck", flag.ExitOnError)
 
 	var (
@@ -83,18 +88,21 @@ func runHealthcheck(args []string) int {
 
 	start := time.Now()
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	// Dialing the runtime connect path performs the full QUIC + TLS 1.3 + HTTP/3 + WebTransport handshake
 	// A successful upgrade (2xx) proves the runtime is serving and accepting sessions, which is all a liveness probe needs
+	// The response's body is the session's CONNECT stream, which closing the session releases
 	url := "https://" + addr + protocol.RuntimeConnectPath
-	rsp, session, err := dialer.Dial(ctx, url, nil)
+	rsp, session, err := dialer.Dial(ctx, url, nil) //nolint:bodyclose
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Healthcheck failed: could not dial runtime at %s: %v (took %dms)\n", addr, err, time.Since(start).Milliseconds())
 		return 1
 	}
-	defer func() { _ = session.CloseWithError(0, "") }()
+	defer func() {
+		_ = session.CloseWithError(0, "")
+	}()
 
 	if rsp.StatusCode < 200 || rsp.StatusCode >= 300 {
 		fmt.Fprintf(os.Stderr, "❌ Healthcheck failed: runtime at %s returned status %d (took %dms)\n", addr, rsp.StatusCode, time.Since(start).Milliseconds())

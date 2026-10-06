@@ -172,7 +172,7 @@ The runtime looks for its configuration in this order:
    - `~/.francis`
    - `/etc/francis`
 
-Subcommands (including `print-ca`, `healthcheck`, `backup`, and `restore`) resolve the config the same way.
+Subcommands (including `print-ca`, `healthcheck`, `backup`, and `restore`) resolve the config the same way. The `dashboard` subcommand, which serves the [standalone dashboard](/docs/dashboard#standalone), reads no configuration.
 
 ### Configuration reference
 
@@ -198,10 +198,11 @@ Subcommands (including `print-ca`, `healthcheck`, `backup`, and `restore`) resol
 | `shutdownGracePeriod` | Grace period for a clean shutdown. Default `30s`. |
 | `log.level` | `debug`, `info`, `warn`, or `error`. |
 | `log.json` | Log in structured JSON instead of text. Default `false`. |
-| `management.enabled` | Serve the [management REST API](/docs/management-api). Default `false`, in which case no TCP port is opened. |
+| `management.enabled` | Serve the [management REST API](/docs/management-api) and its [dashboard](/docs/dashboard). Default `false`, in which case no TCP port is opened. |
 | `management.bind` | TCP address and port the management API listens on. Default `127.0.0.1:7401`. Set it to an address such as `0.0.0.0:7401` to listen on all interfaces, for example to reach the API from outside a container. The runtime logs a warning at startup when this is not a loopback address and TLS is not configured. |
 | `management.readOnlyTokens` | Bearer tokens that get every scope except those ending in `:manage`, so they can read everything but perform no actions. |
 | `management.managementTokens` | Bearer tokens that get every scope, including actions. When the API is enabled, at least one token is required across the two lists. Every token must be at least 32 characters long, and no token may appear more than once across both lists. |
+| `management.allowedOrigins` | Browser origins allowed to call the management API, such as a [standalone dashboard](/docs/dashboard#standalone) at `http://localhost:7402`. Each is a scheme, host, and optional port, matched exactly, and `"*"` allows any origin. Default empty, in which case only the dashboard served by the runtime itself can call the API from a browser. |
 | `management.tls.certFile` / `keyFile` | Paths to a PEM certificate chain and private key, to serve the management API over HTTPS. Set both or neither. They're loaded at startup, so restart the runtime after renewing the certificate. |
 
 Durations accept Go duration strings (e.g. `"1h"`, `"1500ms"`).
@@ -313,7 +314,9 @@ management:
 The API listens on `127.0.0.1:7401` by default, so it only accepts connections from the same machine. To reach it from outside the runtime's container, set `bind` to an address on all interfaces, such as `0.0.0.0:7401`, and with Docker, publish the TCP port (`-p 7401:7401/tcp`).  
 In that case, either configure `management.tls` or put a TLS-terminating proxy in front of the API, since the runtime logs a warning when it serves plain HTTP on a non-loopback address.
 
-See [Management API](/docs/management-api) for authentication, scopes, and the list of endpoints.
+The same listener serves a web [dashboard](/docs/dashboard) at `/`, so you can browse the cluster and run the actions from a browser by signing in with one of the tokens. You can also run the dashboard on its own with `francis dashboard`, and connect it to any number of runtimes that list its origin in `management.allowedOrigins`.
+
+See [Management API](/docs/management-api) for authentication, scopes, the dashboard, and the list of endpoints.
 
 ## Database
 

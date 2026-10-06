@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 )
 
@@ -27,6 +28,12 @@ type Config struct {
 	ManagementTokens []string
 	// TLSConfig, when set, makes the server serve HTTPS directly
 	TLSConfig *tls.Config
+	// Dashboard, when set, holds the compiled dashboard, which is served at the root of the listener
+	// It must contain an index.html file at its root
+	Dashboard fs.FS
+	// AllowedOrigins lists the browser origins that may call the API, such as a dashboard served by the "francis dashboard" command
+	// Each is a scheme, host, and optional port, such as "http://localhost:7402", or "*" for any origin
+	AllowedOrigins []string
 }
 
 // Validate checks the configuration and applies defaults
@@ -70,6 +77,19 @@ func (c *Config) Validate() error {
 	err = check("management", c.ManagementTokens)
 	if err != nil {
 		return err
+	}
+
+	// Origins are compared as browsers send them, so the configured ones are normalized to the same form
+	if len(c.AllowedOrigins) > 0 {
+		origins := make([]string, len(c.AllowedOrigins))
+		for i, o := range c.AllowedOrigins {
+			origins[i], err = normalizeOrigin(o)
+			if err != nil {
+				return fmt.Errorf("management allowed origin at index %d is invalid: %w", i, err)
+			}
+		}
+
+		c.AllowedOrigins = origins
 	}
 
 	return nil

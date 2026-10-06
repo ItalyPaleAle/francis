@@ -166,6 +166,12 @@
           "uniqueItems": true,
           "items": { "type": "string", "minLength": 32 }
         },
+        "allowedOrigins": {
+          "description": "Browser origins allowed to call the API across origins, such as http://localhost:7402, or * for any origin.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
         "tls": {
           "type": "object",
           "properties": {

@@ -346,7 +346,20 @@ type instanceItemJSON struct {
 } //	@name	InstanceItem
 
 type instancesCursor struct {
+	// Group is the index of the status the next page continues in, when the listing has several
+	Group int    `json:"g,omitempty"`
 	After string `json:"a"`
+}
+
+// instanceStatusOrder is the order a listing with several statuses lists them in
+var instanceStatusOrder = []workflow.Status{
+	workflow.StatusPending,
+	workflow.StatusRunning,
+	workflow.StatusSuspended,
+	workflow.StatusCompensating,
+	workflow.StatusCompleted,
+	workflow.StatusFailed,
+	workflow.StatusCancelled,
 }
 
 // isInstanceStatus reports whether s is a status a workflow instance can have, which makes it a valid filter of an instance listing
@@ -374,6 +387,7 @@ func isInstanceStatus(s workflow.Status) bool {
 //	@Description
 //	@Description		Lists the instances of a workflow, ordered by instance ID, from the labels stored with each instance (the journals are not read, so items stay at summary size).
 //	@Description		When no label filter (`status`, `version`, `parent`) is set, instances without labels are listed too, with `status: "unknown"`.
+//	@Description		With several statuses, the instances are listed one status after another, in the order `pending`, `running`, `suspended`, `compensating`, `completed`, `failed`, `cancelled`, and ordered by instance ID within each.
 //	@Tags				Workflows
 //	@Security			bearerAuth
 //	@x-required-scope	"workflows:read"
@@ -381,7 +395,7 @@ func isInstanceStatus(s workflow.Status) bool {
 //	@Param				name		path		string					true	"The workflow name, which must not contain a slash or a dot"
 //	@Param				limit		query		int						false	"Maximum number of items to return"	minimum(1)	maximum(1000)	default(100)
 //	@Param				cursor		query		string					false	"Opaque cursor returned as nextCursor by the previous page; omit for the first page"
-//	@Param				status		query		string					false	"Only return instances in this status"					Enums(pending, running, suspended, compensating, completed, failed, cancelled)
+//	@Param				status		query		[]string				false	"Only return instances in these statuses; repeat the parameter for several"	Enums(pending, running, suspended, compensating, completed, failed, cancelled)	collectionFormat(multi)
 //	@Param				version		query		int						false	"Only return instances running this definition version"	minimum(1)
 //	@Param				parent		query		string					false	"Only return child instances whose parent label equals this value"
 //	@Param				createdFrom	query		string					false	"Only return instances created at or after this time (RFC 3339)"		format(date-time)
@@ -406,26 +420,28 @@ func (s *Server) handleListInstances(w http.ResponseWriter, r *http.Request) *ap
 		return apiErr
 	}
 
-	// Parse the filters, which are matched against the workflow labels
+	// Parse the filters, which are matched against the workflow labels, and where the status can be repeated
 	q := r.URL.Query()
-	labels := &components.WorkflowLabels{
-		Status: q.Get("status"),
-		Parent: q.Get("parent"),
+	statuses := queryValues(q, "status", inOrder(instanceStatusOrder))
+	for _, status := range statuses {
+		if status != "" && !isInstanceStatus(workflow.Status(status)) {
+			return errBadRequest("status must be one of: pending, running, suspended, compensating, completed, failed, cancelled")
+		}
 	}
-	if labels.Status != "" && !isInstanceStatus(workflow.Status(labels.Status)) {
-		return errBadRequest("status must be one of: pending, running, suspended, compensating, completed, failed, cancelled")
+	if !validGroup(cursor.Group, statuses) {
+		return errBadRequest("invalid cursor")
 	}
+
+	parent := q.Get("parent")
+	var version int
 	versionStr := q.Get("version")
 	if versionStr != "" {
 		v, err := strconv.Atoi(versionStr)
 		if err != nil || v < 1 {
 			return errBadRequest("version must be a positive integer")
 		}
-		labels.Version = v
-	}
-	if labels.IsZero() {
-		// Without a label filter, rows that have no labels are listed too
-		labels = nil
+
+		version = v
 	}
 	createdFrom, apiErr := timeParam(q.Get("createdFrom"), "createdFrom")
 	if apiErr != nil {
@@ -436,21 +452,35 @@ func (s *Server) handleListInstances(w http.ResponseWriter, r *http.Request) *ap
 		return apiErr
 	}
 
-	res, err := s.backend.Provider().ListStates(r.Context(), components.ListStatesReq{
-		ActorType:      workflow.OrchestratorActorType(name),
-		WorkflowLabels: labels,
-		CreatedFrom:    createdFrom,
-		CreatedTo:      createdTo,
-		After:          cursor.After,
-		Limit:          limit,
+	// List the instances one status after another, continuing after the last instance ID of each page
+	res, err := pageAcrossValues(statuses, cursor.Group, cursor.After, limit, func(status string, after string, limit int) ([]components.ActorStateInfo, string, bool, error) {
+		labels := &components.WorkflowLabels{Status: status, Version: version, Parent: parent}
+		if labels.IsZero() {
+			// Without a label filter, rows that have no labels are listed too
+			labels = nil
+		}
+
+		page, err := s.backend.Provider().ListStates(r.Context(), components.ListStatesReq{
+			ActorType:      workflow.OrchestratorActorType(name),
+			WorkflowLabels: labels,
+			CreatedFrom:    createdFrom,
+			CreatedTo:      createdTo,
+			After:          after,
+			Limit:          limit,
+		})
+		if err != nil || !page.HasMore || len(page.States) == 0 {
+			return page.States, after, false, err
+		}
+
+		return page.States, page.States[len(page.States)-1].ActorID, true, nil
 	})
 	if err != nil {
 		return s.fail(r, "failed to list workflow instances", err)
 	}
 
 	// The listing reads labels only, so it stays at summary size
-	items := make([]instanceItemJSON, len(res.States))
-	for i, st := range res.States {
+	items := make([]instanceItemJSON, len(res.Items))
+	for i, st := range res.Items {
 		items[i] = instanceItemJSON{InstanceID: st.ActorID, Status: "unknown"}
 		if st.WorkflowLabels == nil {
 			continue
@@ -467,8 +497,8 @@ func (s *Server) handleListInstances(w http.ResponseWriter, r *http.Request) *ap
 	}
 
 	var next string
-	if res.HasMore && len(items) > 0 {
-		next = encodeCursor(instancesCursor{After: items[len(items)-1].InstanceID})
+	if res.HasMore {
+		next = encodeCursor(instancesCursor{Group: res.Group, After: res.After})
 	}
 
 	writeJSON(w, http.StatusOK, newPage(items, next))

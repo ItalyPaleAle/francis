@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -38,6 +39,21 @@ func (c *Caller) Has(s Scope) bool {
 
 	_, ok := c.scopes[s]
 	return ok
+}
+
+// Scopes returns the scopes granted to the caller, sorted
+func (c *Caller) Scopes() []Scope {
+	if c == nil {
+		return []Scope{}
+	}
+
+	res := make([]Scope, 0, len(c.scopes))
+	for s := range c.scopes {
+		res = append(res, s)
+	}
+	slices.Sort(res)
+
+	return res
 }
 
 // tokenEntry is a configured token, stored as a hash so every comparison has the same length

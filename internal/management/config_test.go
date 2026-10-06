@@ -27,6 +27,15 @@ func TestConfigValidate(t *testing.T) {
 		assert.Equal(t, "0.0.0.0:9000", cfg.Bind)
 	})
 
+	t.Run("normalizes the allowed origins into a new slice", func(t *testing.T) {
+		origins := []string{"HTTP://LocalHost:7402/", "*"}
+		cfg := Config{ReadOnlyTokens: []string{tokA}, AllowedOrigins: origins}
+		err := cfg.Validate()
+		require.NoError(t, err)
+		assert.Equal(t, []string{"http://localhost:7402", "*"}, cfg.AllowedOrigins)
+		assert.Equal(t, "HTTP://LocalHost:7402/", origins[0])
+	})
+
 	t.Run("accepts tokens in both lists", func(t *testing.T) {
 		cfg := Config{ReadOnlyTokens: []string{tokA}, ManagementTokens: []string{tokB}}
 		err := cfg.Validate()
@@ -47,6 +56,8 @@ func TestConfigValidate(t *testing.T) {
 		{name: "duplicate within read-only list", cfg: Config{ReadOnlyTokens: []string{tokA, tokB, tokA}}, errMsg: "management read-only token at index 2 is a duplicate"},
 		{name: "duplicate within management list", cfg: Config{ManagementTokens: []string{tokB, tokB}}, errMsg: "management management token at index 1 is a duplicate"},
 		{name: "duplicate across lists", cfg: Config{ReadOnlyTokens: []string{tokA}, ManagementTokens: []string{tokB, tokA}}, errMsg: "management management token at index 1 is a duplicate"},
+		{name: "invalid allowed origin", cfg: Config{ReadOnlyTokens: []string{tokA}, AllowedOrigins: []string{"http://ok.example", "localhost:7402"}}, errMsg: "management allowed origin at index 1 is invalid"},
+		{name: "allowed origin with a path", cfg: Config{ReadOnlyTokens: []string{tokA}, AllowedOrigins: []string{"https://example.com/dashboard"}}, errMsg: "management allowed origin at index 0 is invalid"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

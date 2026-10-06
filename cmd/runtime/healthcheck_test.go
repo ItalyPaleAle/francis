@@ -102,7 +102,7 @@ func TestRunHealthcheckSucceedsVerifyingAgainstDerivedCA(t *testing.T) {
 	// The runtime starts listening asynchronously, so retry until the probe observes it
 	// By default the probe verifies the runtime's SPIFFE certificate against the CA derived from the configured PSKs
 	require.Eventually(t, func() bool {
-		return runHealthcheck([]string{
+		return runHealthcheck(t.Context(), []string{
 			"-addr", addr,
 			"-timeout", "2s",
 		}) == 0
@@ -114,7 +114,7 @@ func TestRunHealthcheckSucceedsInsecureSkipVerify(t *testing.T) {
 
 	// With -insecure-skip-verify and -addr set, no config is loaded at all
 	require.Eventually(t, func() bool {
-		return runHealthcheck([]string{
+		return runHealthcheck(t.Context(), []string{
 			"-addr", addr,
 			"-insecure-skip-verify",
 			"-timeout", "2s",
@@ -129,7 +129,7 @@ func TestRunHealthcheckFailsWhenServerUnreachable(t *testing.T) {
 	quietStdoutStderr(t, func() {
 		// runHealthcheck returns non-zero when it cannot dial
 		// It must not os.Exit, which would kill the test binary
-		code := runHealthcheck([]string{
+		code := runHealthcheck(t.Context(), []string{
 			"-addr", addr,
 			"-insecure-skip-verify",
 			"-timeout", "500ms",

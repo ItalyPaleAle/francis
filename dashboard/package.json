@@ -1,0 +1,48 @@
+{
+  "name": "francis-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "dev:standalone": "vite --mode standalone",
+    "preview": "vite preview",
+    "format": "biome format --write .",
+    "lint": "biome lint . && svelte-check",
+    "check": "biome check --write .",
+    "check:ci": "biome ci .",
+    "svelte-check": "svelte-check",
+    "test": "vitest run",
+    "e2e": "pnpm run e2e:build && playwright test",
+    "e2e:build": "vite build && go build -o ../.bin/e2e/francis ../cmd/runtime && go build -o ../.bin/e2e/fixture-host ./e2e/fixture",
+    "e2e:install": "node ./e2e/install-browsers.mjs"
+  },
+  "packageManager": "pnpm@12.6.0",
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": "^24.18.0",
+      "onFail": "download"
+    }
+  },
+  "dependencies": {
+    "@fontsource-variable/geist": "5.3.0",
+    "@fontsource-variable/geist-mono": "5.3.0",
+    "tailwindcss": "4.3.3"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.13",
+    "@playwright/test": "1.63.0",
+    "@sveltejs/vite-plugin-svelte": "7.3.1",
+    "@tailwindcss/vite": "4.3.3",
+    "@tsconfig/svelte": "5.0.8",
+    "@types/node": "26.6.0",
+    "svelte": "5.57.0",
+    "svelte-check": "4.7.6",
+    "typescript": "6.0.3",
+    "vite": "8.3.1",
+    "vite-plugin-sri-gen": "1.7.4",
+    "vitest": "5.0.3"
+  }
+}

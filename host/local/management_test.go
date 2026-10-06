@@ -41,6 +41,7 @@ func TestHostLocalManagementAPI(t *testing.T) {
 			Bind:             bind,
 			ReadOnlyTokens:   []string{readOnlyToken},
 			ManagementTokens: []string{managementToken},
+			AllowedOrigins:   []string{"http://localhost:7402"},
 		}),
 	)
 	require.NoError(t, err)
@@ -103,6 +104,26 @@ func TestHostLocalManagementAPI(t *testing.T) {
 		item, _ := items[0].(map[string]any)
 		assert.Equal(t, "S", item["actorType"])
 		assert.Equal(t, "x", item["actorId"])
+	})
+
+	t.Run("allows the configured origins", func(t *testing.T) {
+		req, rErr := http.NewRequestWithContext(t.Context(), http.MethodOptions, "http://"+bind+"/api/v1/hosts", nil)
+		require.NoError(t, rErr)
+		req.Header.Set("Origin", "http://localhost:7402")
+		req.Header.Set("Access-Control-Request-Method", http.MethodGet)
+
+		res, rErr := http.DefaultClient.Do(req)
+		require.NoError(t, rErr)
+		defer res.Body.Close()
+
+		assert.Equal(t, http.StatusNoContent, res.StatusCode)
+		assert.Equal(t, "http://localhost:7402", res.Header.Get("Access-Control-Allow-Origin"))
+	})
+
+	t.Run("serves no dashboard", func(t *testing.T) {
+		status, body := get(t, "/", "")
+		assert.Equal(t, http.StatusNotFound, status)
+		assert.Equal(t, "notFound", body["code"])
 	})
 
 	t.Run("runtimes are not applicable", func(t *testing.T) {

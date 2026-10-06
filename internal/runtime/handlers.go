@@ -294,9 +294,15 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 		JoinToken:          joinToken,
 		JoinTokenExpiresAt: joinTokenExpiresAt,
 	})
-	if errors.Is(err, components.ErrJoinTokenAlreadyConsumed) {
+	switch {
+	case errors.Is(err, components.ErrJoinTokenAlreadyConsumed):
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeUnauthorized, "join token has already been used"))
-	} else if err != nil {
+	case errors.Is(err, components.ErrClusterLocked):
+		// An exclusive-access lease, such as the one a restore holds, keeps every host out until it's released
+		// That's expected, and the host reports it, so it's only worth a debug log here as each host keeps retrying
+		rt.log.DebugContext(ctx, "Rejected host registration because the cluster is locked for exclusive access", slog.String("address", payload.Address))
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeClusterLocked, components.ErrClusterLocked.Error()))
+	case err != nil:
 		rt.log.ErrorContext(ctx, "Failed to register host", slog.Any("error", err))
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to register host"))
 	}

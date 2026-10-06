@@ -25,6 +25,9 @@ type ManagementOptions struct {
 	ManagementTokens []string
 	// TLSConfig optionally serves the management API over HTTPS
 	TLSConfig *tls.Config
+	// AllowedOrigins lists the browser origins that may call the API, such as a dashboard served by the runtime's "dashboard" command
+	// Each is a scheme, host, and optional port, such as "http://localhost:7402", or "*" for any origin
+	AllowedOrigins []string
 }
 
 // WithManagementAPI enables the management REST API on this host
@@ -40,6 +43,7 @@ func (h *Host) newManagementServer(opts ManagementOptions, log *slog.Logger) (*m
 		ReadOnlyTokens:   opts.ReadOnlyTokens,
 		ManagementTokens: opts.ManagementTokens,
 		TLSConfig:        opts.TLSConfig,
+		AllowedOrigins:   opts.AllowedOrigins,
 	}
 
 	return management.NewServer(management.ServerOptions{

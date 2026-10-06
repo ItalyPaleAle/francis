@@ -11,7 +11,7 @@ package management
 //	@description.markdown
 //
 //	@tag.name					Meta
-//	@tag.description			Public endpoints.
+//	@tag.description			The public endpoints, and the scopes of the caller's token.
 //	@tag.name					Cluster
 //	@tag.description			Cluster-wide summary, runtime replicas, and hosts.
 //	@tag.name					Actors

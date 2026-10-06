@@ -72,25 +72,33 @@ func middlewareTimeout(timeout time.Duration) httpserver.Middleware {
 	}
 }
 
-// middlewareRequireScope authenticates the caller from its bearer token and authorizes it for the scope the route requires
+// middlewareAuthenticate authenticates the caller from its bearer token, without requiring any scope
 // The caller is stored in the request context, where handlers and audit records read it
+func (s *Server) middlewareAuthenticate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		caller := s.auth.authenticate(r)
+		if caller == nil {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="francis-management"`)
+			writeError(w, r, newAPIError(http.StatusUnauthorized, CodeUnauthorized, "a valid bearer token is required"))
+			return
+		}
+
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callerCtxKey{}, caller)))
+	})
+}
+
+// middlewareRequireScope authenticates the caller from its bearer token and authorizes it for the scope the route requires
 func (s *Server) middlewareRequireScope(scope Scope) httpserver.Middleware {
 	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Authenticate the caller first, then authorize the route from its declared scope
-			caller := s.auth.authenticate(r)
-			if caller == nil {
-				w.Header().Set("WWW-Authenticate", `Bearer realm="francis-management"`)
-				writeError(w, r, newAPIError(http.StatusUnauthorized, CodeUnauthorized, "a valid bearer token is required"))
-				return
-			}
-
-			if !caller.Has(scope) {
+		// Authentication runs first and stores the caller, which is then authorized from the route's declared scope
+		authorize := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !callerFromContext(r.Context()).Has(scope) {
 				writeError(w, r, newAPIErrorf(http.StatusForbidden, CodeForbidden, "the token does not grant the '%s' scope", scope))
 				return
 			}
 
-			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), callerCtxKey{}, caller)))
+			next.ServeHTTP(w, r)
 		})
+		return s.middlewareAuthenticate(authorize)
 	}
 }

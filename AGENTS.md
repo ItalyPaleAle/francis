@@ -56,6 +56,27 @@ If you change an interface that is mocked in `internal/mocks` (the list is in `.
 The management API's OpenAPI document in `internal/management/openapi/openapi.yaml` is generated from the swag annotations on the handlers and the request and response types in `internal/management`, plus the overview in `internal/management/openapi/api.md`.
 If you change any of them, run `make gen-openapi` before finishing the task, and never edit `openapi.yaml` by hand.
 
+## Dashboard
+
+The management dashboard in `dashboard/` is a Svelte 5 SPA built with Vite and Tailwind 4, and managed with pnpm.
+
+The runtime embeds its build output from `dashboard/dist` through the `dashboard` Go package, and `internal/dashboardserver` serves it in one of two modes: next to the management API at `/` ("embedded"), or on its own with the `francis dashboard` command ("standalone"), where users add the endpoints to connect to.
+The server tells the page its mode by rewriting the `francis-dashboard-mode` meta tag in `dashboard/index.html`, so keep that tag.
+`dashboard/dist/.gitkeep` keeps the directory in the source tree so Go code compiles before the dashboard is built; never delete it.
+
+The TypeScript types in `dashboard/src/lib/types.ts` and the client in `dashboard/src/lib/api.ts` mirror the management API by hand.
+If you change a route, a request, or a response of the management API, update them and the pages that use them.
+
+Style the dashboard with Tailwind classes, using `dark:` variants for dark mode, and only the colour tokens defined in `dashboard/src/style.css`.
+Before finishing a dashboard change, run `make dashboard-check`, and `make dashboard` to confirm it builds.
+Then run the Playwright tests with `make dashboard-e2e`, and add or update tests in `dashboard/e2e` for the behavior you changed.
+They run against a real runtime and the fixture host in `dashboard/e2e/fixture`, which seeds the data the tests expect.
+A test that changes the cluster creates its own actors, instances, or hosts through the fixture, so the tests don't depend on their order.
+
+`make dashboard-demo` runs a cluster with sample data in one process, for trying the dashboard by hand: see `dashboard/README.md`.
+Its code is in `internal/demo`, and the `demo` subcommand only exists in builds with the `demo` build tag.
+If a dashboard change shows data the demo doesn't produce, extend `internal/demo` so the demo keeps covering every page.
+
 ## Comments
 
 - Exactly one sentence per line
