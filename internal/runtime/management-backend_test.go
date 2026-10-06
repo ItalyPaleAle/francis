@@ -88,7 +88,8 @@ func TestManagementRouteExplainsAnUnreachableAdvertiseAddress(t *testing.T) {
 	b := &managementBackend{rt: rt}
 
 	// Another replica registered its unspecified bind address, which this replica can't dial
-	require.NoError(t, prov.RegisterRuntime(t.Context(), components.RegisterRuntimeReq{RuntimeID: "other", Address: ":8443", TTL: time.Minute}))
+	err := prov.RegisterRuntime(t.Context(), components.RegisterRuntimeReq{RuntimeID: "other", Address: ":8443", TTL: time.Minute})
+	require.NoError(t, err)
 	res, err := prov.RegisterHost(t.Context(), components.RegisterHostReq{
 		Address:    "127.0.0.1:9999",
 		ActorTypes: []components.ActorHostType{{ActorType: "A", IdleTimeout: time.Minute}},

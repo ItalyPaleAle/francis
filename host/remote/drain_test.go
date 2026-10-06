@@ -324,7 +324,8 @@ func TestRuntimeClientAdministrativeDrain(t *testing.T) {
 		<-rc.Ready()
 
 		cancel()
-		require.NoError(t, waitRun(t, runErr))
+		err := waitRun(t, runErr)
+		require.NoError(t, err)
 		select {
 		case timeout := <-drainTimeout:
 			assert.Equal(t, time.Duration(0), timeout, "a shutdown is not bounded")

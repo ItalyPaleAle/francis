@@ -45,7 +45,7 @@ type ActorStateChange struct {
 	Value *StateEntry
 }
 
-// WorkflowEventChange represents workflow events to be inserted for an actor.
+// WorkflowEventChange represents workflow events to be inserted for an actor
 type WorkflowEventChange struct {
 	Key    ActorKey
 	Events []components.WorkflowEvent

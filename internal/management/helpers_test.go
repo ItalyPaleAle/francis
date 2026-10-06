@@ -271,7 +271,8 @@ func decodeError(t *testing.T, w *httptest.ResponseRecorder, status int, code st
 	require.Equal(t, "application/json", w.Header().Get("Content-Type"))
 
 	var e errorBody
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &e), "body: %s", w.Body.String())
+	err := json.Unmarshal(w.Body.Bytes(), &e)
+	require.NoError(t, err, "body: %s", w.Body.String())
 	require.Equal(t, code, e.Code, "body: %s", w.Body.String())
 	require.NotEmpty(t, e.Message)
 	require.NotEmpty(t, e.RequestID)
@@ -285,7 +286,8 @@ func decodeJSON(t *testing.T, w *httptest.ResponseRecorder, status int) map[stri
 	require.Equal(t, status, w.Code, "body: %s", w.Body.String())
 	require.Equal(t, "application/json", w.Header().Get("Content-Type"))
 	var res map[string]any
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &res), "body: %s", w.Body.String())
+	err := json.Unmarshal(w.Body.Bytes(), &res)
+	require.NoError(t, err, "body: %s", w.Body.String())
 	return res
 }
 

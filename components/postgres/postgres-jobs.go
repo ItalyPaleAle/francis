@@ -163,17 +163,27 @@ func (p *PostgresProvider) storeJobRow(ctx context.Context, q jobQuerier, aRef r
 	}
 
 	// The initial state is written only when the actor has no live state, and an expired row that the garbage collector has not removed yet counts as no state
+	// Replacing an expired row is an update, which doesn't fire the trigger that removes events, so the statement removes the expired state's events itself whenever it stores the initial state
+	// Otherwise they would be served as the history of the new state until its first write with events resets it
 	batch := &pgx.Batch{}
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	batch.Queue(`INSERT INTO `+p.tablePrefix+`actor_state AS stored
-			(actor_type, actor_id, actor_state_data, actor_state_expiration_time, workflow_labels)
-		VALUES ($1, $2, $3, NULL, $4::jsonb)
-		ON CONFLICT (actor_type, actor_id) DO UPDATE SET
-			actor_state_data = EXCLUDED.actor_state_data,
-			actor_state_expiration_time = NULL,
-			workflow_labels = EXCLUDED.workflow_labels
-		WHERE stored.actor_state_expiration_time IS NOT NULL
-			AND stored.actor_state_expiration_time <= (now() AT TIME ZONE 'utc')`,
+	batch.Queue(`WITH stored_state AS (
+			INSERT INTO `+p.tablePrefix+`actor_state AS stored
+				(actor_type, actor_id, actor_state_data, actor_state_expiration_time, workflow_labels)
+			VALUES ($1, $2, $3, NULL, $4::jsonb)
+			ON CONFLICT (actor_type, actor_id) DO UPDATE SET
+				actor_state_data = EXCLUDED.actor_state_data,
+				actor_state_expiration_time = NULL,
+				workflow_labels = EXCLUDED.workflow_labels
+			WHERE stored.actor_state_expiration_time IS NOT NULL
+				AND stored.actor_state_expiration_time <= (now() AT TIME ZONE 'utc')
+			RETURNING 1
+		)
+		DELETE FROM `+p.tablePrefix+`workflow_events
+		WHERE
+			actor_type = $1
+			AND actor_id = $2
+			AND EXISTS (SELECT 1 FROM stored_state)`,
 		aRef.ActorType, aRef.ActorID, initial.Data, wfLabels,
 	)
 	batch.Queue(query, args...)

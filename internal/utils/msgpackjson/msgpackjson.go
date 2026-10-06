@@ -29,6 +29,7 @@ const timestampExtType = -1
 // ToJSON converts a single MessagePack value to JSON, rendering numbers and values without a JSON equivalent with the package convention
 // lossy is true when any value used a rendering that changes its shape: binary data, an extension, a timestamp, a string that isn't valid UTF-8, or a map key that isn't a string
 // Numbers rendered as strings don't make the result lossy, since that is the convention for every number
+// A result that is not lossy can therefore still not convert back to the same bytes, because a number and a string with the same text render the same
 func ToJSON(data []byte) (out json.RawMessage, lossy bool, err error) {
 	r := bytes.NewReader(data)
 	c := &converter{

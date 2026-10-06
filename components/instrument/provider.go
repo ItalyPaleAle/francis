@@ -154,8 +154,18 @@ func classifyOperation(method string, err error) operationDisposition {
 		if errors.Is(err, components.ErrHostUnregistered) || errors.Is(err, components.ErrHostSuperseded) {
 			return operationExpected
 		}
-	case "GetHostDetails", "MarkHostDraining", "ClearHostDraining":
+	case "GetHostDetails", "ClearHostDraining":
 		if errors.Is(err, components.ErrHostUnregistered) {
+			return operationExpected
+		}
+	case "MarkHostDraining":
+		// A drain refused while an exclusive-access lease is held is the outcome the lease exists for, which the caller reports
+		if errors.Is(err, components.ErrHostUnregistered) || errors.Is(err, components.ErrClusterLocked) {
+			return operationExpected
+		}
+	case "DispatchJob":
+		// Only a dispatch that asked to be refused while an exclusive-access lease is held gets this error, which the caller reports
+		if errors.Is(err, components.ErrClusterLocked) {
 			return operationExpected
 		}
 	case "RegisterRuntime":
@@ -571,6 +581,24 @@ func (w *providerWrapper) QueryJobs(ctx context.Context, req components.QueryJob
 	spanCtx, span, start := w.beginOp(ctx, "QueryJobs")
 	res, err = w.base.QueryJobs(spanCtx, req)
 	w.finishOp(spanCtx, span, "QueryJobs", start, err)
+
+	return res, err
+}
+
+// CountJobs implements components.ManagementProvider
+func (w *providerWrapper) CountJobs(ctx context.Context, req components.CountJobsReq) (res int, err error) {
+	spanCtx, span, start := w.beginOp(ctx, "CountJobs")
+	res, err = w.base.CountJobs(spanCtx, req)
+	w.finishOp(spanCtx, span, "CountJobs", start, err)
+
+	return res, err
+}
+
+// CountStates implements components.ManagementProvider
+func (w *providerWrapper) CountStates(ctx context.Context, req components.CountStatesReq) (res int, err error) {
+	spanCtx, span, start := w.beginOp(ctx, "CountStates")
+	res, err = w.base.CountStates(spanCtx, req)
+	w.finishOp(spanCtx, span, "CountStates", start, err)
 
 	return res, err
 }

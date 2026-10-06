@@ -3,17 +3,15 @@ package management
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"time"
-	"uuid"
 
 	"github.com/italypaleale/francis/builtin/workflow"
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/protocol"
 )
 
-// summaryCountCap bounds each count in the cluster summary, since providers have no count methods and counting pages through the rows
+// summaryCountCap bounds each count in the cluster summary, so a large collection costs the provider a bounded amount of work
 const summaryCountCap = 10_000
 
 // boundedCountJSON is a count that stops at summaryCountCap
@@ -81,7 +79,7 @@ type clusterSummaryJSON struct {
 //	@Failure			401	{object}	apiError			"`unauthorized`: the bearer token is missing or unknown"
 //	@Failure			403	{object}	apiError			"`forbidden`: the token does not grant the scope the route requires"
 //	@Failure			500	{object}	apiError			"`internal`: an unexpected server error"
-//	@Failure			503	{object}	apiError			"`hostUnavailable`: the host, or the runtime owning its session, could not be reached; retryable"
+//	@Failure			503	{object}	apiError			"`hostUnavailable`: the host, or the runtime owning its session, could not be reached or was too busy; retryable"
 //	@Failure			504	{object}	apiError			"`timeout`: the request timed out; retryable"
 //	@Header				all	{string}	X-Request-Id		"A unique ID assigned to the request, also returned as requestId in error bodies and recorded in audit logs"
 //	@Header				401	{string}	WWW-Authenticate	"Always Bearer realm="francis-management" when the token is missing or unknown"
@@ -189,53 +187,31 @@ func (s *Server) handleClusterSummary(w http.ResponseWriter, r *http.Request) *a
 	return nil
 }
 
-// countPages counts the items of a paginated listing, up to summaryCountCap
-// fetch reads the page after a cursor, returning its number of items, whether more follow, and the cursor after its last item
-func countPages[C any](fetch func(after C) (n int, hasMore bool, next C, err error)) (boundedCountJSON, error) {
-	var (
-		res   boundedCountJSON
-		after C
-	)
-	for {
-		n, hasMore, next, err := fetch(after)
-		if err != nil {
-			return res, err
-		}
-		res.Count += n
-		if !hasMore || n == 0 {
-			return res, nil
-		}
-		if res.Count >= summaryCountCap {
-			res.Truncated = true
-			return res, nil
-		}
-		after = next
+// boundedCount turns a count bounded at summaryCountCap+1 into a count that stops at summaryCountCap
+func boundedCount(n int) boundedCountJSON {
+	if n > summaryCountCap {
+		return boundedCountJSON{Count: summaryCountCap, Truncated: true}
 	}
+
+	return boundedCountJSON{Count: n}
 }
 
 // countJobs counts the jobs in a status, up to summaryCountCap
 func countJobs(ctx context.Context, provider components.ManagementProvider, status components.JobStatus) (boundedCountJSON, error) {
-	return countPages(func(after components.UUIDCursor) (int, bool, components.UUIDCursor, error) {
-		page, err := provider.QueryJobs(ctx, components.QueryJobsReq{
-			Status: status,
-			After:  after,
-			Limit:  components.MaxManagementListLimit,
-		})
-		if err != nil || len(page.Jobs) == 0 {
-			return 0, false, after, err
-		}
-
-		next, err := uuid.Parse(page.Jobs[len(page.Jobs)-1].JobID)
-		if err != nil {
-			return 0, false, after, fmt.Errorf("provider returned a job ID that is not a UUID: %w", err)
-		}
-
-		return len(page.Jobs), page.HasMore, next, nil
+	// Counting one past the cap tells a count that reached the cap apart from one that exceeded it
+	n, err := provider.CountJobs(ctx, components.CountJobsReq{
+		Status: status,
+		Limit:  summaryCountCap + 1,
 	})
+	if err != nil {
+		return boundedCountJSON{}, err
+	}
+
+	return boundedCount(n), nil
 }
 
 // countWorkflowInstances counts the instances of an orchestrator type by status, leaving out the statuses with no instances
-func countWorkflowInstances(ctx context.Context, provider components.ActorProvider, actorType string) (map[string]boundedCountJSON, error) {
+func countWorkflowInstances(ctx context.Context, provider components.ManagementProvider, actorType string) (map[string]boundedCountJSON, error) {
 	counts := map[string]boundedCountJSON{}
 	for _, status := range []workflow.Status{
 		workflow.StatusPending,
@@ -246,32 +222,19 @@ func countWorkflowInstances(ctx context.Context, provider components.ActorProvid
 		workflow.StatusFailed,
 		workflow.StatusCancelled,
 	} {
-		count, err := countInstances(ctx, provider, actorType, status)
+		n, err := provider.CountStates(ctx, components.CountStatesReq{
+			ActorType:      actorType,
+			WorkflowLabels: &components.WorkflowLabels{Status: string(status)},
+			Limit:          summaryCountCap + 1,
+		})
 		if err != nil {
 			return nil, err
 		}
 
-		if count.Count > 0 {
-			counts[string(status)] = count
+		if n > 0 {
+			counts[string(status)] = boundedCount(n)
 		}
 	}
 
 	return counts, nil
-}
-
-// countInstances counts the instances of an orchestrator type in a status, up to summaryCountCap
-func countInstances(ctx context.Context, provider components.ActorProvider, actorType string, status workflow.Status) (boundedCountJSON, error) {
-	return countPages(func(after string) (int, bool, string, error) {
-		page, err := provider.ListStates(ctx, components.ListStatesReq{
-			ActorType:      actorType,
-			WorkflowLabels: &components.WorkflowLabels{Status: string(status)},
-			After:          after,
-			Limit:          components.MaxListStatesLimit,
-		})
-		if err != nil || len(page.States) == 0 {
-			return 0, false, after, err
-		}
-
-		return len(page.States), page.HasMore, page.States[len(page.States)-1].ActorID, nil
-	})
 }

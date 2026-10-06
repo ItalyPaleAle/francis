@@ -152,7 +152,8 @@ func TestPeerManagementWithoutHandler(t *testing.T) {
 func TestReadBoundedMessage(t *testing.T) {
 	var buf bytes.Buffer
 	env := protocol.NewEnvelope(protocol.KindHealthCheck, nil)
-	require.NoError(t, protocol.WriteMessage(&buf, env))
+	err := protocol.WriteMessage(&buf, env)
+	require.NoError(t, err)
 	size := binary.BigEndian.Uint32(buf.Bytes()[:4])
 
 	// A message within the bound is read normally

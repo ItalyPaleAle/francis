@@ -173,9 +173,9 @@ func (p *Provider) ListStates(ctx context.Context, req components.ListStatesReq)
 	p.StateMu.RLock()
 	defer p.StateMu.RUnlock()
 
-	// Collect the actor IDs that match the type and cursor, skipping expired state so the listing agrees with GetState even before the background cleanup runs
+	// Keep the first actor IDs that match the type and cursor, plus one that tells whether more follow, skipping expired state so the listing agrees with GetState even before the background cleanup runs
 	// An empty cursor selects the first page, since every actor ID sorts after the empty string
-	matches := make([]string, 0, len(p.ActorState))
+	sel := newPageSelector(limit+1, strings.Compare)
 	for key, state := range p.ActorState {
 		if key.ActorType != req.ActorType || state.IsExpired(now) {
 			continue
@@ -190,13 +190,11 @@ func (p *Provider) ListStates(ctx context.Context, req components.ListStatesReq)
 			continue
 		}
 
-		matches = append(matches, key.ActorID)
+		sel.Add(key.ActorID)
 	}
 
-	// The map has no order of its own, so the ascending order the API promises has to be established here
-	slices.Sort(matches)
-
 	// Anything past the limit is dropped from the page, but its existence is reported through HasMore
+	matches := sel.Sorted()
 	hasMore := len(matches) > limit
 	if hasMore {
 		matches = matches[:limit]
@@ -224,6 +222,32 @@ func (p *Provider) ListStates(ctx context.Context, req components.ListStatesReq)
 	}
 
 	return res, nil
+}
+
+func (p *Provider) CountStates(_ context.Context, req components.CountStatesReq) (int, error) {
+	if req.Limit <= 0 {
+		return 0, nil
+	}
+	now := p.Clock.Now()
+
+	p.StateMu.RLock()
+	defer p.StateMu.RUnlock()
+
+	// Count without collecting or sorting the actor IDs, stopping as soon as the limit is reached
+	// Expired state is skipped so the count agrees with ListStates even before the background cleanup runs
+	var count int
+	for key, state := range p.ActorState {
+		if key.ActorType != req.ActorType || state.IsExpired(now) || !state.MatchesWorkflowLabels(req.WorkflowLabels) {
+			continue
+		}
+
+		count++
+		if count >= req.Limit {
+			return req.Limit, nil
+		}
+	}
+
+	return count, nil
 }
 
 func (p *Provider) DeleteState(ctx context.Context, r ref.ActorRef) error {

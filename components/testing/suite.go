@@ -6368,9 +6368,10 @@ func (s Suite) TestJobs(t *testing.T) {
 
 	t.Run("a dispatch that rejects a locked cluster stores nothing while an exclusive-access lease is held", func(t *testing.T) {
 		ctx := t.Context()
-		require.NoError(t, s.p.Seed(ctx, jobSeed()))
+		err := s.p.Seed(ctx, jobSeed())
+		require.NoError(t, err)
 
-		_, err := s.p.AcquireExclusiveLease(ctx, "job-owner", time.Minute)
+		_, err = s.p.AcquireExclusiveLease(ctx, "job-owner", time.Minute)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = s.p.ReleaseExclusiveLease(context.WithoutCancel(t.Context()), "job-owner") })
 
@@ -6404,7 +6405,8 @@ func (s Suite) TestJobs(t *testing.T) {
 		assert.True(t, created)
 
 		// Once the lease is released the option lets the dispatch through
-		require.NoError(t, s.p.ReleaseExclusiveLease(ctx, "job-owner"))
+		err = s.p.ReleaseExclusiveLease(ctx, "job-owner")
+		require.NoError(t, err)
 		_, created, _, err = s.p.DispatchJob(ctx, ref.NewAlarmRef("JOB", "unlocked", "key"), lockedReq([]string{jobHost}, true))
 		require.NoError(t, err)
 		assert.True(t, created)

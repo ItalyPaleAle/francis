@@ -365,22 +365,14 @@ func (s *SQLiteProvider) ListPlacements(ctx context.Context, req components.List
 	return res, nil
 }
 
+const liveJobActiveCond = `alarm_lease_id IS NOT NULL AND alarm_lease_expiration_time IS NOT NULL AND alarm_lease_expiration_time >= ?`
+
 func (s *SQLiteProvider) QueryJobs(ctx context.Context, req components.QueryJobsReq) (components.QueryJobsRes, error) {
 	limit := components.EffectiveListLimit(req.Limit)
 	now := s.clock.Now().UnixMilli()
 
-	// Decide which halves of the union can match the status filter
-	includeLive := true
-	includeTerminal := true
-	switch req.Status {
-	case "":
-		// No filter, so both halves are included
-	case components.JobStatusActive, components.JobStatusPending:
-		includeTerminal = false
-	case components.JobStatusCompleted, components.JobStatusDeadLettered:
-		includeLive = false
-	default:
-		// No job can be in an unknown status
+	// A status filter selects only the half of the union that can hold it, and no job is in an unknown status
+	if !req.IncludeLive() && !req.IncludeTerminal() {
 		return components.QueryJobsRes{Jobs: []components.JobInfo{}}, nil
 	}
 
@@ -394,12 +386,11 @@ func (s *SQLiteProvider) QueryJobs(ctx context.Context, req components.QueryJobs
 	// Live and terminal job IDs never overlap, so UNION ALL cannot produce duplicates
 	branches := make([]string, 0, 2)
 	args := make([]any, 0, 16)
-	if includeLive {
+	if req.IncludeLive() {
 		var b strings.Builder
 		b.WriteString(`SELECT job_id, actor_type, actor_id, job_method, alarm_due_time, alarm_interval, alarm_cron, job_status, attempts, last_error, ended_at FROM (
 			SELECT alarm_id AS job_id, actor_type, actor_id, job_method, alarm_due_time, alarm_interval, alarm_cron,
-				CASE WHEN alarm_lease_id IS NOT NULL AND alarm_lease_expiration_time IS NOT NULL AND alarm_lease_expiration_time >= ?
-					THEN 'active' ELSE 'pending' END AS job_status,
+				CASE WHEN ` + liveJobActiveCond + ` THEN 'active' ELSE 'pending' END AS job_status,
 				0 AS attempts, NULL AS last_error, NULL AS ended_at
 			FROM `)
 		b.WriteString(s.tablePrefix)
@@ -416,10 +407,10 @@ func (s *SQLiteProvider) QueryJobs(ctx context.Context, req components.QueryJobs
 		}
 		switch req.Status {
 		case components.JobStatusActive:
-			b.WriteString(` AND alarm_lease_id IS NOT NULL AND alarm_lease_expiration_time IS NOT NULL AND alarm_lease_expiration_time >= ?`)
+			b.WriteString(` AND ` + liveJobActiveCond)
 			args = append(args, now)
 		case components.JobStatusPending:
-			b.WriteString(` AND NOT (alarm_lease_id IS NOT NULL AND alarm_lease_expiration_time IS NOT NULL AND alarm_lease_expiration_time >= ?)`)
+			b.WriteString(` AND NOT (` + liveJobActiveCond + `)`)
 			args = append(args, now)
 		}
 		b.WriteString(` ORDER BY alarm_id LIMIT ?)`)
@@ -427,7 +418,7 @@ func (s *SQLiteProvider) QueryJobs(ctx context.Context, req components.QueryJobs
 		branches = append(branches, b.String())
 	}
 
-	if includeTerminal {
+	if req.IncludeTerminal() {
 		// Expired terminal records are omitted, as in ListJobs
 		var b strings.Builder
 		b.WriteString(`SELECT job_id, actor_type, actor_id, job_method, original_due, job_interval, job_cron, job_status, attempts, last_error, ended_at FROM (
@@ -509,6 +500,67 @@ func (s *SQLiteProvider) QueryJobs(ctx context.Context, req components.QueryJobs
 	}
 
 	return res, nil
+}
+
+// CountJobs counts the live and terminal jobs across the cluster in a status, stopping at the limit
+func (s *SQLiteProvider) CountJobs(ctx context.Context, req components.CountJobsReq) (int, error) {
+	if req.Limit <= 0 {
+		return 0, nil
+	}
+	now := s.clock.Now().UnixMilli()
+
+	// A status filter selects only the half of the union that can hold it, and no job is in an unknown status
+	if !req.IncludeLive() && !req.IncludeTerminal() {
+		return 0, nil
+	}
+
+	// Each half stops at the limit on its own, so neither reads more than that many rows
+	// The arguments are appended in the order their placeholders appear in the joined query
+	branches := make([]string, 0, 2)
+	args := make([]any, 0, 6)
+	if req.IncludeLive() {
+		var b strings.Builder
+		b.WriteString(`(SELECT count(*) FROM (SELECT 1 FROM `)
+		b.WriteString(s.tablePrefix)
+		b.WriteString(`alarms WHERE alarm_kind = 'job'`)
+		switch req.Status {
+		case components.JobStatusActive:
+			b.WriteString(` AND ` + liveJobActiveCond)
+			args = append(args, now)
+		case components.JobStatusPending:
+			b.WriteString(` AND NOT (` + liveJobActiveCond + `)`)
+			args = append(args, now)
+		}
+		b.WriteString(` LIMIT ?))`)
+		args = append(args, req.Limit)
+		branches = append(branches, b.String())
+	}
+	if req.IncludeTerminal() {
+		// Expired terminal records are omitted, as in QueryJobs
+		var b strings.Builder
+		b.WriteString(`(SELECT count(*) FROM (SELECT 1 FROM `)
+		b.WriteString(s.tablePrefix)
+		b.WriteString(`terminal_jobs WHERE (expiration_time IS NULL OR expiration_time > ?)`)
+		args = append(args, now)
+		if req.Status != "" {
+			b.WriteString(` AND job_status = ?`)
+			args = append(args, string(req.Status))
+		}
+		b.WriteString(` LIMIT ?))`)
+		args = append(args, req.Limit)
+		branches = append(branches, b.String())
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	var count int
+	err := s.db.QueryRowContext(queryCtx, `SELECT `+strings.Join(branches, ` + `), args...).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("error counting jobs: %w", err)
+	}
+
+	// Both halves can reach the limit, so their sum is capped again
+	return min(count, req.Limit), nil
 }
 
 func (s *SQLiteProvider) ListAlarms(ctx context.Context, req components.ListAlarmsReq) (components.ListAlarmsRes, error) {

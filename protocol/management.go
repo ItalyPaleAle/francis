@@ -107,8 +107,8 @@ type CapacityGroupInfo struct {
 
 // HostDrainRequest asks a host to drain: stop accepting new work, deactivate its actors, unregister, and stop
 type HostDrainRequest struct {
-	// TimeoutMs bounds the graceful teardown, after which the remaining actors are halted forcibly
-	// Zero uses the host's default
+	// TimeoutMs bounds how long the in-flight calls of the halting actors can run before they are canceled
+	// The host still waits for the canceled calls to return before it unregisters, and zero means no bound
 	TimeoutMs int64 `msgpack:"timeout,omitempty"`
 	// Reason is an optional operator-supplied reason, logged by the host
 	Reason string `msgpack:"reason,omitempty"`

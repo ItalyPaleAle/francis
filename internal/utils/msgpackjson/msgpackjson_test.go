@@ -45,7 +45,8 @@ func encode(t *testing.T, fn func(enc *msgpack.Encoder) error) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	enc := msgpack.NewEncoder(&buf)
-	require.NoError(t, fn(enc))
+	err := fn(enc)
+	require.NoError(t, err)
 	return buf.Bytes()
 }
 

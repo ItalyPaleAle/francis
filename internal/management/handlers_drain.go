@@ -18,7 +18,7 @@ const maxDrainTimeout = 5 * time.Minute
 
 // drainRequestJSON is the body of a drain request, where every field is optional
 type drainRequestJSON struct {
-	// A Go duration string (such as `30s`) bounding the host's graceful teardown, positive and at most `5m`; when omitted, the host waits for every actor to deactivate, with no time limit
+	// A Go duration string (such as `30s`) bounding how long the host lets its actors' in-flight calls run before canceling them, positive and at most `5m`; the host still waits for the canceled calls to return before it unregisters, and when omitted it waits for every call to finish, with no time limit
 	Timeout string `json:"timeout,omitempty" example:"30s"`
 	// Drain the host even when it is the last live server of one or more actor types
 	Force bool `json:"force,omitempty" default:"false"`
@@ -62,13 +62,15 @@ func decodeBody(r *http.Request, dst any) *apiError {
 //	@Description	Requires scope `hosts:manage`. The action is audited, including its reason.
 //	@Description
 //	@Description	Marks the host draining in the provider, so no new actor is placed on it anywhere, then asks the host to drain and returns `202` once the host acknowledged.
-//	@Description	The host then deactivates its actors gracefully, bounded by `timeout`; the drain continues after the response is sent.
+//	@Description	The host then deactivates its actors gracefully, canceling the calls still running when `timeout` expires; the drain continues after the response is sent.
 //	@Description
 //	@Description	- Draining a host that is the last live, non-draining server of one or more actor types is refused with `409 lastServer` (with `details.actorTypes`), unless `force` is `true`; a forced drain lists those types in `forcedActorTypes`. The check is atomic with other drain requests, so concurrent drains of the last servers of a type can't both succeed without `force`.
 //	@Description	- Repeating a drain on a host that is already draining is never refused, and `alreadyDraining` reports whether the host was already draining.
 //	@Description	- While an exclusive-access lease is held on the cluster, the action is refused with `409 exclusiveLeaseHeld`.
 //	@Description	- If the host reconnected before it received the request, including to another runtime replica, the request is sent again to its new session; only if the host keeps reconnecting is the response `409 hostReattached`, and the request can be sent again.
 //	@Description	- When the request to the host fails, the host is asked whether it is draining. A host that is draining accepted the drain and the response is `202`. A host that is not draining has its draining mark removed, and the error has `details.hostDraining: false`. A host that can't be asked keeps its mark, since it may have accepted the drain, and the error has `details.hostDraining: true`.
+//	@Description	- A host that refused the request because it was too busy never accepted the drain, so its mark is removed without asking it, and the error is `503 hostUnavailable` with `details.hostDraining: false`.
+//	@Description	- The mark is only removed by the request that set it: when the host was already marked draining, a failed request leaves the mark in place and the error has `details.hostDraining: true`.
 //	@Description
 //	@Description		The request body is optional; an empty body is equivalent to `{}`.
 //	@Description		Unknown fields are rejected.
@@ -87,7 +89,7 @@ func decodeBody(r *http.Request, dst any) *apiError {
 //	@Failure			409		{object}	apiError			"`lastServer`: the host is the last live server of the actor types in details.actorTypes, so set force to drain it anyway; `exclusiveLeaseHeld`: an exclusive-access lease is held on the cluster (retryable); or `hostReattached`: the host kept reconnecting (retryable)"
 //	@Failure			413		{object}	apiError			"`payloadTooLarge`: the request body exceeds 64 KiB"
 //	@Failure			500		{object}	apiError			"`internal`: an unexpected server error"
-//	@Failure			503		{object}	apiError			"`hostUnavailable`: the host, or the runtime owning its session, could not be reached; retryable"
+//	@Failure			503		{object}	apiError			"`hostUnavailable`: the host, or the runtime owning its session, could not be reached or was too busy; retryable"
 //	@Failure			504		{object}	apiError			"`timeout`: the request timed out; retryable"
 //	@Header				all		{string}	X-Request-Id		"A unique ID assigned to the request, also returned as requestId in error bodies and recorded in audit logs"
 //	@Header				401		{string}	WWW-Authenticate	"Always Bearer realm="francis-management" when the token is missing or unknown"
@@ -158,7 +160,7 @@ func (s *Server) drainHost(w http.ResponseWriter, r *http.Request, body drainReq
 	})
 	if err != nil {
 		// A drain that took effect although its acknowledgement was lost is reported as accepted
-		apiErr = s.drainFailed(r, h, err)
+		apiErr = s.drainFailed(r, h, !mark.AlreadyDraining, err)
 		if apiErr != nil {
 			return apiErr
 		}
@@ -172,28 +174,37 @@ func (s *Server) drainHost(w http.ResponseWriter, r *http.Request, body drainReq
 // drainFailed decides what a failed drain request left behind, since the host was marked draining before it was asked
 // It asks the host whether it is draining: a host that is draining accepted the drain and only the acknowledgement was lost, so nil is returned, while a host that is not draining never accepted it and its mark is cleared to put it back into service
 // A host that can't be asked keeps its mark, because it may have accepted the drain, and the error's details say whether the host is still marked draining
-func (s *Server) drainFailed(r *http.Request, h components.HostDetails, drainErr error) *apiError {
+// The mark is cleared only when markedHere is set, because a mark this request found in place belongs to another drain, whose request may be about to reach the host
+func (s *Server) drainFailed(r *http.Request, h components.HostDetails, markedHere bool, drainErr error) *apiError {
 	apiErr := s.fail(r, "failed to drain the host", drainErr)
 	leftDraining := func(draining bool) *apiError {
 		return apiErr.withDetails(map[string]any{"hostDraining": draining})
 	}
 
-	// Ask the host for its state, with a bound of its own since the failed request may have used up the first one
-	snap, err := s.hostSnapshot(r.Context(), h, protocol.HostSnapshotRequest{SkipActivations: true})
-	if err != nil {
-		s.log.WarnContext(r.Context(),
-			"Drain request failed and the host could not be asked whether it accepted it, so it stays marked draining",
-			slog.String("hostId", h.HostID),
-			slog.Any("error", err),
-		)
-		return leftDraining(true)
+	// A host that refused the request because it was busy never handled it, so it is not asked again, which would likely be refused the same way
+	if !errors.Is(drainErr, ErrHostBusy) {
+		// Ask the host for its state, with a bound of its own since the failed request may have used up the first one
+		snap, err := s.hostSnapshot(r.Context(), h, protocol.HostSnapshotRequest{SkipActivations: true})
+		if err != nil {
+			s.log.WarnContext(r.Context(),
+				"Drain request failed and the host could not be asked whether it accepted it, so it stays marked draining",
+				slog.String("hostId", h.HostID),
+				slog.Any("error", err),
+			)
+			return leftDraining(true)
+		}
+		if snap.Draining {
+			return nil
+		}
 	}
-	if snap.Draining {
-		return nil
+
+	// Another drain's mark is left in place
+	if !markedHere {
+		return leftDraining(true)
 	}
 
 	// The host is in service, so remove the mark that keeps new actors off it
-	err = s.backend.Provider().ClearHostDraining(r.Context(), h.HostID)
+	err := s.backend.Provider().ClearHostDraining(r.Context(), h.HostID)
 	switch {
 	case errors.Is(err, components.ErrHostUnregistered):
 		// The host went away, so there is no mark left to clear

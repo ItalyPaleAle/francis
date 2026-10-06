@@ -174,16 +174,16 @@ func compareActorRef(aType string, aID string, bType string, bID string) int {
 	)
 }
 
-// HaltAllWithin halts all actors active on the host like HaltAll, but stops waiting once timeout elapses
+// HaltAllWithin halts all actors active on the host like HaltAll, but bounds how long their in-flight calls can run
 // When the timeout expires, it cancels the in-flight calls of the actors still halting without waiting out the shutdown grace period, and returns their keys so the caller can log them
-// Those actors finish halting in the background
-// A timeout that is not positive waits for HaltAll to complete
+// It still waits for those actors to finish halting before returning, because the caller unregisters the host next, and another host could then activate an actor whose call is still running here
+// A timeout that is not positive waits for HaltAll to complete without canceling any call
 func (m *Manager) HaltAllWithin(timeout time.Duration) (forced []string, err error) {
 	if timeout <= 0 {
 		return nil, m.HaltAll()
 	}
 
-	// Halt in the background so the wait can be bounded
+	// Halt in the background so the in-flight calls can be canceled once the timeout expires
 	done := make(chan error, 1)
 	go func() {
 		done <- m.HaltAll()
@@ -213,7 +213,10 @@ func (m *Manager) HaltAllWithin(timeout time.Duration) (forced []string, err err
 		}
 	})
 
-	return forced, nil
+	// Wait for the canceled calls to return and for their actors to deactivate and clear their placement
+	err = <-done
+
+	return forced, err
 }
 
 // DrainAll halts every actor active on the host like HaltAllWithin, logging a failure and the actors whose in-flight calls were cut short
@@ -224,7 +227,7 @@ func (m *Manager) DrainAll(timeout time.Duration) {
 	}
 	if len(forced) > 0 {
 		m.log.Warn(
-			"Drain timeout expired: forcibly halting actors that were still busy",
+			"Drain timeout expired: canceled the in-flight calls of actors that were still busy",
 			slog.Duration("timeout", timeout),
 			slog.Int("count", len(forced)),
 			slog.Any("actors", forced),

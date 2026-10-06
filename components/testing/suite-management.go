@@ -582,13 +582,15 @@ func (s Suite) TestMarkHostDraining(t *testing.T) {
 	}
 
 	t.Run("refuses to drain the last server of a type unless forced", func(t *testing.T) {
-		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
 		h1 := register(t, "10.3.0.1:5000", "MD-A", "MD-B", "MD-C")
 		register(t, "10.3.0.2:5000", "MD-B")
 
 		// A draining host does not count as a server of the types it registered
 		h3 := register(t, "10.3.0.3:5000", "MD-C")
-		require.NoError(t, s.p.UpdateActorHost(t.Context(), h3, components.UpdateActorHostReq{Draining: true}))
+		err = s.p.UpdateActorHost(t.Context(), h3, components.UpdateActorHostReq{Draining: true})
+		require.NoError(t, err)
 
 		// Without force the host is left alone, and the types without another server are reported in order
 		req := components.MarkHostDrainingReq{HostID: h1}
@@ -615,7 +617,8 @@ func (s Suite) TestMarkHostDraining(t *testing.T) {
 	})
 
 	t.Run("marks a host whose types are served elsewhere", func(t *testing.T) {
-		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
 		h1 := register(t, "10.3.1.1:5000", "MD-A")
 		register(t, "10.3.1.2:5000", "MD-A")
 
@@ -626,12 +629,13 @@ func (s Suite) TestMarkHostDraining(t *testing.T) {
 	})
 
 	t.Run("clearing the flag puts the host back into service", func(t *testing.T) {
-		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
 		h1 := register(t, "10.3.4.1:5000", "MD-A")
 		h2 := register(t, "10.3.4.2:5000", "MD-A")
 
 		// Marking h1 leaves h2 as the only server, so h2 can't be drained without force
-		_, err := s.p.MarkHostDraining(t.Context(), components.MarkHostDrainingReq{HostID: h1})
+		_, err = s.p.MarkHostDraining(t.Context(), components.MarkHostDrainingReq{HostID: h1})
 		require.NoError(t, err)
 		require.True(t, draining(t, h1))
 		req := components.MarkHostDrainingReq{HostID: h2}
@@ -640,7 +644,8 @@ func (s Suite) TestMarkHostDraining(t *testing.T) {
 		require.True(t, res.Refused(req))
 
 		// Clearing h1 counts it as a server again
-		require.NoError(t, s.p.ClearHostDraining(t.Context(), h1))
+		err = s.p.ClearHostDraining(t.Context(), h1)
+		require.NoError(t, err)
 		assert.False(t, draining(t, h1))
 		res, err = s.p.MarkHostDraining(t.Context(), req)
 		require.NoError(t, err)
@@ -648,31 +653,37 @@ func (s Suite) TestMarkHostDraining(t *testing.T) {
 		assert.True(t, draining(t, h2))
 
 		// Clearing a host that is not draining changes nothing
-		require.NoError(t, s.p.ClearHostDraining(t.Context(), h1))
+		err = s.p.ClearHostDraining(t.Context(), h1)
+		require.NoError(t, err)
 		assert.False(t, draining(t, h1))
 
 		// A host that isn't registered is not found
-		require.ErrorIs(t, s.p.ClearHostDraining(t.Context(), SpecHostNonExistent), components.ErrHostUnregistered)
+		err = s.p.ClearHostDraining(t.Context(), SpecHostNonExistent)
+		require.ErrorIs(t, err, components.ErrHostUnregistered)
 	})
 
 	t.Run("a host with an expired registration is not found", func(t *testing.T) {
-		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
 		h1 := register(t, "10.3.2.1:5000", "MD-A")
-		require.NoError(t, s.p.AdvanceClock(s.p.HealthCheckPolicy().Deadline()+time.Second))
+		err = s.p.AdvanceClock(s.p.HealthCheckPolicy().Deadline() + time.Second)
+		require.NoError(t, err)
 
-		_, err := s.p.MarkHostDraining(t.Context(), components.MarkHostDrainingReq{HostID: h1})
+		_, err = s.p.MarkHostDraining(t.Context(), components.MarkHostDrainingReq{HostID: h1})
 		require.ErrorIs(t, err, components.ErrHostUnregistered)
 		_, err = s.p.MarkHostDraining(t.Context(), components.MarkHostDrainingReq{HostID: SpecHostNonExistent})
 		require.ErrorIs(t, err, components.ErrHostUnregistered)
-		require.ErrorIs(t, s.p.ClearHostDraining(t.Context(), h1), components.ErrHostUnregistered)
+		err = s.p.ClearHostDraining(t.Context(), h1)
+		require.ErrorIs(t, err, components.ErrHostUnregistered)
 	})
 
 	t.Run("nothing is marked while an exclusive-access lease is held", func(t *testing.T) {
-		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
 		h1 := register(t, "10.3.5.1:5000", "MD-A")
 		register(t, "10.3.5.2:5000", "MD-A")
 
-		_, err := s.p.AcquireExclusiveLease(t.Context(), "md-owner", time.Minute)
+		_, err = s.p.AcquireExclusiveLease(t.Context(), "md-owner", time.Minute)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = s.p.ReleaseExclusiveLease(context.WithoutCancel(t.Context()), "md-owner") })
 
@@ -684,14 +695,16 @@ func (s Suite) TestMarkHostDraining(t *testing.T) {
 		assert.False(t, draining(t, h1))
 
 		// Once the lease is released the host can be marked
-		require.NoError(t, s.p.ReleaseExclusiveLease(t.Context(), "md-owner"))
+		err = s.p.ReleaseExclusiveLease(t.Context(), "md-owner")
+		require.NoError(t, err)
 		_, err = s.p.MarkHostDraining(t.Context(), components.MarkHostDrainingReq{HostID: h1})
 		require.NoError(t, err)
 		assert.True(t, draining(t, h1))
 	})
 
 	t.Run("concurrent drains never leave a type without a server", func(t *testing.T) {
-		require.NoError(t, s.p.Seed(t.Context(), Spec{}))
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
 
 		// Two hosts are the only servers of a type, so at most one of them may be drained without force
 		hosts := []string{
@@ -716,7 +729,8 @@ func (s Suite) TestMarkHostDraining(t *testing.T) {
 		}
 		wg.Wait()
 
-		require.NoError(t, errors.Join(errs...))
+		err = errors.Join(errs...)
+		require.NoError(t, err)
 		assert.Equal(t, int32(1), refused.Load(), "exactly one of the two drains should be refused")
 		assert.NotEqual(t, draining(t, hosts[0]), draining(t, hosts[1]), "exactly one host should be draining")
 	})
@@ -1177,6 +1191,34 @@ func (s Suite) TestQueryJobs(t *testing.T) {
 		assert.False(t, hasMore)
 	})
 
+	t.Run("CountJobs counts the jobs QueryJobs lists, up to the limit", func(t *testing.T) {
+		// The terminal-job store holds the jobs of other tests too, so each count is compared with a listing of the whole cluster
+		for _, status := range []components.JobStatus{"", components.JobStatusPending, components.JobStatusActive, components.JobStatusCompleted, components.JobStatusDeadLettered} {
+			total := len(queryAll(t, components.QueryJobsReq{Status: status, Limit: components.MaxManagementListLimit}))
+			require.Positivef(t, total, "the test needs a job in status %q", status)
+
+			n, err := s.p.CountJobs(t.Context(), components.CountJobsReq{Status: status, Limit: total + 10})
+			require.NoError(t, err)
+			assert.Equalf(t, total, n, "count of the jobs in status %q", status)
+
+			// A limit at or below the total stops the count there, including when both halves of the union match
+			n, err = s.p.CountJobs(t.Context(), components.CountJobsReq{Status: status, Limit: total})
+			require.NoError(t, err)
+			assert.Equalf(t, total, n, "count of the jobs in status %q at a limit equal to the total", status)
+			n, err = s.p.CountJobs(t.Context(), components.CountJobsReq{Status: status, Limit: 1})
+			require.NoError(t, err)
+			assert.Equalf(t, 1, n, "count of the jobs in status %q at a limit of one", status)
+		}
+
+		// A limit that is not positive counts nothing, and no job is in an unknown status
+		n, err := s.p.CountJobs(t.Context(), components.CountJobsReq{Limit: 0})
+		require.NoError(t, err)
+		assert.Zero(t, n)
+		n, err = s.p.CountJobs(t.Context(), components.CountJobsReq{Status: "bogus", Limit: 10})
+		require.NoError(t, err)
+		assert.Zero(t, n)
+	})
+
 	t.Run("a live job whose lease expired is pending", func(t *testing.T) {
 		// Past the lease duration the active job's lease is no longer valid, even though the lease ID is still stored
 		err := s.p.AdvanceClock(2 * time.Minute)
@@ -1187,6 +1229,11 @@ func (s Suite) TestQueryJobs(t *testing.T) {
 
 		ids, _ = query(t, components.QueryJobsReq{ActorType: typeA, Status: components.JobStatusPending})
 		assert.Equal(t, sortedIDs(pendingA1, pendingA1b, activeA2), ids)
+
+		// CountJobs derives the status the same way
+		n, err := s.p.CountJobs(t.Context(), components.CountJobsReq{Status: components.JobStatusActive, Limit: 10})
+		require.NoError(t, err)
+		assert.Zero(t, n)
 	})
 }
 
@@ -1622,6 +1669,50 @@ func (s Suite) TestListStatesManagement(t *testing.T) {
 		}
 		assert.Equal(t, []string{"id-1", "id-2", "id-3", "id-4", "id-7", "id-8"}, seen)
 	})
+
+	t.Run("CountStates counts the rows ListStates lists, up to the limit", func(t *testing.T) {
+		// count counts the rows of the test's actor type
+		count := func(t *testing.T, labels *components.WorkflowLabels, limit int) int {
+			t.Helper()
+			n, err := s.p.CountStates(t.Context(), components.CountStatesReq{ActorType: actorType, WorkflowLabels: labels, Limit: limit})
+			require.NoError(t, err)
+			return n
+		}
+
+		assert.Equal(t, len(rows), count(t, nil, 100))
+		assert.Equal(t, 5, count(t, &components.WorkflowLabels{Status: "running"}, 100))
+		assert.Equal(t, 2, count(t, &components.WorkflowLabels{Status: "done"}, 100))
+		assert.Equal(t, 1, count(t, &components.WorkflowLabels{Status: "done", Version: 2}, 100))
+		assert.Zero(t, count(t, &components.WorkflowLabels{Status: "unknown"}, 100))
+
+		// The created label is not an equality filter, as in ListStates
+		assert.Equal(t, 5, count(t, &components.WorkflowLabels{Status: "running", Created: "not-a-time"}, 100))
+
+		// The count stops at the limit, and a limit that is not positive counts nothing
+		assert.Equal(t, 3, count(t, &components.WorkflowLabels{Status: "running"}, 3))
+		assert.Equal(t, 5, count(t, &components.WorkflowLabels{Status: "running"}, 5))
+		assert.Zero(t, count(t, &components.WorkflowLabels{Status: "running"}, 0))
+
+		// Other actor types are not counted
+		n, err := s.p.CountStates(t.Context(), components.CountStatesReq{ActorType: actorType + "-other", Limit: 100})
+		require.NoError(t, err)
+		assert.Zero(t, n)
+	})
+
+	t.Run("CountStates skips expired state before garbage collection", func(t *testing.T) {
+		const expiringType = "LSC-EXP"
+		err := s.p.SetState(t.Context(), ref.NewActorRef(expiringType, "short"), []byte("x"), components.SetStateOpts{TTL: time.Second, WorkflowLabels: &components.WorkflowLabels{Status: "running"}})
+		require.NoError(t, err)
+		err = s.p.SetState(t.Context(), ref.NewActorRef(expiringType, "long"), []byte("x"), components.SetStateOpts{TTL: time.Hour, WorkflowLabels: &components.WorkflowLabels{Status: "running"}})
+		require.NoError(t, err)
+
+		err = s.p.AdvanceClock(2 * time.Second)
+		require.NoError(t, err)
+
+		n, err := s.p.CountStates(t.Context(), components.CountStatesReq{ActorType: expiringType, WorkflowLabels: &components.WorkflowLabels{Status: "running"}, Limit: 100})
+		require.NoError(t, err)
+		assert.Equal(t, 1, n)
+	})
 }
 
 // TestWorkflowEvents covers SetStateOpts.AppendEvents and ListWorkflowEvents
@@ -1766,6 +1857,33 @@ func (s Suite) TestWorkflowEvents(t *testing.T) {
 		setState(t, "expiring", components.SetStateOpts{})
 		assert.Empty(t, listAll(t, actorType, "expiring"))
 		assert.Len(t, listAll(t, actorType, "lasting"), 2)
+	})
+
+	t.Run("a job's initial state that replaces an expired state removes its events", func(t *testing.T) {
+		// dispatch dispatches a job that stores an initial state for the actor
+		dispatch := func(t *testing.T, actorID string) {
+			t.Helper()
+			_, _, _, err := s.p.DispatchJob(t.Context(), ref.NewAlarmRef(actorType, actorID, "start"), components.SetAlarmReq{
+				AlarmProperties: ref.AlarmProperties{DueTime: s.p.Now().Add(time.Hour)},
+				Kind:            components.AlarmKindJob,
+				JobMethod:       "start",
+				InitialState:    &components.InitialState{Data: []byte("placeholder"), WorkflowLabels: &components.WorkflowLabels{Status: "pending"}},
+			})
+			require.NoError(t, err)
+		}
+
+		// The expired row is still stored when the initial state replaces it, and its events must not become the new state's history
+		setState(t, "reused", components.SetStateOpts{TTL: time.Second, AppendEvents: makeEvents(1, 3, "reused")})
+		err := s.p.AdvanceClock(2 * time.Second)
+		require.NoError(t, err)
+		dispatch(t, "reused")
+		assert.Empty(t, listAll(t, actorType, "reused"))
+
+		// An initial state that leaves live state in place leaves its events alone too
+		live := makeEvents(1, 2, "live")
+		setState(t, "live", components.SetStateOpts{TTL: time.Hour, AppendEvents: live})
+		dispatch(t, "live")
+		assertEvents(t, live, listAll(t, actorType, "live"))
 	})
 
 	t.Run("pages with the sequence cursor", func(t *testing.T) {

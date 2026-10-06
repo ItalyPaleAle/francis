@@ -333,6 +333,40 @@ func TestDrainHost(t *testing.T) {
 		assert.Equal(t, true, e.Details["hostDraining"])
 	})
 
+	t.Run("a host too busy to handle the drain is put back into service without asking it again", func(t *testing.T) {
+		ts := newTestServer(t)
+		ts.provider.EXPECT().GetHostDetails(mock.Anything, "h1").Return(testHost("h1", false, "B"), nil)
+		markDraining(ts, false, components.MarkHostDrainingRes{}, nil)
+
+		// The host refuses the request before handling it, as a host at its in-flight limit does
+		ts.backend.drainFn = func(components.HostDetails, protocol.HostDrainRequest) (protocol.HostDrainResponse, error) {
+			return protocol.HostDrainResponse{}, FromProtocolError(protocol.NewError(protocol.ErrCodeRetryLater, "host has too many in-flight runtime requests"))
+		}
+		ts.backend.snapshotFn = func(components.HostDetails, protocol.HostSnapshotRequest) (protocol.HostSnapshotResponse, error) {
+			t.Error("the host should not be asked for a snapshot")
+			return protocol.HostSnapshotResponse{}, ErrHostUnavailable
+		}
+		ts.provider.EXPECT().ClearHostDraining(mock.Anything, "h1").Return(nil).Once()
+
+		e := decodeError(t, ts.do(t, http.MethodPost, "/api/v1/hosts/h1/drain", testManagementToken, ""), http.StatusServiceUnavailable, CodeHostUnavailable)
+		assert.True(t, e.Retryable)
+		assert.Equal(t, false, e.Details["hostDraining"])
+	})
+
+	t.Run("a failed drain leaves the mark of another drain in place", func(t *testing.T) {
+		ts := newTestServer(t)
+		ts.provider.EXPECT().GetHostDetails(mock.Anything, "h1").Return(testHost("h1", true, "B"), nil)
+
+		// Another request marked the host, and its drain hasn't reached the host yet, so the host says it is not draining
+		markDraining(ts, false, components.MarkHostDrainingRes{AlreadyDraining: true}, nil)
+		failDrain(ts)
+
+		// The mock provider has no ClearHostDraining expectation, so clearing the mark fails the test
+		e := decodeError(t, ts.do(t, http.MethodPost, "/api/v1/hosts/h1/drain", testManagementToken, ""), http.StatusServiceUnavailable, CodeHostUnavailable)
+		assert.True(t, e.Retryable)
+		assert.Equal(t, true, e.Details["hostDraining"])
+	})
+
 	invalid := map[string]string{
 		"invalid timeout":         `{"timeout":"soon"}`,
 		"negative timeout":        `{"timeout":"-1s"}`,

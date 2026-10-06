@@ -10,6 +10,13 @@ ALTER TABLE %shost_actor_types ADD COLUMN actor_dead_lettered_job_retention inte
 CREATE INDEX %pactor_state_wf_created_idx ON %sactor_state (actor_type, (workflow_labels->>'created'), actor_id)
     WHERE workflow_labels IS NOT NULL;
 
+-- Index on the job rows of the alarms table in job ID order, so jobs can be listed and counted without reading the plain alarms
+CREATE INDEX %palarms_job_id_idx ON %salarms (alarm_id)
+    WHERE alarm_kind = 'job';
+
+-- Index on the status of terminal jobs in job ID order, so they can be listed and counted by status
+CREATE INDEX %pterminal_jobs_status_idx ON %sterminal_jobs (job_status, job_id);
+
 -- Append-only event history of workflow instances, written together with the state row it belongs to
 CREATE TABLE %sworkflow_events (
     -- Actor type of the state row the event belongs to

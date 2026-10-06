@@ -276,8 +276,8 @@ func (h *Host) Service() *actor.Service {
 	return h.service
 }
 
-// Run the host service.
-// Note this function is blocking, and will return only when the service is shut down via context cancellation, or after an administrative drain.
+// Run the host service
+// Note this function is blocking, and will return only when the service is shut down via context cancellation, or after an administrative drain
 func (h *Host) Run(parentCtx context.Context) error {
 	if !h.running.CompareAndSwap(false, true) {
 		return errors.New("service is already running")

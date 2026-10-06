@@ -136,6 +136,40 @@ func (p *PostgresProvider) appendWorkflowEvents(ctx context.Context, tx pgx.Tx, 
 	return nil
 }
 
+// workflowLabelFilter returns the clauses that restrict a state listing to the given workflow labels and created range, appending their values to args
+// Each label field is matched as the same ->> expression its index was built on, which is required to use the index
+func workflowLabelFilter(labels *components.WorkflowLabels, createdFrom time.Time, createdTo time.Time, args []any) (string, []any) {
+	var labelFields map[string]string
+	if labels != nil {
+		labelFields = labels.Fields()
+	}
+
+	var b strings.Builder
+	for field, v := range labelFields {
+		b.Grow(32 + len(field))
+		// #nosec G202 -- the only concatenated values are one of the closed set of label field names and a placeholder number
+		b.WriteString(` AND workflow_labels->>'`)
+		b.WriteString(field)
+		b.WriteString(`' = $`)
+		b.WriteString(strconv.Itoa(len(args) + 1))
+		args = append(args, v)
+	}
+
+	// The created label is a fixed-width UTC string, so a string range on the same expression the index is built on is a time range
+	if !createdFrom.IsZero() {
+		b.WriteString(` AND workflow_labels->>'` + components.WorkflowLabelCreated + `' >= $`)
+		b.WriteString(strconv.Itoa(len(args) + 1))
+		args = append(args, components.FormatWorkflowCreated(createdFrom))
+	}
+	if !createdTo.IsZero() {
+		b.WriteString(` AND workflow_labels->>'` + components.WorkflowLabelCreated + `' < $`)
+		b.WriteString(strconv.Itoa(len(args) + 1))
+		args = append(args, components.FormatWorkflowCreated(createdTo))
+	}
+
+	return b.String(), args
+}
+
 func (p *PostgresProvider) ListStates(ctx context.Context, req components.ListStatesReq) (components.ListStatesRes, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
@@ -150,39 +184,8 @@ func (p *PostgresProvider) ListStates(ctx context.Context, req components.ListSt
 	// This avoids a second query just to compute HasMore
 	limit := req.EffectiveLimit()
 
-	// To use the index, each requested label field is matched as the same ->> expression its index was built on
-	var labelFields map[string]string
-	if req.WorkflowLabels != nil {
-		labelFields = req.WorkflowLabels.Fields()
-	}
-
-	// The size is known up front
-	args := make([]any, 0, 5+len(labelFields))
-	args = append(args, req.ActorType, req.After)
-
-	var labelClauses strings.Builder
-	for field, v := range labelFields {
-		labelClauses.Grow(32 + len(field))
-		// #nosec G202 -- the only concatenated values are one of the closed set of label field names and a placeholder number
-		labelClauses.WriteString(` AND workflow_labels->>'`)
-		labelClauses.WriteString(field)
-		labelClauses.WriteString(`' = $`)
-		labelClauses.WriteString(strconv.Itoa(len(args) + 1))
-		args = append(args, v)
-	}
-
-	// The created label is a fixed-width UTC string, so a string range on the same expression the index is built on is a time range
-	if !req.CreatedFrom.IsZero() {
-		labelClauses.WriteString(` AND workflow_labels->>'` + components.WorkflowLabelCreated + `' >= $`)
-		labelClauses.WriteString(strconv.Itoa(len(args) + 1))
-		args = append(args, components.FormatWorkflowCreated(req.CreatedFrom))
-	}
-	if !req.CreatedTo.IsZero() {
-		labelClauses.WriteString(` AND workflow_labels->>'` + components.WorkflowLabelCreated + `' < $`)
-		labelClauses.WriteString(strconv.Itoa(len(args) + 1))
-		args = append(args, components.FormatWorkflowCreated(req.CreatedTo))
-	}
-
+	// Filter on the workflow labels after the actor type and cursor
+	labelClauses, args := workflowLabelFilter(req.WorkflowLabels, req.CreatedFrom, req.CreatedTo, []any{req.ActorType, req.After})
 	limitArg := strconv.Itoa(len(args) + 1)
 	args = append(args, limit+1)
 
@@ -196,7 +199,7 @@ func (p *PostgresProvider) ListStates(ctx context.Context, req components.ListSt
 			actor_type = $1
 			AND actor_id > $2
 			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > (now() AT TIME ZONE 'utc'))`+
-			labelClauses.String()+`
+			labelClauses+`
 		ORDER BY actor_id
 		LIMIT $`+limitArg,
 		args...,
@@ -245,6 +248,40 @@ func (p *PostgresProvider) ListStates(ctx context.Context, req components.ListSt
 	}
 
 	return res, nil
+}
+
+// CountStates counts the live stored states of an actor type whose workflow labels match the request, stopping at the limit
+func (p *PostgresProvider) CountStates(ctx context.Context, req components.CountStatesReq) (int, error) {
+	if req.Limit <= 0 {
+		return 0, nil
+	}
+
+	// The inner query stops at the limit, so the count reads at most that many index entries
+	labelClauses, args := workflowLabelFilter(req.WorkflowLabels, time.Time{}, time.Time{}, []any{req.ActorType})
+	limitArg := strconv.Itoa(len(args) + 1)
+	args = append(args, req.Limit)
+
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+	var count int
+	// #nosec G202 -- the only concatenated values are the static table prefix, fixed label field names, and placeholder numbers, not user input
+	err := p.db.QueryRow(queryCtx,
+		`SELECT count(*) FROM (
+			SELECT 1
+			FROM `+p.tablePrefix+`actor_state
+			WHERE
+				actor_type = $1
+				AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > (now() AT TIME ZONE 'utc'))`+
+			labelClauses+`
+			LIMIT $`+limitArg+`
+		) AS s`,
+		args...,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("error counting actor states: %w", err)
+	}
+
+	return count, nil
 }
 
 func (p *PostgresProvider) DeleteState(ctx context.Context, ref ref.ActorRef) error {

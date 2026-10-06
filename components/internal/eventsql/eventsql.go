@@ -29,7 +29,8 @@ type PostgresExecer interface {
 func InsertSQLite(ctx context.Context, db SQLiteExecer, timeout time.Duration, table string, actorType string, actorID string, events []components.WorkflowEvent) (err error) {
 	// Limit rows per each statement
 	// Each row binds 6 parameters and SQLite refuses a statement with more than 32766 of them, so a single statement for a wide fan-out would fail
-	const sqliteRowsPerStatement = 1000
+	// The batch is kept much smaller than that limit because the driver matches every parameter to its argument with a linear scan, so binding a statement costs time quadratic in its number of parameters
+	const sqliteRowsPerStatement = 100
 
 	for len(events) > 0 {
 		batch := events[:min(len(events), sqliteRowsPerStatement)]

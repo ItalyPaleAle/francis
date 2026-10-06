@@ -1,7 +1,9 @@
 package management
 
 import (
+	"context"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strconv"
 	"testing"
@@ -141,6 +143,37 @@ func TestGetActorState(t *testing.T) {
 	t.Run("invalid path", func(t *testing.T) {
 		ts := newTestServer(t)
 		decodeError(t, ts.do(t, http.MethodGet, "/api/v1/actor-states/counter/a%2Fb", testReadOnlyToken, ""), http.StatusBadRequest, CodeBadRequest)
+	})
+
+	t.Run("a workflow's actor types also require the data scope", func(t *testing.T) {
+		orchestrator := workflow.OrchestratorActorType("orders")
+		ts := newTestServer(t)
+
+		// Read-only tokens hold workflows:data:read too, so they read the state
+		ts.provider.EXPECT().GetState(mock.Anything, ref.NewActorRef(orchestrator, "i1")).Return(state, nil).Once()
+		decodeJSON(t, ts.do(t, http.MethodGet, "/api/v1/actor-states/"+orchestrator+"/i1", testReadOnlyToken, ""), http.StatusOK)
+
+		// getState calls the handler as a caller that holds actors:state:read but not workflows:data:read, which no configured token is
+		getState := func(actorType string, actorID string) (*httptest.ResponseRecorder, *apiError) {
+			r := httptest.NewRequest(http.MethodGet, "/api/v1/actor-states/"+actorType+"/"+actorID, nil)
+			r.SetPathValue("type", actorType)
+			r.SetPathValue("id", actorID)
+			r = r.WithContext(context.WithValue(r.Context(), callerCtxKey{}, &Caller{scopes: map[Scope]struct{}{ScopeActorsStateRead: {}}}))
+			w := httptest.NewRecorder()
+			return w, ts.srv.handleGetActorState(w, r)
+		}
+
+		// The state of a workflow's actor is refused before it is read
+		_, apiErr := getState(orchestrator, "i1")
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusForbidden, apiErr.status)
+		assert.Equal(t, CodeForbidden, apiErr.Code)
+
+		// The state of other actors is still readable
+		ts.provider.EXPECT().GetState(mock.Anything, aRef).Return(state, nil).Once()
+		w, apiErr := getState("counter", "c1")
+		require.Nil(t, apiErr)
+		assert.Equal(t, http.StatusOK, w.Code)
 	})
 }
 

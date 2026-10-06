@@ -33,13 +33,10 @@ func WithManagementAPI(opts ManagementOptions) HostOption {
 	return func(o *newHostOptions) { o.Management = &opts }
 }
 
-// defaultManagementBind is the listen address of a local host's management API when the options do not set one
-const defaultManagementBind = "127.0.0.1:7401"
-
 // newManagementServer returns the management API server for the host
 func (h *Host) newManagementServer(opts ManagementOptions, log *slog.Logger) (*management.Server, error) {
 	cfg := management.Config{
-		Bind:             cmp.Or(opts.Bind, defaultManagementBind),
+		Bind:             cmp.Or(opts.Bind, management.DefaultBind),
 		ReadOnlyTokens:   opts.ReadOnlyTokens,
 		ManagementTokens: opts.ManagementTokens,
 		TLSConfig:        opts.TLSConfig,

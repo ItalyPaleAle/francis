@@ -48,6 +48,14 @@ type ManagementProvider interface {
 	// Live and terminal job IDs never overlap, so the job ID alone is a stable pagination cursor
 	QueryJobs(ctx context.Context, req QueryJobsReq) (QueryJobsRes, error)
 
+	// CountJobs counts the jobs across the whole cluster that QueryJobs lists with the same status filter, stopping at the request's limit
+	// It returns the limit when at least that many jobs match, so counting a large collection does a bounded amount of work
+	CountJobs(ctx context.Context, req CountJobsReq) (int, error)
+
+	// CountStates counts the live stored states of an actor type that ListStates lists with the same workflow label filter, stopping at the request's limit
+	// It returns the limit when at least that many states match, so counting a large collection does a bounded amount of work
+	CountStates(ctx context.Context, req CountStatesReq) (int, error)
+
 	// ListAlarms returns a page of plain alarms (excluding jobs), ordered by actor type, actor ID and alarm name
 	ListAlarms(ctx context.Context, req ListAlarmsReq) (ListAlarmsRes, error)
 
@@ -219,12 +227,52 @@ type QueryJobsReq struct {
 	Limit int
 }
 
+// IncludeLive reports whether the status filter can match live jobs, which are pending or active
+func (r QueryJobsReq) IncludeLive() bool {
+	return r.Status == "" || r.Status == JobStatusPending || r.Status == JobStatusActive
+}
+
+// IncludeTerminal reports whether the status filter can match terminal jobs, which are completed or dead-lettered
+func (r QueryJobsReq) IncludeTerminal() bool {
+	return r.Status == "" || r.Status.IsTerminal()
+}
+
 // QueryJobsRes is the response object for the QueryJobs method
 type QueryJobsRes struct {
 	// Jobs in this page, ordered by job ID
 	Jobs []JobInfo
 	// HasMore is true when more jobs follow the last one in this page
 	HasMore bool
+}
+
+// CountJobsReq is the request object for the CountJobs method
+type CountJobsReq struct {
+	// Status, when set, restricts the count to jobs in this status
+	Status JobStatus
+	// Limit is the count at which counting stops
+	// A limit that is not positive counts nothing
+	Limit int
+}
+
+// IncludeLive reports whether the status filter can match live jobs, which are pending or active
+func (r CountJobsReq) IncludeLive() bool {
+	return r.Status == "" || r.Status == JobStatusPending || r.Status == JobStatusActive
+}
+
+// IncludeTerminal reports whether the status filter can match terminal jobs, which are completed or dead-lettered
+func (r CountJobsReq) IncludeTerminal() bool {
+	return r.Status == "" || r.Status.IsTerminal()
+}
+
+// CountStatesReq is the request object for the CountStates method
+type CountStatesReq struct {
+	// Actor type whose stored states are counted
+	ActorType string
+	// WorkflowLabels, when set, restricts the count to rows whose labels match every field it sets, as in ListStatesReq
+	WorkflowLabels *WorkflowLabels
+	// Limit is the count at which counting stops
+	// A limit that is not positive counts nothing
+	Limit int
 }
 
 // ListAlarmsReq is the request object for the ListAlarms method

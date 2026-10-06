@@ -63,7 +63,7 @@ type bootstrapConfig struct {
 type managementConfig struct {
 	// Enabled starts the management listener, which is off by default
 	Enabled bool `yaml:"enabled"`
-	// Bind is the TCP address of the management listener, which defaults to 0.0.0.0:7401
+	// Bind is the TCP address of the management listener, which defaults to 127.0.0.1:7401
 	Bind string `yaml:"bind"`
 	// ReadOnlyTokens receive every scope except those ending in ":manage"
 	ReadOnlyTokens []string `yaml:"readOnlyTokens"`

@@ -1,7 +1,6 @@
 package management
 
 import (
-	"context"
 	"fmt"
 	"maps"
 	"net/http"
@@ -318,7 +317,8 @@ func TestControlInstance(t *testing.T) {
 
 			if tc.reason != "" {
 				var payload map[string]any
-				require.NoError(t, msgpack.Unmarshal(d.Req.Data, &payload))
+				err := msgpack.Unmarshal(d.Req.Data, &payload)
+				require.NoError(t, err)
 				assert.Equal(t, tc.reason, payload["reason"])
 			}
 
@@ -413,9 +413,7 @@ func TestInstanceStatuses(t *testing.T) {
 	t.Run("the summary counts every declared status", func(t *testing.T) {
 		// Every status has one instance, so each status the summary queries appears in its counts
 		prov := components_mocks.NewMockActorProvider(t)
-		prov.EXPECT().ListStates(mock.Anything, mock.Anything).RunAndReturn(func(context.Context, components.ListStatesReq) (components.ListStatesRes, error) {
-			return components.ListStatesRes{States: []components.ActorStateInfo{{ActorID: "i1"}}}, nil
-		})
+		prov.EXPECT().CountStates(mock.Anything, mock.Anything).Return(1, nil)
 
 		counts, err := countWorkflowInstances(t.Context(), prov, workflow.OrchestratorActorType("wf"))
 		require.NoError(t, err)

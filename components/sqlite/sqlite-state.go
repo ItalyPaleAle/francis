@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	sqltransactions "github.com/italypaleale/go-sql-utils/transactions/sql"
 
@@ -132,6 +133,46 @@ func (s *SQLiteProvider) appendWorkflowEvents(ctx context.Context, tx *sql.Tx, r
 	return nil
 }
 
+// workflowLabelFilter returns the clauses that restrict a state listing to the given workflow labels and created range, appending their values to args
+// Each label field is matched as the same json_extract expression its index was built on, which is required to use the index
+func workflowLabelFilter(labels *components.WorkflowLabels, createdFrom time.Time, createdTo time.Time, args []any) (string, []any) {
+	var wfLabelFields map[string]string
+	if labels != nil {
+		wfLabelFields = labels.Fields()
+	}
+
+	var b strings.Builder
+	if len(wfLabelFields) > 0 || !createdFrom.IsZero() || !createdTo.IsZero() {
+		// json_extract needs well-formed JSON, so a row with no labels at all is excluded before it is reached
+		b.WriteString(` AND workflow_labels IS NOT NULL `)
+	}
+	for field, v := range wfLabelFields {
+		// #nosec G202 -- the only concatenated value is one of the closed set of label field names, not user input
+		fieldLabel := workflowLabelExtract(field)
+		b.Grow(10 + len(fieldLabel))
+		b.WriteString(` AND `)
+		b.WriteString(fieldLabel)
+		b.WriteString(` = ?`)
+		args = append(args, v)
+	}
+
+	// The created label is compared as a string, which matches chronological order because every value has the same width and is in UTC
+	if !createdFrom.IsZero() {
+		b.WriteString(` AND `)
+		b.WriteString(workflowLabelExtract(components.WorkflowLabelCreated))
+		b.WriteString(` >= ?`)
+		args = append(args, components.FormatWorkflowCreated(createdFrom))
+	}
+	if !createdTo.IsZero() {
+		b.WriteString(` AND `)
+		b.WriteString(workflowLabelExtract(components.WorkflowLabelCreated))
+		b.WriteString(` < ?`)
+		args = append(args, components.FormatWorkflowCreated(createdTo))
+	}
+
+	return b.String(), args
+}
+
 func (s *SQLiteProvider) ListStates(ctx context.Context, req components.ListStatesReq) (components.ListStatesRes, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
@@ -146,43 +187,8 @@ func (s *SQLiteProvider) ListStates(ctx context.Context, req components.ListStat
 	// This avoids a second query just to compute HasMore
 	limit := req.EffectiveLimit()
 
-	// Each requested label field is matched as the same json_extract expression its index was built on, which is required to use the index
-	var wfLabelFields map[string]string
-	if req.WorkflowLabels != nil {
-		wfLabelFields = req.WorkflowLabels.Fields()
-	}
-
-	args := make([]any, 0, 6+len(wfLabelFields))
-	args = append(args, req.ActorType, req.After, s.clock.Now().UnixMilli())
-
-	var labelClauses strings.Builder
-	if len(wfLabelFields) > 0 || !req.CreatedFrom.IsZero() || !req.CreatedTo.IsZero() {
-		// json_extract needs well-formed JSON, so a row with no labels at all is excluded before it is reached
-		labelClauses.WriteString(` AND workflow_labels IS NOT NULL `)
-	}
-	for field, v := range wfLabelFields {
-		// #nosec G202 -- the only concatenated value is one of the closed set of label field names, not user input
-		fieldLabel := workflowLabelExtract(field)
-		labelClauses.Grow(10 + len(fieldLabel))
-		labelClauses.WriteString(` AND `)
-		labelClauses.WriteString(fieldLabel)
-		labelClauses.WriteString(` = ?`)
-		args = append(args, v)
-	}
-
-	// The created label is compared as a string, which matches chronological order because every value has the same width and is in UTC
-	if !req.CreatedFrom.IsZero() {
-		labelClauses.WriteString(` AND `)
-		labelClauses.WriteString(workflowLabelExtract(components.WorkflowLabelCreated))
-		labelClauses.WriteString(` >= ?`)
-		args = append(args, components.FormatWorkflowCreated(req.CreatedFrom))
-	}
-	if !req.CreatedTo.IsZero() {
-		labelClauses.WriteString(` AND `)
-		labelClauses.WriteString(workflowLabelExtract(components.WorkflowLabelCreated))
-		labelClauses.WriteString(` < ?`)
-		args = append(args, components.FormatWorkflowCreated(req.CreatedTo))
-	}
+	// Filter on the workflow labels after the actor type, cursor, and expiration
+	labelClauses, args := workflowLabelFilter(req.WorkflowLabels, req.CreatedFrom, req.CreatedTo, []any{req.ActorType, req.After, s.clock.Now().UnixMilli()})
 	args = append(args, limit+1)
 
 	// The (actor_type, actor_id) primary key serves both the range scan and the ordering
@@ -195,7 +201,7 @@ func (s *SQLiteProvider) ListStates(ctx context.Context, req components.ListStat
 			actor_type = ?
 			AND actor_id > ?
 			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > ?)`+
-			labelClauses.String()+`
+			labelClauses+`
 		ORDER BY actor_id
 		LIMIT ?`,
 		args...,
@@ -244,6 +250,39 @@ func (s *SQLiteProvider) ListStates(ctx context.Context, req components.ListStat
 	}
 
 	return res, nil
+}
+
+// CountStates counts the live stored states of an actor type whose workflow labels match the request, stopping at the limit
+func (s *SQLiteProvider) CountStates(ctx context.Context, req components.CountStatesReq) (int, error) {
+	if req.Limit <= 0 {
+		return 0, nil
+	}
+
+	// The inner query stops at the limit, so the count reads at most that many index entries
+	labelClauses, args := workflowLabelFilter(req.WorkflowLabels, time.Time{}, time.Time{}, []any{req.ActorType, s.clock.Now().UnixMilli()})
+	args = append(args, req.Limit)
+
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	var count int
+	// #nosec G202 -- the only concatenated values are the static table prefix and fixed label field names, not user input
+	err := s.db.QueryRowContext(queryCtx,
+		`SELECT count(*) FROM (
+			SELECT 1
+			FROM `+s.tablePrefix+`actor_state
+			WHERE
+				actor_type = ?
+				AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > ?)`+
+			labelClauses+`
+			LIMIT ?
+		)`,
+		args...,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("error counting actor states: %w", err)
+	}
+
+	return count, nil
 }
 
 func (s *SQLiteProvider) DeleteState(ctx context.Context, ref ref.ActorRef) error {

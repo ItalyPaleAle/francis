@@ -97,6 +97,138 @@ func (_c *MockManagementProvider_ClearHostDraining_Call) RunAndReturn(run func(c
 	return _c
 }
 
+// CountJobs provides a mock function for the type MockManagementProvider
+func (_mock *MockManagementProvider) CountJobs(ctx context.Context, req components.CountJobsReq) (int, error) {
+	ret := _mock.Called(ctx, req)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CountJobs")
+	}
+
+	var r0 int
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, components.CountJobsReq) (int, error)); ok {
+		return returnFunc(ctx, req)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, components.CountJobsReq) int); ok {
+		r0 = returnFunc(ctx, req)
+	} else {
+		r0 = ret.Get(0).(int)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, components.CountJobsReq) error); ok {
+		r1 = returnFunc(ctx, req)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManagementProvider_CountJobs_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CountJobs'
+type MockManagementProvider_CountJobs_Call struct {
+	*mock.Call
+}
+
+// CountJobs is a helper method to define mock.On call
+//   - ctx context.Context
+//   - req components.CountJobsReq
+func (_e *MockManagementProvider_Expecter) CountJobs(ctx any, req any) *MockManagementProvider_CountJobs_Call {
+	return &MockManagementProvider_CountJobs_Call{Call: _e.mock.On("CountJobs", ctx, req)}
+}
+
+func (_c *MockManagementProvider_CountJobs_Call) Run(run func(ctx context.Context, req components.CountJobsReq)) *MockManagementProvider_CountJobs_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 components.CountJobsReq
+		if args[1] != nil {
+			arg1 = args[1].(components.CountJobsReq)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManagementProvider_CountJobs_Call) Return(n int, err error) *MockManagementProvider_CountJobs_Call {
+	_c.Call.Return(n, err)
+	return _c
+}
+
+func (_c *MockManagementProvider_CountJobs_Call) RunAndReturn(run func(ctx context.Context, req components.CountJobsReq) (int, error)) *MockManagementProvider_CountJobs_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// CountStates provides a mock function for the type MockManagementProvider
+func (_mock *MockManagementProvider) CountStates(ctx context.Context, req components.CountStatesReq) (int, error) {
+	ret := _mock.Called(ctx, req)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CountStates")
+	}
+
+	var r0 int
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, components.CountStatesReq) (int, error)); ok {
+		return returnFunc(ctx, req)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, components.CountStatesReq) int); ok {
+		r0 = returnFunc(ctx, req)
+	} else {
+		r0 = ret.Get(0).(int)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, components.CountStatesReq) error); ok {
+		r1 = returnFunc(ctx, req)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockManagementProvider_CountStates_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CountStates'
+type MockManagementProvider_CountStates_Call struct {
+	*mock.Call
+}
+
+// CountStates is a helper method to define mock.On call
+//   - ctx context.Context
+//   - req components.CountStatesReq
+func (_e *MockManagementProvider_Expecter) CountStates(ctx any, req any) *MockManagementProvider_CountStates_Call {
+	return &MockManagementProvider_CountStates_Call{Call: _e.mock.On("CountStates", ctx, req)}
+}
+
+func (_c *MockManagementProvider_CountStates_Call) Run(run func(ctx context.Context, req components.CountStatesReq)) *MockManagementProvider_CountStates_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 components.CountStatesReq
+		if args[1] != nil {
+			arg1 = args[1].(components.CountStatesReq)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *MockManagementProvider_CountStates_Call) Return(n int, err error) *MockManagementProvider_CountStates_Call {
+	_c.Call.Return(n, err)
+	return _c
+}
+
+func (_c *MockManagementProvider_CountStates_Call) RunAndReturn(run func(ctx context.Context, req components.CountStatesReq) (int, error)) *MockManagementProvider_CountStates_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetExclusiveLease provides a mock function for the type MockManagementProvider
 func (_mock *MockManagementProvider) GetExclusiveLease(ctx context.Context) (components.ExclusiveLeaseInfo, error) {
 	ret := _mock.Called(ctx)

@@ -269,3 +269,45 @@ func TestBackendErrorMapping(t *testing.T) {
 		decodeError(t, w, http.StatusNotFound, CodeNotApplicable)
 	})
 }
+
+func TestFromProtocolError(t *testing.T) {
+	tests := []struct {
+		code      protocol.ErrorCode
+		status    int
+		apiCode   string
+		retryable bool
+	}{
+		{code: protocol.ErrCodeHostReattached, status: http.StatusConflict, apiCode: CodeHostReattached, retryable: true},
+		{code: protocol.ErrCodeHostUnavailable, status: http.StatusServiceUnavailable, apiCode: CodeHostUnavailable, retryable: true},
+		{code: protocol.ErrCodeHostMismatch, status: http.StatusServiceUnavailable, apiCode: CodeHostUnavailable, retryable: true},
+		{code: protocol.ErrCodeTransportFailure, status: http.StatusServiceUnavailable, apiCode: CodeHostUnavailable, retryable: true},
+		{code: protocol.ErrCodeHostDraining, status: http.StatusServiceUnavailable, apiCode: CodeHostUnavailable, retryable: true},
+		{code: protocol.ErrCodeRetryLater, status: http.StatusServiceUnavailable, apiCode: CodeHostUnavailable, retryable: true},
+		{code: protocol.ErrCodeOverloaded, status: http.StatusServiceUnavailable, apiCode: CodeHostUnavailable, retryable: true},
+		{code: protocol.ErrCodeDeadlineExceeded, status: http.StatusGatewayTimeout, apiCode: CodeTimeout, retryable: true},
+		{code: protocol.ErrCodeInternal, status: http.StatusInternalServerError, apiCode: CodeInternal},
+	}
+	for _, tc := range tests {
+		t.Run(string(tc.code), func(t *testing.T) {
+			// The host's error reaches the handler through a backend, which maps it with FromProtocolError
+			ts := newTestServer(t)
+			ts.provider.EXPECT().GetHostDetails(mock.Anything, "h1").Return(testHost("h1", false, "A"), nil)
+			ts.backend.snapshotFn = func(components.HostDetails, protocol.HostSnapshotRequest) (protocol.HostSnapshotResponse, error) {
+				return protocol.HostSnapshotResponse{}, FromProtocolError(protocol.NewError(tc.code, "the host failed"))
+			}
+
+			w := ts.do(t, http.MethodGet, "/api/v1/hosts/h1/activations", testReadOnlyToken, "")
+			e := decodeError(t, w, tc.status, tc.apiCode)
+			assert.Equal(t, tc.retryable, e.Retryable)
+		})
+	}
+
+	// A busy host is distinct from an unreachable one, so a backend doesn't look for the host elsewhere
+	err := FromProtocolError(protocol.NewError(protocol.ErrCodeOverloaded, "busy"))
+	require.ErrorIs(t, err, ErrHostBusy)
+	require.NotErrorIs(t, err, ErrHostUnavailable)
+
+	// An error that isn't a protocol error is returned as-is
+	other := errors.New("other")
+	assert.Same(t, other, FromProtocolError(other))
+}

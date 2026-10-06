@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"uuid"
@@ -951,5 +952,76 @@ func TestPostgresManagement(t *testing.T) {
 		assert.Equal(t, "runtime-1", runtimeID)
 		assert.Equal(t, -1*time.Second, completedRet)
 		assert.Equal(t, 36*time.Hour, deadRet)
+	})
+
+	t.Run("a drain and a reattach of the same host queued on the cluster row don't deadlock", func(t *testing.T) {
+		res, err := p.RegisterHost(t.Context(), components.RegisterHostReq{
+			Address:    "10.2.0.1:8080",
+			ActorTypes: []components.ActorHostType{{ActorType: "DeadlockActor", IdleTimeout: time.Minute}},
+		})
+		require.NoError(t, err)
+		hostID := res.HostID
+
+		// Hold the cluster_config row from a side transaction, so both operations queue behind it
+		side, err := p.db.Begin(t.Context())
+		require.NoError(t, err)
+		defer func() {
+			_ = side.Rollback(context.WithoutCancel(t.Context()))
+		}()
+		var sidePID int
+		err = side.QueryRow(t.Context(), `SELECT pg_backend_pid()`).Scan(&sidePID)
+		require.NoError(t, err)
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		_, err = side.Exec(t.Context(), `SELECT 1 FROM `+p.tablePrefix+`cluster_config WHERE cluster_config_id = 1 FOR UPDATE`)
+		require.NoError(t, err)
+
+		// waitForWaiters waits until n backends are blocked by the side transaction, directly or behind another blocked backend
+		waitForWaiters := func(n int) {
+			t.Helper()
+			assert.EventuallyWithT(t, func(c *assert.CollectT) {
+				var waiters int
+				qErr := p.db.QueryRow(t.Context(),
+					`SELECT count(*) FROM pg_stat_activity AS a
+					WHERE
+						$1 = ANY(pg_blocking_pids(a.pid))
+						OR EXISTS (
+							SELECT 1 FROM pg_stat_activity AS b
+							WHERE b.pid = ANY(pg_blocking_pids(a.pid)) AND $1 = ANY(pg_blocking_pids(b.pid))
+						)`,
+					sidePID,
+				).Scan(&waiters)
+				if !assert.NoError(c, qErr) {
+					return
+				}
+				assert.Equal(c, n, waiters)
+			}, 10*time.Second, 10*time.Millisecond)
+		}
+
+		// Start the reattach first, so it is the first in line for the cluster row once the side transaction ends
+		var (
+			wg                    sync.WaitGroup
+			reattachErr, drainErr error
+		)
+		wg.Go(func() {
+			_, reattachErr = p.RegisterHost(t.Context(), components.RegisterHostReq{
+				ExistingHostID: hostID,
+				Address:        "10.2.0.1:8080",
+				ActorTypes:     []components.ActorHostType{{ActorType: "DeadlockActor", IdleTimeout: time.Minute}},
+			})
+		})
+		waitForWaiters(1)
+
+		// Then the drain, which with locks taken in opposite orders would hold the host row while it waits for the cluster row
+		wg.Go(func() {
+			_, drainErr = p.MarkHostDraining(t.Context(), components.MarkHostDrainingReq{HostID: hostID, Force: true})
+		})
+		waitForWaiters(2)
+
+		// Release the cluster row: both operations must complete rather than one of them being aborted as a deadlock victim
+		err = side.Commit(t.Context())
+		require.NoError(t, err)
+		wg.Wait()
+		require.NoError(t, reattachErr)
+		require.NoError(t, drainErr)
 	})
 }

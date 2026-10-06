@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,6 +38,8 @@ var (
 	ErrHostUnavailable = errors.New("host is unavailable")
 	// ErrHostReattached is returned when the host's session changed before it received the request
 	ErrHostReattached = errors.New("host session changed before the request was delivered")
+	// ErrHostBusy is returned when the host, or the runtime owning its session, refused the request because it was busy, before handling it
+	ErrHostBusy = errors.New("host is busy")
 )
 
 // apiError is the body of an error response
@@ -100,6 +103,8 @@ func backendError(err error) *apiError {
 		return newAPIError(http.StatusConflict, CodeHostReattached, "the host kept reconnecting before it received the request; send it again").retryable()
 	case errors.Is(err, ErrHostUnavailable):
 		return newAPIErrorf(http.StatusServiceUnavailable, CodeHostUnavailable, "the host could not be reached: %v", err).retryable()
+	case errors.Is(err, ErrHostBusy):
+		return newAPIErrorf(http.StatusServiceUnavailable, CodeHostUnavailable, "the host is too busy to handle the request: %v", err).retryable()
 	default:
 		return nil
 	}
@@ -121,7 +126,7 @@ func writeError(w http.ResponseWriter, r *http.Request, e *apiError) {
 	writeJSON(w, e.status, e)
 }
 
-// FromProtocolError maps the protocol errors that mean a host could not be reached to ErrHostReattached and ErrHostUnavailable, and returns any other error as-is
+// FromProtocolError maps the protocol errors that mean a host could not be reached, was busy, or did not answer in time to the errors the handlers turn into retryable responses, and returns any other error as-is
 // Backends use it for the errors of requests sent to hosts and runtime replicas
 func FromProtocolError(err error) error {
 	var perr *protocol.Error
@@ -132,8 +137,15 @@ func FromProtocolError(err error) error {
 	switch perr.Code {
 	case protocol.ErrCodeHostReattached:
 		return fmt.Errorf("%w: %s", ErrHostReattached, perr.Message)
-	case protocol.ErrCodeHostUnavailable, protocol.ErrCodeHostMismatch, protocol.ErrCodeTransportFailure:
+	case protocol.ErrCodeHostUnavailable, protocol.ErrCodeHostMismatch, protocol.ErrCodeTransportFailure, protocol.ErrCodeHostDraining:
 		return fmt.Errorf("%w: %s", ErrHostUnavailable, perr.Message)
+	case protocol.ErrCodeRetryLater, protocol.ErrCodeOverloaded:
+		// Hosts and runtime replicas reply with these codes only when they refuse a request before handling it, because too many requests are in flight
+		return fmt.Errorf("%w: %s", ErrHostBusy, perr.Message)
+	case protocol.ErrCodeDeadlineExceeded:
+		return fmt.Errorf("%w: %s", context.DeadlineExceeded, perr.Message)
+	case protocol.ErrCodeCanceled:
+		return fmt.Errorf("%w: %s", context.Canceled, perr.Message)
 	default:
 		return perr
 	}

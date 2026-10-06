@@ -67,7 +67,7 @@ components:
         lossy:
           description: True when any value used a rendering that changes its shape,
             such as binary data or a timestamp; numbers are always strings and don't
-            count
+            count, so `false` doesn't mean the JSON converts back to the stored bytes
           type: boolean
         size:
           description: The size of the stored MessagePack value, in bytes
@@ -467,9 +467,11 @@ components:
           maxLength: 1024
           type: string
         timeout:
-          description: A Go duration string (such as `30s`) bounding the host's graceful
-            teardown, positive and at most `5m`; when omitted, the host waits for
-            every actor to deactivate, with no time limit
+          description: A Go duration string (such as `30s`) bounding how long the
+            host lets its actors' in-flight calls run before canceling them, positive
+            and at most `5m`; the host still waits for the canceled calls to return
+            before it unregisters, and when omitted it waits for every call to finish,
+            with no time limit
           example: 30s
           type: string
       type: object
@@ -1411,9 +1413,9 @@ info:
     | --- | --- |
     | `cluster:read` | Cluster summary, runtimes, hosts |
     | `actors:read` | Activations, placements, actor types, actor-state listings |
-    | `actors:state:read` | Reading the stored state of an actor (audited) |
+    | `actors:state:read` | Reading the stored state of an actor (audited); a workflow's actor types also need `workflows:data:read` |
     | `workflows:read` | Workflows, instances, event history |
-    | `workflows:data:read` | Including workflow instance input and output in instance details (audited) |
+    | `workflows:data:read` | Including workflow instance input and output in instance details, and reading the stored state of a workflow's actor types (audited) |
     | `jobs:read` | Jobs and alarms |
     | `actors:manage` | Deactivating an actor |
     | `hosts:manage` | Draining a host |
@@ -1459,7 +1461,7 @@ info:
     | `payloadTooLarge` | 413 | The request body is larger than 64 KiB |
     | `stateNotDecodable` | 422 | The stored actor state cannot be rendered as JSON, because it is not valid MessagePack or a map has two keys that would share a JSON name |
     | `internal` | 500 | Unexpected server error |
-    | `hostUnavailable` | 503 | The host, or the runtime owning its session, could not be reached; retryable |
+    | `hostUnavailable` | 503 | The host, or the runtime owning its session, could not be reached or was too busy; retryable |
     | `noHostsReachable` | 503 | None of the queried hosts could be reached; `details.errors` lists them; retryable |
     | `timeout` | 504 | The request timed out; retryable |
   title: Francis management API
@@ -1736,6 +1738,7 @@ paths:
     get:
       description: |-
         Requires scope `actors:state:read`. Every read is audited (the data itself is never logged).
+        Reading the state of a workflow's actors, such as an orchestrator's journal, also requires `workflows:data:read`, since it holds the instances' input and output.
 
         Actor state is stored as MessagePack.
         By default it is converted to JSON and returned inside an `ActorState` envelope.
@@ -1842,7 +1845,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
           description: '`forbidden`: the token does not grant the scope the route
-            requires'
+            requires, or `workflows:data:read` for a workflow''s actor type'
           headers:
             X-Request-Id:
               description: A unique ID assigned to the request, also returned as requestId
@@ -2115,7 +2118,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
           description: '`hostUnavailable`: the host, or the runtime owning its session,
-            could not be reached; retryable'
+            could not be reached or was too busy; retryable'
           headers:
             X-Request-Id:
               description: A unique ID assigned to the request, also returned as requestId
@@ -2329,7 +2332,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
           description: '`hostUnavailable`: the host, or the runtime owning its session,
-            could not be reached; retryable'
+            could not be reached or was too busy; retryable'
           headers:
             X-Request-Id:
               description: A unique ID assigned to the request, also returned as requestId
@@ -2719,7 +2722,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
           description: '`hostUnavailable`: the host, or the runtime owning its session,
-            could not be reached; retryable'
+            could not be reached or was too busy; retryable'
           headers:
             X-Request-Id:
               description: A unique ID assigned to the request, also returned as requestId
@@ -2750,13 +2753,15 @@ paths:
         Requires scope `hosts:manage`. The action is audited, including its reason.
 
         Marks the host draining in the provider, so no new actor is placed on it anywhere, then asks the host to drain and returns `202` once the host acknowledged.
-        The host then deactivates its actors gracefully, bounded by `timeout`; the drain continues after the response is sent.
+        The host then deactivates its actors gracefully, canceling the calls still running when `timeout` expires; the drain continues after the response is sent.
 
         - Draining a host that is the last live, non-draining server of one or more actor types is refused with `409 lastServer` (with `details.actorTypes`), unless `force` is `true`; a forced drain lists those types in `forcedActorTypes`. The check is atomic with other drain requests, so concurrent drains of the last servers of a type can't both succeed without `force`.
         - Repeating a drain on a host that is already draining is never refused, and `alreadyDraining` reports whether the host was already draining.
         - While an exclusive-access lease is held on the cluster, the action is refused with `409 exclusiveLeaseHeld`.
         - If the host reconnected before it received the request, including to another runtime replica, the request is sent again to its new session; only if the host keeps reconnecting is the response `409 hostReattached`, and the request can be sent again.
         - When the request to the host fails, the host is asked whether it is draining. A host that is draining accepted the drain and the response is `202`. A host that is not draining has its draining mark removed, and the error has `details.hostDraining: false`. A host that can't be asked keeps its mark, since it may have accepted the drain, and the error has `details.hostDraining: true`.
+        - A host that refused the request because it was too busy never accepted the drain, so its mark is removed without asking it, and the error is `503 hostUnavailable` with `details.hostDraining: false`.
+        - The mark is only removed by the request that set it: when the host was already marked draining, a failed request leaves the mark in place and the error has `details.hostDraining: true`.
 
         The request body is optional; an empty body is equivalent to `{}`.
         Unknown fields are rejected.
@@ -2888,7 +2893,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
           description: '`hostUnavailable`: the host, or the runtime owning its session,
-            could not be reached; retryable'
+            could not be reached or was too busy; retryable'
           headers:
             X-Request-Id:
               description: A unique ID assigned to the request, also returned as requestId
@@ -3375,7 +3380,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
           description: '`hostUnavailable`: the host, or the runtime owning its session,
-            could not be reached; retryable'
+            could not be reached or was too busy; retryable'
           headers:
             X-Request-Id:
               description: A unique ID assigned to the request, also returned as requestId
@@ -3919,7 +3924,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
           description: '`hostUnavailable`: the host, or the runtime owning its session,
-            could not be reached; retryable'
+            could not be reached or was too busy; retryable'
           headers:
             X-Request-Id:
               description: A unique ID assigned to the request, also returned as requestId
@@ -4239,7 +4244,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
           description: '`hostUnavailable`: the host, or the runtime owning its session,
-            could not be reached; retryable'
+            could not be reached or was too busy; retryable'
           headers:
             X-Request-Id:
               description: A unique ID assigned to the request, also returned as requestId
@@ -4424,7 +4429,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
           description: '`hostUnavailable`: the host, or the runtime owning its session,
-            could not be reached; retryable'
+            could not be reached or was too busy; retryable'
           headers:
             X-Request-Id:
               description: A unique ID assigned to the request, also returned as requestId

@@ -430,8 +430,8 @@ type ListStatesReq struct {
 	ActorType string
 	// When true, the stored state data is returned alongside each actor ID
 	IncludeData bool
-	// WorkflowLabels, when set, restricts the listing to rows whose labels match every field it sets, by equality.
-	// Its Created field is ignored as a filter: use CreatedFrom and CreatedTo instead.
+	// WorkflowLabels, when set, restricts the listing to rows whose labels match every field it sets, by equality
+	// Its Created field is ignored as a filter: use CreatedFrom and CreatedTo instead
 	WorkflowLabels *WorkflowLabels
 	// CreatedFrom, when non-zero, restricts the listing to rows whose created label is at or after this time
 	CreatedFrom time.Time

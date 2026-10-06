@@ -16,7 +16,7 @@ In the remote topology, the [runtime](/docs/deploying-the-runtime) serves the AP
 ```yaml
 management:
   enabled: true
-  # TCP address the API listens on, default "0.0.0.0:7401" (all interfaces)
+  # TCP address the API listens on, default "127.0.0.1:7401"
   bind: "0.0.0.0:7401"
   # Tokens that can read everything but perform no actions
   readOnlyTokens:
@@ -62,7 +62,7 @@ The API exposes actor state and workflow inputs and outputs, so treat access to 
 - **Tokens.** Callers authenticate with a bearer token in the `Authorization` header. When the API is enabled, at least one token is required. Every token must be at least 32 characters long.
 - **Rotation.** Each list accepts multiple tokens. To rotate one, add the new token, update your clients, then remove the old one.
 - **Audit logs.** Actions, and reads of actor state and workflow input and output, are logged with the request ID, the target, and the last 5 characters of the token that was used. The full token is never logged, and neither are state or workflow payloads (different tokens can end with the same 5 characters, so the suffix helps you tell tokens apart but isn't a unique key).
-- **TLS.** TLS is optional. The runtime listens on all interfaces by default (`0.0.0.0:7401`), so the API is reachable from outside its container, while a local host listens on `127.0.0.1:7401` unless you set `Bind`. If the API listens on an address other machines can reach without TLS configured, the server logs a warning at startup: in that case, terminate TLS in a proxy in front of it, or configure a certificate.
+- **TLS.** TLS is optional. Both the runtime and a local host listen on `127.0.0.1:7401` by default, so the API only accepts connections from the same machine unless you set the bind address. If the API listens on an address other machines can reach without TLS configured, the server logs a warning at startup: in that case, terminate TLS in a proxy in front of it, or configure a certificate.
 - **Separate credentials.** Management tokens are independent of the runtime PSKs and the host bootstrap credentials. Traffic between runtime replicas, and between local hosts, is authenticated with their certificates and never with management tokens.
 
 ### Scopes
@@ -73,9 +73,9 @@ Every route requires a scope. Tokens in `readOnlyTokens` receive every scope exc
 | --- | --- | --- |
 | `cluster:read` | Cluster summary, runtimes, and hosts | - |
 | `actors:read` | Live activations, placements, actor types, and the list of actors with stored state | - |
-| `actors:state:read` | The durable state of an actor, including built-in actor types | - |
+| `actors:state:read` | The durable state of an actor, including built-in actor types (a workflow's actor types also need `workflows:data:read`) | - |
 | `workflows:read` | Workflows, instance metadata, and instance event history | - |
-| `workflows:data:read` | Workflow input and output in instance details | - |
+| `workflows:data:read` | Workflow input and output in instance details, and the stored state of a workflow's actor types | - |
 | `jobs:read` | Jobs and alarms | - |
 | `actors:manage` | Deactivating an actor | Yes |
 | `hosts:manage` | Draining a host | Yes |
@@ -97,7 +97,7 @@ In addition, there are two public routes which don't require a token:
 | Route | Scope | Description |
 | --- | --- | --- |
 | `GET /api/v1/cluster/summary` | `cluster:read` | Counts of runtimes, hosts by state, placements, live activations, jobs, and workflow instances by status, plus the holder of the cluster's exclusive-access lease when one is held. Counts stop at 10,000 and are then flagged as `truncated`. |
-| `GET /api/v1/runtimes` | `cluster:read` | Runtime replicas with a live membership, their advertised addresses, and last heartbeat. Remote topology only. |
+| `GET /api/v1/runtimes` | `cluster:read` | Runtime replicas with a live membership (those with the management API enabled), their advertised addresses, and last heartbeat. Remote topology only. |
 | `GET /api/v1/hosts` | `cluster:read` | Paginated hosts, with their state (`connected`, `draining`, or, in the remote topology, `unreachable`), last health check, owner runtime, and actor counts. Filter with `state`. |
 | `GET /api/v1/hosts/{hostId}` | `cluster:read` | One host's registration, actor types with their placement limits and usage, and the capacity, drain state, and workflow definitions the host reports. |
 | `GET /api/v1/hosts/{hostId}/activations` | `actors:read` | Paginated actors that are active in memory on one host right now, read from the host itself. Filter with `type`. |
@@ -113,7 +113,7 @@ Only hosts with a live registration are listed. A host whose health check is old
 | `GET /api/v1/placements` | `actors:read` | Paginated placements recorded in the provider (actor type, ID, host, and idle timeout). Filter with `host` and `type`. |
 | `GET /api/v1/actor-types` | `actors:read` | Registered actor types, the hosts serving each, placement usage and limits, job retention, and execution capacity groups. |
 | `GET /api/v1/actor-states?type={type}` | `actors:read` | Paginated IDs of the actors of a type that have stored state, whether or not they're active. `type` is required. |
-| `GET /api/v1/actor-states/{type}/{id}` | `actors:state:read` | An actor's stored state. See [Actor state](#actor-state). |
+| `GET /api/v1/actor-states/{type}/{id}` | `actors:state:read` | An actor's stored state. A workflow's actor types also need `workflows:data:read`. See [Actor state](#actor-state). |
 | `POST /api/v1/actors/{type}/{id}/deactivate` | `actors:manage` | Ask the host an actor is active on to deactivate it. See [Deactivating an actor](#deactivating-an-actor). |
 
 ### Jobs and alarms
@@ -210,11 +210,12 @@ By default the state is converted to JSON and returned in the `state` field, tog
 
 Because every number is a string, a number and a string with the same text look the same in the JSON, so read numbers according to the type you stored.
 
-`lossy` is `true` when any value used one of the renderings in the last four rows, which change the value's shape. Numbers don't count, since they're always strings. To get the exact stored bytes, send `Accept: application/msgpack`.
+`lossy` is `true` when any value used one of the renderings in the last four rows, which change the value's shape. Numbers don't count, since they're always strings, so `lossy: false` doesn't mean the JSON converts back to the stored bytes. To get the exact stored bytes, send `Accept: application/msgpack`.
 
 If two keys of a map would become the same JSON name, such as `1` and `"1"` or the same key stored twice, the state can't be rendered as JSON, because JSON parsers disagree on which value they keep. The request then fails with `422 stateNotDecodable`, and the state can still be read with `Accept: application/msgpack`.
 
-Built-in actor types (such as workflow orchestrators and workers) store their internals in the same way, and `actors:state:read` can read them. That's useful for debugging, but their format is internal and can change between releases. Use the workflow endpoints to inspect workflows.
+Built-in actor types (such as workflow orchestrators and workers) store their internals in the same way, and `actors:state:read` can read them. That's useful for debugging, but their format is internal and can change between releases. Use the workflow endpoints to inspect workflows.  
+The state of a workflow's actor types holds the instances' input and output, so reading it also requires `workflows:data:read`, the same scope that the instance details need to include them.
 
 Reads of actor state are recorded in the audit log.
 
@@ -240,7 +241,7 @@ Deactivating is just hybernating the actor's state. It is not pausing the actor:
 
 The request body accepts:
 
-- `timeout`: a Go duration string, up to `5m`, controlling how long the host has to deactivate its actors gracefully before the remaining ones are halted. When omitted, the host waits for every actor to deactivate, with no time limit. The host keeps sending health checks until its actors have halted, so its registration doesn't expire while they finish.
+- `timeout`: a Go duration string, up to `5m`, controlling how long the host lets its actors' in-flight calls run before it cancels them. When omitted, the host waits for every call to finish, with no time limit. The host keeps sending health checks until its actors have halted, so its registration doesn't expire while they finish.
 - `force`: drain the host even if it's the last live host serving one or more actor types. Without it, the request fails with `409` and the code `lastServer`, listing the affected types in `details.actorTypes`. The check is atomic with other drain requests, so concurrent drains of the last hosts serving a type can't both succeed without `force`.
 - `reason`: an optional reason, logged by the host and in the audit log.
 

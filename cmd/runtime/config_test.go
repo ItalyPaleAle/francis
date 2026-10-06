@@ -133,7 +133,7 @@ func TestManagementServerConfig(t *testing.T) {
 	t.Run("defaults the bind address", func(t *testing.T) {
 		res, err := managementConfig{Enabled: true, ReadOnlyTokens: []string{readOnly}}.managementServerConfig()
 		require.NoError(t, err)
-		assert.Equal(t, "0.0.0.0:7401", res.Bind)
+		assert.Equal(t, "127.0.0.1:7401", res.Bind)
 	})
 
 	t.Run("rejects a short token", func(t *testing.T) {

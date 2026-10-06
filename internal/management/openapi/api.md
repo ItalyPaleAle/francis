@@ -15,9 +15,9 @@ The server is configured with two token lists:
 | --- | --- |
 | `cluster:read` | Cluster summary, runtimes, hosts |
 | `actors:read` | Activations, placements, actor types, actor-state listings |
-| `actors:state:read` | Reading the stored state of an actor (audited) |
+| `actors:state:read` | Reading the stored state of an actor (audited); a workflow's actor types also need `workflows:data:read` |
 | `workflows:read` | Workflows, instances, event history |
-| `workflows:data:read` | Including workflow instance input and output in instance details (audited) |
+| `workflows:data:read` | Including workflow instance input and output in instance details, and reading the stored state of a workflow's actor types (audited) |
 | `jobs:read` | Jobs and alarms |
 | `actors:manage` | Deactivating an actor |
 | `hosts:manage` | Draining a host |
@@ -63,6 +63,6 @@ Error `code` values:
 | `payloadTooLarge` | 413 | The request body is larger than 64 KiB |
 | `stateNotDecodable` | 422 | The stored actor state cannot be rendered as JSON, because it is not valid MessagePack or a map has two keys that would share a JSON name |
 | `internal` | 500 | Unexpected server error |
-| `hostUnavailable` | 503 | The host, or the runtime owning its session, could not be reached; retryable |
+| `hostUnavailable` | 503 | The host, or the runtime owning its session, could not be reached or was too busy; retryable |
 | `noHostsReachable` | 503 | None of the queried hosts could be reached; `details.errors` lists them; retryable |
 | `timeout` | 504 | The request timed out; retryable |

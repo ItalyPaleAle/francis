@@ -127,7 +127,7 @@ func (p *PostgresProvider) MarkHostDraining(ctx context.Context, req components.
 		}
 
 		// Nothing is changed while an exclusive-access lease is held, so a live lease rolls the transaction back
-		// The lease is checked last because host registration deletes expired hosts before it locks the cluster_config row, and taking the locks in the same order can't deadlock with it
+		// The lease is checked last because every transaction that locks host rows does so before it locks the cluster_config row: registration deletes expired hosts first, and a reattach updates its host first, so taking the locks in the same order can't deadlock with them
 		// The row lock is then held until the transaction ends, so a lease is either taken after the commit or seen here
 		rErr = p.checkClusterNotLocked(ctx, tx)
 		if rErr != nil {
@@ -390,14 +390,27 @@ func (p *PostgresProvider) ListPlacements(ctx context.Context, req components.Li
 	return res, nil
 }
 
+const (
+	liveJobActiveCond = `alarm_lease_id IS NOT NULL AND alarm_lease_expiration_time IS NOT NULL AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')`
+	liveJobStatusExpr = `CASE WHEN ` + liveJobActiveCond + ` THEN 'active' ELSE 'pending' END`
+)
+
+// liveJobStatusFilter returns the predicate that selects the live jobs in a status, which must be pending or active
+// It spells out the lease conditions rather than comparing liveJobStatusExpr, so the planner can use the indexes on the lease columns
+func liveJobStatusFilter(status components.JobStatus) string {
+	if status == components.JobStatusActive {
+		return `(` + liveJobActiveCond + `)`
+	}
+
+	return `NOT (` + liveJobActiveCond + `)`
+}
+
 // QueryJobs returns a page of live and terminal jobs across the cluster, ordered by job ID
 func (p *PostgresProvider) QueryJobs(ctx context.Context, req components.QueryJobsReq) (components.QueryJobsRes, error) {
 	limit := components.EffectiveListLimit(req.Limit)
 
-	// A status filter selects only the half of the union that can hold it
-	includeLive := req.Status == "" || req.Status == components.JobStatusPending || req.Status == components.JobStatusActive
-	includeTerminal := req.Status == "" || req.Status.IsTerminal()
-	if !includeLive && !includeTerminal {
+	// A status filter selects only the half of the union that can hold it, and no job is in an unknown status
+	if !req.IncludeLive() && !req.IncludeTerminal() {
 		return components.QueryJobsRes{Jobs: []components.JobInfo{}}, nil
 	}
 
@@ -415,21 +428,19 @@ func (p *PostgresProvider) QueryJobs(ctx context.Context, req components.QueryJo
 	}
 	limitArg := args.add(limit + 1)
 
-	// The live status is derived from lease validity exactly as ListJobs does
-	const liveStatusExpr = `CASE WHEN alarm_lease_id IS NOT NULL AND alarm_lease_expiration_time IS NOT NULL AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc') THEN 'active' ELSE 'pending' END`
-
-	// Each half is ordered and limited on its own, so it can walk its primary key, and the outer query merges them
+	// Each half is ordered and limited on its own, so it can walk an index in job ID order, and the outer query merges them
+	// The live half walks the partial index on the job rows of the alarms table, so it never reads plain alarms
 	branches := make([]string, 0, 2)
-	if includeLive {
+	if req.IncludeLive() {
 		where := `alarm_kind = 'job'` + actorClause + ` AND alarm_id > ` + cursorArg
-		if !includeTerminal {
-			where += ` AND ` + liveStatusExpr + ` = ` + args.add(string(req.Status))
+		if !req.IncludeTerminal() {
+			where += ` AND ` + liveJobStatusFilter(req.Status)
 		}
 
 		// #nosec G202 -- the only concatenated values are the static table prefix, static clauses, and placeholders, not user input
 		branches = append(branches, `(
 			SELECT alarm_id AS job_id, actor_type, actor_id, job_method, alarm_due_time AS due_time, alarm_interval AS job_interval, alarm_cron AS job_cron,
-				`+liveStatusExpr+` AS job_status,
+				`+liveJobStatusExpr+` AS job_status,
 				0 AS attempts, NULL::text AS last_error, NULL::timestamp AS ended_at
 			FROM `+p.tablePrefix+`alarms
 			WHERE `+where+`
@@ -437,10 +448,10 @@ func (p *PostgresProvider) QueryJobs(ctx context.Context, req components.QueryJo
 			LIMIT `+limitArg+`
 		)`)
 	}
-	if includeTerminal {
+	if req.IncludeTerminal() {
 		// Expired terminal records are omitted, as in ListJobs
 		where := `(expiration_time IS NULL OR expiration_time > (now() AT TIME ZONE 'utc'))` + actorClause + ` AND job_id > ` + cursorArg
-		if !includeLive {
+		if !req.IncludeLive() {
 			where += ` AND job_status = ` + args.add(string(req.Status))
 		}
 
@@ -515,6 +526,52 @@ func (p *PostgresProvider) QueryJobs(ctx context.Context, req components.QueryJo
 	}
 
 	return res, nil
+}
+
+// CountJobs counts the live and terminal jobs across the cluster in a status, stopping at the limit
+func (p *PostgresProvider) CountJobs(ctx context.Context, req components.CountJobsReq) (int, error) {
+	if req.Limit <= 0 {
+		return 0, nil
+	}
+
+	// A status filter selects only the half of the union that can hold it, and no job is in an unknown status
+	if !req.IncludeLive() && !req.IncludeTerminal() {
+		return 0, nil
+	}
+
+	// Each half stops at the limit on its own, so neither reads more than that many rows
+	args := queryArgs{}
+	limitArg := args.add(req.Limit)
+	branches := make([]string, 0, 2)
+	if req.IncludeLive() {
+		where := `alarm_kind = 'job'`
+		if !req.IncludeTerminal() {
+			where += ` AND ` + liveJobStatusFilter(req.Status)
+		}
+		// #nosec G202 -- the only concatenated values are the static table prefix, static clauses, and placeholders, not user input
+		branches = append(branches, `(SELECT count(*) FROM (SELECT 1 FROM `+p.tablePrefix+`alarms WHERE `+where+` LIMIT `+limitArg+`) AS l)`)
+	}
+	if req.IncludeTerminal() {
+		// Expired terminal records are omitted, as in QueryJobs
+		where := `(expiration_time IS NULL OR expiration_time > (now() AT TIME ZONE 'utc'))`
+		if !req.IncludeLive() {
+			where += ` AND job_status = ` + args.add(string(req.Status))
+		}
+		// #nosec G202 -- the only concatenated values are the static table prefix, static clauses, and placeholders, not user input
+		branches = append(branches, `(SELECT count(*) FROM (SELECT 1 FROM `+p.tablePrefix+`terminal_jobs WHERE `+where+` LIMIT `+limitArg+`) AS t)`)
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+	var count int64
+	// #nosec G202 -- the only concatenated values are the static branches built above, not user input
+	err := p.db.QueryRow(queryCtx, `SELECT `+strings.Join(branches, ` + `), args...).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("error counting jobs: %w", err)
+	}
+
+	// Both halves can reach the limit, so their sum is capped again
+	return min(int(count), req.Limit), nil
 }
 
 // ListAlarms returns a page of plain alarms, never jobs, ordered by actor type, actor ID and alarm name

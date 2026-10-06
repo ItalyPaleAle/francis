@@ -8,7 +8,7 @@ import (
 )
 
 // DefaultBind is the listen address used when the configuration does not set one
-const DefaultBind = "0.0.0.0:7401"
+const DefaultBind = "127.0.0.1:7401"
 
 // MinTokenLength is the minimum length of an API token
 // It keeps the last characters used to identify a token in audit logs from revealing a meaningful part of it

@@ -69,13 +69,13 @@ func (o *SetStateOpts) WorkflowLabels() *components.WorkflowLabels {
 	return o.workflowLabels
 }
 
-// SetAppendEvents attaches workflow events that are written in the same operation as the state.
+// SetAppendEvents attaches workflow events that are written in the same operation as the state
 // It is reserved for Francis' own built-in actors (the key argument is a private type)
 func (o *SetStateOpts) SetAppendEvents(_ builtinkey.Key, events []components.WorkflowEvent) {
 	o.appendEvents = events
 }
 
-// AppendEvents returns the events attached with SetAppendEvents, or nil when none were.
+// AppendEvents returns the events attached with SetAppendEvents, or nil when none were
 func (o *SetStateOpts) AppendEvents() []components.WorkflowEvent {
 	if o == nil {
 		return nil

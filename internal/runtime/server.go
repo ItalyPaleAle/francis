@@ -247,14 +247,12 @@ func (rt *Runtime) Run(parentCtx context.Context) error {
 
 		// Run the actor provider
 		rt.provider.Run,
-
-		// Keep this replica's membership registered, so other replicas can route management requests to it
-		rt.runMembership,
 	}
 
-	// Serve the management API when it is enabled
+	// Serve the management API when it is enabled, keeping this replica's membership registered so other replicas can route management requests to it
+	// Only the management API uses the membership, so a replica without the API doesn't write it, and its hosts can't be reached from the API of another replica
 	if rt.management != nil {
-		services = append(services, rt.management.Run)
+		services = append(services, rt.runMembership, rt.management.Run)
 	}
 
 	// Run all background services
@@ -299,7 +297,10 @@ func (rt *Runtime) runServer(ctx context.Context) error {
 	})
 
 	// WebTransport endpoint for other runtime replicas, which send management requests for the hosts this replica owns
-	mux.HandleFunc(protocol.RuntimePeerPath, rt.handleRuntimePeerConnect(ctx, wtServer, &handlers))
+	// It is served only with the management API enabled, since the replica is otherwise not registered as a member other replicas can find
+	if rt.management != nil {
+		mux.HandleFunc(protocol.RuntimePeerPath, rt.handleRuntimePeerConnect(ctx, wtServer, &handlers))
+	}
 
 	// Bind before serving so shutdown never races WebTransport's internal startup bookkeeping
 	udpAddr, err := net.ResolveUDPAddr("udp", rt.bind)

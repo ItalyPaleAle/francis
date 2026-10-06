@@ -203,9 +203,12 @@ func (p *Provider) ListPlacements(_ context.Context, req components.ListPlacemen
 	p.Mu.RLock()
 	defer p.Mu.RUnlock()
 
-	// Collect the placements that match the filters and sort after the cursor
+	// Keep the first placements that match the filters and sort after the cursor, plus one that tells whether more follow
 	// Placements on a host whose registration expired are skipped, since they are about to be garbage collected
-	placements := make([]components.PlacementInfo, 0)
+	sel := newPageSelector(limit+1, func(a, b components.PlacementInfo) int {
+		return cmp.Or(cmp.Compare(a.ActorType, b.ActorType), cmp.Compare(a.ActorID, b.ActorID))
+	})
+
 	for _, actor := range p.ActiveActors {
 		switch {
 		case req.HostID != "" && actor.HostID != req.HostID,
@@ -219,7 +222,7 @@ func (p *Provider) ListPlacements(_ context.Context, req components.ListPlacemen
 			continue
 		}
 
-		placements = append(placements, components.PlacementInfo{
+		sel.Add(components.PlacementInfo{
 			ActorType:   actor.ActorType,
 			ActorID:     actor.ActorID,
 			HostID:      actor.HostID,
@@ -227,12 +230,8 @@ func (p *Provider) ListPlacements(_ context.Context, req components.ListPlacemen
 		})
 	}
 
-	// The map has no order of its own, so the order the API promises has to be established here
-	slices.SortFunc(placements, func(a, b components.PlacementInfo) int {
-		return cmp.Or(cmp.Compare(a.ActorType, b.ActorType), cmp.Compare(a.ActorID, b.ActorID))
-	})
-
 	// Anything past the limit is dropped from the page, but its existence is reported through HasMore
+	placements := sel.Sorted()
 	hasMore := len(placements) > limit
 	if hasMore {
 		placements = placements[:limit]
@@ -269,10 +268,14 @@ func (p *Provider) QueryJobs(_ context.Context, req components.QueryJobsReq) (co
 	p.Mu.RLock()
 	defer p.Mu.RUnlock()
 
-	jobs := make([]components.JobInfo, 0)
+	// Keep the first jobs that match, plus one that tells whether more follow
+	// Live and terminal job IDs never overlap, so ordering by job ID alone gives a stable union
+	sel := newPageSelector(limit+1, func(a, b components.JobInfo) int {
+		return cmp.Compare(a.JobID, b.JobID)
+	})
 
-	// Live jobs, skipped when the status filter asks for a terminal status
-	if req.Status == "" || !req.Status.IsTerminal() {
+	// Live jobs, skipped when the status filter can't match one
+	if req.IncludeLive() {
 		for _, a := range p.AlarmsByID {
 			if a.Kind != string(components.AlarmKindJob) || a.ID <= after || !matchesActor(a.ActorType, a.ActorID) {
 				continue
@@ -282,13 +285,13 @@ func (p *Provider) QueryJobs(_ context.Context, req components.QueryJobsReq) (co
 			if req.Status != "" && info.Status != req.Status {
 				continue
 			}
-			jobs = append(jobs, info)
+			sel.Add(info)
 		}
 	}
 
-	// Terminal jobs, skipped when the status filter asks for a live status
+	// Terminal jobs, skipped when the status filter can't match one
 	// An expired record is treated as gone before the collector gets to it, as in ListJobs
-	if req.Status == "" || req.Status.IsTerminal() {
+	if req.IncludeTerminal() {
 		for _, d := range p.TerminalJobs {
 			if d.JobID <= after || d.HasExpired(now) || !matchesActor(d.ActorType, d.ActorID) {
 				continue
@@ -296,16 +299,12 @@ func (p *Provider) QueryJobs(_ context.Context, req components.QueryJobsReq) (co
 			if req.Status != "" && components.JobStatus(d.Status) != req.Status {
 				continue
 			}
-			jobs = append(jobs, terminalJobToInfo(d))
+			sel.Add(terminalJobToInfo(d))
 		}
 	}
 
-	// Live and terminal job IDs never overlap, so ordering by job ID alone gives a stable union
-	slices.SortFunc(jobs, func(a, b components.JobInfo) int {
-		return cmp.Compare(a.JobID, b.JobID)
-	})
-
 	// Anything past the limit is dropped from the page, but its existence is reported through HasMore
+	jobs := sel.Sorted()
 	hasMore := len(jobs) > limit
 	if hasMore {
 		jobs = jobs[:limit]
@@ -317,6 +316,58 @@ func (p *Provider) QueryJobs(_ context.Context, req components.QueryJobsReq) (co
 	}, nil
 }
 
+func (p *Provider) CountJobs(_ context.Context, req components.CountJobsReq) (int, error) {
+	if req.Limit <= 0 {
+		return 0, nil
+	}
+	now := p.Clock.Now()
+
+	p.Mu.RLock()
+	defer p.Mu.RUnlock()
+
+	// Count without collecting or sorting the jobs, stopping as soon as the limit is reached
+	var count int
+
+	// Live jobs, skipped when the status filter can't match one
+	if req.IncludeLive() {
+		for _, a := range p.AlarmsByID {
+			if a.Kind != string(components.AlarmKindJob) {
+				continue
+			}
+
+			status := components.JobStatusPending
+			if a.LeaseValid(now) {
+				status = components.JobStatusActive
+			}
+			if req.Status != "" && status != req.Status {
+				continue
+			}
+
+			count++
+			if count >= req.Limit {
+				return req.Limit, nil
+			}
+		}
+	}
+
+	// Terminal jobs, skipped when the status filter can't match one
+	// An expired record is treated as gone before the collector gets to it, as in QueryJobs
+	if req.IncludeTerminal() {
+		for _, d := range p.TerminalJobs {
+			if d.HasExpired(now) || (req.Status != "" && components.JobStatus(d.Status) != req.Status) {
+				continue
+			}
+
+			count++
+			if count >= req.Limit {
+				return req.Limit, nil
+			}
+		}
+	}
+
+	return count, nil
+}
+
 func (p *Provider) ListAlarms(_ context.Context, req components.ListAlarmsReq) (components.ListAlarmsRes, error) {
 	limit := components.EffectiveListLimit(req.Limit)
 	now := p.Clock.Now()
@@ -324,8 +375,11 @@ func (p *Provider) ListAlarms(_ context.Context, req components.ListAlarmsReq) (
 	p.Mu.RLock()
 	defer p.Mu.RUnlock()
 
-	// Collect the plain alarms that match the filters and sort after the cursor, leaving jobs out
-	alarms := make([]*Alarm, 0)
+	// Keep the first plain alarms that match the filters and sort after the cursor, leaving jobs out, plus one that tells whether more follow
+	sel := newPageSelector(limit+1, func(a, b *Alarm) int {
+		return compareAlarmKey(a.GetAlarmKey(), ref.AlarmRef{ActorType: b.ActorType, ActorID: b.ActorID, Name: b.Name})
+	})
+
 	for key, a := range p.Alarms {
 		switch {
 		case a.Kind != "" && a.Kind != string(components.AlarmKindAlarm),
@@ -334,15 +388,11 @@ func (p *Provider) ListAlarms(_ context.Context, req components.ListAlarmsReq) (
 			compareAlarmKey(key, req.After) <= 0:
 			continue
 		}
-		alarms = append(alarms, a)
+		sel.Add(a)
 	}
 
-	// The map has no order of its own, so the order the API promises has to be established here
-	slices.SortFunc(alarms, func(a, b *Alarm) int {
-		return compareAlarmKey(a.GetAlarmKey(), ref.AlarmRef{ActorType: b.ActorType, ActorID: b.ActorID, Name: b.Name})
-	})
-
 	// Anything past the limit is dropped from the page, but its existence is reported through HasMore
+	alarms := sel.Sorted()
 	hasMore := len(alarms) > limit
 	if hasMore {
 		alarms = alarms[:limit]

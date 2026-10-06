@@ -238,6 +238,9 @@ func TestHaltAllWithin(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, []string{"T/busy"}, forced)
 
+		// The actor finished halting before HaltAllWithin returned, so the caller can unregister the host without another host activating an actor that is still running here
+		assert.Zero(t, m.Actors.Len())
+
 		// The busy call is cut short instead of running out the grace period
 		select {
 		case err = <-callErr:
@@ -245,11 +248,62 @@ func TestHaltAllWithin(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("in-flight call was not canceled")
 		}
+	})
 
-		// The actor finishes halting in the background
-		assert.Eventually(t, func() bool {
-			return m.Actors.Len() == 0
-		}, 5*time.Second, 10*time.Millisecond)
+	t.Run("waits for a canceled call that takes time to return", func(t *testing.T) {
+		removed := make(chan ref.ActorRef, 1)
+		m := NewManager(Options{
+			RemoveActor: func(_ context.Context, r ref.ActorRef) error {
+				removed <- r
+				return nil
+			},
+			ShutdownGracePeriod: time.Hour,
+		})
+		err := m.RegisterActor("T", noopFactory, RegisterActorOptions{})
+		require.NoError(t, err)
+		m.Start()
+		t.Cleanup(m.Close)
+
+		// The method keeps running for a while after its context is canceled
+		started := make(chan struct{})
+		release := make(chan struct{})
+		go func() {
+			_, _ = m.LockAndInvoke(t.Context(), ref.NewActorRef("T", "slow"), func(ctx context.Context, _ *ActiveActor) (any, error) {
+				close(started)
+				<-ctx.Done()
+				<-release
+				return nil, nil
+			})
+		}()
+		<-started
+
+		haltDone := make(chan []string, 1)
+		go func() {
+			forced, haltErr := m.HaltAllWithin(50 * time.Millisecond)
+			assert.NoError(t, haltErr)
+			haltDone <- forced
+		}()
+
+		// Until the method returns, the actor is still active and its placement is not cleared
+		select {
+		case <-haltDone:
+			t.Fatal("HaltAllWithin returned while a canceled call was still running")
+		case <-removed:
+			t.Fatal("placement was cleared while a canceled call was still running")
+		case <-time.After(300 * time.Millisecond):
+		}
+		assert.EqualValues(t, 1, m.Actors.Len())
+
+		// Once the method returns, the actor halts and HaltAllWithin reports it
+		close(release)
+		select {
+		case forced := <-haltDone:
+			assert.Equal(t, []string{"T/slow"}, forced)
+		case <-time.After(5 * time.Second):
+			t.Fatal("HaltAllWithin did not return after the call completed")
+		}
+		assert.Equal(t, ref.NewActorRef("T", "slow"), <-removed)
+		assert.Zero(t, m.Actors.Len())
 	})
 
 	t.Run("a call cut short is reported as canceled even when the method returns no error", func(t *testing.T) {

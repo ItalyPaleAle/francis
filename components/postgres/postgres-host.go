@@ -119,13 +119,6 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 			return zero, fmt.Errorf("error removing failed hosts: %w", err)
 		}
 
-		// Reject a reattach while an exclusive-access lease is held, so a locked cluster stays empty
-		// A reattach never adds a host beyond the limit, so the host count and limit agreement are not re-checked here
-		err = p.checkClusterNotLocked(ctx, tx)
-		if err != nil {
-			return zero, err
-		}
-
 		// Try to refresh the existing registration in place, handing it to the new session
 		// A unique constraint violation here means a different, healthy host already holds the address
 		queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
@@ -142,6 +135,15 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 			return zero, components.ErrHostAlreadyRegistered
 		} else if err != nil {
 			return zero, fmt.Errorf("error updating host: %w", err)
+		}
+
+		// Reject a reattach while an exclusive-access lease is held, so a locked cluster stays empty, and a live lease rolls back the update above
+		// A reattach never adds a host beyond the limit, so the host count and limit agreement are not re-checked here
+		// The cluster_config row is locked after the host row, which is the order MarkHostDraining takes them in, so the two can't deadlock
+		// It is still locked before inserting a replacement row below, which keeps that insert serialized with registrations of the same address
+		err = p.checkClusterNotLocked(ctx, tx)
+		if err != nil {
+			return zero, err
 		}
 
 		var activeHostID string

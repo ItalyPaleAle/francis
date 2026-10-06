@@ -40,9 +40,7 @@ func (p *Provider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req compo
 
 	changes := NewChanges()
 	defer changes.Release()
-	if stateChange != nil {
-		changes.ActorState.Set = append(changes.ActorState.Set, *stateChange)
-	}
+	p.addInitialStateChange(changes, stateChange)
 
 	// Idempotency: keep an existing job (or alarm) with the same key and return its ID
 	p.Mu.RLock()
@@ -123,9 +121,7 @@ func (p *Provider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, r
 
 	changes := NewChanges()
 	defer changes.Release()
-	if stateChange != nil {
-		changes.ActorState.Set = append(changes.ActorState.Set, *stateChange)
-	}
+	p.addInitialStateChange(changes, stateChange)
 
 	// Preserve the first job stored for an idempotency key while allowing an unleased occurrence to become immediately schedulable
 	now := p.Clock.Now()
@@ -261,6 +257,23 @@ func (p *Provider) initialStateChange(r ref.ActorRef, initial *components.Initia
 	return &ActorStateChange{Key: key, Value: entry}
 }
 
+// addInitialStateChange records an initial state in changes, together with the removal of the workflow events of the actor's earlier state, if any
+// An expired state that the garbage collector hasn't removed yet keeps its events, which would otherwise be served as the history of the new state until its first write with events resets it
+// The caller must hold stateWriteMu
+func (p *Provider) addInitialStateChange(changes *Changes, stateChange *ActorStateChange) {
+	if stateChange == nil {
+		return
+	}
+	changes.ActorState.Set = append(changes.ActorState.Set, *stateChange)
+
+	p.StateMu.RLock()
+	_, hasEvents := p.WorkflowEvents[stateChange.Key]
+	p.StateMu.RUnlock()
+	if hasEvents {
+		changes.WorkflowEvents.Reset = append(changes.WorkflowEvents.Reset, stateChange.Key)
+	}
+}
+
 // persistThenApplyWithState persists a job's change set, then applies it under Mu and, when it stores an initial state, under StateMu too
 // The caller must hold writeMu, and stateWriteMu when stateChange is set
 func (p *Provider) persistThenApplyWithState(ctx context.Context, changes *Changes, stateChange *ActorStateChange, apply func()) error {
@@ -277,8 +290,10 @@ func (p *Provider) persistThenApplyWithState(ctx context.Context, changes *Chang
 	apply()
 	p.Mu.Unlock()
 
+	// The initial state replaces no live state, so any events the actor has belong to an earlier state
 	p.StateMu.Lock()
 	p.ActorState[stateChange.Key] = stateChange.Value
+	delete(p.WorkflowEvents, stateChange.Key)
 	p.StateMu.Unlock()
 
 	return nil

@@ -380,7 +380,7 @@ type runtimeJSON struct {
 //	@Failure			403	{object}	apiError			"`forbidden`: the token does not grant the scope the route requires"
 //	@Failure			404	{object}	apiError			"`notApplicable`: there are no runtime replicas in the local topology"
 //	@Failure			500	{object}	apiError			"`internal`: an unexpected server error"
-//	@Failure			503	{object}	apiError			"`hostUnavailable`: the host, or the runtime owning its session, could not be reached; retryable"
+//	@Failure			503	{object}	apiError			"`hostUnavailable`: the host, or the runtime owning its session, could not be reached or was too busy; retryable"
 //	@Failure			504	{object}	apiError			"`timeout`: the request timed out; retryable"
 //	@Header				all	{string}	X-Request-Id		"A unique ID assigned to the request, also returned as requestId in error bodies and recorded in audit logs"
 //	@Header				401	{string}	WWW-Authenticate	"Always Bearer realm="francis-management" when the token is missing or unknown"

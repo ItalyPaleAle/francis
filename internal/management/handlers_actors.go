@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/italypaleale/francis/builtin/workflow"
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/utils/msgpackjson"
@@ -86,7 +87,7 @@ type hostActivationsJSON struct {
 //	@Failure			404		{object}	apiError			"`notFound`: the host is not registered"
 //	@Failure			409		{object}	apiError			"`hostReattached`: the host kept reconnecting, so the request could not be delivered to its current session; retryable"
 //	@Failure			500		{object}	apiError			"`internal`: an unexpected server error"
-//	@Failure			503		{object}	apiError			"`hostUnavailable`: the host, or the runtime owning its session, could not be reached; retryable"
+//	@Failure			503		{object}	apiError			"`hostUnavailable`: the host, or the runtime owning its session, could not be reached or was too busy; retryable"
 //	@Failure			504		{object}	apiError			"`timeout`: the request timed out; retryable"
 //	@Header				all		{string}	X-Request-Id		"A unique ID assigned to the request, also returned as requestId in error bodies and recorded in audit logs"
 //	@Header				401		{string}	WWW-Authenticate	"Always Bearer realm="francis-management" when the token is missing or unknown"
@@ -617,7 +618,7 @@ type actorStateJSON struct {
 	ActorID   string `json:"actorId"`
 	// The size of the stored MessagePack value, in bytes
 	Size int `json:"size"`
-	// True when any value used a rendering that changes its shape, such as binary data or a timestamp; numbers are always strings and don't count
+	// True when any value used a rendering that changes its shape, such as binary data or a timestamp; numbers are always strings and don't count, so `false` doesn't mean the JSON converts back to the stored bytes
 	Lossy bool `json:"lossy"`
 	// The stored value converted to JSON, following the convention described on the operation; any JSON value
 	State json.RawMessage `json:"state" swaggertype:"object"`
@@ -628,6 +629,7 @@ type actorStateJSON struct {
 //	@Summary		Read an actor's stored state
 //	@ID				getActorState
 //	@Description	Requires scope `actors:state:read`. Every read is audited (the data itself is never logged).
+//	@Description	Reading the state of a workflow's actors, such as an orchestrator's journal, also requires `workflows:data:read`, since it holds the instances' input and output.
 //	@Description
 //	@Description	Actor state is stored as MessagePack.
 //	@Description	By default it is converted to JSON and returned inside an `ActorState` envelope.
@@ -662,7 +664,7 @@ type actorStateJSON struct {
 //	@Success			200		{object}	actorStateJSON		"The actor's state, or the exact stored MessagePack bytes when requested with Accept: application/msgpack"
 //	@Failure			400		{object}	apiError			"`badRequest`: an invalid path segment, query parameter, cursor, or request body"
 //	@Failure			401		{object}	apiError			"`unauthorized`: the bearer token is missing or unknown"
-//	@Failure			403		{object}	apiError			"`forbidden`: the token does not grant the scope the route requires"
+//	@Failure			403		{object}	apiError			"`forbidden`: the token does not grant the scope the route requires, or `workflows:data:read` for a workflow's actor type"
 //	@Failure			404		{object}	apiError			"`notFound`: the actor has no stored state"
 //	@Failure			422		{object}	apiError			"`stateNotDecodable`: the stored state cannot be rendered as JSON, because it is not valid MessagePack or a map has two keys that would share a JSON name"
 //	@Failure			500		{object}	apiError			"`internal`: an unexpected server error"
@@ -674,6 +676,12 @@ func (s *Server) handleGetActorState(w http.ResponseWriter, r *http.Request) *ap
 	aRef, apiErr := actorRefFromPath(r)
 	if apiErr != nil {
 		return apiErr
+	}
+
+	// The state of a workflow's actors holds the instances' input and output, which the workflow routes only return with their own scope
+	_, _, _, isWorkflow := workflow.ParseActorType(aRef.ActorType)
+	if isWorkflow && !callerFromContext(r.Context()).Has(ScopeWorkflowsDataRead) {
+		return newAPIErrorf(http.StatusForbidden, CodeForbidden, "reading the state of a workflow's actors requires the '%s' scope too", ScopeWorkflowsDataRead)
 	}
 
 	s.auditRead(r, "actorState.read", slog.String("actorType", aRef.ActorType), slog.String("actorId", aRef.ActorID))
@@ -828,7 +836,7 @@ type deactivateJSON struct {
 //	@Failure			403		{object}	apiError			"`forbidden`: the token does not grant the scope the route requires"
 //	@Failure			409		{object}	apiError			"`hostReattached`: the host kept reconnecting, so the request could not be delivered to its current session; retryable"
 //	@Failure			500		{object}	apiError			"`internal`: an unexpected server error"
-//	@Failure			503		{object}	apiError			"`hostUnavailable`: the host, or the runtime owning its session, could not be reached; retryable"
+//	@Failure			503		{object}	apiError			"`hostUnavailable`: the host, or the runtime owning its session, could not be reached or was too busy; retryable"
 //	@Failure			504		{object}	apiError			"`timeout`: the request timed out; retryable"
 //	@Header				all		{string}	X-Request-Id		"A unique ID assigned to the request, also returned as requestId in error bodies and recorded in audit logs"
 //	@Header				401		{string}	WWW-Authenticate	"Always Bearer realm="francis-management" when the token is missing or unknown"
