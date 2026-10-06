@@ -12,11 +12,12 @@ type Host struct {
 	Address         string
 	LastHealthCheck time.Time
 
-	// SessionID, RuntimeID and Draining are kept in memory only, since a standalone provider serves a single runtime whose sessions all end when it restarts
+	// SessionID, RuntimeID, Draining and DrainToken are kept in memory only, since a standalone provider serves a single runtime whose sessions all end when it restarts
 	// A host that reconnects after a restart reattaches, which sets them all again
-	SessionID string
-	RuntimeID string
-	Draining  bool
+	SessionID  string
+	RuntimeID  string
+	Draining   bool
+	DrainToken string
 }
 
 // Clone creates a deep copy of the Host
@@ -28,6 +29,7 @@ func (h *Host) Clone() *Host {
 		SessionID:       h.SessionID,
 		RuntimeID:       h.RuntimeID,
 		Draining:        h.Draining,
+		DrainToken:      h.DrainToken,
 	}
 }
 

@@ -61,7 +61,6 @@ Error `code` values:
 | `exclusiveLeaseHeld` | 409 | An exclusive-access lease is held on the cluster (for example during a restore), so drains and workflow controls are refused; `GET /api/v1/cluster/summary` reports who holds it; retryable |
 | `hostReattached` | 409 | The host kept reconnecting, so the request could not be delivered to its current session; send it again; retryable |
 | `payloadTooLarge` | 413 | The request body is larger than 64 KiB |
-| `stateNotDecodable` | 422 | The stored actor state cannot be rendered as JSON, because it is not valid MessagePack or a map has two keys that would share a JSON name |
 | `internal` | 500 | Unexpected server error |
 | `hostUnavailable` | 503 | The host, or the runtime owning its session, could not be reached or was too busy; retryable |
 | `noHostsReachable` | 503 | None of the queried hosts could be reached; `details.errors` lists them; retryable |

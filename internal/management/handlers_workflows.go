@@ -547,9 +547,9 @@ type instanceJSON struct {
 	// True when the instance stored an output, where a stored JSON `null` counts
 	HasOutput bool `json:"hasOutput"`
 	// The instance input as JSON, present only with the `workflows:data:read` scope and when an input was stored; any JSON value
-	Input json.RawMessage `json:"input,omitempty" swaggertype:"object"`
+	Input json.RawMessage `json:"input,omitempty" extensions:"x-nullable"`
 	// The instance output as JSON, present only with the `workflows:data:read` scope and when `hasOutput` is true; any JSON value
-	Output json.RawMessage `json:"output,omitempty" swaggertype:"object"`
+	Output json.RawMessage `json:"output,omitempty" extensions:"x-nullable"`
 	// Present and `true` when `input` and `output` were withheld because the token lacks `workflows:data:read`
 	DataRedacted bool       `json:"dataRedacted,omitempty"`
 	Steps        []stepJSON `json:"steps"`

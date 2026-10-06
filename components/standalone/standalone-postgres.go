@@ -23,6 +23,7 @@ import (
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/internal/eventsql"
 	"github.com/italypaleale/francis/components/standalone/internal"
+	"github.com/italypaleale/francis/internal/utils"
 )
 
 //go:embed migrations/postgres/*.sql
@@ -720,7 +721,7 @@ func (s *StandalonePostgresBacked) persistHostActorTypeChanges(ctx context.Conte
 				actor_completed_job_retention = EXCLUDED.actor_completed_job_retention,
 				actor_dead_lettered_job_retention = EXCLUDED.actor_dead_lettered_job_retention`,
 			hat.HostID, hat.ActorType, hat.IdleTimeout.Milliseconds(), hat.ConcurrencyLimit,
-			hat.CompletedJobRetention.Milliseconds(), hat.DeadLetteredJobRetention.Milliseconds(),
+			utils.RetentionMilliseconds(hat.CompletedJobRetention), utils.RetentionMilliseconds(hat.DeadLetteredJobRetention),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to upsert host actor type: %w", err)

@@ -47,7 +47,16 @@ func TestLocalDrainStateMachine(t *testing.T) {
 	out, perr := h.localDrain(t.Context(), protocol.HostDrainRequest{TimeoutMs: 1500, Reason: "test"})
 	require.Nil(t, perr)
 	assert.False(t, out.AlreadyDraining)
-	assert.True(t, canceled, "the drain stops Run")
+	assert.False(t, canceled, "accepting a drain preserves the connection until the reply is written")
+
+	req, err := protocol.NewRequest(protocol.KindPeerHostDrain, protocol.HostDrainRequest{})
+	require.NoError(t, err)
+
+	duplicate := replyWith(req, protocol.KindPeerHostDrainResponse, protocol.HostDrainResponse{AlreadyDraining: true})
+	h.managementResponseWritten(req, duplicate)
+	assert.False(t, canceled, "a duplicate acknowledgement cannot start the first drain")
+	h.managementResponseWritten(req, replyWith(req, protocol.KindPeerHostDrainResponse, out))
+	assert.True(t, canceled, "writing the acknowledgement starts teardown")
 	assert.True(t, h.draining.Load())
 	assert.True(t, h.adminDrain.Accepted())
 
@@ -220,4 +229,83 @@ func TestHandleManagementUnknownKind(t *testing.T) {
 	perr, isErr := resp.AsError()
 	require.True(t, isErr)
 	assert.Equal(t, protocol.ErrCodeBadRequest, perr.Code)
+}
+
+type drainRegressionJob struct {
+	run func(context.Context) error
+}
+
+func (j drainRegressionJob) Job(ctx context.Context, _ string, _ actor.Envelope) error {
+	return j.run(ctx)
+}
+
+func TestLocalDrainReleasesRunningJobs(t *testing.T) {
+	for _, signal := range []string{"cancellation", "halting"} {
+		t.Run(signal, func(t *testing.T) {
+			started := make(chan struct{})
+
+			h, err := NewHost(
+				WithAddress(localFreeUDPAddr(t)),
+				WithSQLiteProvider(sqlite.SQLiteProviderOptions{ConnectionString: filepath.Join(t.TempDir(), "drain.db")}),
+				WithRuntimePSKs(localTestRuntimePSK),
+				WithShutdownGracePeriod(time.Hour),
+				WithLogger(slog.New(slog.DiscardHandler)),
+			)
+			require.NoError(t, err)
+
+			err = h.RegisterActor("drain-job", func(string, *actor.Service) actor.Actor {
+				return drainRegressionJob{run: func(ctx context.Context) error {
+					close(started)
+					stop := ctx.Done()
+					if signal == "halting" {
+						stop = actor.HaltingFromContext(ctx)
+					}
+					select {
+					case <-stop:
+						return ctx.Err()
+					case <-t.Context().Done():
+						return context.Canceled
+					}
+				}}
+			})
+			require.NoError(t, err)
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- h.Run(ctx)
+			}()
+
+			select {
+			case <-h.Ready():
+			case <-time.After(15 * time.Second):
+				t.Fatal("host did not start")
+			}
+
+			_, _, err = h.Dispatch(t.Context(), "drain-job", "one", "wait", nil, actor.JobProperties{})
+			require.NoError(t, err)
+
+			select {
+			case <-started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("job did not start")
+			}
+
+			// The host must begin halting before waiting for this job, and its timeout overrides the hour-long ordinary grace period
+			_, err = h.managementDrain(t.Context(), h.HostID(), h.address, protocol.HostDrainRequest{TimeoutMs: 1000})
+			require.NoError(t, err)
+
+			select {
+			case err = <-runErr:
+				require.ErrorIs(t, err, host.ErrAdministrativeDrain)
+			case <-time.After(5 * time.Second):
+				t.Fatal("bounded drain did not release the job")
+			}
+
+			assert.Empty(t, h.HostID())
+			assert.Zero(t, h.core.Actors.Len())
+		})
+	}
 }

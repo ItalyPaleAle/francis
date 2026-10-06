@@ -1,4 +1,84 @@
 components:
+  responses:
+    getActorState_400:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+      description: '`badRequest`: an invalid path segment, query parameter, cursor,
+        or request body'
+      headers:
+        X-Request-Id:
+          description: A unique ID assigned to the request, also returned as requestId
+            in error bodies and recorded in audit logs
+          schema:
+            type: string
+    getActorState_401:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+      description: '`unauthorized`: the bearer token is missing or unknown'
+      headers:
+        WWW-Authenticate:
+          description: Always Bearer realm="francis-management" when the token is
+            missing or unknown
+          schema:
+            type: string
+        X-Request-Id:
+          description: A unique ID assigned to the request, also returned as requestId
+            in error bodies and recorded in audit logs
+          schema:
+            type: string
+    getActorState_403:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+      description: '`forbidden`: the token does not grant the scope the route requires,
+        or `workflows:data:read` for a workflow''s actor type'
+      headers:
+        X-Request-Id:
+          description: A unique ID assigned to the request, also returned as requestId
+            in error bodies and recorded in audit logs
+          schema:
+            type: string
+    getActorState_404:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+      description: '`notFound`: the actor has no stored state'
+      headers:
+        X-Request-Id:
+          description: A unique ID assigned to the request, also returned as requestId
+            in error bodies and recorded in audit logs
+          schema:
+            type: string
+    getActorState_500:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+      description: '`internal`: an unexpected server error'
+      headers:
+        X-Request-Id:
+          description: A unique ID assigned to the request, also returned as requestId
+            in error bodies and recorded in audit logs
+          schema:
+            type: string
+    getActorState_504:
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+      description: '`timeout`: the request timed out; retryable'
+      headers:
+        X-Request-Id:
+          description: A unique ID assigned to the request, also returned as requestId
+            in error bodies and recorded in audit logs
+          schema:
+            type: string
   schemas:
     Activation:
       properties:
@@ -57,31 +137,6 @@ components:
       - items
       - partial
       - startedAt
-      type: object
-    ActorState:
-      properties:
-        actorId:
-          type: string
-        actorType:
-          type: string
-        lossy:
-          description: True when any value used a rendering that changes its shape,
-            such as binary data or a timestamp; numbers are always strings and don't
-            count, so `false` doesn't mean the JSON converts back to the stored bytes
-          type: boolean
-        size:
-          description: The size of the stored MessagePack value, in bytes
-          type: integer
-        state:
-          description: The stored value converted to JSON, following the convention
-            described on the operation; any JSON value
-          type: object
-      required:
-      - actorId
-      - actorType
-      - lossy
-      - size
-      - state
       type: object
     ActorStateItem:
       properties:
@@ -513,7 +568,6 @@ components:
           - noHostsReachable
           - eventHistoryDisabled
           - payloadTooLarge
-          - stateNotDecodable
           - timeout
           - internal
           type: string
@@ -842,13 +896,13 @@ components:
         input:
           description: The instance input as JSON, present only with the `workflows:data:read`
             scope and when an input was stored; any JSON value
-          type: object
+          nullable: true
         instanceId:
           type: string
         output:
           description: The instance output as JSON, present only with the `workflows:data:read`
             scope and when `hasOutput` is true; any JSON value
-          type: object
+          nullable: true
         parent:
           allOf:
           - $ref: '#/components/schemas/InstanceParent'
@@ -1459,7 +1513,6 @@ info:
     | `exclusiveLeaseHeld` | 409 | An exclusive-access lease is held on the cluster (for example during a restore), so drains and workflow controls are refused; `GET /api/v1/cluster/summary` reports who holds it; retryable |
     | `hostReattached` | 409 | The host kept reconnecting, so the request could not be delivered to its current session; send it again; retryable |
     | `payloadTooLarge` | 413 | The request body is larger than 64 KiB |
-    | `stateNotDecodable` | 422 | The stored actor state cannot be rendered as JSON, because it is not valid MessagePack or a map has two keys that would share a JSON name |
     | `internal` | 500 | Unexpected server error |
     | `hostUnavailable` | 503 | The host, or the runtime owning its session, could not be reached or was too busy; retryable |
     | `noHostsReachable` | 503 | None of the queried hosts could be reached; `details.errors` lists them; retryable |
@@ -1740,29 +1793,8 @@ paths:
         Requires scope `actors:state:read`. Every read is audited (the data itself is never logged).
         Reading the state of a workflow's actors, such as an orchestrator's journal, also requires `workflows:data:read`, since it holds the instances' input and output.
 
-        Actor state is stored as MessagePack.
-        By default it is converted to JSON and returned inside an `ActorState` envelope.
-        Send `Accept: application/msgpack` (also accepted: `application/x-msgpack`, `application/vnd.msgpack`) to receive the exact stored bytes instead, with `Content-Type: application/msgpack`.
-        Quality values are honored: the bytes are returned only when a MessagePack type is listed by name with a quality above zero and at least as high as the quality of JSON, so `*/*` alone keeps the JSON envelope.
-
-        JSON conversion convention:
-
-        | MessagePack | JSON | Lossy |
-        | --- | --- | --- |
-        | nil, bool, array, map with UTF-8 string keys | `null`, boolean, array, object (MessagePack field names are the keys) | no |
-        | string that is valid UTF-8 | string | no |
-        | integer of any size | decimal string, such as `"42"` or `"18446744073709551615"` | no |
-        | float (32 or 64 bit), finite | string with the shortest representation of its precision, such as `"0.1"` or `"1e+21"` | no |
-        | float NaN, +Inf, -Inf | string `"NaN"`, `"Infinity"`, `"-Infinity"` | no |
-        | bin, or string that is not valid UTF-8 | `{"$binary": "<standard base64>"}` | yes |
-        | timestamp extension (type -1) | RFC 3339 string in UTC with nanoseconds, such as `"2026-01-02T03:04:05.123456789Z"` | yes |
-        | any other extension | `{"$ext": <type>, "data": "<standard base64>"}` | yes |
-        | map key that is not a UTF-8 string | the key as text, such as `"1"` for the integer key 1 | yes |
-
-        Every number is a string, so its exact value survives any JSON parser.
-        `lossy` is `true` when any value used a rendering that changes its shape (the rows marked lossy above); numbers don't count, since they are always strings. Request MessagePack when exactness matters.
-        If the stored bytes are not a single valid MessagePack value (or are nested more than 512 levels deep), the JSON rendering fails with `422 stateNotDecodable`; the raw bytes can still be read with `Accept: application/msgpack`.
-        The same happens when two keys of a map would become the same JSON name, such as `1` and `"1"` or the same key stored twice, since JSON parsers disagree on which value they keep.
+        Returns the exact stored MessagePack bytes with `Content-Type: application/msgpack`.
+        The stored value is not decoded or converted; error responses use JSON.
       operationId: getActorState
       parameters:
       - description: The actor type, which must not contain a slash
@@ -1777,23 +1809,14 @@ paths:
         required: true
         schema:
           type: string
-      - description: Send application/msgpack to receive the raw stored bytes instead
-          of the JSON envelope
-        in: header
-        name: Accept
-        schema:
-          type: string
       responses:
         "200":
           content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ActorState'
             application/msgpack:
               schema:
-                $ref: '#/components/schemas/ActorState'
-          description: 'The actor''s state, or the exact stored MessagePack bytes
-            when requested with Accept: application/msgpack'
+                format: binary
+                type: string
+          description: The exact stored MessagePack bytes
           headers:
             X-Request-Id:
               description: A unique ID assigned to the request, also returned as requestId
@@ -1801,119 +1824,17 @@ paths:
               schema:
                 type: string
         "400":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-            application/msgpack:
-              schema:
-                $ref: '#/components/schemas/Error'
-          description: '`badRequest`: an invalid path segment, query parameter, cursor,
-            or request body'
-          headers:
-            X-Request-Id:
-              description: A unique ID assigned to the request, also returned as requestId
-                in error bodies and recorded in audit logs
-              schema:
-                type: string
+          $ref: '#/components/responses/getActorState_400'
         "401":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-            application/msgpack:
-              schema:
-                $ref: '#/components/schemas/Error'
-          description: '`unauthorized`: the bearer token is missing or unknown'
-          headers:
-            WWW-Authenticate:
-              description: Always Bearer realm="francis-management" when the token
-                is missing or unknown
-              schema:
-                type: string
-            X-Request-Id:
-              description: A unique ID assigned to the request, also returned as requestId
-                in error bodies and recorded in audit logs
-              schema:
-                type: string
+          $ref: '#/components/responses/getActorState_401'
         "403":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-            application/msgpack:
-              schema:
-                $ref: '#/components/schemas/Error'
-          description: '`forbidden`: the token does not grant the scope the route
-            requires, or `workflows:data:read` for a workflow''s actor type'
-          headers:
-            X-Request-Id:
-              description: A unique ID assigned to the request, also returned as requestId
-                in error bodies and recorded in audit logs
-              schema:
-                type: string
+          $ref: '#/components/responses/getActorState_403'
         "404":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-            application/msgpack:
-              schema:
-                $ref: '#/components/schemas/Error'
-          description: '`notFound`: the actor has no stored state'
-          headers:
-            X-Request-Id:
-              description: A unique ID assigned to the request, also returned as requestId
-                in error bodies and recorded in audit logs
-              schema:
-                type: string
-        "422":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-            application/msgpack:
-              schema:
-                $ref: '#/components/schemas/Error'
-          description: '`stateNotDecodable`: the stored state cannot be rendered as
-            JSON, because it is not valid MessagePack or a map has two keys that would
-            share a JSON name'
-          headers:
-            X-Request-Id:
-              description: A unique ID assigned to the request, also returned as requestId
-                in error bodies and recorded in audit logs
-              schema:
-                type: string
+          $ref: '#/components/responses/getActorState_404'
         "500":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-            application/msgpack:
-              schema:
-                $ref: '#/components/schemas/Error'
-          description: '`internal`: an unexpected server error'
-          headers:
-            X-Request-Id:
-              description: A unique ID assigned to the request, also returned as requestId
-                in error bodies and recorded in audit logs
-              schema:
-                type: string
+          $ref: '#/components/responses/getActorState_500'
         "504":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-            application/msgpack:
-              schema:
-                $ref: '#/components/schemas/Error'
-          description: '`timeout`: the request timed out; retryable'
-          headers:
-            X-Request-Id:
-              description: A unique ID assigned to the request, also returned as requestId
-                in error bodies and recorded in audit logs
-              schema:
-                type: string
+          $ref: '#/components/responses/getActorState_504'
       security:
       - bearerAuth: []
       summary: Read an actor's stored state
@@ -2759,9 +2680,9 @@ paths:
         - Repeating a drain on a host that is already draining is never refused, and `alreadyDraining` reports whether the host was already draining.
         - While an exclusive-access lease is held on the cluster, the action is refused with `409 exclusiveLeaseHeld`.
         - If the host reconnected before it received the request, including to another runtime replica, the request is sent again to its new session; only if the host keeps reconnecting is the response `409 hostReattached`, and the request can be sent again.
-        - When the request to the host fails, the host is asked whether it is draining. A host that is draining accepted the drain and the response is `202`. A host that is not draining has its draining mark removed, and the error has `details.hostDraining: false`. A host that can't be asked keeps its mark, since it may have accepted the drain, and the error has `details.hostDraining: true`.
-        - A host that refused the request because it was too busy never accepted the drain, so its mark is removed without asking it, and the error is `503 hostUnavailable` with `details.hostDraining: false`.
-        - The mark is only removed by the request that set it: when the host was already marked draining, a failed request leaves the mark in place and the error has `details.hostDraining: true`.
+        - When the request to the host fails, the host is asked whether it is draining. A host that is draining accepted the drain and the response is `202`. A host that is not draining has its mark removed only while this request still owns it, and the error reports `details.hostDraining`. A host that can't be asked keeps its mark, since it may have accepted the drain, and the error has `details.hostDraining: true`.
+        - A host that refused the request because it was too busy never accepted the drain, so its mark can be removed without asking it while this request still owns it; the error is `503 hostUnavailable` with `details.hostDraining`.
+        - A competing drain request or the host accepting a drain atomically invalidates rollback ownership, so a failed request leaves that mark in place with `details.hostDraining: true`.
 
         The request body is optional; an empty body is equivalent to `{}`.
         Unknown fields are rejected.

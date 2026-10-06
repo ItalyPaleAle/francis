@@ -119,35 +119,37 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 			return zero, fmt.Errorf("error removing failed hosts: %w", err)
 		}
 
-		// Try to refresh the existing registration in place, handing it to the new session
-		// A unique constraint violation here means a different, healthy host already holds the address
+		// Lock the identity before the cluster lease, without reserving a new address that a registration may be waiting to insert
 		queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
 		defer cancel()
-		var tag pgconn.CommandTag
+		var existingID string
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-		tag, err = tx.Exec(queryCtx,
-			`UPDATE `+p.tablePrefix+`hosts
-			SET host_address = $1, host_last_health_check = now() AT TIME ZONE 'utc', host_session_id = $3, host_runtime_id = $4, host_draining = false
-			WHERE host_id = $2`,
-			req.Address, req.ExistingHostID, utils.NullString(req.SessionID), utils.NullString(req.RuntimeID),
-		)
-		if isConstraintError(err) {
-			return zero, components.ErrHostAlreadyRegistered
-		} else if err != nil {
-			return zero, fmt.Errorf("error updating host: %w", err)
+		err = tx.QueryRow(queryCtx, `SELECT host_id FROM `+p.tablePrefix+`hosts WHERE host_id = $1 FOR UPDATE`, req.ExistingHostID).Scan(&existingID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return zero, fmt.Errorf("error locking host: %w", err)
 		}
 
-		// Reject a reattach while an exclusive-access lease is held, so a locked cluster stays empty, and a live lease rolls back the update above
-		// A reattach never adds a host beyond the limit, so the host count and limit agreement are not re-checked here
-		// The cluster_config row is locked after the host row, which is the order MarkHostDraining takes them in, so the two can't deadlock
-		// It is still locked before inserting a replacement row below, which keeps that insert serialized with registrations of the same address
+		// A reattach never adds a host beyond the limit, but it must still respect the exclusive-access lease
 		err = p.checkClusterNotLocked(ctx, tx)
 		if err != nil {
 			return zero, err
 		}
 
 		var activeHostID string
-		if tag.RowsAffected() == 1 {
+		if existingID != "" {
+			// Refresh the registration only after acquiring the cluster lock, matching fresh registrations' address lock order
+			queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
+			defer cancel()
+			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+			_, err = tx.Exec(queryCtx,
+				`UPDATE `+p.tablePrefix+`hosts SET host_address = $1, host_last_health_check = now() AT TIME ZONE 'utc', host_session_id = $3, host_runtime_id = $4, host_draining = false, host_drain_token = '' WHERE host_id = $2`,
+				req.Address, req.ExistingHostID, utils.NullString(req.SessionID), utils.NullString(req.RuntimeID),
+			)
+			if isConstraintError(err) {
+				return zero, components.ErrHostAlreadyRegistered
+			} else if err != nil {
+				return zero, fmt.Errorf("error updating host: %w", err)
+			}
 			activeHostID = req.ExistingHostID
 			reattached = true
 		} else {
@@ -364,7 +366,7 @@ func (p *PostgresProvider) setActorHostDraining(ctx context.Context, hostID stri
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := db.Exec(queryCtx,
 		`UPDATE `+p.tablePrefix+`hosts
-		SET host_draining = true
+		SET host_draining = true, host_drain_token = ''
 		WHERE
 			host_id = $1
 			AND host_last_health_check >= ((now() AT TIME ZONE 'utc') - $2::interval)`,
@@ -637,8 +639,8 @@ func (ahtc *actorHostTypeColl) Values() ([]any, error) {
 		row.ActorType,
 		row.IdleTimeout,
 		row.ConcurrencyLimit,
-		row.CompletedJobRetention,
-		row.DeadLetteredJobRetention,
+		utils.RetentionInterval(row.CompletedJobRetention),
+		utils.RetentionInterval(row.DeadLetteredJobRetention),
 	}
 	return res, nil
 }

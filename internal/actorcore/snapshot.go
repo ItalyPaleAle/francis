@@ -179,6 +179,11 @@ func compareActorRef(aType string, aID string, bType string, bID string) int {
 // It still waits for those actors to finish halting before returning, because the caller unregisters the host next, and another host could then activate an actor whose call is still running here
 // A timeout that is not positive waits for HaltAll to complete without canceling any call
 func (m *Manager) HaltAllWithin(timeout time.Duration) (forced []string, err error) {
+	// Bar actor creation before taking the halt snapshot, including work admitted just before shutdown
+	m.createLock.Lock()
+	m.draining.Store(true)
+	m.createLock.Unlock()
+
 	if timeout <= 0 {
 		return nil, m.HaltAll()
 	}

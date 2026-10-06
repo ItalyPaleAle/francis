@@ -1,10 +1,8 @@
 package management
 
 import (
-	"encoding/json"
 	"errors"
 	"log/slog"
-	"mime"
 	"net/http"
 	"slices"
 	"strconv"
@@ -14,7 +12,6 @@ import (
 	"github.com/italypaleale/francis/builtin/workflow"
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
-	"github.com/italypaleale/francis/internal/utils/msgpackjson"
 	"github.com/italypaleale/francis/protocol"
 )
 
@@ -613,17 +610,6 @@ func (s *Server) handleListActorStates(w http.ResponseWriter, r *http.Request) *
 	return nil
 }
 
-type actorStateJSON struct {
-	ActorType string `json:"actorType"`
-	ActorID   string `json:"actorId"`
-	// The size of the stored MessagePack value, in bytes
-	Size int `json:"size"`
-	// True when any value used a rendering that changes its shape, such as binary data or a timestamp; numbers are always strings and don't count, so `false` doesn't mean the JSON converts back to the stored bytes
-	Lossy bool `json:"lossy"`
-	// The stored value converted to JSON, following the convention described on the operation; any JSON value
-	State json.RawMessage `json:"state" swaggertype:"object"`
-} //	@name	ActorState
-
 // handleGetActorState serves GET /api/v1/actor-states/{type}/{id}
 //
 //	@Summary		Read an actor's stored state
@@ -631,42 +617,19 @@ type actorStateJSON struct {
 //	@Description	Requires scope `actors:state:read`. Every read is audited (the data itself is never logged).
 //	@Description	Reading the state of a workflow's actors, such as an orchestrator's journal, also requires `workflows:data:read`, since it holds the instances' input and output.
 //	@Description
-//	@Description	Actor state is stored as MessagePack.
-//	@Description	By default it is converted to JSON and returned inside an `ActorState` envelope.
-//	@Description	Send `Accept: application/msgpack` (also accepted: `application/x-msgpack`, `application/vnd.msgpack`) to receive the exact stored bytes instead, with `Content-Type: application/msgpack`.
-//	@Description	Quality values are honored: the bytes are returned only when a MessagePack type is listed by name with a quality above zero and at least as high as the quality of JSON, so `*/*` alone keeps the JSON envelope.
-//	@Description
-//	@Description	JSON conversion convention:
-//	@Description
-//	@Description	| MessagePack | JSON | Lossy |
-//	@Description	| --- | --- | --- |
-//	@Description	| nil, bool, array, map with UTF-8 string keys | `null`, boolean, array, object (MessagePack field names are the keys) | no |
-//	@Description	| string that is valid UTF-8 | string | no |
-//	@Description	| integer of any size | decimal string, such as `"42"` or `"18446744073709551615"` | no |
-//	@Description	| float (32 or 64 bit), finite | string with the shortest representation of its precision, such as `"0.1"` or `"1e+21"` | no |
-//	@Description	| float NaN, +Inf, -Inf | string `"NaN"`, `"Infinity"`, `"-Infinity"` | no |
-//	@Description	| bin, or string that is not valid UTF-8 | `{"$binary": "<standard base64>"}` | yes |
-//	@Description	| timestamp extension (type -1) | RFC 3339 string in UTC with nanoseconds, such as `"2026-01-02T03:04:05.123456789Z"` | yes |
-//	@Description	| any other extension | `{"$ext": <type>, "data": "<standard base64>"}` | yes |
-//	@Description	| map key that is not a UTF-8 string | the key as text, such as `"1"` for the integer key 1 | yes |
-//	@Description
-//	@Description		Every number is a string, so its exact value survives any JSON parser.
-//	@Description		`lossy` is `true` when any value used a rendering that changes its shape (the rows marked lossy above); numbers don't count, since they are always strings. Request MessagePack when exactness matters.
-//	@Description		If the stored bytes are not a single valid MessagePack value (or are nested more than 512 levels deep), the JSON rendering fails with `422 stateNotDecodable`; the raw bytes can still be read with `Accept: application/msgpack`.
-//	@Description		The same happens when two keys of a map would become the same JSON name, such as `1` and `"1"` or the same key stored twice, since JSON parsers disagree on which value they keep.
+//	@Description	Returns the exact stored MessagePack bytes with `Content-Type: application/msgpack`.
+//	@Description	The stored value is not decoded or converted; error responses use JSON.
 //	@Tags				Actors
 //	@Security			bearerAuth
 //	@x-required-scope	"actors:state:read"
-//	@Produce			json,application/msgpack
+//	@Produce			application/msgpack
 //	@Param				type	path		string				true	"The actor type, which must not contain a slash"
 //	@Param				id		path		string				true	"The actor ID, which must not contain a slash"
-//	@Param				Accept	header		string				false	"Send application/msgpack to receive the raw stored bytes instead of the JSON envelope"
-//	@Success			200		{object}	actorStateJSON		"The actor's state, or the exact stored MessagePack bytes when requested with Accept: application/msgpack"
+//	@Success			200		{file}		file				"The exact stored MessagePack bytes"
 //	@Failure			400		{object}	apiError			"`badRequest`: an invalid path segment, query parameter, cursor, or request body"
 //	@Failure			401		{object}	apiError			"`unauthorized`: the bearer token is missing or unknown"
 //	@Failure			403		{object}	apiError			"`forbidden`: the token does not grant the scope the route requires, or `workflows:data:read` for a workflow's actor type"
 //	@Failure			404		{object}	apiError			"`notFound`: the actor has no stored state"
-//	@Failure			422		{object}	apiError			"`stateNotDecodable`: the stored state cannot be rendered as JSON, because it is not valid MessagePack or a map has two keys that would share a JSON name"
 //	@Failure			500		{object}	apiError			"`internal`: an unexpected server error"
 //	@Failure			504		{object}	apiError			"`timeout`: the request timed out; retryable"
 //	@Header				all		{string}	X-Request-Id		"A unique ID assigned to the request, also returned as requestId in error bodies and recorded in audit logs"
@@ -693,102 +656,14 @@ func (s *Server) handleGetActorState(w http.ResponseWriter, r *http.Request) *ap
 		return s.fail(r, "failed to get actor state", err)
 	}
 
-	// The exact stored bytes are returned on request
-	if acceptsMsgpack(r) {
-		w.Header().Set("Content-Type", "application/msgpack")
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
-		w.WriteHeader(http.StatusOK)
-		// The body is served as application/msgpack with no-sniff, so it is not rendered as HTML
-		_, _ = w.Write(data) //nolint:gosec
-		return nil
-	}
-
-	state, lossy, err := msgpackjson.ToJSON(data)
-	if err != nil {
-		return newAPIErrorf(http.StatusUnprocessableEntity, CodeStateNotDecodable, "the stored state can't be rendered as JSON (%v); request it with 'Accept: application/msgpack' to read the raw bytes", err)
-	}
-
-	writeJSON(w, http.StatusOK, actorStateJSON{
-		ActorType: aRef.ActorType,
-		ActorID:   aRef.ActorID,
-		Size:      len(data),
-		Lossy:     lossy,
-		State:     state,
-	})
+	// Return the stored bytes without decoding potentially untrusted state
+	w.Header().Set("Content-Type", "application/msgpack")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data) //nolint:gosec // MessagePack is served with nosniff
 	return nil
-}
-
-// acceptsMsgpack reports whether the request asks for the raw MessagePack encoding
-// MessagePack must be listed by name with a non-zero quality, and at least as high as the quality JSON gets, so wildcards alone keep the JSON default
-func acceptsMsgpack(r *http.Request) bool {
-	var (
-		// msgpackQ stays negative unless a MessagePack type is listed, and the aliases all name the same format
-		msgpackQ = -1.0
-		jsonQ    float64
-		// jsonRank is how specific the range that set jsonQ is, since the most specific matching range decides a type's quality
-		jsonRank int
-	)
-	for part := range strings.SplitSeq(r.Header.Get("Accept"), ",") {
-		mediaType, q, ok := parseAcceptRange(part)
-		if !ok {
-			continue
-		}
-
-		if mediaType == "application/msgpack" || mediaType == "application/x-msgpack" || mediaType == "application/vnd.msgpack" {
-			msgpackQ = max(msgpackQ, q)
-			continue
-		}
-
-		// A range that covers JSON replaces the quality of any less specific one
-		rank := jsonRangeRank(mediaType)
-		switch {
-		case rank == 0:
-			// The range doesn't cover JSON
-		case rank > jsonRank:
-			jsonQ = q
-			jsonRank = rank
-		case rank == jsonRank:
-			jsonQ = max(jsonQ, q)
-		}
-	}
-	return msgpackQ > 0 && msgpackQ >= jsonQ
-}
-
-// jsonRangeRank ranks the media ranges that cover JSON from the least to the most specific, and returns 0 for any other range
-func jsonRangeRank(mediaType string) int {
-	switch mediaType {
-	case "*/*":
-		return 1
-	case "application/*":
-		return 2
-	case "application/json":
-		return 3
-	default:
-		return 0
-	}
-}
-
-// parseAcceptRange parses one media range of an Accept header, returning its lowercased media type and quality
-// A range that can't be parsed, or has a quality outside 0 to 1, is reported as not ok so it is ignored
-func parseAcceptRange(part string) (mediaType string, q float64, ok bool) {
-	mediaType, params, err := mime.ParseMediaType(part)
-	if err != nil {
-		return "", 0, false
-	}
-
-	// A range without a quality has the default of 1
-	qs, hasQ := params["q"]
-	if !hasQ {
-		return mediaType, 1, true
-	}
-	// The range check is written so that NaN fails it too
-	q, err = strconv.ParseFloat(qs, 64)
-	if err != nil || !(q >= 0 && q <= 1) {
-		return "", 0, false
-	}
-	return mediaType, q, true
 }
 
 // actorRefFromPath reads the actor type and ID path segments

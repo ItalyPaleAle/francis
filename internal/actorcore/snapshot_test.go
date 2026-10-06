@@ -250,6 +250,57 @@ func TestHaltAllWithin(t *testing.T) {
 		}
 	})
 
+	t.Run("an already halting actor still observes the drain deadline", func(t *testing.T) {
+		m := newManager(t)
+		started := make(chan struct{})
+		halting := make(chan struct{})
+		callDone := make(chan error, 1)
+		r := ref.NewActorRef("T", "already-halting")
+
+		go func() {
+			_, err := m.LockAndInvoke(t.Context(), r, func(ctx context.Context, _ *ActiveActor) (any, error) {
+				close(started)
+				<-actor.HaltingFromContext(ctx)
+				close(halting)
+				<-ctx.Done()
+				return nil, ctx.Err()
+			})
+			callDone <- err
+		}()
+
+		<-started
+
+		haltDone := make(chan error, 1)
+		go func() {
+			haltDone <- m.Halt(r.ActorType, r.ActorID)
+		}()
+
+		<-halting
+
+		// DrainAll must wait for the halt another caller owns, keeping the force-cancellation timer active
+		drainDone := make(chan error, 1)
+
+		go func() {
+			_, err := m.HaltAllWithin(50 * time.Millisecond)
+			drainDone <- err
+		}()
+
+		select {
+		case err := <-drainDone:
+			require.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("drain did not cancel an already halting actor")
+		}
+
+		err := <-haltDone
+		require.NoError(t, err)
+
+		err = <-callDone
+		require.ErrorIs(t, err, context.Canceled)
+
+		assert.Zero(t, m.Actors.Len())
+	})
+
 	t.Run("waits for a canceled call that takes time to return", func(t *testing.T) {
 		removed := make(chan ref.ActorRef, 1)
 		m := NewManager(Options{
@@ -345,4 +396,44 @@ func TestHaltAllWithin(t *testing.T) {
 		assert.Empty(t, forced)
 		assert.Zero(t, m.Actors.Len())
 	})
+}
+
+func TestIdleLockIsReleasedToAConcurrentDrain(t *testing.T) {
+	m := NewManager(Options{RemoveActor: func(context.Context, ref.ActorRef) error {
+		return nil
+	}})
+
+	err := m.RegisterActor("T", func(string, *actor.Service) actor.Actor {
+		return struct{}{}
+	}, RegisterActorOptions{})
+	require.NoError(t, err)
+
+	m.Start()
+	defer m.Close()
+	r := ref.NewActorRef("T", "idle")
+	act, err := m.getOrCreateActor(t.Context(), r)
+	require.NoError(t, err)
+
+	// Pause idle deactivation after its TryLock while a drain claims deactivation and waits on that lock
+	locked, _, err := act.TryLock()
+	require.NoError(t, err)
+	require.True(t, locked)
+
+	done := make(chan error, 1)
+
+	go func() {
+		_, err := m.HaltAllWithin(50 * time.Millisecond)
+		done <- err
+	}()
+	require.Eventually(t, act.deactivationStarted.Load, time.Second, time.Millisecond)
+
+	// Losing deactivation ownership must give up the idle lock so the drain can finish
+	m.haltIdleActor(act)
+	select {
+	case err = <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("drain remained blocked on the idle processor's lock")
+	}
+	assert.Zero(t, m.Actors.Len())
 }

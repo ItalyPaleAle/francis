@@ -559,12 +559,12 @@ func (w *providerWrapper) MarkHostDraining(ctx context.Context, req components.M
 }
 
 // ClearHostDraining implements components.ManagementProvider
-func (w *providerWrapper) ClearHostDraining(ctx context.Context, hostID string) (err error) {
+func (w *providerWrapper) ClearHostDraining(ctx context.Context, hostID string, rollbackToken string) (cleared bool, err error) {
 	spanCtx, span, start := w.beginOp(ctx, "ClearHostDraining")
-	err = w.base.ClearHostDraining(spanCtx, hostID)
+	cleared, err = w.base.ClearHostDraining(spanCtx, hostID, rollbackToken)
 	w.finishOp(spanCtx, span, "ClearHostDraining", start, err)
 
-	return err
+	return cleared, err
 }
 
 // ListPlacements implements components.ManagementProvider

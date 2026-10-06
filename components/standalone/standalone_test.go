@@ -2376,6 +2376,7 @@ func testWorkflowEventPersistence(t *testing.T, p *internal.Provider, reload fun
 					CompletedJobRetention:    90 * time.Second,
 					DeadLetteredJobRetention: 36 * time.Hour,
 				},
+				{ActorType: "ForeverActor", CompletedJobRetention: time.Duration(-1), DeadLetteredJobRetention: time.Nanosecond},
 			},
 		})
 		require.NoError(t, err)
@@ -2384,9 +2385,16 @@ func testWorkflowEventPersistence(t *testing.T, p *internal.Provider, reload fun
 		p2.Mu.RLock()
 		types := p2.HostActorTypes[res.HostID]
 		p2.Mu.RUnlock()
-		require.Len(t, types, 1)
-		require.Equal(t, 90*time.Second, types[0].CompletedJobRetention)
-		require.Equal(t, 36*time.Hour, types[0].DeadLetteredJobRetention)
+		require.Len(t, types, 2)
+		for _, typ := range types {
+			if typ.ActorType == "ForeverActor" {
+				require.Negative(t, typ.CompletedJobRetention)
+				require.Positive(t, typ.DeadLetteredJobRetention)
+			} else {
+				require.Equal(t, 90*time.Second, typ.CompletedJobRetention)
+				require.Equal(t, 36*time.Hour, typ.DeadLetteredJobRetention)
+			}
+		}
 
 		// Restore refuses to run while a host is connected
 		err = p.UnregisterHost(t.Context(), res.HostID, components.UnregisterHostOpts{})

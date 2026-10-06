@@ -1037,6 +1037,8 @@ func rewindLoopBody(st *instanceState, d *stepDef) {
 			continue
 		}
 
+		// Preserve this iteration's settlement and received event before opening the next iteration
+		st.captureStepHistory(sr)
 		sr.Status = StepPending
 		sr.Remaining = 0
 		sr.Error = ""
@@ -1131,6 +1133,8 @@ func unwindNextFrame(st *instanceState, def *definition, now time.Time) bool {
 
 	// Opening the frame gives every task that has to be undone its first compensation attempt, numbered before it is dispatched
 	if sr.Status != StepCompensating {
+		// Preserve the failure or completion that opened this compensation in the same turn
+		st.captureStepHistory(sr)
 		sr.Status = StepCompensating
 		for _, i := range compensableTasks(sr, d) {
 			if sr.Tasks[i].Comp != nil {

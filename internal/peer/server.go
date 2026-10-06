@@ -66,6 +66,9 @@ type ServerConfig struct {
 	// Management requests are served while the host is draining, since they are how the host is inspected and drained
 	// If nil, management requests are rejected like any other unexpected kind
 	ManagementHandler func(ctx context.Context, req *protocol.Envelope) *protocol.Envelope
+
+	// ManagementResponseWritten runs after the bounded response write, allowing drain acknowledgements to precede shutdown
+	ManagementResponseWritten func(req *protocol.Envelope, resp *protocol.Envelope)
 }
 
 // Server accepts host-to-host actor invocations over WebTransport
@@ -307,7 +310,15 @@ func (s *Server) handleManagement(ctx context.Context, stream *webtransport.Stre
 	if resp == nil {
 		resp = req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "management request produced no response"))
 	}
+	// Bound the reply so an unresponsive caller cannot prevent an accepted drain from starting
+	_ = stream.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	_ = protocol.WriteMessage(stream, resp)
+
+	// Close both directions before teardown can reset an acknowledgement still registered with the session
+	wt.CloseStream(stream)
+	if s.cfg.ManagementResponseWritten != nil {
+		s.cfg.ManagementResponseWritten(req, resp)
+	}
 }
 
 // handleObject runs an object invocation and returns the response envelope

@@ -954,6 +954,41 @@ func TestPostgresManagement(t *testing.T) {
 		assert.Equal(t, 36*time.Hour, deadRet)
 	})
 
+	t.Run("a changed-address reattach does not reserve the address before the cluster lock", func(t *testing.T) {
+		res, err := p.RegisterHost(t.Context(), components.RegisterHostReq{Address: "10.2.1.1:8080"})
+		require.NoError(t, err)
+		// Model a fresh registration's transaction paused after cluster admission and before its unique address insert
+		side, err := p.db.Begin(t.Context())
+		require.NoError(t, err)
+		defer func() { _ = side.Rollback(context.WithoutCancel(t.Context())) }()
+		var sidePID int
+		err = side.QueryRow(t.Context(), `SELECT pg_backend_pid()`).Scan(&sidePID)
+		require.NoError(t, err)
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		_, err = side.Exec(t.Context(), `SELECT 1 FROM `+p.tablePrefix+`cluster_config WHERE cluster_config_id = 1 FOR UPDATE`)
+		require.NoError(t, err)
+		reattachErr := make(chan error, 1)
+		go func() {
+			_, err := p.RegisterHost(t.Context(), components.RegisterHostReq{ExistingHostID: res.HostID, Address: "10.2.1.2:8080"})
+			reattachErr <- err
+		}()
+		assert.EventuallyWithT(t, func(c *assert.CollectT) {
+			var blocked int
+			err := p.db.QueryRow(t.Context(), `SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))`, sidePID).Scan(&blocked)
+			assert.NoError(c, err)
+			assert.Equal(c, 1, blocked)
+		}, 10*time.Second, 10*time.Millisecond)
+
+		// The reattach is waiting for the cluster lock, so it must not block this fresh registration's insert
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		_, err = side.Exec(t.Context(), `INSERT INTO `+p.tablePrefix+`hosts (host_id, host_address, host_last_health_check) VALUES ($1, $2, now() AT TIME ZONE 'utc')`, uuid.NewV7().String(), "10.2.1.2:8080")
+		require.NoError(t, err)
+		err = side.Commit(t.Context())
+		require.NoError(t, err)
+		err = <-reattachErr
+		require.ErrorIs(t, err, components.ErrHostAlreadyRegistered)
+	})
+
 	t.Run("a drain and a reattach of the same host queued on the cluster row don't deadlock", func(t *testing.T) {
 		res, err := p.RegisterHost(t.Context(), components.RegisterHostReq{
 			Address:    "10.2.0.1:8080",

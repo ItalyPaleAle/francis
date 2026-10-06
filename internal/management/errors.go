@@ -25,7 +25,6 @@ const (
 	CodeNoHostsReachable     = "noHostsReachable"
 	CodeEventHistoryDisabled = "eventHistoryDisabled"
 	CodePayloadTooLarge      = "payloadTooLarge"
-	CodeStateNotDecodable    = "stateNotDecodable"
 	CodeTimeout              = "timeout"
 	CodeInternal             = "internal"
 )
@@ -51,7 +50,7 @@ type apiError struct {
 
 	// A machine-readable error code
 	// See the API description for the meaning of each code
-	Code string `json:"code" enums:"badRequest,unauthorized,forbidden,notFound,notApplicable,methodNotAllowed,exclusiveLeaseHeld,lastServer,hostUnavailable,hostReattached,noHostsReachable,eventHistoryDisabled,payloadTooLarge,stateNotDecodable,timeout,internal"`
+	Code string `json:"code" enums:"badRequest,unauthorized,forbidden,notFound,notApplicable,methodNotAllowed,exclusiveLeaseHeld,lastServer,hostUnavailable,hostReattached,noHostsReachable,eventHistoryDisabled,payloadTooLarge,timeout,internal"`
 	// A human-readable description of the error
 	Message string `json:"message"`
 	// The request ID, also returned in the `X-Request-Id` header

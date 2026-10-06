@@ -24,40 +24,7 @@ func TestGetActorState(t *testing.T) {
 	aRef := ref.NewActorRef("counter", "c1")
 	state := mp(b(0x82), fixstr("n"), mp(b(0xcf), be64(1<<60)), fixstr("name"), fixstr("x"))
 
-	t.Run("JSON rendering", func(t *testing.T) {
-		ts := newTestServer(t)
-		ts.provider.EXPECT().GetState(mock.Anything, aRef).Return(state, nil)
-
-		// Read-only tokens hold actors:state:read
-		res := decodeJSON(t, ts.do(t, http.MethodGet, "/api/v1/actor-states/counter/c1", testReadOnlyToken, ""), http.StatusOK)
-		assert.Equal(t, "counter", res["actorType"])
-		assert.Equal(t, "c1", res["actorId"])
-		assert.InDelta(t, len(state), res["size"], 0)
-
-		// Every number is rendered as a string by convention, which doesn't make the state lossy
-		assert.Equal(t, false, res["lossy"])
-		assert.Equal(t, map[string]any{"n": "1152921504606846976", "name": "x"}, res["state"])
-	})
-
-	t.Run("JSON rendering of a lossy value", func(t *testing.T) {
-		ts := newTestServer(t)
-		ts.provider.EXPECT().GetState(mock.Anything, aRef).Return(mp(b(0x81), fixstr("data"), b(0xc4, 0x01, 0x01)), nil)
-
-		res := decodeJSON(t, ts.do(t, http.MethodGet, "/api/v1/actor-states/counter/c1", testReadOnlyToken, ""), http.StatusOK)
-		assert.Equal(t, true, res["lossy"])
-		assert.Equal(t, map[string]any{"data": map[string]any{"$binary": "AQ=="}}, res["state"])
-	})
-
-	t.Run("JSON rendering preserves key order", func(t *testing.T) {
-		ts := newTestServer(t)
-		ts.provider.EXPECT().GetState(mock.Anything, aRef).Return(state, nil)
-
-		w := ts.do(t, http.MethodGet, "/api/v1/actor-states/counter/c1", testReadOnlyToken, "", "Accept", "application/json")
-		require.Equal(t, http.StatusOK, w.Code)
-		assert.Contains(t, w.Body.String(), `"state":{"n":"1152921504606846976","name":"x"}`)
-	})
-
-	for _, accept := range []string{"application/msgpack", "application/x-msgpack", "application/vnd.msgpack", "text/html, APPLICATION/MSGPACK;q=0.9"} {
+	for _, accept := range []string{"", "application/msgpack", "application/json", "*/*", "application/msgpack;q=0"} {
 		t.Run("raw bytes with Accept "+accept, func(t *testing.T) {
 			ts := newTestServer(t)
 			ts.provider.EXPECT().GetState(mock.Anything, aRef).Return(state, nil)
@@ -67,70 +34,19 @@ func TestGetActorState(t *testing.T) {
 			assert.Equal(t, "application/msgpack", w.Header().Get("Content-Type"))
 			assert.Equal(t, strconv.Itoa(len(state)), w.Header().Get("Content-Length"))
 			assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+			assert.Equal(t, "nosniff", w.Header().Get("X-Content-Type-Options"))
 			assert.Equal(t, state, w.Body.Bytes())
 		})
 	}
 
-	// Each Accept header either prefers the raw bytes or keeps the JSON rendering, depending on the qualities
-	negotiation := []struct {
-		accept  string
-		msgpack bool
-	}{
-		{accept: "application/msgpack;q=0", msgpack: false},
-		{accept: "application/msgpack; q=0.0", msgpack: false},
-		{accept: "application/json, application/msgpack;q=0", msgpack: false},
-		{accept: "application/json;q=0.9, application/msgpack;q=0.5", msgpack: false},
-		{accept: "application/json;q=0.5, application/msgpack;q=0.9", msgpack: true},
-		{accept: "application/json, application/msgpack", msgpack: true},
-		{accept: "*/*, application/msgpack;q=0.8", msgpack: false},
-		{accept: "application/*;q=0.8, application/msgpack;q=0.9", msgpack: true},
-		{accept: "application/json;q=0.1, */*, application/msgpack;q=0.5", msgpack: true},
-		{accept: "application/msgpack;q=0, application/x-msgpack", msgpack: true},
-		{accept: "application/msgpack;q=2", msgpack: false},
-		{accept: "application/msgpack;q=NaN", msgpack: false},
-		{accept: "application/msgpack;q=high", msgpack: false},
-		{accept: "*/*", msgpack: false},
-		{accept: "", msgpack: false},
-	}
-	for _, tc := range negotiation {
-		t.Run("negotiates Accept "+tc.accept, func(t *testing.T) {
+	t.Run("stored bytes are never decoded", func(t *testing.T) {
+		for _, data := range [][]byte{{0xc1, 0x00}, {0xdb, 0xff, 0xff, 0xff, 0xf0}} {
 			ts := newTestServer(t)
-			ts.provider.EXPECT().GetState(mock.Anything, aRef).Return(state, nil)
-
-			w := ts.do(t, http.MethodGet, "/api/v1/actor-states/counter/c1", testReadOnlyToken, "", "Accept", tc.accept)
+			ts.provider.EXPECT().GetState(mock.Anything, aRef).Return(data, nil)
+			w := ts.do(t, http.MethodGet, "/api/v1/actor-states/counter/c1", testReadOnlyToken, "")
 			require.Equal(t, http.StatusOK, w.Code)
-			if tc.msgpack {
-				assert.Equal(t, "application/msgpack", w.Header().Get("Content-Type"))
-			} else {
-				assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
-			}
-		})
-	}
-
-	t.Run("raw bytes of a value that is not valid MessagePack", func(t *testing.T) {
-		ts := newTestServer(t)
-		ts.provider.EXPECT().GetState(mock.Anything, aRef).Return(b(0xc1, 0x00), nil)
-
-		w := ts.do(t, http.MethodGet, "/api/v1/actor-states/counter/c1", testReadOnlyToken, "", "Accept", "application/msgpack")
-		require.Equal(t, http.StatusOK, w.Code)
-		assert.Equal(t, b(0xc1, 0x00), w.Body.Bytes())
-	})
-
-	t.Run("state that is not valid MessagePack", func(t *testing.T) {
-		ts := newTestServer(t)
-		ts.provider.EXPECT().GetState(mock.Anything, aRef).Return(b(0xc1, 0x00), nil)
-
-		e := decodeError(t, ts.do(t, http.MethodGet, "/api/v1/actor-states/counter/c1", testReadOnlyToken, ""), http.StatusUnprocessableEntity, CodeStateNotDecodable)
-		assert.Contains(t, e.Message, "application/msgpack")
-	})
-
-	t.Run("state whose map keys collide in JSON", func(t *testing.T) {
-		ts := newTestServer(t)
-		ts.provider.EXPECT().GetState(mock.Anything, aRef).Return(mp(b(0x82, 0x01), fixstr("a"), fixstr("1"), fixstr("b")), nil)
-
-		e := decodeError(t, ts.do(t, http.MethodGet, "/api/v1/actor-states/counter/c1", testReadOnlyToken, ""), http.StatusUnprocessableEntity, CodeStateNotDecodable)
-		assert.Contains(t, e.Message, `JSON name "1"`)
-		assert.Contains(t, e.Message, "application/msgpack")
+			assert.Equal(t, data, w.Body.Bytes())
+		}
 	})
 
 	t.Run("no state", func(t *testing.T) {
@@ -151,7 +67,9 @@ func TestGetActorState(t *testing.T) {
 
 		// Read-only tokens hold workflows:data:read too, so they read the state
 		ts.provider.EXPECT().GetState(mock.Anything, ref.NewActorRef(orchestrator, "i1")).Return(state, nil).Once()
-		decodeJSON(t, ts.do(t, http.MethodGet, "/api/v1/actor-states/"+orchestrator+"/i1", testReadOnlyToken, ""), http.StatusOK)
+		w := ts.do(t, http.MethodGet, "/api/v1/actor-states/"+orchestrator+"/i1", testReadOnlyToken, "")
+		require.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, state, w.Body.Bytes())
 
 		// getState calls the handler as a caller that holds actors:state:read but not workflows:data:read, which no configured token is
 		getState := func(actorType string, actorID string) (*httptest.ResponseRecorder, *apiError) {
@@ -171,7 +89,7 @@ func TestGetActorState(t *testing.T) {
 
 		// The state of other actors is still readable
 		ts.provider.EXPECT().GetState(mock.Anything, aRef).Return(state, nil).Once()
-		w, apiErr := getState("counter", "c1")
+		w, apiErr = getState("counter", "c1")
 		require.Nil(t, apiErr)
 		assert.Equal(t, http.StatusOK, w.Code)
 	})

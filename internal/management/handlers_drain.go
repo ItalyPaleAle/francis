@@ -68,9 +68,9 @@ func decodeBody(r *http.Request, dst any) *apiError {
 //	@Description	- Repeating a drain on a host that is already draining is never refused, and `alreadyDraining` reports whether the host was already draining.
 //	@Description	- While an exclusive-access lease is held on the cluster, the action is refused with `409 exclusiveLeaseHeld`.
 //	@Description	- If the host reconnected before it received the request, including to another runtime replica, the request is sent again to its new session; only if the host keeps reconnecting is the response `409 hostReattached`, and the request can be sent again.
-//	@Description	- When the request to the host fails, the host is asked whether it is draining. A host that is draining accepted the drain and the response is `202`. A host that is not draining has its draining mark removed, and the error has `details.hostDraining: false`. A host that can't be asked keeps its mark, since it may have accepted the drain, and the error has `details.hostDraining: true`.
-//	@Description	- A host that refused the request because it was too busy never accepted the drain, so its mark is removed without asking it, and the error is `503 hostUnavailable` with `details.hostDraining: false`.
-//	@Description	- The mark is only removed by the request that set it: when the host was already marked draining, a failed request leaves the mark in place and the error has `details.hostDraining: true`.
+//	@Description	- When the request to the host fails, the host is asked whether it is draining. A host that is draining accepted the drain and the response is `202`. A host that is not draining has its mark removed only while this request still owns it, and the error reports `details.hostDraining`. A host that can't be asked keeps its mark, since it may have accepted the drain, and the error has `details.hostDraining: true`.
+//	@Description	- A host that refused the request because it was too busy never accepted the drain, so its mark can be removed without asking it while this request still owns it; the error is `503 hostUnavailable` with `details.hostDraining`.
+//	@Description	- A competing drain request or the host accepting a drain atomically invalidates rollback ownership, so a failed request leaves that mark in place with `details.hostDraining: true`.
 //	@Description
 //	@Description		The request body is optional; an empty body is equivalent to `{}`.
 //	@Description		Unknown fields are rejected.
@@ -160,7 +160,7 @@ func (s *Server) drainHost(w http.ResponseWriter, r *http.Request, body drainReq
 	})
 	if err != nil {
 		// A drain that took effect although its acknowledgement was lost is reported as accepted
-		apiErr = s.drainFailed(r, h, !mark.AlreadyDraining, err)
+		apiErr = s.drainFailed(r, h, mark.RollbackToken, err)
 		if apiErr != nil {
 			return apiErr
 		}
@@ -174,8 +174,8 @@ func (s *Server) drainHost(w http.ResponseWriter, r *http.Request, body drainReq
 // drainFailed decides what a failed drain request left behind, since the host was marked draining before it was asked
 // It asks the host whether it is draining: a host that is draining accepted the drain and only the acknowledgement was lost, so nil is returned, while a host that is not draining never accepted it and its mark is cleared to put it back into service
 // A host that can't be asked keeps its mark, because it may have accepted the drain, and the error's details say whether the host is still marked draining
-// The mark is cleared only when markedHere is set, because a mark this request found in place belongs to another drain, whose request may be about to reach the host
-func (s *Server) drainFailed(r *http.Request, h components.HostDetails, markedHere bool, drainErr error) *apiError {
+// Rollback tests the persisted token atomically, so a competing mark or accepted drain cannot be cleared by this request
+func (s *Server) drainFailed(r *http.Request, h components.HostDetails, rollbackToken string, drainErr error) *apiError {
 	apiErr := s.fail(r, "failed to drain the host", drainErr)
 	leftDraining := func(draining bool) *apiError {
 		return apiErr.withDetails(map[string]any{"hostDraining": draining})
@@ -199,12 +199,12 @@ func (s *Server) drainFailed(r *http.Request, h components.HostDetails, markedHe
 	}
 
 	// Another drain's mark is left in place
-	if !markedHere {
+	if rollbackToken == "" {
 		return leftDraining(true)
 	}
 
 	// The host is in service, so remove the mark that keeps new actors off it
-	err := s.backend.Provider().ClearHostDraining(r.Context(), h.HostID)
+	cleared, err := s.backend.Provider().ClearHostDraining(r.Context(), h.HostID, rollbackToken)
 	switch {
 	case errors.Is(err, components.ErrHostUnregistered):
 		// The host went away, so there is no mark left to clear
@@ -217,6 +217,6 @@ func (s *Server) drainFailed(r *http.Request, h components.HostDetails, markedHe
 		)
 		return leftDraining(true)
 	default:
-		return leftDraining(false)
+		return leftDraining(!cleared)
 	}
 }

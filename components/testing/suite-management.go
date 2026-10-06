@@ -236,6 +236,28 @@ func (s Suite) TestHostDetails(t *testing.T) {
 		assertTimeNear(t, s.p.Now(), got.LastHealthCheck)
 	})
 
+	t.Run("sub-resolution retentions preserve their policies across every registration write", func(t *testing.T) {
+		err := s.p.Seed(t.Context(), Spec{})
+		require.NoError(t, err)
+		types := []components.ActorHostType{{ActorType: "HD-Sentinel", CompletedJobRetention: time.Duration(-1), DeadLetteredJobRetention: time.Nanosecond}}
+		res, err := s.p.RegisterHost(t.Context(), components.RegisterHostReq{Address: "10.1.9.1:5000", ActorTypes: types})
+		require.NoError(t, err)
+		assertPolicies := func() {
+			t.Helper()
+			h := getDetails(t, t.Context(), res.HostID)
+			require.Len(t, h.ActorTypes, 1)
+			assert.Negative(t, h.ActorTypes[0].CompletedJobRetention)
+			assert.Positive(t, h.ActorTypes[0].DeadLetteredJobRetention)
+		}
+		assertPolicies()
+		err = s.p.UpdateActorHost(t.Context(), res.HostID, components.UpdateActorHostReq{ActorTypes: types})
+		require.NoError(t, err)
+		assertPolicies()
+		_, err = s.p.RegisterHost(t.Context(), components.RegisterHostReq{ExistingHostID: res.HostID, Address: "10.1.9.1:5000", ActorTypes: types})
+		require.NoError(t, err)
+		assertPolicies()
+	})
+
 	t.Run("a host without a runtime reports empty session and runtime IDs", func(t *testing.T) {
 		ctx := t.Context()
 		err := s.p.Seed(ctx, Spec{})
@@ -635,7 +657,7 @@ func (s Suite) TestMarkHostDraining(t *testing.T) {
 		h2 := register(t, "10.3.4.2:5000", "MD-A")
 
 		// Marking h1 leaves h2 as the only server, so h2 can't be drained without force
-		_, err = s.p.MarkHostDraining(t.Context(), components.MarkHostDrainingReq{HostID: h1})
+		mark, err := s.p.MarkHostDraining(t.Context(), components.MarkHostDrainingReq{HostID: h1})
 		require.NoError(t, err)
 		require.True(t, draining(t, h1))
 		req := components.MarkHostDrainingReq{HostID: h2}
@@ -644,8 +666,9 @@ func (s Suite) TestMarkHostDraining(t *testing.T) {
 		require.True(t, res.Refused(req))
 
 		// Clearing h1 counts it as a server again
-		err = s.p.ClearHostDraining(t.Context(), h1)
+		cleared, err := s.p.ClearHostDraining(t.Context(), h1, mark.RollbackToken)
 		require.NoError(t, err)
+		assert.True(t, cleared)
 		assert.False(t, draining(t, h1))
 		res, err = s.p.MarkHostDraining(t.Context(), req)
 		require.NoError(t, err)
@@ -653,14 +676,53 @@ func (s Suite) TestMarkHostDraining(t *testing.T) {
 		assert.True(t, draining(t, h2))
 
 		// Clearing a host that is not draining changes nothing
-		err = s.p.ClearHostDraining(t.Context(), h1)
+		cleared, err = s.p.ClearHostDraining(t.Context(), h1, mark.RollbackToken)
 		require.NoError(t, err)
+		assert.True(t, cleared)
 		assert.False(t, draining(t, h1))
 
 		// A host that isn't registered is not found
-		err = s.p.ClearHostDraining(t.Context(), SpecHostNonExistent)
+		_, err = s.p.ClearHostDraining(t.Context(), SpecHostNonExistent, mark.RollbackToken)
 		require.ErrorIs(t, err, components.ErrHostUnregistered)
 	})
+
+	for _, transition := range []string{"competing mark", "accepted drain", "reattach"} {
+		t.Run("rollback cannot clear a "+transition, func(t *testing.T) {
+			err := s.p.Seed(t.Context(), Spec{})
+			require.NoError(t, err)
+			h1 := register(t, "10.3.6.1:5000", "MD-A")
+			h2 := register(t, "10.3.6.2:5000", "MD-A")
+			mark, err := s.p.MarkHostDraining(t.Context(), components.MarkHostDrainingReq{HostID: h1})
+			require.NoError(t, err)
+			require.NotEmpty(t, mark.RollbackToken)
+
+			// Another request or the host itself takes ownership before the first request's rollback
+			switch transition {
+			case "competing mark":
+				other, markErr := s.p.MarkHostDraining(t.Context(), components.MarkHostDrainingReq{HostID: h1})
+				require.NoError(t, markErr)
+				assert.True(t, other.AlreadyDraining)
+				assert.Empty(t, other.RollbackToken)
+			case "accepted drain":
+				err = s.p.UpdateActorHost(t.Context(), h1, components.UpdateActorHostReq{Draining: true})
+				require.NoError(t, err)
+			case "reattach":
+				_, err = s.p.RegisterHost(t.Context(), components.RegisterHostReq{ExistingHostID: h1, Address: "10.3.6.1:5000", ActorTypes: []components.ActorHostType{{ActorType: "MD-A"}}})
+				require.NoError(t, err)
+				// A new drain after reattaching must not be cleared by the old registration's token
+				_, err = s.p.MarkHostDraining(t.Context(), components.MarkHostDrainingReq{HostID: h1})
+				require.NoError(t, err)
+			}
+
+			cleared, err := s.p.ClearHostDraining(t.Context(), h1, mark.RollbackToken)
+			require.NoError(t, err)
+			assert.False(t, cleared)
+			assert.True(t, draining(t, h1))
+			last, err := s.p.MarkHostDraining(t.Context(), components.MarkHostDrainingReq{HostID: h2})
+			require.NoError(t, err)
+			assert.True(t, last.Refused(components.MarkHostDrainingReq{HostID: h2}))
+		})
+	}
 
 	t.Run("a host with an expired registration is not found", func(t *testing.T) {
 		err := s.p.Seed(t.Context(), Spec{})
@@ -673,7 +735,7 @@ func (s Suite) TestMarkHostDraining(t *testing.T) {
 		require.ErrorIs(t, err, components.ErrHostUnregistered)
 		_, err = s.p.MarkHostDraining(t.Context(), components.MarkHostDrainingReq{HostID: SpecHostNonExistent})
 		require.ErrorIs(t, err, components.ErrHostUnregistered)
-		err = s.p.ClearHostDraining(t.Context(), h1)
+		_, err = s.p.ClearHostDraining(t.Context(), h1, "missing-token")
 		require.ErrorIs(t, err, components.ErrHostUnregistered)
 	})
 

@@ -35,10 +35,11 @@ type ManagementProvider interface {
 	// While an exclusive-access lease is held it changes nothing and returns ErrClusterLocked, checking the lease atomically with the update
 	MarkHostDraining(ctx context.Context, req MarkHostDrainingReq) (MarkHostDrainingRes, error)
 
-	// ClearHostDraining clears the draining flag of a live host, putting it back into placement
-	// It undoes MarkHostDraining for a drain the host never accepted, and is a no-op for a host that is not draining
+	// ClearHostDraining rolls back a mark only if its nonempty rollback token still owns the draining flag
+	// A competing mark, an accepted drain or a reattach invalidates the token atomically
+	// It returns true when the host is no longer marked draining and false when another drain owns the mark
 	// If the host doesn't exist or its registration expired, returns ErrHostUnregistered
-	ClearHostDraining(ctx context.Context, hostID string) error
+	ClearHostDraining(ctx context.Context, hostID string, rollbackToken string) (cleared bool, err error)
 
 	// ListPlacements returns a page of the provider's actor placements, ordered by actor type and then actor ID
 	// It never creates, moves or removes a placement
@@ -171,7 +172,9 @@ type MarkHostDrainingReq struct {
 
 // MarkHostDrainingRes is the response object for the MarkHostDraining method
 type MarkHostDrainingRes struct {
-	// AlreadyDraining is true when the host was already draining, in which case nothing was checked or changed
+	// RollbackToken owns a newly applied mark until another mark, drain acceptance or reattach invalidates it
+	RollbackToken string
+	// AlreadyDraining is true when the host was already draining, in which case any previous rollback token is invalidated
 	AlreadyDraining bool
 	// LastServerOf lists, in ascending order, the actor types the host serves that no other live, non-draining host serves
 	// When it is not empty and the request did not set Force, the host was left unchanged

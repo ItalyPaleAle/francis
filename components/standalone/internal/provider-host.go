@@ -172,6 +172,7 @@ func (p *Provider) reattachHost(ctx context.Context, req components.RegisterHost
 		updatedHost.SessionID = req.SessionID
 		updatedHost.RuntimeID = req.RuntimeID
 		updatedHost.Draining = false
+		updatedHost.DrainToken = ""
 		changes.Hosts.Set = append(changes.Hosts.Set, HostChange{Key: req.ExistingHostID, Value: updatedHost})
 
 		// Replace the supported actor types
@@ -316,6 +317,7 @@ func (p *Provider) UpdateActorHost(ctx context.Context, hostID string, req compo
 			// The draining flag is only ever set here, and reset when the host registers or reattaches again
 			if req.Draining {
 				updatedHost.Draining = true
+				updatedHost.DrainToken = ""
 			}
 			changes.Hosts.Set = append(changes.Hosts.Set, HostChange{Key: hostID, Value: updatedHost})
 		}

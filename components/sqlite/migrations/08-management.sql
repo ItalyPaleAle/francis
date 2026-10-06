@@ -58,3 +58,5 @@ CREATE TABLE %sruntimes (
     -- When the lease expires unless renewed
     runtime_expires_at integer NOT NULL
 ) WITHOUT ROWID, STRICT;
+
+ALTER TABLE %shosts ADD COLUMN host_drain_token TEXT NOT NULL DEFAULT '';

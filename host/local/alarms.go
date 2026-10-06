@@ -31,9 +31,6 @@ func (h *Host) runAlarmFetcher(ctx context.Context) error {
 	h.log.DebugContext(ctx, "Starting background alarm fetcher", slog.Any("interval", h.alarmsPollInterval))
 	defer h.log.Debug("Stopped background alarm fetcher")
 
-	// Close the processor when the fetcher exits, then wait for all in-flight alarm goroutines to finish
-	defer h.closeAndDrainAlarmProcessor()
-
 	t := h.clock.NewTicker(h.alarmsPollInterval)
 	defer t.Stop()
 
@@ -69,8 +66,8 @@ func (h *Host) runAlarmFetcher(ctx context.Context) error {
 	}
 }
 
-// closeAndDrainAlarmProcessor prevents new executions before waiting for every execution that already crossed the drain barrier
-func (h *Host) closeAndDrainAlarmProcessor() {
+// stopAlarmProcessor prevents new executions without waiting for jobs that need the actor halt signal
+func (h *Host) stopAlarmProcessor() {
 	// Establish the shutdown barrier under the same lock used by both WaitGroup Add sites
 	h.activeAlarmsLock.Lock()
 	h.alarmsDraining = true
@@ -84,8 +81,11 @@ func (h *Host) closeAndDrainAlarmProcessor() {
 			h.log.Error("Failed to close alarm processor", slog.Any("error", apErr))
 		}
 	}
+}
 
-	// Every future Add is now excluded, so waiting concurrently with caller goroutines is safe
+// closeAndDrainAlarmProcessor stops admission and waits for admitted executions
+func (h *Host) closeAndDrainAlarmProcessor() {
+	h.stopAlarmProcessor()
 	h.alarmWg.Wait()
 }
 

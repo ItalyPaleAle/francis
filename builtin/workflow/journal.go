@@ -137,6 +137,8 @@ type instanceState struct {
 	LastEventSeq int64 `msgpack:"lastEventSeq,omitempty"`
 	// NoEventHistory records that the definition opted out of event history with WithoutEventHistory, when the instance started
 	NoEventHistory bool `msgpack:"noEventHistory,omitempty"`
+	// stepHistory preserves forward settlements that a loop rewind or compensation overwrites within this turn
+	stepHistory []stepRecord
 	// encoded reuses the exact size-check encoding when the provider serializes this state immediately afterward
 	encoded []byte
 }
@@ -322,6 +324,7 @@ func (sr *stepRecord) task(index int) *taskRecord {
 func (st *instanceState) clone() instanceState {
 	out := *st
 	out.encoded = nil
+	out.stepHistory = nil
 	out.Input = bytes.Clone(st.Input)
 	out.Output = bytes.Clone(st.Output)
 	out.EventNames = append([]string(nil), st.EventNames...)

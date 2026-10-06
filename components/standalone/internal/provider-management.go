@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"slices"
+	"uuid"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
@@ -62,7 +63,7 @@ func (p *Provider) GetHostDetails(_ context.Context, hostID string) (components.
 	return p.hostDetails(h, p.countPlacementsByHostType()), nil
 }
 
-func (p *Provider) ClearHostDraining(ctx context.Context, hostID string) error {
+func (p *Provider) ClearHostDraining(ctx context.Context, hostID string, rollbackToken string) (bool, error) {
 	// writeMu orders the change with every other writer, including MarkHostDraining
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
@@ -70,25 +71,35 @@ func (p *Provider) ClearHostDraining(ctx context.Context, hostID string) error {
 	// Read the host, which must be live
 	p.Mu.RLock()
 	h, ok := p.Hosts[hostID]
-	if !ok || !p.IsHostHealthy(h) {
+	switch {
+	case !ok || !p.IsHostHealthy(h):
 		p.Mu.RUnlock()
-		return components.ErrHostUnregistered
-	}
-	if !h.Draining {
+		return false, components.ErrHostUnregistered
+	case !h.Draining:
 		p.Mu.RUnlock()
-		return nil
+		return true, nil
+	case rollbackToken == "" || h.DrainToken != rollbackToken:
+		p.Mu.RUnlock()
+		return false, nil
 	}
+
 	updatedHost := h.Clone()
 	p.Mu.RUnlock()
 
 	// The flag is persisted before it is applied, like every other change
 	updatedHost.Draining = false
+	updatedHost.DrainToken = ""
+
 	changes := NewChanges()
 	defer changes.Release()
+
 	changes.Hosts.Set = append(changes.Hosts.Set, HostChange{Key: hostID, Value: updatedHost})
-	return p.persistThenApply(ctx, &p.Mu, changes, func() {
+
+	err := p.persistThenApply(ctx, &p.Mu, changes, func() {
 		p.Hosts[hostID] = updatedHost
 	})
+
+	return err == nil, err
 }
 
 func (p *Provider) MarkHostDraining(ctx context.Context, req components.MarkHostDrainingReq) (components.MarkHostDrainingRes, error) {
@@ -111,29 +122,32 @@ func (p *Provider) MarkHostDraining(ctx context.Context, req components.MarkHost
 		p.Mu.RUnlock()
 		return res, components.ErrHostUnregistered
 	}
-	if h.Draining {
-		p.Mu.RUnlock()
-		res.AlreadyDraining = true
-		return res, nil
-	}
+	res.AlreadyDraining = h.Draining
 	served := make(map[string]struct{})
 	for id, other := range p.Hosts {
 		if id == req.HostID || other.Draining || !p.IsHostHealthy(other) {
 			continue
 		}
+
 		for _, hat := range p.HostActorTypes[id] {
 			served[hat.ActorType] = struct{}{}
 		}
 	}
+
 	for _, hat := range p.HostActorTypes[req.HostID] {
 		_, ok = served[hat.ActorType]
 		if !ok {
 			res.LastServerOf = append(res.LastServerOf, hat.ActorType)
 		}
 	}
+
 	updatedHost := h.Clone()
 	p.Mu.RUnlock()
 	slices.Sort(res.LastServerOf)
+
+	if res.AlreadyDraining {
+		res.LastServerOf = nil
+	}
 
 	// Leave the host alone when it is the last server of some type and the drain is not forced
 	if res.Refused(req) {
@@ -142,9 +156,17 @@ func (p *Provider) MarkHostDraining(ctx context.Context, req components.MarkHost
 
 	// The flag is persisted before it is applied, like every other change
 	updatedHost.Draining = true
+	updatedHost.DrainToken = ""
+	if !res.AlreadyDraining {
+		res.RollbackToken = uuid.NewV7().String()
+		updatedHost.DrainToken = res.RollbackToken
+	}
+
 	changes := NewChanges()
 	defer changes.Release()
+
 	changes.Hosts.Set = append(changes.Hosts.Set, HostChange{Key: req.HostID, Value: updatedHost})
+
 	err = p.persistThenApply(ctx, &p.Mu, changes, func() {
 		p.Hosts[req.HostID] = updatedHost
 	})

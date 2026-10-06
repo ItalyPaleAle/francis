@@ -268,16 +268,17 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 	// It reports our host ID so it can reject invocations aimed at a stale placement, and requires a host certificate from every caller
 	// Draining is wired so callers receive a retry-later response rather than a hard reset during graceful shutdown
 	h.peerServer = peer.NewServer(peer.ServerConfig{
-		Bind:                h.bind,
-		TLSConfig:           hosttls.PeerServerTLSConfig(holder),
-		Handler:             h.peerInvokeObject,
-		StreamHandler:       h.peerInvokeStream,
-		Log:                 options.Logger,
-		HostID:              h.HostID,
-		Draining:            func() bool { return h.draining.Load() },
-		ManagementHandler:   h.handleManagement,
-		MaxInFlightRequests: options.MaxInFlightRequests,
-		MaxRequestBodySize:  options.MaxRequestBodySize,
+		Bind:                      h.bind,
+		TLSConfig:                 hosttls.PeerServerTLSConfig(holder),
+		Handler:                   h.peerInvokeObject,
+		StreamHandler:             h.peerInvokeStream,
+		Log:                       options.Logger,
+		HostID:                    h.HostID,
+		Draining:                  func() bool { return h.draining.Load() },
+		ManagementHandler:         h.handleManagement,
+		ManagementResponseWritten: h.managementResponseWritten,
+		MaxInFlightRequests:       options.MaxInFlightRequests,
+		MaxRequestBodySize:        options.MaxRequestBodySize,
 	})
 
 	// Create the management API server when it is enabled
@@ -388,14 +389,6 @@ func (h *Host) Run(parentCtx context.Context) error {
 		go h.core.BootstrapSingletons(ctx)
 	}
 
-	// Set the draining flag as soon as the context is canceled so the peer server rejects new invocations with a retry-later error before any actors are halted, giving callers a chance to re-resolve
-	// A drain request that arrives from now on finds the host already stopping
-	go func() {
-		<-ctx.Done()
-		h.draining.Store(true)
-		h.adminDrain.BeginStopping()
-	}()
-
 	// The peer server runs under its own context, so it keeps serving while local actors drain and the host unregisters
 	// Throughout that window it rejects new invocations with a retry-later error, and it can still write the reply to an administrative drain
 	// Registered before the unregister and halt defers, so it runs after both (LIFO)
@@ -422,23 +415,23 @@ func (h *Host) Run(parentCtx context.Context) error {
 
 	// Health checks run under their own context too, and stop only once the actors have halted
 	// Halting can take longer than the health check deadline, and a registration that expired meanwhile would let other hosts activate actors that are still halting here
-	// Registered between the unregister and halt defers, so it runs after the halt and before the unregister (LIFO)
+	// The shutdown service finishes actor halting before the runner returns and these defers stop health checks and unregister
 	stopHealthChecks, watchHealthChecks := runDetached(parentCtx, "health checks", h.runHealthChecks)
 	defer stopHealthChecks()
 
-	// Halt all remaining actors before the host unregisters
-	// Registered last so it runs first (LIFO): actors are halted before health checks stop and the provider record is removed
-	defer func() {
-		// Mark the host draining in the provider first, so no new actor is placed on it while the others halt
-		h.draining.Store(true)
-		h.persistDraining()
-
-		// An administrative drain bounds the wait, while a regular shutdown waits for every actor
-		_, timeout := h.adminDrain.BeginStopping()
-		h.core.DrainAll(timeout)
-	}()
-
 	services := []servicerunner.Service{
+		// Start actor halting as soon as the runner cancels, before waiting for jobs that need cancellation or the halt signal
+		func(shutdownCtx context.Context) error {
+			<-shutdownCtx.Done()
+			_, timeout := h.adminDrain.BeginStopping()
+			h.draining.Store(true)
+			h.stopAlarmProcessor()
+			h.persistDraining()
+			h.core.DrainAll(timeout)
+			h.alarmWg.Wait()
+			return nil
+		},
+
 		// Stop the host if health checks, which run on their own context, fail
 		watchHealthChecks,
 

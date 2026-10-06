@@ -25,3 +25,26 @@ func TimePtrUTC(t *time.Time) *time.Time {
 	u := t.UTC()
 	return &u
 }
+
+// RetentionMilliseconds preserves the disabled, forever and positive retention policies at millisecond precision
+func RetentionMilliseconds(d time.Duration) int64 {
+	switch {
+	case d < 0:
+		return min(d.Milliseconds(), -1)
+	case d > 0:
+		return max(d.Milliseconds(), 1)
+	default:
+		return 0
+	}
+}
+
+// RetentionInterval preserves retention policies when PostgreSQL encodes durations at microsecond precision
+func RetentionInterval(d time.Duration) time.Duration {
+	if d < 0 {
+		return min(d, -time.Microsecond)
+	}
+	if d > 0 {
+		return max(d, time.Microsecond)
+	}
+	return 0
+}

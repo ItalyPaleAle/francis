@@ -629,6 +629,7 @@ func (o *orchestrator) persist(ctx context.Context, st *instanceState, now time.
 
 	// The turn's own history is spent by this write whatever its outcome, because a failed write fails the turn and its retry rebuilds it
 	o.history = nil
+	st.stepHistory = nil
 	err = o.client.SetState(ctx, *st, opts)
 	if err != nil {
 		return fmt.Errorf("failed to write the workflow journal: %w", err)
@@ -643,22 +644,31 @@ func (o *orchestrator) persist(ctx context.Context, st *instanceState, now time.
 // A marker only ever moves forward, so one for an attempt the journal has since superseded changes nothing
 func (o *orchestrator) applyUnsavedDispatches(st *instanceState) {
 	for _, ack := range o.unsavedDispatches {
-		sr := st.step(ack.step)
-		if sr == nil {
-			continue
+		applyDispatchAck(st.step(ack.step), ack)
+		// Intermediate settlements must carry the same dispatch markers so history orders dispatch before completion
+		for i := range st.stepHistory {
+			if st.stepHistory[i].Name == ack.step {
+				applyDispatchAck(&st.stepHistory[i], ack)
+			}
 		}
-		tr := sr.task(ack.index)
-		if tr == nil {
-			continue
-		}
+	}
+}
 
-		if !ack.undo {
-			tr.DispatchedAttempt = max(tr.DispatchedAttempt, ack.attempt)
-			continue
-		}
-		if tr.Comp != nil {
-			tr.Comp.DispatchedAttempt = max(tr.Comp.DispatchedAttempt, ack.attempt)
-		}
+// applyDispatchAck stamps one accepted dispatch onto the journal or an intermediate history snapshot
+func applyDispatchAck(sr *stepRecord, ack dispatchAck) {
+	if sr == nil {
+		return
+	}
+	tr := sr.task(ack.index)
+	if tr == nil {
+		return
+	}
+	if !ack.undo {
+		tr.DispatchedAttempt = max(tr.DispatchedAttempt, ack.attempt)
+		return
+	}
+	if tr.Comp != nil {
+		tr.Comp.DispatchedAttempt = max(tr.Comp.DispatchedAttempt, ack.attempt)
 	}
 }
 

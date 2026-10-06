@@ -64,6 +64,17 @@ type turnHistory struct {
 	report bool
 }
 
+// captureStepHistory keeps an overwritten forward settlement out of the durable journal
+func (st *instanceState) captureStepHistory(sr *stepRecord) {
+	if st.NoEventHistory {
+		return
+	}
+	switch sr.Status {
+	case StepCompleted, StepFailed, StepSkipped:
+		st.stepHistory = append(st.stepHistory, sr.clone())
+	}
+}
+
 // beginTurnHistory records what a non-duplicate event contributes to the history beyond what the journal diff shows
 func (o *orchestrator) beginTurnHistory(ev *event, duplicate bool, now time.Time) {
 	o.history = nil
@@ -183,7 +194,7 @@ func (o *orchestrator) attachHistory(ctx context.Context, opts *actor.SetStateOp
 }
 
 // historyEntries derives the events a write adds by comparing the journal about to be written with the committed one
-// Everything the journal records is derived here, and only what the journal does not record comes from the turn's own history
+// Overwritten forward settlements are replayed before the final step state, preserving loop iteration and failure ordering
 func (o *orchestrator) historyEntries(base *instanceState, st *instanceState, now time.Time) []historyEntry {
 	b := &historyBuilder{
 		o:       o,
@@ -215,7 +226,16 @@ func (o *orchestrator) historyEntries(base *instanceState, st *instanceState, no
 
 	// Forward progress of every step, then the unwind that it may have opened, then the compensation of every step
 	for i := range st.Steps {
-		b.forwardStep(stepBefore(base, st, i), &st.Steps[i])
+		before := stepBefore(base, st, i)
+		for j := range st.stepHistory {
+			transition := &st.stepHistory[j]
+			if transition.Name != st.Steps[i].Name {
+				continue
+			}
+			b.forwardStep(before, transition)
+			before = transition
+		}
+		b.forwardStep(before, &st.Steps[i])
 	}
 	if st.TerminalStatus != "" && (base.TerminalStatus == "" || base.Status.IsTerminal() && !st.Status.IsTerminal()) {
 		b.add(EventKindCompensationStarted, now, eventData{TimeSource: TimeSourceEngine, Reason: st.Cause, Outcome: string(st.TerminalStatus)})

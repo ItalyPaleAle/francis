@@ -15,11 +15,16 @@ import (
 	"github.com/quic-go/webtransport-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/utils/clock"
 
+	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/host"
+	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/ca"
 	"github.com/italypaleale/francis/internal/certholder"
 	"github.com/italypaleale/francis/internal/hosttls"
+	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/wt"
 	"github.com/italypaleale/francis/protocol"
 )
@@ -185,6 +190,151 @@ func waitRun(t *testing.T, runErr <-chan error) error {
 	case <-time.After(15 * time.Second):
 		t.Fatal("Run did not return")
 		return nil
+	}
+}
+
+type gracefulRemoteJob struct {
+	run func(context.Context) error
+}
+
+func (j gracefulRemoteJob) Job(ctx context.Context, _ string, _ actor.Envelope) error {
+	return j.run(ctx)
+}
+
+func TestRemoteDrainPreservesRunningJobGrace(t *testing.T) {
+	for _, timeout := range []int64{0, 2000} {
+		t.Run(time.Duration(timeout*int64(time.Millisecond)).String(), func(t *testing.T) {
+			rt := startScriptedRuntime(t)
+			started := make(chan struct{})
+			halting := make(chan error, 1)
+			release := make(chan struct{})
+			defer close(release)
+
+			h := &Host{clock: &clock.RealClock{}, log: slog.New(slog.DiscardHandler)}
+			h.core = actorcore.NewManager(actorcore.Options{
+				RemoveActor:         func(context.Context, ref.ActorRef) error { return nil },
+				ShutdownGracePeriod: time.Hour,
+			})
+
+			err := h.core.RegisterActor("T", func(string, *actor.Service) actor.Actor {
+				return gracefulRemoteJob{run: func(ctx context.Context) error {
+					close(started)
+					select {
+					case <-actor.HaltingFromContext(ctx):
+						halting <- ctx.Err()
+					case <-ctx.Done():
+						halting <- ctx.Err()
+						return ctx.Err()
+					}
+					select {
+					case <-release:
+						return nil
+					case <-t.Context().Done():
+						return context.Canceled
+					}
+				}}
+			}, actorcore.RegisterActorOptions{})
+			require.NoError(t, err)
+
+			h.core.Start()
+			defer h.core.Close()
+
+			rc := newReconnectingClient(t, rt.addr, runtimeClientConfig{
+				handlers: runtimeHandlers{executeAlarm: h.executeAlarm},
+				onDrain:  h.core.DrainAll,
+			})
+
+			runErr := make(chan error, 1)
+			go func() {
+				runErr <- rc.Run(t.Context())
+			}()
+
+			session := waitSession(t, rt)
+			jobReq, err := protocol.NewRequest(protocol.KindExecuteAlarm, protocol.ExecuteAlarmRequest{
+				ActorType: "T", ActorID: "one", Name: "job", Kind: string(components.AlarmKindJob), JobMethod: "wait",
+			})
+			require.NoError(t, err)
+
+			jobReq.HostID = "host-1"
+			jobReq.SessionID = "session-1"
+			jobCtx, cancelJob := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancelJob()
+
+			type jobResult struct {
+				response *protocol.Envelope
+				err      error
+			}
+			jobResp := make(chan jobResult, 1)
+
+			go func() {
+				stream, err := session.OpenStreamSync(jobCtx)
+				if err != nil {
+					jobResp <- jobResult{err: err}
+					return
+				}
+				defer wt.CloseStream(stream)
+				resp, err := protocol.RoundTrip(jobCtx, stream, jobReq)
+				jobResp <- jobResult{response: resp, err: err}
+			}()
+
+			select {
+			case <-started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("remote job did not start")
+			}
+
+			resp := rt.send(t, session, protocol.KindHostDrain, protocol.HostDrainRequest{TimeoutMs: timeout})
+			require.Equal(t, protocol.KindHostDrainResponse, resp.Kind)
+			select {
+			case err = <-halting:
+				require.NoError(t, err, "stopping admission must preserve the job context during grace")
+			case <-time.After(5 * time.Second):
+				t.Fatal("job did not receive the halt signal")
+			}
+
+			release <- struct{}{}
+
+			select {
+			case result := <-jobResp:
+				require.NoError(t, result.err)
+				require.Equal(t, protocol.KindExecuteAlarmResponse, result.response.Kind)
+			case <-time.After(5 * time.Second):
+				t.Fatal("job response was lost during teardown")
+			}
+
+			err = waitRun(t, runErr)
+			require.ErrorIs(t, err, host.ErrAdministrativeDrain)
+		})
+	}
+}
+
+func TestRemoteDrainCancelsIdleStreamReads(t *testing.T) {
+	rt := startScriptedRuntime(t)
+	rc := newReconnectingClient(t, rt.addr, runtimeClientConfig{})
+	runErr := make(chan error, 1)
+
+	go func() {
+		runErr <- rc.Run(t.Context())
+	}()
+
+	session := waitSession(t, rt)
+
+	// Leave a request frame incomplete so the host has an admitted stream waiting for bytes
+	stream, err := session.OpenStreamSync(t.Context())
+	require.NoError(t, err)
+	defer wt.CloseStream(stream)
+
+	_, err = stream.Write([]byte{0})
+	require.NoError(t, err)
+
+	resp := rt.send(t, session, protocol.KindHostDrain, protocol.HostDrainRequest{TimeoutMs: 1000})
+	require.Equal(t, protocol.KindHostDrainResponse, resp.Kind)
+
+	select {
+	case err = <-runErr:
+		require.ErrorIs(t, err, host.ErrAdministrativeDrain)
+	case <-time.After(5 * time.Second):
+		t.Fatal("an idle inbound stream held the drain open")
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"uuid"
 
 	sqltransactions "github.com/italypaleale/go-sql-utils/transactions/sql"
 
@@ -105,35 +106,28 @@ func (s *SQLiteProvider) queryHostDetails(ctx context.Context, filterClause stri
 	})
 }
 
-func (s *SQLiteProvider) ClearHostDraining(ctx context.Context, hostID string) error {
-	cutoff := s.clock.Now().UnixMilli() - s.cfg.HostHealthCheckDeadline.Milliseconds()
-
-	// The host must be visible with the same rule as GetHostDetails
+func (s *SQLiteProvider) ClearHostDraining(ctx context.Context, hostID string, rollbackToken string) (bool, error) {
+	// Test ownership and clear the flag in one write, serialized with drain acceptance and competing marks
+	cutoff := s.clock.Now().Add(-s.cfg.HostHealthCheckDeadline).UnixMilli()
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
+	var draining bool
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	res, err := s.db.ExecContext(queryCtx,
+	err := s.db.QueryRowContext(queryCtx,
 		`UPDATE `+s.tablePrefix+`hosts
-		SET host_draining = 0
-		WHERE
-			host_id = ?
-			AND host_last_health_check >= ?`,
-		hostID, cutoff,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to clear the host's draining flag: %w", err)
+		SET host_draining = CASE WHEN ? <> '' AND host_drain_token = ? THEN 0 ELSE host_draining END,
+		    host_drain_token = CASE WHEN ? <> '' AND host_drain_token = ? THEN '' ELSE host_drain_token END
+		WHERE host_id = ? AND host_last_health_check >= ?
+		RETURNING host_draining`,
+		rollbackToken, rollbackToken, rollbackToken, rollbackToken, hostID, cutoff,
+	).Scan(&draining)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, components.ErrHostUnregistered
+	} else if err != nil {
+		return false, fmt.Errorf("failed to clear the host's draining flag: %w", err)
 	}
 
-	// No row means the host doesn't exist, or exists but is un-healthy
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("error counting affected rows: %w", err)
-	}
-	if affected == 0 {
-		return components.ErrHostUnregistered
-	}
-
-	return nil
+	return !draining, nil
 }
 
 func (s *SQLiteProvider) MarkHostDraining(ctx context.Context, req components.MarkHostDrainingReq) (components.MarkHostDrainingRes, error) {
@@ -166,7 +160,8 @@ func (s *SQLiteProvider) MarkHostDraining(ctx context.Context, req components.Ma
 		}
 		if draining != 0 {
 			res.AlreadyDraining = true
-			return res, nil
+			txErr = s.setActorHostDraining(ctx, req.HostID, tx)
+			return res, txErr
 		}
 
 		// Find the actor types that no other live, non-draining host serves
@@ -214,10 +209,14 @@ func (s *SQLiteProvider) MarkHostDraining(ctx context.Context, req components.Ma
 			return res, nil
 		}
 
-		txErr = s.setActorHostDraining(ctx, req.HostID, tx)
+		// Give only this mark permission to roll back until the host accepts or another request joins it
+		res.RollbackToken = uuid.NewV7().String()
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		_, txErr = tx.ExecContext(queryCtx, `UPDATE `+s.tablePrefix+`hosts SET host_draining = 1, host_drain_token = ? WHERE host_id = ?`, res.RollbackToken, req.HostID)
 		if txErr != nil {
-			return res, txErr
+			return res, fmt.Errorf("error marking host draining: %w", txErr)
 		}
+
 		return res, nil
 	})
 	if errors.Is(err, components.ErrHostUnregistered) {

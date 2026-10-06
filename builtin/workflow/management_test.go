@@ -111,6 +111,64 @@ func TestEventHistorySequenceSurvivesARetriedTurn(t *testing.T) {
 	assert.Equal(t, TimeSourceEngine, kinds[EventKindInstanceStarted].TimeSource)
 }
 
+func TestHistoryPreservesLoopSettlementBeforeNextIteration(t *testing.T) {
+	host := &failingStateHost{fakeHost: newFakeHost()}
+	wf, err := New("loop-history", WithSteps(
+		Loop("poll", Step("check", WithRun(noopRun))).With(WithUntil("check", true), WithMaxIterations(3)),
+	))
+	require.NoError(t, err)
+	o := newRoutedOrchestrator(t, wf, "instance", actor.NewService(host))
+	err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
+	require.NoError(t, err)
+
+	// A retried report must preserve the previous iteration's completion before opening the next one
+	report := &payloadEnvelope{value: reportPayload{Step: "check", Index: 0, Attempt: 1, Output: json.RawMessage(`false`)}}
+	host.failState = true
+	err = o.Job(t.Context(), methodDone, report)
+	require.Error(t, err)
+	host.failState = false
+	err = o.Job(t.Context(), methodDone, report)
+	require.NoError(t, err)
+	events := host.eventsOf(ref.BuiltInActorTypePrefix+wf.baseType, "instance")
+	var got []string
+	for _, ev := range events {
+		view, decodeErr := DecodeEvent(ev)
+		require.NoError(t, decodeErr)
+		if view.Step == "check" {
+			got = append(got, fmt.Sprintf("%s:%d", view.Kind, view.Iteration))
+		}
+	}
+	assert.Equal(t, []string{"step_started:0", "task_dispatched:0", "task_completed:0", "step_completed:0", "step_started:1"}, got)
+	err = o.Job(t.Context(), methodDone, report)
+	require.NoError(t, err)
+	completed := 0
+	for _, ev := range host.eventsOf(ref.BuiltInActorTypePrefix+wf.baseType, "instance") {
+		if ev.Kind == EventKindStepCompleted {
+			completed++
+		}
+	}
+	assert.Equal(t, 1, completed, "a duplicate report cannot repeat the settlement")
+}
+
+func TestHistoryPreservesFailureBeforeItsOwnCompensation(t *testing.T) {
+	host := newFakeHost()
+	wf, err := New("failure-history", WithSteps(
+		Step("effect", WithRun(noopRun), WithMaxAttempts(1), WithCompensate(noopCompensate), WithCompensateOnFailure()),
+	))
+	require.NoError(t, err)
+	o := newRoutedOrchestrator(t, wf, "instance", actor.NewService(host))
+	err = o.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
+	require.NoError(t, err)
+	err = o.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "effect", Index: 0, Attempt: 1, Error: "failed effect"}})
+	require.NoError(t, err)
+	events := host.eventsOf(ref.BuiltInActorTypePrefix+wf.baseType, "instance")
+	got := make([]string, 0, len(events))
+	for _, ev := range events {
+		got = append(got, ev.Kind)
+	}
+	assert.Equal(t, []string{EventKindInstanceStarted, EventKindStepStarted, EventKindTaskDispatched, EventKindTaskFailed, EventKindStepFailed, EventKindCompensationStarted, EventKindStepCompensating}, got)
+}
+
 func TestWithoutEventHistoryRecordsNoEvents(t *testing.T) {
 	host := newFakeHost()
 	wf, err := New("no-history", WithoutEventHistory(), WithSteps(Step("only", WithRun(noopRun))))

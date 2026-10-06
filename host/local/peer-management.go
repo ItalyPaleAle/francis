@@ -71,8 +71,7 @@ func (h *Host) localSnapshot(req protocol.HostSnapshotRequest) protocol.HostSnap
 }
 
 // localDrain accepts an administrative drain of this host
-// It marks the host draining in the provider before replying, then stops Run, which halts the actors bounded by the requested timeout and unregisters the host
-// The peer server keeps serving until the host has unregistered, so the reply still reaches a remote caller
+// It marks the host draining before replying, and the caller triggers teardown after the acknowledgement
 func (h *Host) localDrain(ctx context.Context, req protocol.HostDrainRequest) (protocol.HostDrainResponse, *protocol.Error) {
 	// Record the drain, unless the host is not running or is already stopping
 	timeout := time.Duration(max(req.TimeoutMs, 0)) * time.Millisecond
@@ -90,10 +89,19 @@ func (h *Host) localDrain(ctx context.Context, req protocol.HostDrainRequest) (p
 	h.draining.Store(true)
 	h.persistDraining()
 
-	// Stop Run, which performs the graceful teardown
-	h.adminDrain.Trigger()
-
 	return protocol.HostDrainResponse{}, nil
+}
+
+// managementResponseWritten starts a peer drain only after the acknowledgement write has been attempted
+func (h *Host) managementResponseWritten(req *protocol.Envelope, resp *protocol.Envelope) {
+	if req.Kind != protocol.KindPeerHostDrain || resp.Kind != protocol.KindPeerHostDrainResponse {
+		return
+	}
+	var ack protocol.HostDrainResponse
+	err := resp.DecodePayload(&ack)
+	if err == nil && !ack.AlreadyDraining {
+		h.adminDrain.Trigger()
+	}
 }
 
 // localDeactivate halts an actor active on this host
@@ -143,6 +151,12 @@ func (h *Host) managementDrain(ctx context.Context, hostID string, address strin
 		if perr != nil {
 			return protocol.HostDrainResponse{}, perr
 		}
+
+		// HTTP shutdown waits for the in-process management request to finish writing its response
+		if !out.AlreadyDraining {
+			h.adminDrain.Trigger()
+		}
+
 		return out, nil
 	}
 

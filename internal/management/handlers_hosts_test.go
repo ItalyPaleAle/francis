@@ -174,6 +174,10 @@ func TestListRuntimes(t *testing.T) {
 func TestDrainHost(t *testing.T) {
 	// markDraining expects the provider to be asked to mark h1 draining, reporting the given result
 	markDraining := func(ts *testServer, force bool, res components.MarkHostDrainingRes, err error) {
+		if !res.AlreadyDraining && !res.Refused(components.MarkHostDrainingReq{Force: force}) && err == nil {
+			res.RollbackToken = "mark-token"
+		}
+
 		ts.provider.EXPECT().MarkHostDraining(mock.Anything, components.MarkHostDrainingReq{HostID: "h1", Force: force}).Return(res, err).Once()
 	}
 
@@ -284,7 +288,7 @@ func TestDrainHost(t *testing.T) {
 		failDrain(ts)
 
 		// The host answers that it is not draining, so the mark is removed
-		ts.provider.EXPECT().ClearHostDraining(mock.Anything, "h1").Return(nil).Once()
+		ts.provider.EXPECT().ClearHostDraining(mock.Anything, "h1", "mark-token").Return(true, nil).Once()
 
 		e := decodeError(t, ts.do(t, http.MethodPost, "/api/v1/hosts/h1/drain", testManagementToken, ""), http.StatusServiceUnavailable, CodeHostUnavailable)
 		assert.True(t, e.Retryable)
@@ -327,7 +331,7 @@ func TestDrainHost(t *testing.T) {
 		ts.provider.EXPECT().GetHostDetails(mock.Anything, "h1").Return(testHost("h1", false, "B"), nil)
 		markDraining(ts, false, components.MarkHostDrainingRes{}, nil)
 		failDrain(ts)
-		ts.provider.EXPECT().ClearHostDraining(mock.Anything, "h1").Return(errors.New("database is down")).Once()
+		ts.provider.EXPECT().ClearHostDraining(mock.Anything, "h1", "mark-token").Return(false, errors.New("database is down")).Once()
 
 		e := decodeError(t, ts.do(t, http.MethodPost, "/api/v1/hosts/h1/drain", testManagementToken, ""), http.StatusServiceUnavailable, CodeHostUnavailable)
 		assert.Equal(t, true, e.Details["hostDraining"])
@@ -346,11 +350,27 @@ func TestDrainHost(t *testing.T) {
 			t.Error("the host should not be asked for a snapshot")
 			return protocol.HostSnapshotResponse{}, ErrHostUnavailable
 		}
-		ts.provider.EXPECT().ClearHostDraining(mock.Anything, "h1").Return(nil).Once()
+		ts.provider.EXPECT().ClearHostDraining(mock.Anything, "h1", "mark-token").Return(true, nil).Once()
 
 		e := decodeError(t, ts.do(t, http.MethodPost, "/api/v1/hosts/h1/drain", testManagementToken, ""), http.StatusServiceUnavailable, CodeHostUnavailable)
 		assert.True(t, e.Retryable)
 		assert.Equal(t, false, e.Details["hostDraining"])
+	})
+
+	t.Run("a failed drain cannot clear a competing accepted drain", func(t *testing.T) {
+		ts := newTestServer(t)
+		ts.provider.EXPECT().GetHostDetails(mock.Anything, "h1").Return(testHost("h1", false, "B"), nil)
+		markDraining(ts, false, components.MarkHostDrainingRes{}, nil)
+
+		ts.backend.drainFn = func(components.HostDetails, protocol.HostDrainRequest) (protocol.HostDrainResponse, error) {
+			return protocol.HostDrainResponse{}, ErrHostBusy
+		}
+
+		// The provider rejects the old token after another request or drain acceptance invalidates it
+		ts.provider.EXPECT().ClearHostDraining(mock.Anything, "h1", "mark-token").Return(false, nil).Once()
+
+		e := decodeError(t, ts.do(t, http.MethodPost, "/api/v1/hosts/h1/drain", testManagementToken, ""), http.StatusServiceUnavailable, CodeHostUnavailable)
+		assert.Equal(t, true, e.Details["hostDraining"])
 	})
 
 	t.Run("a failed drain leaves the mark of another drain in place", func(t *testing.T) {

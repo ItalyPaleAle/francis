@@ -49,6 +49,10 @@ type ActiveActor struct {
 	// Halted is set to true when the actor is halted and should not begin more work
 	halted atomic.Bool
 
+	// deactivationDone lets a host drain wait for deactivations that another caller already started
+	deactivationStarted atomic.Bool
+	deactivationDone    chan struct{}
+
 	// Channel that is closed when the actor is halted
 	// This is used by callers who currently have a lock to understand if they need to cancel in-flight requests
 	haltCh chan struct{}
@@ -66,15 +70,16 @@ func NewActiveActor(ref ref.ActorRef, instance actor.Actor, idleTimeout time.Dur
 	}
 
 	a := &ActiveActor{
-		Instance:      instance,
-		ref:           ref,
-		idleTimeout:   idleTimeout,
-		lockMode:      lockMode,
-		haltCh:        make(chan struct{}),
-		locker:        locker.TurnBasedLocker{},
-		idleProcessor: idleProcessor,
-		clock:         cl,
-		activatedAt:   cl.Now(),
+		deactivationDone: make(chan struct{}),
+		Instance:         instance,
+		ref:              ref,
+		idleTimeout:      idleTimeout,
+		lockMode:         lockMode,
+		haltCh:           make(chan struct{}),
+		locker:           locker.TurnBasedLocker{},
+		idleProcessor:    idleProcessor,
+		clock:            cl,
+		activatedAt:      cl.Now(),
 	}
 	a.UpdateIdleAt(0)
 

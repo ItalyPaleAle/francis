@@ -153,14 +153,10 @@ curl -H "Authorization: Bearer $FRANCIS_TOKEN" \
   http://127.0.0.1:7401/api/v1/hosts
 ```
 
-Read an actor's state as JSON, then as the exact stored bytes:
+Read an actor's state as the exact stored MessagePack bytes:
 
 ```sh
 curl -H "Authorization: Bearer $FRANCIS_TOKEN" \
-  http://127.0.0.1:7401/api/v1/actor-states/counter/my-counter
-
-curl -H "Authorization: Bearer $FRANCIS_TOKEN" \
-  -H "Accept: application/msgpack" \
   -o state.msgpack \
   http://127.0.0.1:7401/api/v1/actor-states/counter/my-counter
 ```
@@ -196,23 +192,7 @@ curl -X POST \
 
 Actor state is stored as MessagePack. `GET /api/v1/actor-states/{type}/{id}` reads it from the provider without activating the actor, and returns the last committed state: work in progress inside a running actor call isn't visible. A missing or expired state returns `404`.
 
-By default the state is converted to JSON and returned in the `state` field, together with `size` (the number of stored bytes) and a `lossy` flag. A Go struct encoded with `msgpack` tags appears with its MessagePack field names as keys. Numbers, and values that have no JSON equivalent, are rendered with this convention:
-
-| MessagePack value | JSON rendering |
-| --- | --- |
-| nil, boolean, string, array, map with string keys | As-is |
-| Integer of any size | Decimal string, e.g. `"42"` |
-| Float | String with the shortest representation of its precision, e.g. `"0.1"` or `"1e+21"`, or `"NaN"`, `"Infinity"`, or `"-Infinity"` |
-| Timestamp extension | RFC 3339 string with nanoseconds |
-| Binary, or a string that isn't valid UTF-8 | `{"$binary": "<base64>"}` |
-| Other extension types | `{"$ext": <type>, "data": "<base64>"}` |
-| Map with non-string keys | Keys rendered as text, e.g. `"1"` or `"true"` |
-
-Because every number is a string, a number and a string with the same text look the same in the JSON, so read numbers according to the type you stored.
-
-`lossy` is `true` when any value used one of the renderings in the last four rows, which change the value's shape. Numbers don't count, since they're always strings, so `lossy: false` doesn't mean the JSON converts back to the stored bytes. To get the exact stored bytes, send `Accept: application/msgpack`.
-
-If two keys of a map would become the same JSON name, such as `1` and `"1"` or the same key stored twice, the state can't be rendered as JSON, because JSON parsers disagree on which value they keep. The request then fails with `422 stateNotDecodable`, and the state can still be read with `Accept: application/msgpack`.
+The response body contains the exact stored bytes, with `Content-Type: application/msgpack`. Error responses use JSON.
 
 Built-in actor types (such as workflow orchestrators and workers) store their internals in the same way, and `actors:state:read` can read them. That's useful for debugging, but their format is internal and can change between releases. Use the workflow endpoints to inspect workflows.  
 The state of a workflow's actor types holds the instances' input and output, so reading it also requires `workflows:data:read`, the same scope that the instance details need to include them.
@@ -252,7 +232,7 @@ There's no way to undo a drain once the host has accepted it. If the host reconn
 The host is marked as draining before it's asked to drain, so a request that fails part of the way could leave a host that never accepted the drain out of placement. When the request fails, the API asks the host whether it's draining:
 
 - If the host is draining, it accepted the drain and only its acknowledgement was lost, so the request succeeds.
-- If the host isn't draining, its draining mark is removed, so it goes back into service, and the request fails with `details.hostDraining: false`.
+- If the host isn't draining, its mark is removed only while this request still owns it. A competing drain request or the host accepting a drain invalidates that ownership atomically. When the mark is removed, the host goes back into service and the error has `details.hostDraining: false`, otherwise it stays marked and the error has `details.hostDraining: true`.
 - If the host can't be asked, it may have accepted the drain, so its mark stays, and the request fails with `details.hostDraining: true`. Send the drain again once the host is reachable. The mark also clears when the host registers again, which in the remote topology includes reconnecting to a runtime.
 
 ### Cancelling, suspending, and resuming a workflow instance
@@ -291,7 +271,7 @@ Errors return a JSON body:
 }
 ```
 
-- `code` is a stable, machine-readable error code, such as `badRequest`, `unauthorized`, `forbidden`, `notFound`, `notApplicable` (a route that doesn't exist in this topology, like `/runtimes` in the local topology), `exclusiveLeaseHeld`, `lastServer`, `hostUnavailable`, `hostReattached`, `noHostsReachable`, `eventHistoryDisabled`, `payloadTooLarge`, `stateNotDecodable`, `timeout`, or `internal`.
+- `code` is a stable, machine-readable error code, such as `badRequest`, `unauthorized`, `forbidden`, `notFound`, `notApplicable` (a route that doesn't exist in this topology, like `/runtimes` in the local topology), `exclusiveLeaseHeld`, `lastServer`, `hostUnavailable`, `hostReattached`, `noHostsReachable`, `eventHistoryDisabled`, `payloadTooLarge`, `timeout`, or `internal`.
 - `requestId` is also returned in the `X-Request-Id` header of every response, and matches the audit log.
 - `retryable` is present, and `true`, when sending the same request again may succeed.
 - `details` carries extra information for some errors.

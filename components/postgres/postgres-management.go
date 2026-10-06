@@ -80,36 +80,34 @@ func (p *PostgresProvider) GetHostDetails(ctx context.Context, hostID string) (c
 	return hosts[0], nil
 }
 
-// ClearHostDraining clears the draining flag of a live host, putting it back into placement
-func (p *PostgresProvider) ClearHostDraining(ctx context.Context, hostID string) error {
+// ClearHostDraining rolls back an unaccepted drain while its token still owns the mark
+func (p *PostgresProvider) ClearHostDraining(ctx context.Context, hostID string, rollbackToken string) (bool, error) {
 	// A value that is not a UUID can't identify a host
 	id, err := uuid.Parse(hostID)
 	if err != nil {
-		return components.ErrHostUnregistered
+		return false, components.ErrHostUnregistered
 	}
 
-	// The host must be visible with the same rule as GetHostDetails
+	// Test ownership and clear the flag under the same row lock as drain acceptance and competing marks
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
+	var draining bool
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	tag, err := p.db.Exec(queryCtx,
+	err = p.db.QueryRow(queryCtx,
 		`UPDATE `+p.tablePrefix+`hosts
-		SET host_draining = false
-		WHERE
-			host_id = $1
-			AND host_last_health_check >= ((now() AT TIME ZONE 'utc') - $2::interval)`,
-		id, p.cfg.HostHealthCheckDeadline,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to clear the host's draining flag: %w", err)
+		SET host_draining = CASE WHEN $3 <> '' AND host_drain_token = $3 THEN false ELSE host_draining END,
+		    host_drain_token = CASE WHEN $3 <> '' AND host_drain_token = $3 THEN '' ELSE host_drain_token END
+		WHERE host_id = $1 AND host_last_health_check >= ((now() AT TIME ZONE 'utc') - $2::interval)
+		RETURNING host_draining`,
+		id, p.cfg.HostHealthCheckDeadline, rollbackToken,
+	).Scan(&draining)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, components.ErrHostUnregistered
+	} else if err != nil {
+		return false, fmt.Errorf("failed to clear the host's draining flag: %w", err)
 	}
 
-	// No row means the host doesn't exist or exists but is un-healthy
-	if tag.RowsAffected() == 0 {
-		return components.ErrHostUnregistered
-	}
-
-	return nil
+	return !draining, nil
 }
 
 // MarkHostDraining marks a live host draining unless it is the last live, non-draining server of an actor type, or the request is forced
@@ -165,7 +163,7 @@ func (p *PostgresProvider) markHostDrainingInTx(ctx context.Context, tx pgx.Tx, 
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	err = tx.QueryRow(queryCtx,
 		`SELECT host_draining FROM `+p.tablePrefix+`hosts
-			WHERE host_id = $1 AND host_last_health_check >= ((now() AT TIME ZONE 'utc') - $2::interval)`,
+			WHERE host_id = $1 AND host_last_health_check >= ((now() AT TIME ZONE 'utc') - $2::interval) FOR UPDATE`,
 		hostID, p.cfg.HostHealthCheckDeadline,
 	).Scan(&draining)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -175,7 +173,8 @@ func (p *PostgresProvider) markHostDrainingInTx(ctx context.Context, tx pgx.Tx, 
 	}
 	if draining {
 		res.AlreadyDraining = true
-		return res, nil
+		err = p.setActorHostDraining(ctx, req.HostID, tx)
+		return res, err
 	}
 
 	// Find the actor types that no other live, non-draining host serves
@@ -213,10 +212,14 @@ func (p *PostgresProvider) markHostDrainingInTx(ctx context.Context, tx pgx.Tx, 
 		return res, nil
 	}
 
-	err = p.setActorHostDraining(ctx, req.HostID, tx)
+	// Give only this mark permission to roll back until the host accepts or another request joins it
+	res.RollbackToken = uuid.NewV7().String()
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	_, err = tx.Exec(queryCtx, `UPDATE `+p.tablePrefix+`hosts SET host_draining = true, host_drain_token = $2 WHERE host_id = $1`, hostID, res.RollbackToken)
 	if err != nil {
-		return res, err
+		return res, fmt.Errorf("error marking host draining: %w", err)
 	}
+
 	return res, nil
 }
 

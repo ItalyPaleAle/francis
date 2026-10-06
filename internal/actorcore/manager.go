@@ -66,7 +66,8 @@ type Manager struct {
 	providerRequestTimeout time.Duration
 	shutdownGracePeriod    time.Duration
 
-	started atomic.Bool
+	started  atomic.Bool
+	draining atomic.Bool
 
 	// ActorFactories holds the factory for each registered actor type, keyed by actor type
 	ActorFactories map[string]actor.Factory
@@ -243,6 +244,7 @@ func (m *Manager) RegisteredActorTypes() []components.ActorHostType {
 // Start creates the idle actor processor and marks the manager started so no more actor types can be registered
 func (m *Manager) Start() {
 	m.started.Store(true)
+	m.draining.Store(false)
 	m.IdleProcessor = eventqueue.NewProcessor(eventqueue.Options[string, *ActiveActor]{
 		Clock:     m.clock,
 		ExecuteFn: m.HandleIdleActor,
@@ -306,6 +308,11 @@ func (m *Manager) LockAndPeekActive(parentCtx context.Context, r ref.ActorRef, f
 // lockAndInvokeActor acquires the actor's turn-based lock and runs fn, canceling the call if the actor is halted mid-flight
 // readOnly selects the shared (read) lock used by Peek
 func (m *Manager) lockAndInvokeActor(parentCtx context.Context, act *ActiveActor, readOnly bool, fn func(ctx context.Context, act *ActiveActor) (any, error)) (any, error) {
+	// Refuse a new turn once the host's shutdown barrier is established
+	if m.draining.Load() {
+		return nil, actor.ErrActorHalted
+	}
+
 	sharedLock := act.LockMode() == LockModeShared
 
 	// A shared-mode actor synchronizes itself and mutates its own state, so none of its invocations are read-only and a Peek has no meaning against it
@@ -406,6 +413,11 @@ func (m *Manager) getOrCreateActor(parentCtx context.Context, r ref.ActorRef) (*
 	m.createLock.Lock()
 	defer m.createLock.Unlock()
 
+	// Draining holds this lock while barring activation, so its snapshot cannot miss a late actor
+	if m.draining.Load() {
+		return nil, actor.ErrActorHalted
+	}
+
 	// Re-check under the lock in case another goroutine created the actor while we waited
 	a, ok = m.Actors.Get(key)
 	if ok && a != nil {
@@ -457,6 +469,8 @@ func (m *Manager) haltAll(abandon bool) error {
 		count++
 		go func(act *ActiveActor) {
 			haltErr := m.haltActiveActor(act, true, abandon)
+			// A previously started halt must finish too, so the host's timeout remains active for its running calls
+			<-act.deactivationDone
 			if haltErr != nil {
 				haltErr = fmt.Errorf("failed to halt actor '%s': %w", act.Key(), haltErr)
 			}
@@ -532,13 +546,22 @@ func (m *Manager) HandleIdleActor(act *ActiveActor) {
 		return
 	}
 
-	// Proceed with halting in a background goroutine, so we don't block other idle actors from being deactivated
+	// Transfer the idle lock to deactivation without racing a host drain that may already own it
+	m.haltIdleActor(act)
+}
+
+// haltIdleActor transfers a successful idle TryLock to deactivation or releases it to the caller that already owns deactivation
+func (m *Manager) haltIdleActor(act *ActiveActor) {
+	if !act.deactivationStarted.CompareAndSwap(false, true) {
+		act.Unlock()
+		return
+	}
+
+	// Ownership is claimed before spawning, so a drain waits for this deactivation instead of waiting on its idle lock
 	go func() {
-		// We don't need to drain the active calls because we just acquired the lock
-		haltErr := m.HaltActiveActor(act, false)
+		haltErr := m.finishHaltActiveActor(act, false, false)
 		if haltErr != nil {
 			m.log.Error("Failed to deactivate idle actor", slog.String("actorRef", act.Key()), slog.Any("error", haltErr))
-			return
 		}
 	}()
 }
@@ -551,6 +574,17 @@ func (m *Manager) HaltActiveActor(act *ActiveActor, drain bool) (err error) {
 // haltActiveActor gracefully halts an actor's instance, and unless abandon is set also removes it from the placement store
 // An abandoned actor is one this host no longer owns, so its placement record is left alone and its Deactivate hook runs read-only
 func (m *Manager) haltActiveActor(act *ActiveActor, drain bool, abandon bool) (err error) {
+	// Only one caller owns deactivation, while halt-all waits on its completion before the host unregisters
+	if !act.deactivationStarted.CompareAndSwap(false, true) {
+		return nil
+	}
+
+	return m.finishHaltActiveActor(act, drain, abandon)
+}
+
+// finishHaltActiveActor completes the deactivation whose ownership the caller already claimed
+func (m *Manager) finishHaltActiveActor(act *ActiveActor, drain bool, abandon bool) (err error) {
+	defer close(act.deactivationDone)
 	key := act.Key()
 
 	// Deactivation runs off the idle processor or shutdown, not a caller request, so it begins its own trace

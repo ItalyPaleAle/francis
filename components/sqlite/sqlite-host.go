@@ -141,7 +141,7 @@ func (s *SQLiteProvider) reattachHost(ctx context.Context, req components.Regist
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		res, err = tx.ExecContext(queryCtx,
 			`UPDATE `+s.tablePrefix+`hosts
-			SET host_address = ?, host_last_health_check = ?, host_session_id = ?, host_runtime_id = ?, host_draining = 0
+			SET host_address = ?, host_last_health_check = ?, host_session_id = ?, host_runtime_id = ?, host_draining = 0, host_drain_token = ''
 			WHERE host_id = ?`,
 			req.Address, now, utils.NullString(req.SessionID), utils.NullString(req.RuntimeID), req.ExistingHostID,
 		)
@@ -388,7 +388,7 @@ func (s *SQLiteProvider) setActorHostDraining(ctx context.Context, hostID string
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := db.ExecContext(queryCtx,
 		`UPDATE `+s.tablePrefix+`hosts
-		SET host_draining = 1
+		SET host_draining = 1, host_drain_token = ''
 		WHERE
 			host_id = ?
 			AND host_last_health_check >= ?`,
@@ -862,8 +862,8 @@ func (s *SQLiteProvider) insertHostActorTypes(ctx context.Context, tx *sql.Tx, h
 			t.ActorType,
 			t.IdleTimeout.Milliseconds(),
 			t.ConcurrencyLimit,
-			t.CompletedJobRetention.Milliseconds(),
-			t.DeadLetteredJobRetention.Milliseconds(),
+			utils.RetentionMilliseconds(t.CompletedJobRetention),
+			utils.RetentionMilliseconds(t.DeadLetteredJobRetention),
 		)
 
 		if i > 0 {
