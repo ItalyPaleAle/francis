@@ -21,7 +21,7 @@ require (
 	github.com/lestrrat-go/jwx/v4 v4.5.0
 	github.com/lmittmann/tint v1.2.0
 	github.com/mattn/go-isatty v0.0.24
-	github.com/quic-go/quic-go v0.62.0
+	github.com/quic-go/quic-go v0.63.0
 	github.com/quic-go/webtransport-go v0.13.0
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/stretchr/testify v1.12.1
