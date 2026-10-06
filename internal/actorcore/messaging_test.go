@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/alphadose/haxmap"
@@ -44,6 +45,24 @@ func (e *echoActor) Peek(_ context.Context, method string, data actor.Envelope) 
 		_ = data.Decode(&s)
 	}
 	return "peek:" + method + ":" + s, nil
+}
+
+type waitingDeactivateActor struct {
+	echoActor
+
+	started chan struct{}
+	release <-chan struct{}
+}
+
+func (a *waitingDeactivateActor) Deactivate(ctx context.Context) error {
+	// Keep the lifecycle hook open so an invocation can arrive before cleanup finishes
+	close(a.started)
+	select {
+	case <-a.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // streamActor is a minimal actor that echoes the request body back through the streamed response
@@ -274,6 +293,182 @@ func TestManagerInvokeLocal(t *testing.T) {
 		assert.Equal(t, 2, resolver.resolveCalls)
 		assert.Equal(t, 1, peer.calls)
 		assert.Equal(t, "addr2", peer.lastAddr)
+	})
+}
+
+func TestManagerInvokeDuringDeactivation(t *testing.T) {
+	tests := []struct {
+		name      string
+		readOnly  bool
+		relocated bool
+		want      string
+	}{
+		{name: "invoke", want: "echo:ping:x"},
+		{name: "peek", readOnly: true, want: "peek:ping:x"},
+		{name: "ownership moves", relocated: true, want: "from-peer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				// Pause both the Deactivate hook and placement removal to exercise each part of the transition
+				deactivateStarted := make(chan struct{})
+				deactivateRelease := make(chan struct{})
+				removeStarted := make(chan struct{})
+				removeRelease := make(chan struct{})
+
+				releaseDeactivate := sync.OnceFunc(func() {
+					close(deactivateRelease)
+				})
+				releaseRemove := sync.OnceFunc(func() {
+					close(removeRelease)
+				})
+
+				defer releaseDeactivate()
+				defer releaseRemove()
+
+				var factoryCalls int
+				m := newMessagingManager(t, func(_ string, _ *actor.Service) actor.Actor {
+					factoryCalls++
+					return &waitingDeactivateActor{started: deactivateStarted, release: deactivateRelease}
+				})
+				defer m.Close()
+
+				m.ActorsConfig["testactor"] = components.ActorHostType{DeactivationTimeout: time.Minute}
+				m.providerRequestTimeout = time.Minute
+				m.removeActor = func(ctx context.Context, _ ref.ActorRef) error {
+					close(removeStarted)
+					select {
+					case <-removeRelease:
+						return nil
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
+
+				r := ref.NewActorRef("testactor", "idle")
+				act, err := m.getOrCreateActor(t.Context(), r)
+				require.NoError(t, err)
+
+				m.HandleIdleActor(act)
+				<-deactivateStarted
+
+				// An invocation during deactivation must wait instead of consuming its retry against the halted instance
+				resolver := &fakeResolver{
+					localHostID: "h1",
+					placements:  []*Placement{{HostID: "h1"}, {HostID: "h1"}},
+				}
+				peer := &fakePeer{}
+				if tt.relocated {
+					resolver.confirmErr = actor.ErrActorNotHosted
+					resolver.placements[1] = &Placement{HostID: "h2", Address: "addr2"}
+					out, marshalErr := msgpack.Marshal(tt.want)
+					require.NoError(t, marshalErr)
+					peer.results = []peerObjResult{{resp: protocol.InvokeActorResponse{Data: out}}}
+				}
+				type invokeResult struct {
+					env actor.Envelope
+					err error
+				}
+				resultCh := make(chan invokeResult, 1)
+				go func() {
+					env, invokeErr := m.Invoke(t.Context(), resolver, peer, r, "ping", "x", false, tt.readOnly)
+					resultCh <- invokeResult{env: env, err: invokeErr}
+				}()
+				synctest.Wait()
+				select {
+				case result := <-resultCh:
+					t.Fatalf("invocation returned before the Deactivate hook finished: %v", result.err)
+				default:
+				}
+
+				// The hook finishing is insufficient because the old placement can still be removed afterward
+				releaseDeactivate()
+				<-removeStarted
+				synctest.Wait()
+				select {
+				case result := <-resultCh:
+					t.Fatalf("invocation returned before placement cleanup finished: %v", result.err)
+				default:
+				}
+				assert.Equal(t, 1, factoryCalls)
+				assert.Equal(t, 0, resolver.confirmCalls)
+
+				// After cleanup, confirm ownership again before activating here or routing to a new owner
+				releaseRemove()
+				synctest.Wait()
+				result := <-resultCh
+				err = result.err
+				require.NoError(t, err)
+				assert.Equal(t, tt.want, decodeEnvelope(t, result.env))
+				assert.Equal(t, 1, resolver.confirmCalls)
+				if tt.relocated {
+					assert.Equal(t, 1, factoryCalls)
+					assert.Equal(t, 2, resolver.resolveCalls)
+					assert.Equal(t, 1, resolver.invalidated)
+					assert.Equal(t, 1, peer.calls)
+					return
+				}
+				assert.Equal(t, 2, factoryCalls)
+				assert.Equal(t, 1, resolver.resolveCalls)
+				assert.Equal(t, 0, resolver.invalidated)
+			})
+		})
+	}
+}
+
+func TestManagerInvokeDuringDeactivationCanceled(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// Hold placement removal open so cancellation happens while the next invocation waits
+		removeStarted := make(chan struct{})
+		removeRelease := make(chan struct{})
+		defer close(removeRelease)
+
+		m := newMessagingManager(t, echoFactory)
+		defer m.Close()
+
+		m.ActorsConfig["testactor"] = components.ActorHostType{}
+		m.providerRequestTimeout = time.Minute
+		m.removeActor = func(ctx context.Context, _ ref.ActorRef) error {
+			close(removeStarted)
+			select {
+			case <-removeRelease:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+
+		r := ref.NewActorRef("testactor", "idle")
+		act, err := m.getOrCreateActor(t.Context(), r)
+		require.NoError(t, err)
+
+		m.HandleIdleActor(act)
+		<-removeStarted
+
+		// A canceled caller must leave promptly without confirming placement or creating a replacement
+		resolver := &fakeResolver{
+			localHostID: "h1",
+			placements:  []*Placement{{HostID: "h1"}, {HostID: "h1"}},
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		resultCh := make(chan error, 1)
+		go func() {
+			_, invokeErr := m.Invoke(ctx, resolver, &fakePeer{}, r, "ping", "x", false, false)
+			resultCh <- invokeErr
+		}()
+		synctest.Wait()
+		cancel()
+		synctest.Wait()
+
+		err = <-resultCh
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, 0, resolver.confirmCalls)
+		assert.Equal(t, 1, resolver.resolveCalls)
+
+		current, ok := m.Actors.Get(r.String())
+		assert.True(t, ok)
+		assert.Same(t, act, current)
 	})
 }
 

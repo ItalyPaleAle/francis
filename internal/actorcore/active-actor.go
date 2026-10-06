@@ -49,7 +49,7 @@ type ActiveActor struct {
 	// Halted is set to true when the actor is halted and should not begin more work
 	halted atomic.Bool
 
-	// deactivationDone lets a host drain wait for deactivations that another caller already started
+	// deactivationDone lets invocations and host drains wait until the lifecycle hook and placement cleanup finish
 	deactivationStarted atomic.Bool
 	deactivationDone    chan struct{}
 

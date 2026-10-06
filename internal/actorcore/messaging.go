@@ -543,11 +543,26 @@ func (m *Manager) lockAndInvokeLocal(ctx context.Context, resolver PlacementReso
 }
 
 // claimLocal authoritatively claims an actor for this host before it is activated
-// An actor already active here is, by definition, ours and needs no claim, which keeps warm invocations free of a placement lookup
+// An actor still accepting work here needs no claim, which keeps warm invocations free of a placement lookup
 func (m *Manager) claimLocal(ctx context.Context, resolver PlacementResolver, r ref.ActorRef) error {
-	_, active := m.Actors.Get(r.String())
-	if active {
-		return nil
+	act, active := m.Actors.Get(r.String())
+	if active && act != nil {
+		if !act.deactivationStarted.Load() {
+			return nil
+		}
+
+		// Wait for the old hook and placement cleanup before claiming a replacement that cleanup could otherwise orphan
+		select {
+		case <-act.deactivationDone:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	// Ownership may have moved during deactivation, so confirm it again before activating locally
+	err := ctx.Err()
+	if err != nil {
+		return err
 	}
 
 	return resolver.ConfirmLocal(ctx, r)
