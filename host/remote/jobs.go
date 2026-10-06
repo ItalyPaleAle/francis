@@ -12,6 +12,7 @@ import (
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/types"
+	"github.com/italypaleale/francis/internal/wireconv"
 	"github.com/italypaleale/francis/protocol"
 )
 
@@ -62,7 +63,7 @@ func (h *Host) Dispatch(ctx context.Context, actorType string, actorID string, m
 
 		req.InitialState = &protocol.InitialState{
 			Data:           encoded,
-			WorkflowLabels: workflowLabelsToProtocol(&labels),
+			WorkflowLabels: wireconv.WorkflowLabelsToWire(&labels),
 		}
 	}
 

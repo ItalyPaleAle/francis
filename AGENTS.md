@@ -1,4 +1,4 @@
-# Coding Style Guidelines
+# Agent Guidelines
 
 ## Go
 
@@ -20,11 +20,41 @@ val, ok := something.(string)
 if ok { ... }
 ```
 
+In tests, never invoke functions inside assertions that check errors, such as `require.Error`, `require.NoError`, `require.ErrorIs`, `assert.ErrorContains`, and similar.
+Always assign the result to an `err` variable on a separate line first, then pass the variable to the assertion.
+This does not apply to assertions that do not check errors.
+
+```go
+// Wrong
+require.Error(t, something())
+
+// Wrong
+require.ErrorIs(t, something(), context.Canceled)
+
+// Wrong
+require.NoError(t, something())
+
+// Right
+err := something()
+require.Error(t, err)
+
+// Right
+err := something()
+require.ErrorIs(t, err, context.Canceled)
+
+// Right
+err := something()
+require.NoError(t, err)
+```
+
 The runtime configuration lives in `cmd/runtime/config.go`, and there is no generated config documentation.
 If you add, remove, or change an option in the `config` struct or any struct referenced from it, update the configuration reference in `docs/content/docs/deploying-the-runtime.md` by hand.
 If the option is exposed by the Helm chart, also update `charts/francis/values.yaml`, `charts/francis/values.schema.json`, the config file template in `charts/francis/templates/_helpers.tpl`, and the values table in `charts/francis/README.md`.
 
 If you change an interface that is mocked in `internal/mocks` (the list is in `.mockery.yml`), run `make mocks` to regenerate the mocks before finishing the task.
+
+The management API's OpenAPI document in `internal/management/openapi/openapi.yaml` is generated from the swag annotations on the handlers and the request and response types in `internal/management`, plus the overview in `internal/management/openapi/api.md`.
+If you change any of them, run `make gen-openapi` before finishing the task, and never edit `openapi.yaml` by hand.
 
 ## Comments
 

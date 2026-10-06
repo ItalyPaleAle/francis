@@ -158,16 +158,16 @@ func (h *Host) executeAlarm(ctx context.Context, req protocol.ExecuteAlarmReques
 }
 
 // terminateActor halts an actor active on this host, at the runtime's request
-func (h *Host) terminateActor(_ context.Context, req protocol.TerminateActorRequest) *protocol.Error {
+func (h *Host) terminateActor(_ context.Context, req protocol.TerminateActorRequest) (protocol.TerminateActorResponse, *protocol.Error) {
 	err := h.core.Halt(req.ActorType, req.ActorID)
 	if errors.Is(err, actor.ErrActorNotHosted) {
-		// An actor that is not active here is already in the desired state
-		return nil
+		// An actor that is not active here is already in the desired state, which the caller may want to know
+		return protocol.TerminateActorResponse{NotActive: true}, nil
 	} else if err != nil {
-		return protocol.NewErrorf(protocol.ErrCodeInternal, "failed to terminate actor: %v", err)
+		return protocol.TerminateActorResponse{}, protocol.NewErrorf(protocol.ErrCodeInternal, "failed to terminate actor: %v", err)
 	}
 
-	return nil
+	return protocol.TerminateActorResponse{}, nil
 }
 
 func alarmRequestID(req protocol.ExecuteAlarmRequest) string {

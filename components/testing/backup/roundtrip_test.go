@@ -39,6 +39,7 @@ func TestCrossProviderBackupRestore(t *testing.T) {
 		srcContents := comptesting.DecodeBackup(t, srcBuf.Bytes())
 		require.NotEmpty(t, srcContents.States)
 		require.NotEmpty(t, srcContents.TerminalJobs)
+		require.NotEmpty(t, srcContents.WorkflowEvents)
 
 		err = dst.Restore(ctx, bytes.NewReader(srcBuf.Bytes()))
 		require.NoError(t, err)

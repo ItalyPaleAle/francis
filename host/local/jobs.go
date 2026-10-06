@@ -45,11 +45,16 @@ func (h *Host) Dispatch(ctx context.Context, actorType string, actorID string, m
 		return "", false, err
 	}
 
+	return h.storeJob(ctx, ref.NewAlarmRef(actorType, actorID, name), req)
+}
+
+// storeJob durably stores a job and hands any immediate lease to the in-memory scheduler
+func (h *Host) storeJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) (jobID string, created bool, err error) {
 	// Offer this host for an immediate lease only when its in-memory scheduler can retain it
 	req.LeaseImmediate = h.immediateLeaseHosts()
 
 	// Store the job and acquire any immediate lease in the same provider operation
-	jobID, created, lease, err := h.actorProvider.DispatchJob(ctx, ref.NewAlarmRef(actorType, actorID, name), req)
+	jobID, created, lease, err := h.actorProvider.DispatchJob(ctx, aRef, req)
 	if err != nil {
 		return "", false, fmt.Errorf("failed to dispatch job: %w", err)
 	}

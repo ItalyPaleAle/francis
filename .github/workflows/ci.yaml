@@ -7,7 +7,6 @@ on:
     branches: ["main"]
 
 env:
-  GOLANGCI_LINT_VERSION: "v2.13.1"
   HELM_VERSION: "v4.2.4"
   KIND_VERSION: "v0.29.0"
 
@@ -55,15 +54,23 @@ jobs:
         run: |
           go tool gomod-age
 
+      - name: "Check the management API's OpenAPI document is up to date"
+        run: |
+          make check-openapi-diff
+
+      - name: "Read lint version"
+        id: lint-version
+        run: echo "version=$(cat .golangci-lint-version)" >> "$GITHUB_OUTPUT"
+
       - name: "Lint"
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # 9.3.0
         with:
-          version: "${{ env.GOLANGCI_LINT_VERSION }}"
+          version: "${{ steps.lint-version.outputs.version }}"
 
       - name: "Lint E2E"
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # 9.3.0
         with:
-          version: "${{ env.GOLANGCI_LINT_VERSION }}"
+          version: "${{ steps.lint-version.outputs.version }}"
           working-directory: "tests/e2e"
 
       - name: "Test"

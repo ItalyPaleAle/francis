@@ -43,8 +43,15 @@ type ActiveActor struct {
 	// When the actor is locked, idleAt is updated by adding the idleTimeout to the current time
 	idleAt atomic.Pointer[time.Time]
 
+	// Time the in-memory instance was created on this host, reported by host snapshots
+	activatedAt time.Time
+
 	// Halted is set to true when the actor is halted and should not begin more work
 	halted atomic.Bool
+
+	// deactivationDone lets invocations and host drains wait until the lifecycle hook and placement cleanup finish
+	deactivationStarted atomic.Bool
+	deactivationDone    chan struct{}
 
 	// Channel that is closed when the actor is halted
 	// This is used by callers who currently have a lock to understand if they need to cancel in-flight requests
@@ -63,14 +70,16 @@ func NewActiveActor(ref ref.ActorRef, instance actor.Actor, idleTimeout time.Dur
 	}
 
 	a := &ActiveActor{
-		Instance:      instance,
-		ref:           ref,
-		idleTimeout:   idleTimeout,
-		lockMode:      lockMode,
-		haltCh:        make(chan struct{}),
-		locker:        locker.TurnBasedLocker{},
-		idleProcessor: idleProcessor,
-		clock:         cl,
+		deactivationDone: make(chan struct{}),
+		Instance:         instance,
+		ref:              ref,
+		idleTimeout:      idleTimeout,
+		lockMode:         lockMode,
+		haltCh:           make(chan struct{}),
+		locker:           locker.TurnBasedLocker{},
+		idleProcessor:    idleProcessor,
+		clock:            cl,
+		activatedAt:      cl.Now(),
 	}
 	a.UpdateIdleAt(0)
 
@@ -207,6 +216,17 @@ func (a *ActiveActor) Halt(drain bool) error {
 	}
 
 	return nil
+}
+
+// ActivatedAt returns the time the in-memory instance was created on this host
+func (a *ActiveActor) ActivatedAt() time.Time {
+	return a.activatedAt
+}
+
+// Deactivating reports whether the actor has started halting, after which it accepts no new work
+// It reads only the halted flag, so it never touches the turn locker or the idle timer
+func (a *ActiveActor) Deactivating() bool {
+	return a.halted.Load()
 }
 
 // LockMode returns the lock mode configured for this actor's type

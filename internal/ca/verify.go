@@ -9,10 +9,12 @@ import (
 )
 
 // HostPrefix is the SPIFFE path prefix for host identities
-const HostPrefix = "/host/"
+const (
+	HostPrefix = "/host/"
 
-// RuntimePrefix is the SPIFFE path prefix for runtime identities
-const RuntimePrefix = "/runtime/"
+	// RuntimePrefix is the SPIFFE path prefix for runtime identities
+	RuntimePrefix = "/runtime/"
+)
 
 // NewCertPool builds an x509.CertPool from a CA bundle, which may contain more than one anchor during a root rotation
 func NewCertPool(cas []*CA) *x509.CertPool {
@@ -37,21 +39,31 @@ func PoolFromPEM(pems [][]byte) (*x509.CertPool, error) {
 // HostIDFromCert returns the host identity carried by a peer certificate's SPIFFE ID
 // It errors when the certificate has no SPIFFE host identity, so a caller can reject a non-host peer
 func HostIDFromCert(cert *x509.Certificate) (string, error) {
+	return idFromCert(cert, HostPrefix, "host")
+}
+
+// RuntimeIDFromCert returns the runtime identity carried by a peer certificate's SPIFFE ID
+// It errors when the certificate has no SPIFFE runtime identity, so a caller can reject a non-runtime peer
+func RuntimeIDFromCert(cert *x509.Certificate) (string, error) {
+	return idFromCert(cert, RuntimePrefix, "runtime")
+}
+
+// idFromCert returns the identity in the given SPIFFE namespace carried by a certificate
+func idFromCert(cert *x509.Certificate, prefix string, kind string) (string, error) {
 	id, err := SPIFFEIDFromCert(cert)
 	if err != nil {
 		return "", err
 	}
 
-	if !strings.HasPrefix(id.Path, HostPrefix) {
-		return "", fmt.Errorf("peer SPIFFE identity %q is not a host identity", id.String())
+	if !strings.HasPrefix(id.Path, prefix) {
+		return "", fmt.Errorf("peer SPIFFE identity %q is not a %s identity", id.String(), kind)
 	}
 
-	return strings.TrimPrefix(id.Path, HostPrefix), nil
+	return strings.TrimPrefix(id.Path, prefix), nil
 }
 
 // SPIFFEIDFromCert extracts the single spiffe:// URI SAN from a certificate
-func SPIFFEIDFromCert(cert *x509.Certificate) (*url.URL, error) {
-	var found *url.URL
+func SPIFFEIDFromCert(cert *x509.Certificate) (found *url.URL, err error) {
 	for _, u := range cert.URIs {
 		if u.Scheme != "spiffe" {
 			continue
@@ -61,9 +73,11 @@ func SPIFFEIDFromCert(cert *x509.Certificate) (*url.URL, error) {
 		}
 		found = u
 	}
+
 	if found == nil {
 		return nil, errors.New("certificate has no SPIFFE URI")
 	}
+
 	return found, nil
 }
 

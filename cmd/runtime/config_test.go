@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -88,4 +89,65 @@ func TestLoadConfigRuntimeIDEnvOverride(t *testing.T) {
 	cfg, err = loadConfig(path)
 	require.NoError(t, err)
 	assert.Equal(t, "francis-1", cfg.RuntimeID)
+}
+
+func TestLoadConfigAdvertiseAddressEnvOverride(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	err := os.WriteFile(path, []byte("advertiseAddress: from-file:7400\n"), 0o600)
+	require.NoError(t, err)
+
+	// Without the env var, the config file value is used
+	t.Setenv(advertiseAddressEnvVar, "")
+	cfg, err := loadConfig(path)
+	require.NoError(t, err)
+	assert.Equal(t, "from-file:7400", cfg.AdvertiseAddress)
+
+	// The env var overrides the config file value
+	t.Setenv(advertiseAddressEnvVar, "francis-1.francis:7400")
+	cfg, err = loadConfig(path)
+	require.NoError(t, err)
+	assert.Equal(t, "francis-1.francis:7400", cfg.AdvertiseAddress)
+}
+
+func TestManagementServerConfig(t *testing.T) {
+	readOnly := strings.Repeat("r", 32)
+	manage := strings.Repeat("m", 32)
+
+	t.Run("parses the management block", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		err := os.WriteFile(path, []byte("management:\n  enabled: true\n  bind: 0.0.0.0:7401\n  readOnlyTokens: ["+readOnly+"]\n  managementTokens: ["+manage+"]\n"), 0o600)
+		require.NoError(t, err)
+
+		cfg, err := loadConfig(path)
+		require.NoError(t, err)
+		require.True(t, cfg.Management.Enabled)
+
+		res, err := cfg.Management.managementServerConfig()
+		require.NoError(t, err)
+		assert.Equal(t, "0.0.0.0:7401", res.Bind)
+		assert.Equal(t, []string{readOnly}, res.ReadOnlyTokens)
+		assert.Equal(t, []string{manage}, res.ManagementTokens)
+		assert.Nil(t, res.TLSConfig)
+	})
+
+	t.Run("defaults the bind address", func(t *testing.T) {
+		res, err := managementConfig{Enabled: true, ReadOnlyTokens: []string{readOnly}}.managementServerConfig()
+		require.NoError(t, err)
+		assert.Equal(t, "127.0.0.1:7401", res.Bind)
+	})
+
+	t.Run("rejects a short token", func(t *testing.T) {
+		_, err := managementConfig{Enabled: true, ManagementTokens: []string{"short"}}.managementServerConfig()
+		require.Error(t, err)
+	})
+
+	t.Run("requires both TLS files", func(t *testing.T) {
+		_, err := managementConfig{Enabled: true, ReadOnlyTokens: []string{readOnly}, TLS: managementTLSConfig{CertFile: "cert.pem"}}.managementServerConfig()
+		require.ErrorContains(t, err, "must be set together")
+	})
+
+	t.Run("fails on a missing TLS file", func(t *testing.T) {
+		_, err := managementConfig{Enabled: true, ReadOnlyTokens: []string{readOnly}, TLS: managementTLSConfig{CertFile: "missing.pem", KeyFile: "missing.key"}}.managementServerConfig()
+		require.ErrorContains(t, err, "failed to load the management TLS certificate")
+	})
 }

@@ -2,6 +2,7 @@ package instrument
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
@@ -328,6 +329,12 @@ func TestClassifyOperation(t *testing.T) {
 		{name: "expected acquisition contention", method: "AcquireExclusiveLease", err: components.ErrExclusiveHeld, want: operationExpected},
 		{name: "placement warning", method: "LookupActor", err: components.ErrNoHost, want: operationWarning},
 		{name: "restore warning", method: "Restore", err: components.ErrHostsConnected, want: operationWarning},
+		{name: "expected host details absence", method: "GetHostDetails", err: components.ErrHostUnregistered, want: operationExpected},
+		{name: "expected drain of an unregistered host", method: "MarkHostDraining", err: components.ErrHostUnregistered, want: operationExpected},
+		{name: "expected drain refused by the exclusive lease", method: "MarkHostDraining", err: fmt.Errorf("wrapped: %w", components.ErrClusterLocked), want: operationExpected},
+		{name: "expected dispatch refused by the exclusive lease", method: "DispatchJob", err: components.ErrClusterLocked, want: operationExpected},
+		{name: "dispatch failure", method: "DispatchJob", err: errors.New("database unavailable"), want: operationFailure},
+		{name: "runtime ID conflict warning", method: "RegisterRuntime", err: components.ErrRuntimeIDInUse, want: operationWarning},
 		{name: "renewal lease loss", method: "RenewExclusiveLease", err: components.ErrExclusiveHeld, want: operationFailure},
 		{name: "unexpected failure", method: "GetState", err: errors.New("database unavailable"), want: operationFailure},
 	}

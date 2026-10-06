@@ -12,6 +12,7 @@ import (
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/utils"
 )
 
 func (p *PostgresProvider) GetAlarm(ctx context.Context, req ref.AlarmRef) (res components.GetAlarmRes, err error) {
@@ -107,7 +108,7 @@ func (p *PostgresProvider) SetAlarm(ctx context.Context, alarmRef ref.AlarmRef, 
 			`,
 			// alarm_due_time and alarm_ttl_time are stored as UTC
 			alarmID, alarmRef.ActorType, alarmRef.ActorID, alarmRef.Name,
-			req.DueTime.UTC(), interval, utcPtr(req.TTL), req.Data)
+			req.DueTime.UTC(), interval, utils.TimePtrUTC(req.TTL), req.Data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create alarm: %w", err)
 	}
@@ -134,7 +135,7 @@ func (p *PostgresProvider) setAndLeaseAlarm(ctx context.Context, alarmRef ref.Al
 		FROM `+p.tablePrefix+`set_and_lease_alarm_v1($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 			alarmID, alarmRef.ActorType, alarmRef.ActorID, alarmRef.Name,
 			req.DueTime.UTC(), interval,
-			utcPtr(req.TTL), req.Data, hostUUIDs,
+			utils.TimePtrUTC(req.TTL), req.Data, hostUUIDs,
 			p.cfg.HostHealthCheckDeadline, p.cfg.AlarmsFetchAheadInterval, p.cfg.AlarmsLeaseDuration,
 		).
 		Scan(&storedAlarmID, &dueTime, &leaseID)

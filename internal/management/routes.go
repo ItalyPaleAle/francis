@@ -1,0 +1,130 @@
+package management
+
+import (
+	_ "embed"
+	"net/http"
+	"strings"
+
+	"github.com/italypaleale/go-kit/httpserver"
+)
+
+// openAPISpec is the OpenAPI document, which `make gen-openapi` generates from the swag annotations in this package
+//
+//go:embed openapi/openapi.yaml
+var openAPISpec []byte
+
+// routes builds the router
+// Protected routes authenticate the caller with a per-route middleware for the scope they require, and routes without one are public
+func (s *Server) routes() http.Handler {
+	mux := httpserver.NewMux()
+
+	// Every route gets a request ID, panic recovery, a deadline, and a bounded body, since no route takes a large one
+	// httpserver makes the last middleware the outermost, so the request ID is assigned before anything else runs
+	root := mux.Group("",
+		httpserver.MiddlewareMaxBodySize(maxRequestBodySize),
+		middlewareTimeout(requestTimeout),
+		s.middlewareRecover,
+		middlewareRequestID,
+	)
+	api := root.Group("/api/v1")
+
+	// Paths answer the methods they don't serve with a JSON 405 rather than the plain-text one of http.ServeMux, so record the methods each path serves
+	type groupPath struct {
+		group *httpserver.Mux
+		path  string
+	}
+	methods := map[groupPath][]string{}
+	handle := func(group *httpserver.Mux, method string, path string, h handlerFunc, middlewares ...httpserver.Middleware) {
+		group.Handle(method+" "+path, h, middlewares...)
+		key := groupPath{group: group, path: path}
+		methods[key] = append(methods[key], method)
+	}
+
+	// Public routes
+	handle(root, http.MethodGet, "/healthz", s.handleHealthz)
+	handle(api, http.MethodGet, "/openapi.yaml", s.handleOpenAPI)
+
+	// Cluster
+	handle(api, http.MethodGet, "/cluster/summary", s.handleClusterSummary, s.middlewareRequireScope(ScopeClusterRead))
+	handle(api, http.MethodGet, "/runtimes", s.handleListRuntimes, s.middlewareRequireScope(ScopeClusterRead))
+	handle(api, http.MethodGet, "/hosts", s.handleListHosts, s.middlewareRequireScope(ScopeClusterRead))
+	handle(api, http.MethodGet, "/hosts/{hostId}", s.handleGetHost, s.middlewareRequireScope(ScopeClusterRead))
+	handle(api, http.MethodGet, "/hosts/{hostId}/activations", s.handleHostActivations, s.middlewareRequireScope(ScopeActorsRead))
+	handle(api, http.MethodPost, "/hosts/{hostId}/drain", s.handleDrainHost, s.middlewareRequireScope(ScopeHostsManage))
+
+	// Actors
+	handle(api, http.MethodGet, "/activations", s.handleListActivations, s.middlewareRequireScope(ScopeActorsRead))
+	handle(api, http.MethodGet, "/placements", s.handleListPlacements, s.middlewareRequireScope(ScopeActorsRead))
+	handle(api, http.MethodGet, "/actor-types", s.handleListActorTypes, s.middlewareRequireScope(ScopeActorsRead))
+	handle(api, http.MethodGet, "/actor-states", s.handleListActorStates, s.middlewareRequireScope(ScopeActorsRead))
+	handle(api, http.MethodGet, "/actor-states/{type}/{id}", s.handleGetActorState, s.middlewareRequireScope(ScopeActorsStateRead))
+	handle(api, http.MethodPost, "/actors/{type}/{id}/deactivate", s.handleDeactivateActor, s.middlewareRequireScope(ScopeActorsManage))
+
+	// Jobs and alarms
+	handle(api, http.MethodGet, "/jobs", s.handleListJobs, s.middlewareRequireScope(ScopeJobsRead))
+	handle(api, http.MethodGet, "/jobs/{jobId}", s.handleGetJob, s.middlewareRequireScope(ScopeJobsRead))
+	handle(api, http.MethodGet, "/alarms", s.handleListAlarms, s.middlewareRequireScope(ScopeJobsRead))
+
+	// Workflows
+	handle(api, http.MethodGet, "/workflows", s.handleListWorkflows, s.middlewareRequireScope(ScopeWorkflowsRead))
+	handle(api, http.MethodGet, "/workflows/{name}/instances", s.handleListInstances, s.middlewareRequireScope(ScopeWorkflowsRead))
+	handle(api, http.MethodGet, "/workflows/{name}/instances/{instanceId}", s.handleGetInstance, s.middlewareRequireScope(ScopeWorkflowsRead))
+	handle(api, http.MethodGet, "/workflows/{name}/instances/{instanceId}/events", s.handleListEvents, s.middlewareRequireScope(ScopeWorkflowsRead))
+	handle(api, http.MethodPost, "/workflows/{name}/instances/{instanceId}/cancel", s.handleCancelInstance, s.middlewareRequireScope(ScopeWorkflowsManage))
+	handle(api, http.MethodPost, "/workflows/{name}/instances/{instanceId}/suspend", s.handleSuspendInstance, s.middlewareRequireScope(ScopeWorkflowsManage))
+	handle(api, http.MethodPost, "/workflows/{name}/instances/{instanceId}/resume", s.handleResumeInstance, s.middlewareRequireScope(ScopeWorkflowsManage))
+
+	// Answer other methods on known paths with 405, and unknown paths with 404
+	for key, allowed := range methods {
+		allow := strings.Join(allowed, ", ")
+		key.group.Handle(key.path, handlerFunc(func(w http.ResponseWriter, r *http.Request) *apiError {
+			w.Header().Set("Allow", allow)
+			return newAPIErrorf(http.StatusMethodNotAllowed, CodeMethodNotAllowed, "method %s is not allowed, use %s", r.Method, allow)
+		}))
+	}
+
+	root.Handle("/", handlerFunc(func(w http.ResponseWriter, r *http.Request) *apiError {
+		return newAPIError(http.StatusNotFound, CodeNotFound, "no such route")
+	}))
+
+	return mux
+}
+
+// handleOpenAPI serves GET /api/v1/openapi.yaml
+//
+//	@Summary		Get this OpenAPI document
+//	@ID				getOpenAPI
+//	@Description	Returns this document as YAML.
+//	@Description	Public: no bearer token is required.
+//	@Tags			Meta
+//	@Produce		application/yaml
+//	@Success		200	{string}	string			"The OpenAPI document"
+//	@Header			all	{string}	X-Request-Id	"A unique ID assigned to the request, also returned as requestId in error bodies and recorded in audit logs"
+//	@Router			/api/v1/openapi.yaml [get]
+func (s *Server) handleOpenAPI(w http.ResponseWriter, r *http.Request) *apiError {
+	w.Header().Set("Content-Type", "application/yaml")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(openAPISpec)
+	return nil
+}
+
+type healthJSON struct {
+	Status string `json:"status" enums:"ok"`
+} //	@name	Health
+
+// handleHealthz serves GET /healthz
+//
+//	@Summary		Liveness check
+//	@ID				getHealthz
+//	@Description	Served at the root of the management listener, outside `/api/v1`.
+//	@Description	Public: no bearer token is required.
+//	@Description	Always returns `{"status":"ok"}` while the server is running.
+//	@Tags			Meta
+//	@Produce		json
+//	@Success		200	{object}	healthJSON		"The server is running"
+//	@Header			all	{string}	X-Request-Id	"A unique ID assigned to the request, also returned as requestId in error bodies and recorded in audit logs"
+//	@Router			/healthz [get]
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) *apiError {
+	writeJSON(w, http.StatusOK, healthJSON{Status: "ok"})
+	return nil
+}

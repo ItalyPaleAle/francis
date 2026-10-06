@@ -46,6 +46,20 @@ Database: {{ include "francis.databaseType" . }}
 3. Verify the install:
 
      helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+{{- if .Values.management.enabled }}
+
+The management API is enabled, over {{ if .Values.management.tls.existingSecret }}HTTPS{{ else }}plain HTTP{{ end }} (TCP), at:
+
+     {{ if .Values.management.tls.existingSecret }}https{{ else }}http{{ end }}://{{ include "francis.managementServiceName" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ int .Values.management.port }}/api/v1/
+
+   Every route except /healthz and /api/v1/openapi.yaml needs an "Authorization: Bearer <token>" header.
+{{- if not .Values.management.tls.existingSecret }}
+   Without management.tls.existingSecret, tokens and actor state travel unencrypted: keep the Service private or put a TLS proxy in front of it.
+{{- end }}
+{{- if .Values.existingConfigSecret }}
+   With existingConfigSecret set, the management block (enabled, bind ":{{ int .Values.management.port }}", and the tokens) must be in that Secret.
+{{- end }}
+{{- end }}
 
 {{- if and (eq (include "francis.databaseType" .) "sqlite") (not .Values.existingConfigSecret) }}
 

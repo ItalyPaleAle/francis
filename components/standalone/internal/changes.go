@@ -1,8 +1,11 @@
 package internal
 
 import (
+	"bytes"
 	"context"
 	"sync"
+
+	"github.com/italypaleale/francis/components"
 )
 
 // changesPool is a pool of *Changes objects to reduce allocations.
@@ -42,6 +45,12 @@ type ActorStateChange struct {
 	Value *StateEntry
 }
 
+// WorkflowEventChange represents workflow events to be inserted for an actor
+type WorkflowEventChange struct {
+	Key    ActorKey
+	Events []components.WorkflowEvent
+}
+
 // Changes represents all changes made during a single operation.
 // This is passed to the PersistHook to persist changes to the backing store.
 // Set operations perform upserts (insert or update).
@@ -67,8 +76,15 @@ type Changes struct {
 		Delete []string            // job_ids to delete
 	}
 	ActorState struct {
-		Set    []ActorStateChange // Upsert actor state
+		Set []ActorStateChange // Upsert actor state
+		// Delete removes the state of these actors, and the persistence hook must remove their workflow events with it
 		Delete []ActorKey
+	}
+	WorkflowEvents struct {
+		// Reset removes every workflow event of these actors, and is applied before Insert
+		Reset []ActorKey
+		// Insert adds workflow events, ignoring any whose sequence number the actor already has
+		Insert []WorkflowEventChange
 	}
 }
 
@@ -95,6 +111,8 @@ func (c *Changes) Release() {
 	c.TerminalJobs.Delete = c.TerminalJobs.Delete[:0]
 	c.ActorState.Set = c.ActorState.Set[:0]
 	c.ActorState.Delete = c.ActorState.Delete[:0]
+	c.WorkflowEvents.Reset = c.WorkflowEvents.Reset[:0]
+	c.WorkflowEvents.Insert = c.WorkflowEvents.Insert[:0]
 
 	changesPool.Put(c)
 }
@@ -112,7 +130,9 @@ func (c *Changes) IsEmpty() bool {
 		len(c.TerminalJobs.Set) == 0 &&
 		len(c.TerminalJobs.Delete) == 0 &&
 		len(c.ActorState.Set) == 0 &&
-		len(c.ActorState.Delete) == 0
+		len(c.ActorState.Delete) == 0 &&
+		len(c.WorkflowEvents.Reset) == 0 &&
+		len(c.WorkflowEvents.Insert) == 0
 }
 
 // Clone creates a deep clone of the Changes struct.
@@ -189,6 +209,23 @@ func (c *Changes) Clone() *Changes {
 	if len(c.ActorState.Delete) > 0 {
 		clone.ActorState.Delete = make([]ActorKey, len(c.ActorState.Delete))
 		copy(clone.ActorState.Delete, c.ActorState.Delete)
+	}
+
+	// Clone WorkflowEvents
+	if len(c.WorkflowEvents.Reset) > 0 {
+		clone.WorkflowEvents.Reset = make([]ActorKey, len(c.WorkflowEvents.Reset))
+		copy(clone.WorkflowEvents.Reset, c.WorkflowEvents.Reset)
+	}
+	if len(c.WorkflowEvents.Insert) > 0 {
+		clone.WorkflowEvents.Insert = make([]WorkflowEventChange, len(c.WorkflowEvents.Insert))
+		for i, wc := range c.WorkflowEvents.Insert {
+			events := make([]components.WorkflowEvent, len(wc.Events))
+			for j, ev := range wc.Events {
+				ev.Data = bytes.Clone(ev.Data)
+				events[j] = ev
+			}
+			clone.WorkflowEvents.Insert[i] = WorkflowEventChange{Key: wc.Key, Events: events}
+		}
 	}
 
 	return clone

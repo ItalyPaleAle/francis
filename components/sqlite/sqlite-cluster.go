@@ -13,7 +13,7 @@ import (
 
 // readClusterState reads the singleton cluster_config row using the given transaction
 // SQLite opens write transactions with txlock=immediate, so the transaction already holds the database write lock and the value is read atomically with the rest of the registration
-func (s *SQLiteProvider) readClusterState(ctx context.Context, tx *sql.Tx) (clusterstate.State, error) {
+func (s *SQLiteProvider) readClusterState(ctx context.Context, tx querier) (clusterstate.State, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
@@ -43,6 +43,19 @@ func (s *SQLiteProvider) readClusterState(ctx context.Context, tx *sql.Tx) (clus
 		state.MaxHosts = &v
 	}
 	return state, nil
+}
+
+// checkClusterNotLocked returns ErrClusterLocked if an exclusive-access lease is live at nowMs
+// It must run inside a write transaction, which holds the database write lock (txlock=immediate), so AcquireExclusiveLease can't take the lease until the transaction ends
+func (s *SQLiteProvider) checkClusterNotLocked(ctx context.Context, tx querier, nowMs int64) error {
+	state, err := s.readClusterState(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if state.LeaseLive(nowMs) {
+		return components.ErrClusterLocked
+	}
+	return nil
 }
 
 // setClusterMaxHosts records the effective cluster host limit in the cluster_config row using the given transaction
@@ -179,6 +192,39 @@ func (s *SQLiteProvider) RenewExclusiveLease(ctx context.Context, owner string, 
 	}
 
 	return expiresAt, nil
+}
+
+// GetExclusiveLease returns the holder and expiry of the cluster exclusive-access lease, or a zero value when no live lease is held
+func (s *SQLiteProvider) GetExclusiveLease(ctx context.Context) (components.ExclusiveLeaseInfo, error) {
+	nowMs := s.clock.Now().UnixMilli()
+
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+
+	var (
+		owner   sql.NullString
+		expires sql.NullInt64
+	)
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	err := s.db.QueryRowContext(queryCtx,
+		`SELECT exclusive_owner, exclusive_expires_at FROM `+s.tablePrefix+`cluster_config WHERE cluster_config_id = 1`,
+	).Scan(&owner, &expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		// The row is seeded by a migration, so a missing row means no lease
+		return components.ExclusiveLeaseInfo{}, nil
+	} else if err != nil {
+		return components.ExclusiveLeaseInfo{}, fmt.Errorf("error reading exclusive lease: %w", err)
+	}
+
+	// A lease is live with the same rule AcquireExclusiveLease applies
+	if owner.String == "" || !expires.Valid || expires.Int64 < nowMs {
+		return components.ExclusiveLeaseInfo{}, nil
+	}
+
+	return components.ExclusiveLeaseInfo{
+		Owner:     owner.String,
+		ExpiresAt: time.UnixMilli(expires.Int64),
+	}, nil
 }
 
 // ReleaseExclusiveLease clears the exclusive-access lease if it is held by owner

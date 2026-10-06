@@ -283,6 +283,13 @@ func (p *PostgresProvider) initGC() (err error) {
 					return nil
 				}
 			},
+			"runtimes": func() (string, func() []any) {
+				// Runtime leases are Unix milliseconds in the database clock
+				q := `DELETE FROM ` + p.tablePrefix + `runtimes WHERE runtime_expires_at < ` + nowMsExpr
+				return q, func() []any {
+					return nil
+				}
+			},
 			"terminal_jobs": func() (string, func() []any) {
 				q := `
 				DELETE FROM ` + p.tablePrefix + `terminal_jobs
@@ -321,17 +328,6 @@ func (p *PostgresProvider) tableIdentifier(name string) pgx.Identifier {
 		return pgx.Identifier{p.namePrefix + name}
 	}
 	return pgx.Identifier{p.schema, p.namePrefix + name}
-}
-
-// utcPtr returns a pointer to the UTC representation of t, or nil if t is nil
-// All time columns store UTC values, so times must be normalized to UTC before being written
-func utcPtr(t *time.Time) *time.Time {
-	if t == nil {
-		return nil
-	}
-
-	u := t.UTC()
-	return &u
 }
 
 // Convert string slice to UUID slice for PostgreSQL

@@ -23,6 +23,14 @@ func (p *Provider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req compo
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 
+	// The lease can't be taken while writeMu is held, so this check is atomic with the insert
+	if req.RejectIfClusterLocked {
+		err := p.checkClusterNotLocked()
+		if err != nil {
+			return "", false, nil, err
+		}
+	}
+
 	// The state domain is locked only when the job carries an initial state, in the same order Restore uses
 	if req.InitialState != nil {
 		p.stateWriteMu.Lock()
@@ -32,9 +40,7 @@ func (p *Provider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req compo
 
 	changes := NewChanges()
 	defer changes.Release()
-	if stateChange != nil {
-		changes.ActorState.Set = append(changes.ActorState.Set, *stateChange)
-	}
+	p.addInitialStateChange(changes, stateChange)
 
 	// Idempotency: keep an existing job (or alarm) with the same key and return its ID
 	p.Mu.RLock()
@@ -98,6 +104,14 @@ func (p *Provider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, r
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 
+	// The lease can't be taken while writeMu is held, so this check is atomic with the insert
+	if req.RejectIfClusterLocked {
+		err := p.checkClusterNotLocked()
+		if err != nil {
+			return "", false, nil, err
+		}
+	}
+
 	// The state domain is locked only when the job carries an initial state, in the same order Restore uses
 	if req.InitialState != nil {
 		p.stateWriteMu.Lock()
@@ -107,9 +121,7 @@ func (p *Provider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, r
 
 	changes := NewChanges()
 	defer changes.Release()
-	if stateChange != nil {
-		changes.ActorState.Set = append(changes.ActorState.Set, *stateChange)
-	}
+	p.addInitialStateChange(changes, stateChange)
 
 	// Preserve the first job stored for an idempotency key while allowing an unleased occurrence to become immediately schedulable
 	now := p.Clock.Now()
@@ -245,6 +257,23 @@ func (p *Provider) initialStateChange(r ref.ActorRef, initial *components.Initia
 	return &ActorStateChange{Key: key, Value: entry}
 }
 
+// addInitialStateChange records an initial state in changes, together with the removal of the workflow events of the actor's earlier state, if any
+// An expired state that the garbage collector hasn't removed yet keeps its events, which would otherwise be served as the history of the new state until its first write with events resets it
+// The caller must hold stateWriteMu
+func (p *Provider) addInitialStateChange(changes *Changes, stateChange *ActorStateChange) {
+	if stateChange == nil {
+		return
+	}
+	changes.ActorState.Set = append(changes.ActorState.Set, *stateChange)
+
+	p.StateMu.RLock()
+	_, hasEvents := p.WorkflowEvents[stateChange.Key]
+	p.StateMu.RUnlock()
+	if hasEvents {
+		changes.WorkflowEvents.Reset = append(changes.WorkflowEvents.Reset, stateChange.Key)
+	}
+}
+
 // persistThenApplyWithState persists a job's change set, then applies it under Mu and, when it stores an initial state, under StateMu too
 // The caller must hold writeMu, and stateWriteMu when stateChange is set
 func (p *Provider) persistThenApplyWithState(ctx context.Context, changes *Changes, stateChange *ActorStateChange, apply func()) error {
@@ -261,8 +290,10 @@ func (p *Provider) persistThenApplyWithState(ctx context.Context, changes *Chang
 	apply()
 	p.Mu.Unlock()
 
+	// The initial state replaces no live state, so any events the actor has belong to an earlier state
 	p.StateMu.Lock()
 	p.ActorState[stateChange.Key] = stateChange.Value
+	delete(p.WorkflowEvents, stateChange.Key)
 	p.StateMu.Unlock()
 
 	return nil
@@ -398,21 +429,7 @@ func (p *Provider) GetJob(ctx context.Context, jobID string) (components.JobInfo
 	// First look for a live job
 	a, ok := p.AlarmsByID[jobID]
 	if ok && a.Kind == string(components.AlarmKindJob) {
-		status := components.JobStatusPending
-		if a.LeaseID != nil && a.LeaseExpiration != nil && !a.LeaseExpiration.Before(now) {
-			status = components.JobStatusActive
-		}
-		return components.JobInfo{
-			JobID:     a.ID,
-			ActorType: a.ActorType,
-			ActorID:   a.ActorID,
-			Method:    a.JobMethod,
-			Status:    status,
-			DueTime:   a.DueTime,
-			Interval:  a.Interval,
-			Cron:      a.Cron,
-			CreatedAt: components.JobCreatedAt(jobID),
-		}, nil
+		return liveJobToInfo(a, now), nil
 	}
 
 	// Then look for a job that ended, whether it completed or dead-lettered
@@ -439,22 +456,7 @@ func (p *Provider) ListJobs(ctx context.Context, actorType string, actorID strin
 		if a.Kind != string(components.AlarmKindJob) || a.ActorType != actorType || a.ActorID != actorID {
 			continue
 		}
-		status := components.JobStatusPending
-		if a.LeaseID != nil && a.LeaseExpiration != nil && !a.LeaseExpiration.Before(now) {
-			status = components.JobStatusActive
-		}
-
-		res = append(res, components.JobInfo{
-			JobID:     a.ID,
-			ActorType: a.ActorType,
-			ActorID:   a.ActorID,
-			Method:    a.JobMethod,
-			Status:    status,
-			DueTime:   a.DueTime,
-			Interval:  a.Interval,
-			Cron:      a.Cron,
-			CreatedAt: components.JobCreatedAt(a.ID),
-		})
+		res = append(res, liveJobToInfo(a, now))
 	}
 
 	// Jobs that ended, whether they completed or dead-lettered
@@ -634,4 +636,24 @@ func jobCreatedAtOrEnded(d *TerminalJob) time.Time {
 		return d.EndedAt
 	}
 	return t
+}
+
+// liveJobToInfo maps a live job to the public JobInfo, deriving its status from the lease as ListJobs does
+func liveJobToInfo(a *Alarm, now time.Time) components.JobInfo {
+	status := components.JobStatusPending
+	if a.LeaseValid(now) {
+		status = components.JobStatusActive
+	}
+
+	return components.JobInfo{
+		JobID:     a.ID,
+		ActorType: a.ActorType,
+		ActorID:   a.ActorID,
+		Method:    a.JobMethod,
+		Status:    status,
+		DueTime:   a.DueTime,
+		Interval:  a.Interval,
+		Cron:      a.Cron,
+		CreatedAt: components.JobCreatedAt(a.ID),
+	}
 }

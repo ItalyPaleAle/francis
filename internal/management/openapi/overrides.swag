@@ -1,0 +1,2 @@
+// RawMessage carries arbitrary JSON, including arrays, scalars and null
+replace json.RawMessage any

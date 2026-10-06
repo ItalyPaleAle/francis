@@ -56,6 +56,14 @@ func (s *SQLiteProvider) DispatchJob(ctx context.Context, aRef ref.AlarmRef, req
 
 // insertJob creates a job when its idempotency key is new and always returns the stored job
 func (s *SQLiteProvider) insertJob(ctx context.Context, q querier, aRef ref.AlarmRef, req components.SetAlarmReq, alarmID string, interval *string, cron *string, ttl *int64) (stored setAlarmResult, err error) {
+	// Both callers run inside a write transaction, so the lease can't be taken between this check and the insert
+	if req.RejectIfClusterLocked {
+		err = s.checkClusterNotLocked(ctx, q, s.clock.Now().UnixMilli())
+		if err != nil {
+			return stored, err
+		}
+	}
+
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	_, err = q.ExecContext(ctx, `
 		INSERT INTO `+s.tablePrefix+`alarms
@@ -111,7 +119,7 @@ func (s *SQLiteProvider) insertInitialState(ctx context.Context, q querier, aRef
 	}
 
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	_, err := q.ExecContext(ctx, `
+	res, err := q.ExecContext(ctx, `
 		INSERT INTO `+s.tablePrefix+`actor_state
 			(actor_type, actor_id, actor_state_data, actor_state_expiration_time, workflow_labels)
 		VALUES (?, ?, ?, NULL, ?)
@@ -125,6 +133,26 @@ func (s *SQLiteProvider) insertInitialState(ctx context.Context, q querier, aRef
 	)
 	if err != nil {
 		return fmt.Errorf("failed to store the job's initial state: %w", err)
+	}
+
+	// Nothing else to do when the actor had live state, which the initial state didn't replace
+	stored, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to store the job's initial state: %w", err)
+	}
+	if stored == 0 {
+		return nil
+	}
+
+	// Replacing an expired row is an update, which doesn't fire the trigger that removes events, so the expired state's events are removed here
+	// Otherwise they would be served as the history of the new state until its first write with events resets it
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	_, err = q.ExecContext(ctx,
+		`DELETE FROM `+s.tablePrefix+`workflow_events WHERE actor_type = ? AND actor_id = ?`,
+		aRef.ActorType, aRef.ActorID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to remove the workflow events of the actor's expired state: %w", err)
 	}
 
 	return nil

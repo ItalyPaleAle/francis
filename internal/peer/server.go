@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/italypaleale/go-kit/utils"
@@ -60,6 +61,14 @@ type ServerConfig struct {
 	// While draining, new invocations are rejected with a retry-later error so callers re-resolve to the actor's next placement
 	// If nil, the host is never considered draining
 	Draining func() bool
+
+	// ManagementHandler serves management requests, whose kinds start with protocol.PeerManagementKindPrefix, and returns the reply envelope
+	// Management requests are served while the host is draining, since they are how the host is inspected and drained
+	// If nil, management requests are rejected like any other unexpected kind
+	ManagementHandler func(ctx context.Context, req *protocol.Envelope) *protocol.Envelope
+
+	// ManagementResponseWritten runs after the bounded response write, allowing drain acknowledgements to precede shutdown
+	ManagementResponseWritten func(req *protocol.Envelope, resp *protocol.Envelope)
 }
 
 // Server accepts host-to-host actor invocations over WebTransport
@@ -203,8 +212,16 @@ func (s *Server) handleStream(ctx context.Context, stream *webtransport.Stream, 
 		return
 	}
 
-	// Continue the caller's distributed trace from the trace context carried on the request, opening a server span for the execution on this host
+	// Continue the caller's distributed trace from the trace context carried on the request
 	ctx = protocol.ExtractTraceContext(ctx, req)
+
+	// Management requests take their own path, ahead of the invocation checks, so they are served even while the host is draining
+	if s.cfg.ManagementHandler != nil && strings.HasPrefix(req.Kind, protocol.PeerManagementKindPrefix) {
+		s.handleManagement(ctx, stream, req, inFlight)
+		return
+	}
+
+	// Open a server span for the execution on this host
 	ctx, span := tracing.Start(ctx, "rpc.peer.invoke",
 		trace.WithSpanKind(trace.SpanKindServer),
 	)
@@ -269,6 +286,38 @@ func (s *Server) handleStream(ctx context.Context, stream *webtransport.Stream, 
 		s.handleStreamInvoke(ctx, stream, req, payload)
 	default:
 		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeInvokeModeUnsupported, "unsupported invocation mode %d", payload.Mode)))
+	}
+}
+
+// handleManagement serves one management request, which counts against the session's in-flight bound like an invocation
+func (s *Server) handleManagement(ctx context.Context, stream *webtransport.Stream, req *protocol.Envelope, inFlight chan struct{}) {
+	ctx, span := tracing.Start(ctx, "rpc.peer.mgmt",
+		trace.WithSpanKind(trace.SpanKindServer),
+	)
+	defer span.End()
+
+	// Claim an in-flight slot, rejecting with a retryable overloaded error when the session is at its limit
+	select {
+	case inFlight <- struct{}{}:
+		defer func() { <-inFlight }()
+	default:
+		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeOverloaded, "host has too many in-flight requests").WithRetryAfter(overloadRetryAfter)))
+		return
+	}
+
+	// A handler that returns nothing is a bug, which still gets a reply so the caller is not left waiting
+	resp := s.cfg.ManagementHandler(ctx, req)
+	if resp == nil {
+		resp = req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "management request produced no response"))
+	}
+	// Bound the reply so an unresponsive caller cannot prevent an accepted drain from starting
+	_ = stream.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	_ = protocol.WriteMessage(stream, resp)
+
+	// Close both directions before teardown can reset an acknowledgement still registered with the session
+	wt.CloseStream(stream)
+	if s.cfg.ManagementResponseWritten != nil {
+		s.cfg.ManagementResponseWritten(req, resp)
 	}
 }
 

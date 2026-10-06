@@ -49,6 +49,10 @@ type SetStateOpts struct {
 	// Labels for the workflow engine
 	// These are not part of the public API contract
 	workflowLabels *components.WorkflowLabels
+
+	// Workflow events appended in the same operation as the state
+	// These are not part of the public API contract
+	appendEvents []components.WorkflowEvent
 }
 
 // SetWorkflowLabels attaches the workflow engine's labels to this write, replacing whatever the row had.
@@ -63,6 +67,20 @@ func (o *SetStateOpts) WorkflowLabels() *components.WorkflowLabels {
 		return nil
 	}
 	return o.workflowLabels
+}
+
+// SetAppendEvents attaches workflow events that are written in the same operation as the state
+// It is reserved for Francis' own built-in actors (the key argument is a private type)
+func (o *SetStateOpts) SetAppendEvents(_ builtinkey.Key, events []components.WorkflowEvent) {
+	o.appendEvents = events
+}
+
+// AppendEvents returns the events attached with SetAppendEvents, or nil when none were
+func (o *SetStateOpts) AppendEvents() []components.WorkflowEvent {
+	if o == nil {
+		return nil
+	}
+	return o.appendEvents
 }
 
 // ListStatesOpts is the options for the ListStates method

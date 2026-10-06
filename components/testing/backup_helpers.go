@@ -3,6 +3,7 @@ package comptesting
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -19,6 +20,21 @@ type BackupContents struct {
 	States       map[string]backup.StateRecord
 	Alarms       map[string]backup.AlarmRecord
 	TerminalJobs map[string]backup.TerminalJobRecord
+	// Key is actor type, actor ID and sequence number
+	WorkflowEvents map[string]backup.WorkflowEventRecord
+}
+
+// workflowEventKey is the BackupContents.WorkflowEvents key of an event
+func workflowEventKey(actorType string, actorID string, seq int64) string {
+	return fmt.Sprintf("%s/%s/%d", actorType, actorID, seq)
+}
+
+// backupSectionOrder is the position of each record type in a backup stream, which groups records by type in this order
+var backupSectionOrder = map[backup.RecordType]int{
+	backup.RecordTypeState:         0,
+	backup.RecordTypeAlarm:         1,
+	backup.RecordTypeTerminalJob:   2,
+	backup.RecordTypeWorkflowEvent: 3,
 }
 
 // DecodeBackup reads a whole backup stream into a BackupContents
@@ -29,12 +45,21 @@ func DecodeBackup(t testing.TB, data []byte) BackupContents {
 	require.NoError(t, err)
 
 	out := BackupContents{
-		States:       map[string]backup.StateRecord{},
-		Alarms:       map[string]backup.AlarmRecord{},
-		TerminalJobs: map[string]backup.TerminalJobRecord{},
+		States:         map[string]backup.StateRecord{},
+		Alarms:         map[string]backup.AlarmRecord{},
+		TerminalJobs:   map[string]backup.TerminalJobRecord{},
+		WorkflowEvents: map[string]backup.WorkflowEventRecord{},
 	}
+	section := 0
 	for rec, err := range r.All() {
 		require.NoError(t, err)
+
+		// Records are grouped by type, and a restore relies on the order of the groups
+		order, known := backupSectionOrder[rec.Type]
+		if known {
+			require.GreaterOrEqualf(t, order, section, "record of type %q is out of order", rec.Type)
+			section = order
+		}
 
 		switch rec.Type {
 		case backup.RecordTypeState:
@@ -43,6 +68,9 @@ func DecodeBackup(t testing.TB, data []byte) BackupContents {
 			out.Alarms[rec.Alarm.ID] = *rec.Alarm
 		case backup.RecordTypeTerminalJob:
 			out.TerminalJobs[rec.TerminalJob.JobID] = *rec.TerminalJob
+		case backup.RecordTypeWorkflowEvent:
+			ev := rec.WorkflowEvent
+			out.WorkflowEvents[workflowEventKey(ev.ActorType, ev.ActorID, ev.Seq)] = *ev
 		default:
 			t.Fatalf("unexpected record type %q", rec.Type)
 		}
@@ -98,6 +126,15 @@ func AssertBackupContentsEqual(t testing.TB, want, got BackupContents) {
 		assertTimeEqual(t, w.OriginalDue, g.OriginalDue, "terminal job "+k+" originalDue")
 		assertTimePtrEqual(t, w.Expiration, g.Expiration, "terminal job "+k+" expiration")
 	}
+
+	require.Len(t, got.WorkflowEvents, len(want.WorkflowEvents), "workflow event count mismatch")
+	for k, w := range want.WorkflowEvents {
+		g, ok := got.WorkflowEvents[k]
+		require.Truef(t, ok, "missing workflow event %q", k)
+		assert.Equalf(t, w.Kind, g.Kind, "workflow event %q kind", k)
+		assert.Truef(t, bytes.Equal(w.Data, g.Data), "workflow event %q data", k)
+		assertTimeEqual(t, w.Time, g.Time, "workflow event "+k+" time")
+	}
 }
 
 func assertTimeEqual(t testing.TB, want, got time.Time, msg string) {
@@ -115,7 +152,7 @@ func assertTimePtrEqual(t testing.TB, want, got *time.Time, msg string) {
 	assertTimeEqual(t, *want, *got, msg)
 }
 
-// SeedBackupSample writes one of each kind of persistent record (actor state, a plain alarm, a live job, and a dead job) through the provider's public API, then removes the host so the cluster is quiescent and a backup or restore can run
+// SeedBackupSample writes one of each kind of persistent record (actor state with workflow events, a plain alarm, a live job, and a dead job) through the provider's public API, then removes the host so the cluster is quiescent and a backup or restore can run
 // now should be the provider's current time, so callers with a mock clock should pass the provider's Now
 func SeedBackupSample(t testing.TB, ctx context.Context, p components.ActorProvider, now time.Time) {
 	t.Helper()
@@ -133,9 +170,15 @@ func SeedBackupSample(t testing.TB, ctx context.Context, p components.ActorProvi
 	require.NoError(t, err)
 
 	// Actor state, without expiration so the values do not depend on the provider clock
-	// One entry carries workflow labels and one carries none, so the round-trip covers both
+	// One entry carries workflow labels and an event history and one carries neither, so the round-trip covers both
+	// One event carries no data, so the round-trip covers an empty payload too
 	err = p.SetState(ctx, ref.NewActorRef(actorType, "state-1"), []byte("state-data-1"), components.SetStateOpts{
-		WorkflowLabels: &components.WorkflowLabels{Status: "running", Version: 2, Parent: "parent-1"},
+		WorkflowLabels: &components.WorkflowLabels{Status: "running", Version: 2, Parent: "parent-1", Created: components.FormatWorkflowCreated(now)},
+		AppendEvents: []components.WorkflowEvent{
+			{Seq: 1, Time: now, Kind: "started", Data: []byte("event-1")},
+			{Seq: 2, Time: now.Add(time.Second), Kind: "step"},
+			{Seq: 3, Time: now.Add(2 * time.Second), Kind: "step", Data: []byte("event-3")},
+		},
 	})
 	require.NoError(t, err)
 	err = p.SetState(ctx, ref.NewActorRef(actorType, "state-2"), []byte("state-data-2"), components.SetStateOpts{})
@@ -195,6 +238,16 @@ func AddExtraBackupData(t testing.TB, ctx context.Context, p components.ActorPro
 	t.Helper()
 
 	err := p.SetState(ctx, ref.NewActorRef("EXTRA", "extra-1"), []byte("extra-state"), components.SetStateOpts{})
+	require.NoError(t, err)
+
+	// Events appended after the snapshot, both to an actor in it and to one that is not, must be gone after the restore
+	err = p.SetState(ctx, ref.NewActorRef("BK", "state-1"), []byte("state-data-1"), components.SetStateOpts{
+		AppendEvents: []components.WorkflowEvent{{Seq: 4, Time: now, Kind: "extra", Data: []byte("extra-event")}},
+	})
+	require.NoError(t, err)
+	err = p.SetState(ctx, ref.NewActorRef("EXTRA", "extra-2"), []byte("extra-state"), components.SetStateOpts{
+		AppendEvents: []components.WorkflowEvent{{Seq: 1, Time: now, Kind: "extra", Data: []byte("extra-event")}},
+	})
 	require.NoError(t, err)
 
 	_, err = p.SetAlarm(ctx, ref.NewAlarmRef("EXTRA", "extra-actor", "extra-alarm"), components.SetAlarmReq{

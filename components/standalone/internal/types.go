@@ -12,10 +12,12 @@ type Host struct {
 	Address         string
 	LastHealthCheck time.Time
 
-	// SessionID and Draining are kept in memory only, since a standalone provider serves a single runtime whose sessions all end when it restarts
-	// A host that reconnects after a restart reattaches, which sets both again
-	SessionID string
-	Draining  bool
+	// SessionID, RuntimeID, Draining and DrainToken are kept in memory only, since a standalone provider serves a single runtime whose sessions all end when it restarts
+	// A host that reconnects after a restart reattaches, which sets them all again
+	SessionID  string
+	RuntimeID  string
+	Draining   bool
+	DrainToken string
 }
 
 // Clone creates a deep copy of the Host
@@ -25,24 +27,42 @@ func (h *Host) Clone() *Host {
 		Address:         h.Address,
 		LastHealthCheck: h.LastHealthCheck,
 		SessionID:       h.SessionID,
+		RuntimeID:       h.RuntimeID,
 		Draining:        h.Draining,
+		DrainToken:      h.DrainToken,
 	}
 }
 
 type HostActorType struct {
-	HostID           string
-	ActorType        string
-	IdleTimeout      time.Duration
-	ConcurrencyLimit int32
+	HostID                   string
+	ActorType                string
+	IdleTimeout              time.Duration
+	ConcurrencyLimit         int32
+	CompletedJobRetention    time.Duration
+	DeadLetteredJobRetention time.Duration
+}
+
+// NewHostActorType builds the in-memory record of an actor type a host registered
+func NewHostActorType(hostID string, at components.ActorHostType) *HostActorType {
+	return &HostActorType{
+		HostID:                   hostID,
+		ActorType:                at.ActorType,
+		IdleTimeout:              at.IdleTimeout,
+		ConcurrencyLimit:         at.ConcurrencyLimit,
+		CompletedJobRetention:    at.CompletedJobRetention,
+		DeadLetteredJobRetention: at.DeadLetteredJobRetention,
+	}
 }
 
 // Clone creates a deep copy of the HostActorType
 func (h *HostActorType) Clone() *HostActorType {
 	return &HostActorType{
-		HostID:           h.HostID,
-		ActorType:        h.ActorType,
-		IdleTimeout:      h.IdleTimeout,
-		ConcurrencyLimit: h.ConcurrencyLimit,
+		HostID:                   h.HostID,
+		ActorType:                h.ActorType,
+		IdleTimeout:              h.IdleTimeout,
+		ConcurrencyLimit:         h.ConcurrencyLimit,
+		CompletedJobRetention:    h.CompletedJobRetention,
+		DeadLetteredJobRetention: h.DeadLetteredJobRetention,
 	}
 }
 
@@ -109,6 +129,10 @@ type Alarm struct {
 	Kind string
 	// JobMethod is the job handler method, set only for jobs
 	JobMethod string
+}
+
+func (a *Alarm) LeaseValid(now time.Time) bool {
+	return a.LeaseID != nil && a.LeaseExpiration != nil && !a.LeaseExpiration.Before(now)
 }
 
 func (a *Alarm) GetActorKey() ActorKey {
@@ -260,6 +284,27 @@ func (s *StateEntry) MatchesWorkflowLabels(want *components.WorkflowLabels) bool
 	case want.Version != 0 && want.Version != got.Version:
 		return false
 	case want.Parent != "" && want.Parent != got.Parent:
+		return false
+	}
+	return true
+}
+
+// MatchesCreatedRange returns true when the entry's created label falls within [from, to), where an empty bound is not applied
+// Bounds are formatted with components.FormatWorkflowCreated, whose fixed-width UTC values compare chronologically as strings
+func (s *StateEntry) MatchesCreatedRange(from string, to string) bool {
+	// Without bounds every entry matches, including one with no labels
+	if from == "" && to == "" {
+		return true
+	}
+	if s.WorkflowLabels == nil || s.WorkflowLabels.Created == "" {
+		return false
+	}
+
+	created := s.WorkflowLabels.Created
+	if from != "" && created < from {
+		return false
+	}
+	if to != "" && created >= to {
 		return false
 	}
 	return true

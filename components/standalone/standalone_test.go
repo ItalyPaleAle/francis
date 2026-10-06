@@ -1,6 +1,7 @@
 package standalone
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -47,7 +48,7 @@ func TestStandaloneSQLiteBacked(t *testing.T) {
 	t.Run("concurrent dispatch jobs", suite.TestConcurrentDispatchJobs)
 }
 
-// Name of the environmental variable containing the connection string to the test database.
+// Name of the environmental variable containing the connection string to the test database
 // Example: TEST_STANDALONE_POSTGRES_CONNSTRING=postgres://actors:actors@localhost:5432/actors
 const postgresConnstringEnvVar = "TEST_STANDALONE_POSTGRES_CONNSTRING"
 
@@ -65,14 +66,18 @@ func TestStandaloneTablePrefix(t *testing.T) {
 		// sqliteTables returns the names of all tables in the database, excluding SQLite's internal objects
 		sqliteTables := func(t *testing.T, p *StandaloneSQLiteBacked) []string {
 			t.Helper()
+
+			// Read the catalog directly so the check sees every table the migrations created, not just the ones the provider queries
 			rows, err := p.db.QueryContext(t.Context(), "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
 			require.NoError(t, err)
 			defer rows.Close()
 
+			// Collect the table names
 			var names []string
 			for rows.Next() {
 				var name string
-				require.NoError(t, rows.Scan(&name))
+				err = rows.Scan(&name)
+				require.NoError(t, err)
 				names = append(names, name)
 			}
 
@@ -83,9 +88,11 @@ func TestStandaloneTablePrefix(t *testing.T) {
 		}
 
 		t.Run("default prefix is francis", func(t *testing.T) {
+			// An empty prefix option falls back to the default prefix
 			p := initSQLiteTestProvider(t)
 			require.Equal(t, "francis_", p.tablePrefix)
 
+			// The tables must exist under their prefixed names
 			names := sqliteTables(t, p)
 			require.Contains(t, names, "francis_hosts")
 			require.Contains(t, names, "francis_alarms")
@@ -97,9 +104,11 @@ func TestStandaloneTablePrefix(t *testing.T) {
 		})
 
 		t.Run("custom prefix", func(t *testing.T) {
+			// The provider appends the separator to a custom prefix
 			p := initSQLiteTestProviderWithPrefix(t, "myapp")
 			require.Equal(t, "myapp_", p.tablePrefix)
 
+			// Every table must carry the custom prefix, with nothing left under the default one
 			names := sqliteTables(t, p)
 			for _, name := range names {
 				require.Truef(t, strings.HasPrefix(name, "myapp_"), "table %q is not prefixed", name)
@@ -145,9 +154,11 @@ func TestStandaloneTablePrefix(t *testing.T) {
 		}
 
 		t.Run("default prefix is francis", func(t *testing.T) {
+			// An empty prefix option falls back to the default prefix
 			p := initPostgresTestProvider(t)
 			require.Equal(t, "francis_", p.tablePrefix)
 
+			// The tables must exist under their prefixed names
 			require.True(t, tableInSchema(t, p, "francis_hosts"))
 			require.True(t, tableInSchema(t, p, "francis_terminal_jobs"))
 			require.True(t, tableInSchema(t, p, "francis_metadata"))
@@ -157,6 +168,7 @@ func TestStandaloneTablePrefix(t *testing.T) {
 		})
 
 		t.Run("custom prefix is functional end-to-end", func(t *testing.T) {
+			// The provider appends the separator to a custom prefix, and creates its tables only under the prefixed names
 			p := initPostgresTestProviderWithOptions(t, "myapp", "")
 			require.Equal(t, "myapp_", p.tablePrefix)
 
@@ -189,6 +201,7 @@ func TestStandalonePostgresSchema(t *testing.T) {
 	require.Equal(t, `"`+dataSchema+`".francis_`, p.tablePrefix)
 
 	t.Run("tables are created in the configured schema", func(t *testing.T) {
+		// tableInSchema reports whether a table exists in the given schema
 		tableInSchema := func(schema string, name string) bool {
 			var exists bool
 			err := p.db.
@@ -201,6 +214,7 @@ func TestStandalonePostgresSchema(t *testing.T) {
 			return exists
 		}
 
+		// The tables are created in the configured schema
 		require.True(t, tableInSchema(dataSchema, "francis_hosts"))
 		require.True(t, tableInSchema(dataSchema, "francis_terminal_jobs"))
 		require.True(t, tableInSchema(dataSchema, "francis_metadata"))
@@ -214,6 +228,7 @@ func TestStandalonePostgresSchema(t *testing.T) {
 	})
 
 	t.Run("persisted data is loaded from the configured schema", func(t *testing.T) {
+		// Register a host through the first provider, which persists it to the configured schema
 		hostRes, err := p.RegisterHost(t.Context(), components.RegisterHostReq{
 			Address: "10.0.0.1:8080",
 			ActorTypes: []components.ActorHostType{
@@ -475,6 +490,7 @@ func connectPostgresTestDatabase(t *testing.T, connString string, testSchema str
 }
 
 func initTestProvider(t *testing.T) *StandaloneMemory {
+	// Use a fake clock so tests control the passing of time
 	clock := clocktesting.NewFakeClock(time.Now())
 	h := comptesting.NewSlogClockHandler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
@@ -518,12 +534,11 @@ func (p *StandaloneMemory) clearData() {
 	p.ActorState = make(map[internal.ActorKey]*internal.StateEntry)
 }
 
-// Seed seeds the data into the provider.
+// Seed seeds the data into the provider
 func (p *StandaloneMemory) Seed(ctx context.Context, spec comptesting.Spec) error {
 	p.Mu.Lock()
 	defer p.Mu.Unlock()
-	// Seed also mutates the state map (via clearData), so it must hold StateMu too, to
-	// serialize against the background cleanup loop
+	// Seed also mutates the state map (via clearData), so it must hold StateMu too, to serialize against the background cleanup loop
 	p.StateMu.Lock()
 	defer p.StateMu.Unlock()
 
@@ -598,12 +613,12 @@ func (p *StandaloneMemory) Seed(ctx context.Context, spec comptesting.Spec) erro
 	return nil
 }
 
-// Now returns the current time.
+// Now returns the current time
 func (p *StandaloneMemory) Now() time.Time {
 	return p.Clock.Now()
 }
 
-// AdvanceClock advances the clock.
+// AdvanceClock advances the clock
 func (p *StandaloneMemory) AdvanceClock(d time.Duration) error {
 	p.Clock.Sleep(d)
 	return nil
@@ -615,7 +630,7 @@ func (p *StandaloneMemory) SetMaxHosts(n int) {
 	p.Cfg.MaxHosts = n
 }
 
-// GetAllActorState returns all stored actor state.
+// GetAllActorState returns all stored actor state
 func (p *StandaloneMemory) GetAllActorState(ctx context.Context) (comptesting.ActorStateSpecCollection, error) {
 	p.Mu.RLock()
 	defer p.Mu.RUnlock()
@@ -632,7 +647,7 @@ func (p *StandaloneMemory) GetAllActorState(ctx context.Context) (comptesting.Ac
 	return result, nil
 }
 
-// GetAllHosts returns all stored hosts, host actor types, active actors, and alarms.
+// GetAllHosts returns all stored hosts, host actor types, active actors, and alarms
 func (p *StandaloneMemory) GetAllHosts(ctx context.Context) (comptesting.Spec, error) {
 	p.Mu.RLock()
 	defer p.Mu.RUnlock()
@@ -730,12 +745,11 @@ func (p *StandaloneSQLiteBacked) clearDatabase(ctx context.Context) error {
 	return nil
 }
 
-// Seed seeds the data into the provider.
+// Seed seeds the data into the provider
 func (p *StandaloneSQLiteBacked) Seed(ctx context.Context, spec comptesting.Spec) error {
 	p.Mu.Lock()
 	defer p.Mu.Unlock()
-	// Seed also mutates the state map (via clearData), so it must hold StateMu too, to
-	// serialize against the background cleanup loop
+	// Seed also mutates the state map (via clearData), so it must hold StateMu too, to serialize against the background cleanup loop
 	p.StateMu.Lock()
 	defer p.StateMu.Unlock()
 
@@ -816,12 +830,12 @@ func (p *StandaloneSQLiteBacked) Seed(ctx context.Context, spec comptesting.Spec
 	return nil
 }
 
-// Now returns the current time.
+// Now returns the current time
 func (p *StandaloneSQLiteBacked) Now() time.Time {
 	return p.Clock.Now()
 }
 
-// AdvanceClock advances the clock.
+// AdvanceClock advances the clock
 func (p *StandaloneSQLiteBacked) AdvanceClock(d time.Duration) error {
 	p.Clock.Sleep(d)
 	return nil
@@ -833,7 +847,7 @@ func (p *StandaloneSQLiteBacked) SetMaxHosts(n int) {
 	p.Cfg.MaxHosts = n
 }
 
-// GetAllActorState returns all stored actor state.
+// GetAllActorState returns all stored actor state
 func (p *StandaloneSQLiteBacked) GetAllActorState(ctx context.Context) (comptesting.ActorStateSpecCollection, error) {
 	p.Mu.RLock()
 	defer p.Mu.RUnlock()
@@ -850,7 +864,7 @@ func (p *StandaloneSQLiteBacked) GetAllActorState(ctx context.Context) (comptest
 	return result, nil
 }
 
-// GetAllHosts returns all stored hosts, host actor types, active actors, and alarms.
+// GetAllHosts returns all stored hosts, host actor types, active actors, and alarms
 func (p *StandaloneSQLiteBacked) GetAllHosts(ctx context.Context) (comptesting.Spec, error) {
 	p.Mu.RLock()
 	defer p.Mu.RUnlock()
@@ -948,7 +962,7 @@ func (p *StandalonePostgresBacked) clearDatabase(ctx context.Context) error {
 	return nil
 }
 
-// Seed seeds the data into the provider.
+// Seed seeds the data into the provider
 func (p *StandalonePostgresBacked) Seed(ctx context.Context, spec comptesting.Spec) error {
 	p.Mu.Lock()
 	defer p.Mu.Unlock()
@@ -1033,12 +1047,12 @@ func (p *StandalonePostgresBacked) Seed(ctx context.Context, spec comptesting.Sp
 	return nil
 }
 
-// Now returns the current time.
+// Now returns the current time
 func (p *StandalonePostgresBacked) Now() time.Time {
 	return p.Clock.Now()
 }
 
-// AdvanceClock advances the clock.
+// AdvanceClock advances the clock
 func (p *StandalonePostgresBacked) AdvanceClock(d time.Duration) error {
 	p.Clock.Sleep(d)
 	return nil
@@ -1050,7 +1064,7 @@ func (p *StandalonePostgresBacked) SetMaxHosts(n int) {
 	p.Cfg.MaxHosts = n
 }
 
-// GetAllActorState returns all stored actor state.
+// GetAllActorState returns all stored actor state
 func (p *StandalonePostgresBacked) GetAllActorState(ctx context.Context) (comptesting.ActorStateSpecCollection, error) {
 	p.Mu.RLock()
 	defer p.Mu.RUnlock()
@@ -1067,7 +1081,7 @@ func (p *StandalonePostgresBacked) GetAllActorState(ctx context.Context) (compte
 	return result, nil
 }
 
-// GetAllHosts returns all stored hosts, host actor types, active actors, and alarms.
+// GetAllHosts returns all stored hosts, host actor types, active actors, and alarms
 func (p *StandalonePostgresBacked) GetAllHosts(ctx context.Context) (comptesting.Spec, error) {
 	p.Mu.RLock()
 	defer p.Mu.RUnlock()
@@ -1141,8 +1155,7 @@ func (p *StandalonePostgresBacked) GetAllHosts(ctx context.Context) (comptesting
 	return spec, nil
 }
 
-// MockPersistHook is a mock implementation of internal.PersistHook that
-// captures each call to PersistChanges for later verification.
+// MockPersistHook is a mock implementation of internal.PersistHook that captures each call to PersistChanges for later verification
 type MockPersistHook struct {
 	Calls   []*internal.Changes
 	mu      sync.Mutex
@@ -1178,12 +1191,14 @@ func (m *MockPersistHook) GetCalls() []*internal.Changes {
 
 // initProviderWithMockHook creates a test provider with a MockPersistHook
 func initProviderWithMockHook(t *testing.T) (*internal.Provider, *MockPersistHook) {
+	// Use a fake clock so tests control the passing of time
 	clock := clocktesting.NewFakeClock(time.Now())
 	h := comptesting.NewSlogClockHandler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}), clock)
 	log := slog.New(h)
 
+	// Create the provider with the mock hook, so tests can inspect the changes each operation persists
 	mock := &MockPersistHook{}
 
 	providerConfig := comptesting.GetProviderConfig()
@@ -1196,6 +1211,7 @@ func initProviderWithMockHook(t *testing.T) (*internal.Provider, *MockPersistHoo
 	p, err := internal.NewProvider(log, providerOpts, providerConfig)
 	require.NoError(t, err, "Error creating provider")
 
+	// Init the provider
 	err = p.Init(t.Context())
 	require.NoError(t, err, "Error initializing provider")
 
@@ -1332,6 +1348,7 @@ func TestPersistHook_UnregisterHost(t *testing.T) {
 func TestPersistHook_SetState(t *testing.T) {
 	p, mock := initProviderWithMockHook(t)
 
+	// Set state with a TTL
 	actorRef := ref.ActorRef{ActorType: "myactor", ActorID: "actor1"}
 	data := []byte(`{"key":"value"}`)
 
@@ -1382,6 +1399,7 @@ func TestPersistHook_DeleteState(t *testing.T) {
 func TestPersistHook_SetAlarm(t *testing.T) {
 	p, mock := initProviderWithMockHook(t)
 
+	// Set a repeating alarm with data
 	alarmRef := ref.AlarmRef{ActorType: "myactor", ActorID: "actor1", Name: "reminder"}
 	dueTime := p.Clock.Now().Add(time.Hour)
 	req := components.SetAlarmReq{
@@ -1917,12 +1935,12 @@ func TestPersistHook_Rollback_SetState(t *testing.T) {
 		return errors.New("simulated persistence error")
 	}
 
+	// Try to set state
 	actorRef := ref.ActorRef{ActorType: "myactor", ActorID: "actor1"}
 	err := p.SetState(t.Context(), actorRef, []byte("data"), components.SetStateOpts{})
 
-	// Should return error
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "simulated persistence error")
+	// Should return the error from the persist hook
+	require.ErrorContains(t, err, "simulated persistence error")
 
 	// Verify state was not stored in memory
 	_, err = p.GetState(t.Context(), actorRef)
@@ -1937,6 +1955,7 @@ func TestPersistHook_Rollback_RegisterHost(t *testing.T) {
 		return errors.New("simulated persistence error")
 	}
 
+	// Try to register a host
 	req := components.RegisterHostReq{
 		Address: "localhost:8080",
 		ActorTypes: []components.ActorHostType{
@@ -1946,9 +1965,8 @@ func TestPersistHook_Rollback_RegisterHost(t *testing.T) {
 
 	_, err := p.RegisterHost(t.Context(), req)
 
-	// Should return error
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "simulated persistence error")
+	// Should return the error from the persist hook
+	require.ErrorContains(t, err, "simulated persistence error")
 
 	// Verify host was not stored in memory
 	p.Mu.RLock()
@@ -1966,14 +1984,14 @@ func TestPersistHook_Rollback_SetAlarm(t *testing.T) {
 		return errors.New("simulated persistence error")
 	}
 
+	// Try to set an alarm
 	alarmRef := ref.AlarmRef{ActorType: "myactor", ActorID: "actor1", Name: "reminder"}
 	dueTime := p.Clock.Now().Add(time.Hour)
 
 	_, err := p.SetAlarm(t.Context(), alarmRef, components.SetAlarmReq{DueTime: dueTime})
 
-	// Should return error
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "simulated persistence error")
+	// Should return the error from the persist hook
+	require.ErrorContains(t, err, "simulated persistence error")
 
 	// Verify alarm was not stored in memory
 	_, err = p.GetAlarm(t.Context(), alarmRef)
@@ -2014,6 +2032,7 @@ func TestPersistHook_Rollback_SetAndLeaseAlarm(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, lease)
 
+	// The hook received the alarm and the placement in a single call
 	calls := mock.GetCalls()
 	require.Len(t, calls, 1)
 	require.Len(t, calls[0].Alarms.Set, 1)
@@ -2057,6 +2076,7 @@ func TestPersistHook_Rollback_DispatchAndLeaseJob(t *testing.T) {
 	require.Empty(t, jobID)
 	require.Nil(t, lease)
 
+	// The hook received the leased job and the placement in a single call
 	calls := mock.GetCalls()
 	require.Len(t, calls, 1)
 	require.Len(t, calls[0].Alarms.Set, 1)
@@ -2118,9 +2138,8 @@ func TestPersistHook_Rollback_FetchAndLeaseUpcomingAlarms(t *testing.T) {
 		Hosts: []string{hostRes.HostID},
 	})
 
-	// Should return error
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "simulated persistence error")
+	// Should return the error from the persist hook
+	require.ErrorContains(t, err, "simulated persistence error")
 	require.Nil(t, leases)
 
 	// Verify actor was not placed
@@ -2166,12 +2185,239 @@ func TestPersistHook_Rollback_LookupActor(t *testing.T) {
 	actorRef := ref.ActorRef{ActorType: "myactor", ActorID: "actor1"}
 	_, err = p.LookupActor(t.Context(), actorRef, components.LookupActorOpts{})
 
-	// Should return error
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "simulated persistence error")
+	// Should return the error from the persist hook
+	require.ErrorContains(t, err, "simulated persistence error")
 
 	// Verify actor was not placed
 	p.Mu.RLock()
 	require.Empty(t, p.ActiveActors, "ActiveActors should have been rolled back")
 	p.Mu.RUnlock()
+}
+
+func TestStandaloneSQLiteWorkflowEventPersistence(t *testing.T) {
+	p := initSQLiteTestProvider(t)
+
+	// A new provider over the same (single-connection) in-memory database loads everything persisted by the first one
+	reload := func(t *testing.T) *internal.Provider {
+		t.Helper()
+		p2, err := NewStandaloneSQLiteBacked(slog.New(slog.DiscardHandler), StandaloneSQLiteOptions{
+			DB:    p.db,
+			Clock: p.Clock,
+		}, comptesting.GetProviderConfig())
+		require.NoError(t, err)
+		err = p2.Init(t.Context())
+		require.NoError(t, err)
+		return p2.Provider
+	}
+
+	// countStored returns the number of event rows stored in the database for an actor
+	countStored := func(t *testing.T, actorType string, actorID string) int {
+		t.Helper()
+		var n int
+		err := p.db.QueryRowContext(t.Context(),
+			"SELECT COUNT(*) FROM "+p.tablePrefix+"workflow_events WHERE actor_type = ? AND actor_id = ?",
+			actorType, actorID,
+		).Scan(&n)
+		require.NoError(t, err)
+		return n
+	}
+
+	testWorkflowEventPersistence(t, p.Provider, reload, countStored)
+}
+
+func TestStandalonePostgresWorkflowEventPersistence(t *testing.T) {
+	p := initPostgresTestProvider(t)
+
+	// A new provider over the same database and schema loads everything persisted by the first one
+	reload := func(t *testing.T) *internal.Provider {
+		t.Helper()
+		p2, err := NewStandalonePostgresBacked(slog.New(slog.DiscardHandler), StandalonePostgresOptions{
+			DB:    p.db,
+			Clock: p.Clock,
+		}, comptesting.GetProviderConfig())
+		require.NoError(t, err)
+		err = p2.Init(t.Context())
+		require.NoError(t, err)
+		return p2.Provider
+	}
+
+	// countStored returns the number of event rows stored in the database for an actor
+	countStored := func(t *testing.T, actorType string, actorID string) int {
+		t.Helper()
+		var n int
+		err := p.db.QueryRow(t.Context(),
+			"SELECT COUNT(*) FROM "+p.tablePrefix+"workflow_events WHERE actor_type = $1 AND actor_id = $2",
+			actorType, actorID,
+		).Scan(&n)
+		require.NoError(t, err)
+		return n
+	}
+
+	testWorkflowEventPersistence(t, p.Provider, reload, countStored)
+}
+
+// testWorkflowEventPersistence verifies that workflow events and job retention survive a reload from the database, and that every path removing state removes the persisted events too
+func testWorkflowEventPersistence(t *testing.T, p *internal.Provider, reload func(t *testing.T) *internal.Provider, countStored func(t *testing.T, actorType string, actorID string) int) {
+	const actorType = "EventActor"
+
+	// Event times are whole milliseconds so they round-trip exactly on every backend
+	baseTime := time.UnixMilli(p.Clock.Now().UnixMilli())
+	makeEvents := func(from int64, to int64, kind string) []components.WorkflowEvent {
+		res := make([]components.WorkflowEvent, 0, to-from+1)
+		for seq := from; seq <= to; seq++ {
+			res = append(res, components.WorkflowEvent{
+				Seq:  seq,
+				Time: baseTime.Add(time.Duration(seq) * time.Second),
+				Kind: kind,
+				Data: fmt.Appendf(nil, "%s-%d", kind, seq),
+			})
+		}
+		return res
+	}
+
+	// listEvents returns all events for an actor, as seen by the given provider
+	listEvents := func(t *testing.T, prov *internal.Provider, actorID string) []components.WorkflowEvent {
+		t.Helper()
+		res, err := prov.ListWorkflowEvents(t.Context(), components.ListWorkflowEventsReq{
+			ActorType: actorType,
+			ActorID:   actorID,
+			Limit:     1000,
+		})
+		require.NoError(t, err)
+		require.False(t, res.HasMore)
+		return res.Events
+	}
+
+	// requireEvents asserts the events match the expected ones, comparing times as instants
+	requireEvents := func(t *testing.T, expect []components.WorkflowEvent, actual []components.WorkflowEvent) {
+		t.Helper()
+		require.Len(t, actual, len(expect))
+		for i := range expect {
+			require.Equal(t, expect[i].Seq, actual[i].Seq)
+			require.Equal(t, expect[i].Kind, actual[i].Kind)
+			require.Equal(t, expect[i].Data, actual[i].Data)
+			require.Equal(t, expect[i].Time.UnixMilli(), actual[i].Time.UnixMilli())
+		}
+	}
+
+	// setState writes the actor's state and appends the given events in the same operation
+	setState := func(t *testing.T, actorID string, ttl time.Duration, events []components.WorkflowEvent) {
+		t.Helper()
+		err := p.SetState(t.Context(), ref.NewActorRef(actorType, actorID), []byte("state-"+actorID), components.SetStateOpts{
+			TTL:          ttl,
+			AppendEvents: events,
+		})
+		require.NoError(t, err)
+	}
+
+	t.Run("appended events are persisted and reloaded", func(t *testing.T) {
+		// Append events over two writes, then check both the stored rows and what a reloaded provider sees
+		setState(t, "append", 0, makeEvents(1, 3, "a"))
+		setState(t, "append", 0, makeEvents(4, 5, "a"))
+		require.Equal(t, 5, countStored(t, actorType, "append"))
+
+		requireEvents(t, makeEvents(1, 5, "a"), listEvents(t, reload(t), "append"))
+	})
+
+	t.Run("duplicate events are ignored", func(t *testing.T) {
+		// Seqs 4 and 5 already exist, so only 6 is added and the stored copies of 4 and 5 are kept
+		setState(t, "append", 0, append(makeEvents(4, 5, "dup"), makeEvents(6, 6, "a")...))
+		require.Equal(t, 6, countStored(t, actorType, "append"))
+
+		expect := makeEvents(1, 6, "a")
+		requireEvents(t, expect, listEvents(t, p, "append"))
+		requireEvents(t, expect, listEvents(t, reload(t), "append"))
+	})
+
+	t.Run("first event with seq 1 resets the history", func(t *testing.T) {
+		// A write starting at seq 1 replaces the whole stored history with the new events
+		setState(t, "append", 0, makeEvents(1, 2, "b"))
+		require.Equal(t, 2, countStored(t, actorType, "append"))
+
+		expect := makeEvents(1, 2, "b")
+		requireEvents(t, expect, listEvents(t, p, "append"))
+		requireEvents(t, expect, listEvents(t, reload(t), "append"))
+	})
+
+	t.Run("deleting state deletes persisted events", func(t *testing.T) {
+		setState(t, "delete", 0, makeEvents(1, 3, "d"))
+		require.Equal(t, 3, countStored(t, actorType, "delete"))
+
+		// Deleting the state removes its events from both the database and memory
+		err := p.DeleteState(t.Context(), ref.NewActorRef(actorType, "delete"))
+		require.NoError(t, err)
+		require.Equal(t, 0, countStored(t, actorType, "delete"))
+		require.Empty(t, listEvents(t, p, "delete"))
+		require.Empty(t, listEvents(t, reload(t), "delete"))
+	})
+
+	t.Run("expired state cleanup deletes persisted events", func(t *testing.T) {
+		setState(t, "ttl", time.Minute, makeEvents(1, 3, "t"))
+		require.Equal(t, 3, countStored(t, actorType, "ttl"))
+
+		// Events are hidden as soon as the state expires, and removed from the database by the cleanup
+		p.Clock.Sleep(2 * time.Minute)
+		require.Empty(t, listEvents(t, p, "ttl"))
+
+		err := p.CleanupExpired(t.Context())
+		require.NoError(t, err)
+		require.Equal(t, 0, countStored(t, actorType, "ttl"))
+		require.Empty(t, listEvents(t, reload(t), "ttl"))
+	})
+
+	t.Run("job retention is persisted and reloaded", func(t *testing.T) {
+		// Register a host with non-default retentions, then read them back from a reloaded provider
+		res, err := p.RegisterHost(t.Context(), components.RegisterHostReq{
+			Address: "10.0.0.9:8080",
+			ActorTypes: []components.ActorHostType{
+				{
+					ActorType:                "RetentionActor",
+					IdleTimeout:              5 * time.Minute,
+					CompletedJobRetention:    90 * time.Second,
+					DeadLetteredJobRetention: 36 * time.Hour,
+				},
+				{ActorType: "ForeverActor", CompletedJobRetention: time.Duration(-1), DeadLetteredJobRetention: time.Nanosecond},
+			},
+		})
+		require.NoError(t, err)
+
+		p2 := reload(t)
+		p2.Mu.RLock()
+		types := p2.HostActorTypes[res.HostID]
+		p2.Mu.RUnlock()
+		require.Len(t, types, 2)
+		for _, typ := range types {
+			if typ.ActorType == "ForeverActor" {
+				require.Negative(t, typ.CompletedJobRetention)
+				require.Positive(t, typ.DeadLetteredJobRetention)
+			} else {
+				require.Equal(t, 90*time.Second, typ.CompletedJobRetention)
+				require.Equal(t, 36*time.Hour, typ.DeadLetteredJobRetention)
+			}
+		}
+
+		// Restore refuses to run while a host is connected
+		err = p.UnregisterHost(t.Context(), res.HostID, components.UnregisterHostOpts{})
+		require.NoError(t, err)
+	})
+
+	t.Run("backup and restore include events", func(t *testing.T) {
+		// Back up while the history has four events
+		setState(t, "backup", 0, makeEvents(1, 4, "k"))
+
+		var buf bytes.Buffer
+		err := p.Backup(t.Context(), &buf)
+		require.NoError(t, err)
+
+		// Change the history after the backup, then restore it
+		setState(t, "backup", 0, makeEvents(1, 1, "changed"))
+		err = p.Restore(t.Context(), &buf)
+		require.NoError(t, err)
+
+		// The restored history is the backed-up one, in memory, in the database, and after a reload
+		expect := makeEvents(1, 4, "k")
+		requireEvents(t, expect, listEvents(t, p, "backup"))
+		require.Equal(t, 4, countStored(t, actorType, "backup"))
+		requireEvents(t, expect, listEvents(t, reload(t), "backup"))
+	})
 }

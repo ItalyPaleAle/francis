@@ -9,6 +9,7 @@ import (
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/utils"
 	"github.com/italypaleale/francis/protocol"
 )
 
@@ -37,14 +38,11 @@ func componentsActorTypesToProtocol(in []components.ActorHostType) []protocol.Ac
 
 // retentionToWireMs returns a duration in ms, ensuring that a positive number is always at least 1ms
 func retentionToWireMs(d time.Duration) int64 {
-	switch {
-	case d < 0:
+	if d < 0 {
 		return -1
-	case d > 0:
-		return max(d.Milliseconds(), 1)
-	default:
-		return 0
 	}
+
+	return utils.RetentionMilliseconds(d)
 }
 
 // protocolAlarmPropsToActor converts a runtime alarm response into the public actor properties

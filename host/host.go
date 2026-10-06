@@ -5,6 +5,7 @@ package host
 
 import (
 	"context"
+	"errors"
 
 	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/actorcore"
@@ -14,6 +15,10 @@ import (
 // RegisterActorOption is a functional option for RegisterActor/RegisterSingletonActor
 // It is an alias of the option type both hosts accept, so options built with local.With… or remote.With… can be passed to any Host
 type RegisterActorOption = actorcore.RegisterActorOption
+
+// ErrAdministrativeDrain is returned by Host.Run after the host was drained through the management API
+// The host has stopped serving, deactivated its actors, and unregistered, so the application should exit its process; a replacement process registers as a new host
+var ErrAdministrativeDrain = errors.New("host was drained by an administrator")
 
 // Host is an actor host, in either the local or the remote topology
 // Values of this interface are created with local.NewHost or remote.NewHost, and the concrete host packages expose the topology-specific construction options
@@ -25,7 +30,9 @@ type Host interface {
 	Service() *actor.Service
 
 	// Run the host service
-	// Note this function is blocking, and will return only when the service is shut down via context cancellation
+	// Note this function is blocking, and returns when the service is shut down via context cancellation, when it fails, or after an administrative drain
+	// After an administrative drain it returns an error that matches ErrAdministrativeDrain with errors.Is, so the application can tell a requested drain apart and exit its process
+	// A host that was drained cannot be run again: a later call returns ErrAdministrativeDrain immediately
 	Run(ctx context.Context) error
 
 	// Ready returns a channel that is closed once the host has joined the cluster for the first time and can serve invocations

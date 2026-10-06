@@ -3,6 +3,7 @@ package peer
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -41,6 +42,11 @@ type ClientConfig struct {
 	IdleTimeout time.Duration
 	// Log is the slog logger
 	Log *slog.Logger
+	// ConnectPath is the HTTP/3 path dialed on the peer, which defaults to the host peer server's path
+	ConnectPath string
+	// PeerID returns the identity of a peer from its certificate, which defaults to the host identity
+	// Runtime replicas set it to the runtime identity to reach each other's peer endpoint
+	PeerID func(cert *x509.Certificate) (string, error)
 }
 
 // Client invokes actors on other hosts over WebTransport, pooling one session per peer address
@@ -49,6 +55,8 @@ type Client struct {
 	dialed      atomic.Bool
 	transport   *webtransport.Transport
 	dialTimeout time.Duration
+	connectPath string
+	peerID      func(cert *x509.Certificate) (string, error)
 	log         *slog.Logger
 
 	// sessions pool is a lock-free map: dead sessions are detected via their context and atomically replaced, never deleted, so a concurrent redial can never be clobbered
@@ -62,11 +70,19 @@ func NewClient(cfg ClientConfig) *Client {
 	}
 	cfg.DialTimeout = utils.PositiveOr(cfg.DialTimeout, defaultDialTimeout)
 	cfg.IdleTimeout = utils.PositiveOr(cfg.IdleTimeout, defaultIdleTimeout)
+	if cfg.ConnectPath == "" {
+		cfg.ConnectPath = protocol.PeerConnectPath
+	}
+	if cfg.PeerID == nil {
+		cfg.PeerID = ca.HostIDFromCert
+	}
 
 	return &Client{
 		// The dialer's QUIC idle timeout reclaims a session once it stops carrying traffic, while an active stream keeps it alive
 		transport:   wt.NewDialer(cfg.TLSConfig, wt.WithMaxIdleTimeout(cfg.IdleTimeout)),
 		dialTimeout: cfg.DialTimeout,
+		connectPath: cfg.ConnectPath,
+		peerID:      cfg.PeerID,
 		log:         cfg.Log,
 		sessions:    haxmap.New[string, *webtransport.Session](),
 	}
@@ -316,7 +332,7 @@ func (c *Client) verifyPeerHostID(session *webtransport.Session, expectedHostID 
 	}
 
 	// A mismatch means the host at this address is not the one placement selected, so the caller should re-resolve
-	gotHostID, err := ca.HostIDFromCert(certs[0])
+	gotHostID, err := c.peerID(certs[0])
 	if err != nil {
 		return protocol.NewErrorf(protocol.ErrCodeHostMismatch, "peer identity is invalid: %v", err)
 	}
@@ -395,7 +411,7 @@ func (c *Client) dial(ctx context.Context, address string) (*webtransport.Sessio
 	dialCtx, cancel := context.WithTimeout(ctx, c.dialTimeout)
 	defer cancel()
 
-	rsp, session, err := c.transport.Dial(dialCtx, "https://"+address+protocol.PeerConnectPath, nil)
+	rsp, session, err := c.transport.Dial(dialCtx, "https://"+address+c.connectPath, nil)
 	// The dialer lazily initializes its transport on the first Dial, so record that it is now safe to close
 	c.dialed.Store(true)
 	if err != nil {

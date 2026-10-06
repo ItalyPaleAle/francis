@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/italypaleale/francis/actor"
+	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/sqlite"
 	"github.com/italypaleale/francis/internal/ref"
 )
@@ -149,5 +150,87 @@ func TestHostLocalInvocationSmoke(t *testing.T) {
 	case <-errCh:
 	case <-time.After(10 * time.Second):
 		t.Fatal("host did not shut down")
+	}
+}
+
+// slowDeactivateActor is an actor whose deactivation takes longer than the host's health check deadline
+type slowDeactivateActor struct {
+	smokeActor
+
+	started chan struct{}
+	delay   time.Duration
+}
+
+func (a slowDeactivateActor) Deactivate(ctx context.Context) error {
+	close(a.started)
+	time.Sleep(a.delay)
+	return nil
+}
+
+// TestHostLocalKeepsHealthChecksWhileActorsHalt verifies a host stays registered while its actors take longer to halt than the health check deadline
+// If the registration expired meanwhile, the provider would let another host activate actors that are still halting here
+func TestHostLocalKeepsHealthChecksWhileActorsHalt(t *testing.T) {
+	const deadline = 2 * time.Second
+	dbPath := filepath.Join(t.TempDir(), "health.db")
+
+	h, err := NewHost(
+		WithAddress(localFreeUDPAddr(t)),
+		WithSQLiteProvider(sqlite.SQLiteProviderOptions{ConnectionString: dbPath, Timeout: time.Second}),
+		WithRuntimePSKs(localTestRuntimePSK),
+		WithHostHealthCheckDeadline(deadline),
+		WithLogger(slog.New(slog.DiscardHandler)),
+	)
+	require.NoError(t, err)
+	started := make(chan struct{})
+	err = h.RegisterActor("Slow", func(actorID string, service *actor.Service) actor.Actor {
+		return slowDeactivateActor{started: started, delay: 2 * deadline}
+	})
+	require.NoError(t, err)
+
+	// Run the host and activate the actor
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- h.Run(ctx)
+	}()
+	select {
+	case <-h.Ready():
+	case <-time.After(15 * time.Second):
+		t.Fatal("host did not register")
+	}
+	hostID := h.HostID()
+	_, err = h.Service().Invoke(t.Context(), "Slow", "a1", "echo", "hi")
+	require.NoError(t, err)
+
+	// A second provider on the same database watches the registration from outside the host
+	watcherCfg := components.NewProviderConfig()
+	watcherCfg.HostHealthCheckDeadline = deadline
+	watcher, err := sqlite.NewSQLiteProvider(slog.New(slog.DiscardHandler), sqlite.SQLiteProviderOptions{ConnectionString: dbPath, Timeout: time.Second}, watcherCfg)
+	require.NoError(t, err)
+	err = watcher.Init(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = watcher.Close()
+	})
+
+	// Stop the host, which starts halting the actor
+	cancel()
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the actor was not deactivated")
+	}
+
+	// Well past the deadline, the host is still registered, because its health checks keep running while the actor halts
+	time.Sleep(deadline + deadline/2)
+	_, err = watcher.GetHostDetails(t.Context(), hostID)
+	require.NoError(t, err, "the host's registration expired while its actor was still halting")
+
+	select {
+	case err = <-errCh:
+		require.NoError(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("host did not stop")
 	}
 }

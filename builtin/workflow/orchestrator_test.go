@@ -1091,6 +1091,12 @@ func (h *purgeTrackingHost) readsOf(wf *Workflow, instanceID string) int {
 	return h.reads[key(builtinActorType(wf.baseType), instanceID)]
 }
 
+func (h *purgeTrackingHost) resetReads() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	clear(h.reads)
+}
+
 func (h *purgeTrackingHost) hasJournal(wf *Workflow, instanceID string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1179,6 +1185,8 @@ func TestPurgedChildrenDoNotReReadTheirAncestry(t *testing.T) {
 	persistTerminated(t, svc, mid, "mid-1", &parentRef{Workflow: root.name, InstanceID: "root-1", Step: "sub", Depth: 1}, leaf, leafIDs...)
 	persistTerminated(t, svc, root, "root-1", nil, mid, "mid-1")
 
+	// The setup's own persists read each committed journal to compute its history, so only reads made by the purge count
+	host.resetReads()
 	require.NoError(t, root.Service(svc).Purge(t.Context(), "root-1"))
 
 	// Each journal is read once, by its own purge, because a parent's purge tells its children their ancestry is already settled

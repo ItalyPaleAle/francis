@@ -15,6 +15,7 @@ import (
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/ref"
+	"github.com/italypaleale/francis/internal/utils"
 )
 
 func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.RegisterHostReq) (components.RegisterHostRes, error) {
@@ -55,11 +56,12 @@ func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.Regi
 		defer cancel()
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		_, err = tx.Exec(queryCtx,
-			`INSERT INTO `+p.tablePrefix+`hosts (host_id, host_address, host_last_health_check, host_session_id)
-			VALUES ($1, $2, now() AT TIME ZONE 'utc', $3)`,
+			`INSERT INTO `+p.tablePrefix+`hosts (host_id, host_address, host_last_health_check, host_session_id, host_runtime_id)
+			VALUES ($1, $2, now() AT TIME ZONE 'utc', $3, $4)`,
 			hostID,
 			req.Address,
-			nullString(req.SessionID),
+			utils.NullString(req.SessionID),
+			utils.NullString(req.RuntimeID),
 		)
 		if isConstraintError(err) {
 			return zero, components.ErrHostAlreadyRegistered
@@ -117,33 +119,37 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 			return zero, fmt.Errorf("error removing failed hosts: %w", err)
 		}
 
-		// Reject a reattach while an exclusive-access lease is held, so a locked cluster stays empty
-		// A reattach never adds a host beyond the limit, so the host count and limit agreement are not re-checked here
+		// Lock the identity before the cluster lease, without reserving a new address that a registration may be waiting to insert
+		queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
+		defer cancel()
+		var existingID string
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		err = tx.QueryRow(queryCtx, `SELECT host_id FROM `+p.tablePrefix+`hosts WHERE host_id = $1 FOR UPDATE`, req.ExistingHostID).Scan(&existingID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return zero, fmt.Errorf("error locking host: %w", err)
+		}
+
+		// A reattach never adds a host beyond the limit, but it must still respect the exclusive-access lease
 		err = p.checkClusterNotLocked(ctx, tx)
 		if err != nil {
 			return zero, err
 		}
 
-		// Try to refresh the existing registration in place, handing it to the new session
-		// A unique constraint violation here means a different, healthy host already holds the address
-		queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
-		defer cancel()
-		var tag pgconn.CommandTag
-		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-		tag, err = tx.Exec(queryCtx,
-			`UPDATE `+p.tablePrefix+`hosts
-			SET host_address = $1, host_last_health_check = now() AT TIME ZONE 'utc', host_session_id = $3, host_draining = false
-			WHERE host_id = $2`,
-			req.Address, req.ExistingHostID, nullString(req.SessionID),
-		)
-		if isConstraintError(err) {
-			return zero, components.ErrHostAlreadyRegistered
-		} else if err != nil {
-			return zero, fmt.Errorf("error updating host: %w", err)
-		}
-
 		var activeHostID string
-		if tag.RowsAffected() == 1 {
+		if existingID != "" {
+			// Refresh the registration only after acquiring the cluster lock, matching fresh registrations' address lock order
+			queryCtx, cancel = context.WithTimeout(ctx, p.timeout)
+			defer cancel()
+			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+			_, err = tx.Exec(queryCtx,
+				`UPDATE `+p.tablePrefix+`hosts SET host_address = $1, host_last_health_check = now() AT TIME ZONE 'utc', host_session_id = $3, host_runtime_id = $4, host_draining = false, host_drain_token = '' WHERE host_id = $2`,
+				req.Address, req.ExistingHostID, utils.NullString(req.SessionID), utils.NullString(req.RuntimeID),
+			)
+			if isConstraintError(err) {
+				return zero, components.ErrHostAlreadyRegistered
+			} else if err != nil {
+				return zero, fmt.Errorf("error updating host: %w", err)
+			}
 			activeHostID = req.ExistingHostID
 			reattached = true
 		} else {
@@ -152,9 +158,9 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 			defer cancel()
 			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 			_, err = tx.Exec(queryCtx,
-				`INSERT INTO `+p.tablePrefix+`hosts (host_id, host_address, host_last_health_check, host_session_id)
-				VALUES ($1, $2, now() AT TIME ZONE 'utc', $3)`,
-				newHostID, req.Address, nullString(req.SessionID),
+				`INSERT INTO `+p.tablePrefix+`hosts (host_id, host_address, host_last_health_check, host_session_id, host_runtime_id)
+				VALUES ($1, $2, now() AT TIME ZONE 'utc', $3, $4)`,
+				newHostID, req.Address, utils.NullString(req.SessionID), utils.NullString(req.RuntimeID),
 			)
 			if isConstraintError(err) {
 				return zero, components.ErrHostAlreadyRegistered
@@ -360,7 +366,7 @@ func (p *PostgresProvider) setActorHostDraining(ctx context.Context, hostID stri
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	res, err := db.Exec(queryCtx,
 		`UPDATE `+p.tablePrefix+`hosts
-		SET host_draining = true
+		SET host_draining = true, host_drain_token = ''
 		WHERE
 			host_id = $1
 			AND host_last_health_check >= ((now() AT TIME ZONE 'utc') - $2::interval)`,
@@ -599,7 +605,7 @@ func (p *PostgresProvider) insertHostActorTypes(ctx context.Context, tx pgx.Tx, 
 	_, err := tx.CopyFrom(
 		queryCtx,
 		p.tableIdentifier("host_actor_types"),
-		[]string{"host_id", "actor_type", "actor_idle_timeout", "actor_concurrency_limit"},
+		[]string{"host_id", "actor_type", "actor_idle_timeout", "actor_concurrency_limit", "actor_completed_job_retention", "actor_dead_lettered_job_retention"},
 		&actorHostTypeColl{
 			hostID:     hostID,
 			actorTypes: actorTypes,
@@ -633,6 +639,8 @@ func (ahtc *actorHostTypeColl) Values() ([]any, error) {
 		row.ActorType,
 		row.IdleTimeout,
 		row.ConcurrencyLimit,
+		utils.RetentionInterval(row.CompletedJobRetention),
+		utils.RetentionInterval(row.DeadLetteredJobRetention),
 	}
 	return res, nil
 }

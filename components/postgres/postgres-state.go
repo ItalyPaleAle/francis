@@ -8,9 +8,12 @@ import (
 	"strings"
 	"time"
 
+	postgresadapter "github.com/italypaleale/go-sql-utils/adapter/postgres"
+	postgrestransactions "github.com/italypaleale/go-sql-utils/transactions/postgres"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/components/internal/eventsql"
 	"github.com/italypaleale/francis/internal/ref"
 )
 
@@ -56,12 +59,39 @@ func (p *PostgresProvider) SetState(ctx context.Context, ref ref.ActorRef, data 
 		}
 	}
 
+	// Without events to append, the upsert is a single statement and needs no transaction
+	if len(opts.AppendEvents) == 0 {
+		return p.upsertState(ctx, p.db, ref, data, exp, wfLabels)
+	}
+
+	// The events are written in the same transaction as the state
+	_, err := postgrestransactions.ExecuteInTransaction(ctx, p.log, p.db, p.timeout, func(ctx context.Context, tx pgx.Tx) (zero struct{}, rErr error) {
+		rErr = p.upsertState(ctx, tx, ref, data, exp, wfLabels)
+		if rErr != nil {
+			return zero, rErr
+		}
+
+		rErr = p.appendWorkflowEvents(ctx, tx, ref, opts.AppendEvents)
+		if rErr != nil {
+			return zero, rErr
+		}
+
+		return zero, nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to set state: %w", err)
+	}
+
+	return nil
+}
+
+// upsertState inserts or replaces the state row of an actor
+func (p *PostgresProvider) upsertState(ctx context.Context, db postgresadapter.PGXQuerier, ref ref.ActorRef, data []byte, exp *time.Duration, wfLabels *string) error {
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
-	// Performs a upsert
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	_, err := p.db.Exec(queryCtx,
+	_, err := db.Exec(queryCtx,
 		// If exp is nil, now() + NULL will be NULL
 		`INSERT INTO `+p.tablePrefix+`actor_state
 			(actor_type, actor_id, actor_state_data, actor_state_expiration_time, workflow_labels)
@@ -79,6 +109,67 @@ func (p *PostgresProvider) SetState(ctx context.Context, ref ref.ActorRef, data 
 	return nil
 }
 
+// appendWorkflowEvents stores workflow events for an actor, ignoring those whose sequence number is already stored
+func (p *PostgresProvider) appendWorkflowEvents(ctx context.Context, tx pgx.Tx, ref ref.ActorRef, events []components.WorkflowEvent) error {
+	// A history that starts over at sequence number 1 belongs to a new state reusing the actor ID, so the events of the earlier one are removed first
+	if events[0].Seq == 1 {
+		queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
+		defer cancel()
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		_, err := tx.Exec(queryCtx,
+			`DELETE FROM `+p.tablePrefix+`workflow_events WHERE actor_type = $1 AND actor_id = $2`,
+			ref.ActorType, ref.ActorID,
+		)
+		if err != nil {
+			return fmt.Errorf("error removing previous workflow events: %w", err)
+		}
+	}
+
+	// A retried write repeats sequence numbers that are already stored, and those rows are kept as they are
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+	err := eventsql.InsertPostgres(queryCtx, tx, p.tablePrefix+"workflow_events", ref.ActorType, ref.ActorID, events)
+	if err != nil {
+		return fmt.Errorf("error inserting workflow events: %w", err)
+	}
+
+	return nil
+}
+
+// workflowLabelFilter returns the clauses that restrict a state listing to the given workflow labels and created range, appending their values to args
+// Each label field is matched as the same ->> expression its index was built on, which is required to use the index
+func workflowLabelFilter(labels *components.WorkflowLabels, createdFrom time.Time, createdTo time.Time, args []any) (string, []any) {
+	var labelFields map[string]string
+	if labels != nil {
+		labelFields = labels.Fields()
+	}
+
+	var b strings.Builder
+	for field, v := range labelFields {
+		b.Grow(32 + len(field))
+		// #nosec G202 -- the only concatenated values are one of the closed set of label field names and a placeholder number
+		b.WriteString(` AND workflow_labels->>'`)
+		b.WriteString(field)
+		b.WriteString(`' = $`)
+		b.WriteString(strconv.Itoa(len(args) + 1))
+		args = append(args, v)
+	}
+
+	// The created label is a fixed-width UTC string, so a string range on the same expression the index is built on is a time range
+	if !createdFrom.IsZero() {
+		b.WriteString(` AND workflow_labels->>'` + components.WorkflowLabelCreated + `' >= $`)
+		b.WriteString(strconv.Itoa(len(args) + 1))
+		args = append(args, components.FormatWorkflowCreated(createdFrom))
+	}
+	if !createdTo.IsZero() {
+		b.WriteString(` AND workflow_labels->>'` + components.WorkflowLabelCreated + `' < $`)
+		b.WriteString(strconv.Itoa(len(args) + 1))
+		args = append(args, components.FormatWorkflowCreated(createdTo))
+	}
+
+	return b.String(), args
+}
+
 func (p *PostgresProvider) ListStates(ctx context.Context, req components.ListStatesReq) (components.ListStatesRes, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
@@ -93,26 +184,8 @@ func (p *PostgresProvider) ListStates(ctx context.Context, req components.ListSt
 	// This avoids a second query just to compute HasMore
 	limit := req.EffectiveLimit()
 
-	// To use the index, each requested label field is matched as the same ->> expression its index was built on
-	var labelFields map[string]string
-	if req.WorkflowLabels != nil {
-		labelFields = req.WorkflowLabels.Fields()
-	}
-
-	// The size is known up front: the two fixed arguments, one per label field, and the limit
-	args := make([]any, 0, 3+len(labelFields))
-	args = append(args, req.ActorType, req.After)
-
-	var labelClauses strings.Builder
-	for field, v := range labelFields {
-		labelClauses.Grow(32 + len(field))
-		// #nosec G202 -- the only concatenated values are one of the closed set of label field names and a placeholder number
-		labelClauses.WriteString(` AND workflow_labels->>'`)
-		labelClauses.WriteString(field)
-		labelClauses.WriteString(`' = $`)
-		labelClauses.WriteString(strconv.Itoa(len(args) + 1))
-		args = append(args, v)
-	}
+	// Filter on the workflow labels after the actor type and cursor
+	labelClauses, args := workflowLabelFilter(req.WorkflowLabels, req.CreatedFrom, req.CreatedTo, []any{req.ActorType, req.After})
 	limitArg := strconv.Itoa(len(args) + 1)
 	args = append(args, limit+1)
 
@@ -120,13 +193,13 @@ func (p *PostgresProvider) ListStates(ctx context.Context, req components.ListSt
 	// An empty cursor selects the first page, since every actor ID sorts after the empty string
 	// #nosec G202 -- the only concatenated values are the static table prefix, a fixed column name, and placeholder numbers, not user input
 	rows, err := p.db.Query(queryCtx,
-		`SELECT actor_id, `+dataCol+`
+		`SELECT actor_id, `+dataCol+`, workflow_labels
 		FROM `+p.tablePrefix+`actor_state
 		WHERE
 			actor_type = $1
 			AND actor_id > $2
 			AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > (now() AT TIME ZONE 'utc'))`+
-			labelClauses.String()+`
+			labelClauses+`
 		ORDER BY actor_id
 		LIMIT $`+limitArg,
 		args...,
@@ -149,15 +222,23 @@ func (p *PostgresProvider) ListStates(ctx context.Context, req components.ListSt
 		var (
 			actorID string
 			data    []byte
+			labels  []byte
 		)
-		err = rows.Scan(&actorID, &data)
+		err = rows.Scan(&actorID, &data, &labels)
 		if err != nil {
 			return components.ListStatesRes{}, fmt.Errorf("error scanning actor state: %w", err)
 		}
 
+		// The labels are always returned, since callers list instances from them without reading the state
+		wfLabels, err := components.DecodeWorkflowLabels(labels)
+		if err != nil {
+			return components.ListStatesRes{}, err
+		}
+
 		res.States = append(res.States, components.ActorStateInfo{
-			ActorID: actorID,
-			Data:    data,
+			ActorID:        actorID,
+			Data:           data,
+			WorkflowLabels: wfLabels,
 		})
 	}
 
@@ -167,6 +248,40 @@ func (p *PostgresProvider) ListStates(ctx context.Context, req components.ListSt
 	}
 
 	return res, nil
+}
+
+// CountStates counts the live stored states of an actor type whose workflow labels match the request, stopping at the limit
+func (p *PostgresProvider) CountStates(ctx context.Context, req components.CountStatesReq) (int, error) {
+	if req.Limit <= 0 {
+		return 0, nil
+	}
+
+	// The inner query stops at the limit, so the count reads at most that many index entries
+	labelClauses, args := workflowLabelFilter(req.WorkflowLabels, time.Time{}, time.Time{}, []any{req.ActorType})
+	limitArg := strconv.Itoa(len(args) + 1)
+	args = append(args, req.Limit)
+
+	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+	var count int
+	// #nosec G202 -- the only concatenated values are the static table prefix, fixed label field names, and placeholder numbers, not user input
+	err := p.db.QueryRow(queryCtx,
+		`SELECT count(*) FROM (
+			SELECT 1
+			FROM `+p.tablePrefix+`actor_state
+			WHERE
+				actor_type = $1
+				AND (actor_state_expiration_time IS NULL OR actor_state_expiration_time > (now() AT TIME ZONE 'utc'))`+
+			labelClauses+`
+			LIMIT $`+limitArg+`
+		) AS s`,
+		args...,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("error counting actor states: %w", err)
+	}
+
+	return count, nil
 }
 
 func (p *PostgresProvider) DeleteState(ctx context.Context, ref ref.ActorRef) error {

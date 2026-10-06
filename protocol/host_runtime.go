@@ -329,6 +329,16 @@ type SetStateRequest struct {
 	TTLMs int64 `msgpack:"ttl,omitempty"`
 	// WorkflowLabels is the workflow engine's labels for the row, set only by Francis' own workflow engine
 	WorkflowLabels *WorkflowLabels `msgpack:"workflowLabels,omitempty"`
+	// AppendEvents are workflow events written in the same transaction as the state, set only by Francis' own workflow engine
+	AppendEvents []WorkflowEvent `msgpack:"appendEvents,omitempty"`
+}
+
+// WorkflowEvent is one workflow history event as it travels on the wire
+type WorkflowEvent struct {
+	Seq          int64  `msgpack:"seq"`
+	TimeUnixNano int64  `msgpack:"time"`
+	Kind         string `msgpack:"kind"`
+	Data         []byte `msgpack:"data,omitempty"`
 }
 
 // WorkflowLabels is the workflow engine's label set as it travels on the wire
@@ -337,6 +347,7 @@ type WorkflowLabels struct {
 	Status  string `msgpack:"status,omitempty"`
 	Version int    `msgpack:"version,omitempty"`
 	Parent  string `msgpack:"parent,omitempty"`
+	Created string `msgpack:"created,omitempty"`
 }
 
 // DeleteStateRequest deletes the persistent state of an actor

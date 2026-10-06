@@ -224,6 +224,15 @@ func WithCompensationFailurePolicy(p CompensationFailurePolicy) Option {
 	}
 }
 
+// WithoutEventHistory stops instances started by this definition from recording an event history
+// The history costs a write per transition on the hot path, and wide fan-outs produce large volumes, so a workflow that does not need a timeline can opt out
+// The choice is recorded in each instance's journal when it starts, and does not change the definition's fingerprint
+func WithoutEventHistory() Option {
+	return func(o *options) {
+		o.noEventHistory = true
+	}
+}
+
 // WithLogger sets the logger the engine uses for instance and task lifecycle events
 func WithLogger(l *slog.Logger) Option {
 	return func(o *options) {

@@ -21,6 +21,8 @@ import (
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/host"
+	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/bootstrapauth"
 	"github.com/italypaleale/francis/internal/ca"
 	"github.com/italypaleale/francis/internal/certholder"
@@ -50,10 +52,12 @@ func isFatalRegistrationError(err error) bool {
 type runtimeHandlers struct {
 	// executeAlarm runs an alarm for an actor owned by this host and returns the result
 	executeAlarm func(ctx context.Context, req protocol.ExecuteAlarmRequest) (protocol.ExecuteAlarmResponse, *protocol.Error)
-	// terminateActor halts an actor active on this host
-	terminateActor func(ctx context.Context, req protocol.TerminateActorRequest) *protocol.Error
+	// terminateActor halts an actor active on this host, reporting whether the actor was not active
+	terminateActor func(ctx context.Context, req protocol.TerminateActorRequest) (protocol.TerminateActorResponse, *protocol.Error)
 	// jobFailed runs an actor's optional JobFailed hook after the runtime has dead-lettered a job
 	jobFailed func(ctx context.Context, req protocol.JobFailedRequest) *protocol.Error
+	// snapshot returns a page of the actors active on this host for the management API
+	snapshot func(ctx context.Context, req protocol.HostSnapshotRequest) (protocol.HostSnapshotResponse, *protocol.Error)
 }
 
 // runtimeClientConfig configures a runtimeClient
@@ -77,7 +81,8 @@ type runtimeClientConfig struct {
 	onDrainStart func()
 
 	// onDrain is called once during graceful shutdown, while the runtime session is still alive, to drain local actors after the runtime has been told we are draining
-	onDrain func()
+	// The timeout bounds the drain of an administrative drain, and is zero for a shutdown through context cancellation, which waits for every actor to halt
+	onDrain func(timeout time.Duration)
 
 	// onSessionEnd is called after a live runtime session ends, before reconnecting, so the host can drop cached placements that may have gone stale while disconnected
 	onSessionEnd func()
@@ -105,6 +110,10 @@ type runtimeClient struct {
 
 	readyOnce sync.Once
 	ready     chan struct{}
+
+	// drain tracks an administrative drain, which is never cleared so the host never reattaches after it was accepted
+	// Triggering it stops serving the live session, which starts the graceful teardown
+	drain actorcore.AdminDrain
 
 	// inboundRejected counts streams rejected for being above the inbound concurrency limit since the last warning
 	inboundRejected atomic.Int64
@@ -145,6 +154,12 @@ func (rc *runtimeClient) HostID() string {
 
 // Run connects to a runtime and keeps the session alive, reconnecting on failure until the context is canceled
 func (rc *runtimeClient) Run(ctx context.Context) error {
+	// A drained host is gone for good, so it must not register again
+	if !rc.drain.Start() {
+		return host.ErrAdministrativeDrain
+	}
+	defer rc.drain.Stopped()
+
 	// Only a transport that dialed can be closed, for the reason on transportDialed
 	// Run returns below without dialing whenever its context is already canceled, which is what a host that is shut down as soon as it starts does
 	defer func() {
@@ -169,6 +184,12 @@ func (rc *runtimeClient) Run(ctx context.Context) error {
 
 		// Connect and serve this address until the session ends or the context is canceled
 		established, err := rc.connectAndServe(ctx, addr)
+
+		// Once a drain was received the host has started its teardown, so it must not reattach anywhere, even if the session dropped before the teardown finished
+		if rc.drain.Accepted() {
+			rc.cfg.log.InfoContext(ctx, "Host drained by an administrator; not reconnecting", slog.String("address", addr))
+			return host.ErrAdministrativeDrain
+		}
 		if ctx.Err() != nil {
 			// The context was canceled: this is a graceful shutdown
 			return nil
@@ -254,22 +275,30 @@ func (rc *runtimeClient) connectAndServe(ctx context.Context, addr string) (bool
 		slog.Bool("reattached", resp.Reattached),
 	)
 
-	// Run health checks alongside the inbound listener, tying both to a context we cancel on return
+	// Serve the session under a context we cancel on return, or when an accepted administrative drain stops serving it, which leads into the graceful teardown below
 	serveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	rc.drain.SetStop(cancel)
+	defer rc.drain.SetStop(nil)
 
+	// Health checks follow the session rather than serveCtx, so they keep going through the teardown below until this function returns
+	// Halting can take longer than the health check deadline, and a registration that expired meanwhile would let other hosts activate actors that are still halting here
+	healthCtx, stopHealthChecks := context.WithCancel(session.Context())
+	defer stopHealthChecks()
 	healthDeadline := time.Duration(resp.HealthCheckDeadlineMs) * time.Millisecond
-	go rc.runHealthChecks(serveCtx, session, healthDeadline)
+	go rc.runHealthChecks(healthCtx, session, healthDeadline)
 
 	// Renew the workload certificate before it expires, while the session is alive
 	go rc.runCertRenewal(serveCtx, rc.certNotAfter(resp.CertNotAfterMs))
 
 	// Serve runtime-initiated requests until the session ends or the context is canceled
-	rc.serveInbound(serveCtx, session, sessionIdentity{hostID: resp.HostID, sessionID: resp.SessionID})
+	waitInbound := rc.serveInbound(serveCtx, session, sessionIdentity{hostID: resp.HostID, sessionID: resp.SessionID})
 
-	// A canceled context means we are shutting down gracefully
+	// A canceled context or an accepted administrative drain means we are shutting down gracefully
+	// If the session dropped after a drain was received, the teardown still runs: whatever the dead session cannot deliver is left to the runtime's health expiry
 	// Order matters: mark ourselves draining, tell the runtime, then drain local actors, all while the session is still alive
-	if ctx.Err() != nil {
+	drain, drainTimeout := rc.beginTeardown(ctx.Err() != nil)
+	if drain {
 		// Mark the host draining so the peer server rejects new invocations with retry-later before any actors are halted
 		if rc.cfg.onDrainStart != nil {
 			rc.cfg.onDrainStart()
@@ -280,8 +309,11 @@ func (rc *runtimeClient) connectAndServe(ctx context.Context, addr string) (bool
 
 		// Drain local actors so their deactivation can persist state and clear placement through the still-open runtime session
 		if rc.cfg.onDrain != nil {
-			rc.cfg.onDrain()
+			rc.cfg.onDrain(drainTimeout)
 		}
+
+		// Let admitted jobs write their responses before the session closes, after actor draining releases their executions
+		waitInbound()
 	}
 	return true, nil
 }
@@ -681,7 +713,10 @@ type sessionIdentity struct {
 
 // serveInbound accepts and dispatches runtime-initiated streams until the session ends
 // The identity is the one assigned to this session, so requests are checked against the session they arrived on rather than a newer one
-func (rc *runtimeClient) serveInbound(ctx context.Context, session *webtransport.Session, identity sessionIdentity) {
+func (rc *runtimeClient) serveInbound(ctx context.Context, session *webtransport.Session, identity sessionIdentity) func() {
+	// The accepting context stops admission while admitted handlers retain the live session through actor draining
+	executionCtx := session.Context()
+	var handlers sync.WaitGroup
 	// Per-session semaphores that bound how many inbound streams are handled concurrently, and how many rejections are in flight
 	sem := make(chan struct{}, inboundConcurrencyLimit)
 	rejectSem := make(chan struct{}, inboundRejectLimit)
@@ -689,7 +724,7 @@ func (rc *runtimeClient) serveInbound(ctx context.Context, session *webtransport
 		stream, err := session.AcceptStream(ctx)
 		if err != nil {
 			// The session has ended or the context was canceled
-			return
+			return handlers.Wait
 		}
 
 		// Reject new streams when already at the concurrency limit rather than letting goroutines pile up without bound
@@ -700,15 +735,15 @@ func (rc *runtimeClient) serveInbound(ctx context.Context, session *webtransport
 			continue
 		}
 
-		go func() {
+		handlers.Go(func() {
 			defer func() {
 				// Release the semaphore
 				<-sem
 			}()
 
 			// Handle the stream
-			rc.handleInbound(ctx, stream, identity)
-		}()
+			rc.handleInbound(executionCtx, ctx, stream, identity)
+		})
 	}
 }
 
@@ -783,11 +818,15 @@ func (rc *runtimeClient) warnInboundRejected(ctx context.Context) {
 const inboundReadTimeout = 30 * time.Second
 
 // handleInbound reads one runtime request from a stream, dispatches it, and writes the response
-func (rc *runtimeClient) handleInbound(ctx context.Context, stream *webtransport.Stream, identity sessionIdentity) {
+func (rc *runtimeClient) handleInbound(ctx context.Context, admissionCtx context.Context, stream *webtransport.Stream, identity sessionIdentity) {
 	defer wt.CloseStream(stream)
 
-	// Read the runtime's request off the stream
+	// Idle streams stop reading with admission, while a decoded request keeps the session lifetime through execution
+	stopRead := context.AfterFunc(admissionCtx, func() {
+		stream.CancelRead(0)
+	})
 	req, err := protocol.ReadMessageWithTimeout(stream, inboundReadTimeout)
+	stopRead()
 	if err != nil {
 		// We cannot respond if we could not even read the request
 		return
@@ -798,7 +837,34 @@ func (rc *runtimeClient) handleInbound(ctx context.Context, stream *webtransport
 
 	// Dispatch to the matching handler and write its response back on the same stream
 	resp := rc.dispatchInbound(ctx, req, identity)
-	_ = protocol.WriteMessage(stream, resp)
+	// Bound response writes so an unresponsive runtime cannot stall graceful teardown
+	_ = stream.SetWriteDeadline(time.Now().Add(rc.cfg.requestTimeout))
+	err = protocol.WriteMessage(stream, resp)
+
+	// Once admission stopped, the teardown closes the session as soon as the admitted handlers return, which would discard a response that is still in flight
+	if err == nil && admissionCtx.Err() != nil {
+		rc.awaitResponseRead(stream)
+	}
+
+	// An accepted drain starts its teardown only once the acknowledgement is written, so the runtime receives it before the session goes away
+	if req.Kind == protocol.KindHostDrain && resp.Kind == protocol.KindHostDrainResponse {
+		var ack protocol.HostDrainResponse
+		err = resp.DecodePayload(&ack)
+		if err == nil && !ack.AlreadyDraining {
+			rc.drain.Trigger()
+		}
+	}
+}
+
+// awaitResponseRead waits until the runtime closes its side of a stream whose response was written, bounded by the request timeout
+// The runtime closes its side only after it read the response, so the session can then close without discarding the response
+// Writing the response only hands it to the QUIC stack, which drops any data the runtime hasn't received yet when the connection closes
+func (rc *runtimeClient) awaitResponseRead(stream *webtransport.Stream) {
+	// End the stream right after the response, then wait for the runtime to end its side
+	_ = stream.Close()
+	_ = stream.SetReadDeadline(time.Now().Add(rc.cfg.requestTimeout))
+	var b [1]byte
+	_, _ = stream.Read(b[:])
 }
 
 // dispatchInbound routes a runtime-initiated request to its handler
@@ -820,6 +886,10 @@ func (rc *runtimeClient) dispatchInbound(ctx context.Context, req *protocol.Enve
 		return rc.handleTerminateActor(ctx, req)
 	case protocol.KindJobFailed:
 		return rc.handleJobFailed(ctx, req)
+	case protocol.KindHostSnapshot:
+		return rc.handleSnapshot(ctx, req)
+	case protocol.KindHostDrain:
+		return rc.handleDrain(ctx, req)
 	default:
 		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeBadRequest, "unknown message kind %q", req.Kind))
 	}
@@ -889,12 +959,83 @@ func (rc *runtimeClient) handleTerminateActor(ctx context.Context, req *protocol
 	}
 
 	// Halt the actor locally and acknowledge, relaying any structured failure
-	perr := rc.cfg.handlers.terminateActor(ctx, payload)
+	out, perr := rc.cfg.handlers.terminateActor(ctx, payload)
 	if perr != nil {
 		return req.ErrorReply(perr)
 	}
 
-	return req.Reply(protocol.KindTerminateActorResponse, nil)
+	// Report whether the actor was active, so the caller can tell a halt apart from a no-op
+	resp, err := req.ReplyWith(protocol.KindTerminateActorResponse, out)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to encode terminate actor response"))
+	}
+	return resp
+}
+
+func (rc *runtimeClient) handleSnapshot(ctx context.Context, req *protocol.Envelope) *protocol.Envelope {
+	// A host with no snapshot handler cannot report its activations
+	if rc.cfg.handlers.snapshot == nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "host does not handle snapshots"))
+	}
+
+	// Decode the page to return
+	var payload protocol.HostSnapshotRequest
+	err := req.DecodePayload(&payload)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode host snapshot request"))
+	}
+
+	// Take the snapshot locally
+	out, perr := rc.cfg.handlers.snapshot(ctx, payload)
+	if perr != nil {
+		return req.ErrorReply(perr)
+	}
+
+	resp, err := req.ReplyWith(protocol.KindHostSnapshotResponse, out)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to encode host snapshot response"))
+	}
+	return resp
+}
+
+// handleDrain accepts an administrative drain request
+// It only records the drain: the teardown starts once handleInbound has written the acknowledgement
+func (rc *runtimeClient) handleDrain(ctx context.Context, req *protocol.Envelope) *protocol.Envelope {
+	// Decode the drain parameters
+	var payload protocol.HostDrainRequest
+	err := req.DecodePayload(&payload)
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode host drain request"))
+	}
+
+	// Record the drain, which from now on keeps the host from reattaching
+	timeout := time.Duration(max(payload.TimeoutMs, 0)) * time.Millisecond
+	already, err := rc.drain.Accept(timeout)
+	if err != nil {
+		return req.ErrorReply(protocol.NewErrorf(protocol.ErrCodeHostUnavailable, "cannot accept the drain: %v", err))
+	}
+	if already {
+		rc.cfg.log.InfoContext(ctx, "Received a drain request while the host is already draining", slog.String("reason", payload.Reason))
+	} else {
+		rc.cfg.log.WarnContext(ctx, "Host drain requested by an administrator", slog.String("reason", payload.Reason), slog.Duration("timeout", timeout))
+	}
+
+	resp, err := req.ReplyWith(protocol.KindHostDrainResponse, protocol.HostDrainResponse{AlreadyDraining: already})
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to encode host drain response"))
+	}
+	return resp
+}
+
+// beginTeardown decides whether a session that stopped serving must run the graceful teardown, which it does when shuttingDown is set or a drain was accepted
+// It returns the timeout that bounds the drain of local actors, which is zero for a shutdown
+func (rc *runtimeClient) beginTeardown(shuttingDown bool) (teardown bool, timeout time.Duration) {
+	if !shuttingDown && !rc.drain.Accepted() {
+		return false, 0
+	}
+
+	_, timeout = rc.drain.BeginStopping()
+	return true, timeout
 }
 
 // doRequest sends a host-to-runtime request on a new stream and decodes the response into out

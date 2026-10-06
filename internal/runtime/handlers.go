@@ -16,6 +16,7 @@ import (
 	"github.com/italypaleale/francis/internal/channelbind"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/tracing"
+	"github.com/italypaleale/francis/internal/wireconv"
 	"github.com/italypaleale/francis/internal/wt"
 	"github.com/italypaleale/francis/protocol"
 )
@@ -289,6 +290,7 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 		ActorTypes:         protocolActorTypesToComponents(payload.ActorTypes),
 		ExistingHostID:     existingID,
 		SessionID:          sessionID,
+		RuntimeID:          rt.runtimeID,
 		JoinToken:          joinToken,
 		JoinTokenExpiresAt: joinTokenExpiresAt,
 	})
@@ -687,7 +689,6 @@ func (rt *Runtime) handleDispatchJob(parentCtx context.Context, _ *hostConn, req
 		Kind:      components.AlarmKindJob,
 		JobMethod: payload.Method,
 	}
-	setReq.LeaseImmediate = rt.immediateLeaseHosts()
 	// A zero TTL on the wire means no deadline
 	if payload.TTLUnixMs > 0 {
 		ttl := time.UnixMilli(payload.TTLUnixMs)
@@ -696,17 +697,31 @@ func (rt *Runtime) handleDispatchJob(parentCtx context.Context, _ *hostConn, req
 	if payload.InitialState != nil {
 		setReq.InitialState = &components.InitialState{
 			Data:           payload.InitialState.Data,
-			WorkflowLabels: workflowLabelsFromProtocol(payload.InitialState.WorkflowLabels),
+			WorkflowLabels: wireconv.WorkflowLabelsFromWire(payload.InitialState.WorkflowLabels),
 		}
 	}
 
 	// Persist the job and acquire any immediate lease while keeping the ID stable for an idempotency-key re-dispatch
 	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
 	defer cancel()
-	jobID, created, lease, err := rt.provider.DispatchJob(ctx, ref.NewAlarmRef(payload.ActorType, payload.ActorID, payload.Name), setReq)
+	jobID, created, err := rt.storeJob(ctx, ref.NewAlarmRef(payload.ActorType, payload.ActorID, payload.Name), setReq)
 	if err != nil {
 		rt.log.ErrorContext(ctx, "Failed to dispatch job", slog.Any("error", err))
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to dispatch job"))
+	}
+
+	return rt.reply(req, protocol.KindDispatchJobResponse, protocol.DispatchJobResponse{
+		JobID:   jobID,
+		Created: created,
+	})
+}
+
+// storeJob durably stores a job, offering it for an immediate lease to the hosts of this replica, and hands any immediate lease to the alarm processor
+func (rt *Runtime) storeJob(ctx context.Context, aRef ref.AlarmRef, req components.SetAlarmReq) (jobID string, created bool, err error) {
+	req.LeaseImmediate = rt.immediateLeaseHosts()
+	jobID, created, lease, err := rt.provider.DispatchJob(ctx, aRef, req)
+	if err != nil {
+		return "", false, err
 	}
 
 	// Attempt the in-memory handoff while preserving the durable job ID because an unqueued lease is fetched again after expiration
@@ -717,10 +732,7 @@ func (rt *Runtime) handleDispatchJob(parentCtx context.Context, _ *hostConn, req
 		}
 	}
 
-	return rt.reply(req, protocol.KindDispatchJobResponse, protocol.DispatchJobResponse{
-		JobID:   jobID,
-		Created: created,
-	})
+	return jobID, created, nil
 }
 
 // handleGetJob retrieves a job by ID, spanning live and dead-lettered jobs
@@ -866,7 +878,8 @@ func (rt *Runtime) handleSetState(parentCtx context.Context, _ *hostConn, req *p
 	}
 
 	opts := components.SetStateOpts{
-		WorkflowLabels: workflowLabelsFromProtocol(payload.WorkflowLabels),
+		WorkflowLabels: wireconv.WorkflowLabelsFromWire(payload.WorkflowLabels),
+		AppendEvents:   wireconv.WorkflowEventsFromWire(payload.AppendEvents),
 	}
 	if payload.TTLMs > 0 {
 		opts.TTL = time.Duration(payload.TTLMs) * time.Millisecond
@@ -929,7 +942,7 @@ func (rt *Runtime) handleListStates(parentCtx context.Context, _ *hostConn, req 
 	res, err := rt.provider.ListStates(ctx, components.ListStatesReq{
 		ActorType:      payload.ActorType,
 		IncludeData:    payload.IncludeData,
-		WorkflowLabels: workflowLabelsFromProtocol(payload.WorkflowLabels),
+		WorkflowLabels: wireconv.WorkflowLabelsFromWire(payload.WorkflowLabels),
 		After:          payload.After,
 		Limit:          payload.Limit,
 	})
@@ -978,17 +991,4 @@ func (rt *Runtime) deletePlacement(key string) {
 // placementCacheTTL returns the TTL used for placement cache entries, bounded by the health check deadline
 func (rt *Runtime) placementCacheTTL() time.Duration {
 	return min(lookupCacheMaxTTL, rt.hostHealthCheckDeadline)
-}
-
-// workflowLabelsFromProtocol reads the workflow engine's labels back off the wire, or returns nil when the request carries none
-func workflowLabelsFromProtocol(labels *protocol.WorkflowLabels) *components.WorkflowLabels {
-	if labels == nil {
-		return nil
-	}
-
-	return &components.WorkflowLabels{
-		Status:  labels.Status,
-		Version: labels.Version,
-		Parent:  labels.Parent,
-	}
 }

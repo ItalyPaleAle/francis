@@ -26,6 +26,8 @@ const (
 
 // ActorProvider is the interface implemented by all actor providers
 type ActorProvider interface {
+	ManagementProvider
+
 	// Init the actor provider
 	Init(ctx context.Context) error
 
@@ -207,6 +209,9 @@ type RegisterHostReq struct {
 	JoinToken string
 	// JoinTokenExpiresAt is the expiry time of the join token (zero when JoinToken is empty)
 	JoinTokenExpiresAt time.Time
+	// RuntimeID is the ID of the runtime replica that owns the host's session, stored next to SessionID and replaced with it on every reattach
+	// Empty for hosts that are not connected through a runtime, such as in-process hosts
+	RuntimeID string
 }
 
 // RegisterHostRes is the response object for the RegisterHost method.
@@ -352,6 +357,9 @@ type SetAlarmReq struct {
 	// InitialState is honored only by DispatchJob, which stores it as the actor's state in the same atomic operation as the job
 	// It is written only when the actor has no live state, so it never replaces state the actor already has
 	InitialState *InitialState
+	// RejectIfClusterLocked is honored only by DispatchJob, which then returns ErrClusterLocked and stores nothing while an exclusive-access lease is held
+	// The lease is checked in the same atomic operation as the insert, so a lease acquired concurrently is taken either after the job is stored or before the dispatch is refused
+	RejectIfClusterLocked bool
 }
 
 // InitialState is actor state stored together with a dispatched job, for an actor that has no state yet
@@ -410,6 +418,10 @@ type SetStateOpts struct {
 	// WorkflowLabels, when set, is stored in the state row itself, so it carries the row's expiration and is replaced with it.
 	// Nil removes whatever the row had.
 	WorkflowLabels *WorkflowLabels
+	// AppendEvents are workflow events stored in the same transaction as the state
+	// An event whose sequence number already exists for the actor is ignored, so a retried write never duplicates events
+	// When the first event has sequence number 1, every event previously stored for the actor is removed first, since it belongs to an earlier state that reused the actor ID
+	AppendEvents []WorkflowEvent
 }
 
 // ListStatesReq is the request object for the ListStates method.
@@ -418,8 +430,13 @@ type ListStatesReq struct {
 	ActorType string
 	// When true, the stored state data is returned alongside each actor ID
 	IncludeData bool
-	// WorkflowLabels, when set, restricts the listing to rows whose labels match every field it sets, by equality.
+	// WorkflowLabels, when set, restricts the listing to rows whose labels match every field it sets, by equality
+	// Its Created field is ignored as a filter: use CreatedFrom and CreatedTo instead
 	WorkflowLabels *WorkflowLabels
+	// CreatedFrom, when non-zero, restricts the listing to rows whose created label is at or after this time
+	CreatedFrom time.Time
+	// CreatedTo, when non-zero, restricts the listing to rows whose created label is strictly before this time
+	CreatedTo time.Time
 	// Pagination cursor: only actor IDs sorting strictly after this value are returned
 	After string
 	// Maximum number of states to return
@@ -444,7 +461,22 @@ const (
 	WorkflowLabelStatus  = "status"
 	WorkflowLabelVersion = "version"
 	WorkflowLabelParent  = "parent"
+	WorkflowLabelCreated = "created"
 )
+
+// workflowCreatedLayout is a fixed-width UTC layout, so created labels compare chronologically as strings
+const workflowCreatedLayout = "2006-01-02T15:04:05.000000000Z"
+
+// FormatWorkflowCreated renders a creation time as the value stored in the created workflow label
+// Every value has the same width and is in UTC, so string comparison in a provider matches chronological order
+func FormatWorkflowCreated(t time.Time) string {
+	return t.UTC().Format(workflowCreatedLayout)
+}
+
+// ParseWorkflowCreated parses a created workflow label back into a time
+func ParseWorkflowCreated(s string) (time.Time, error) {
+	return time.Parse(workflowCreatedLayout, s)
+}
 
 // WorkflowLabels is the fixed set of fields the workflow engine stores alongside an instance's journal so that instances can be listed without reading every journal
 // This list is fixed and not meant for general purpose labeling (editing fields requires updating migrations that include indexes)
@@ -457,11 +489,13 @@ type WorkflowLabels struct {
 	Version int `json:"version,string,omitempty"`
 	// Parent is the instance ID of the parent instance, empty for a top-level instance
 	Parent string `json:"parent,omitempty"`
+	// Created is the instance's creation time, formatted with FormatWorkflowCreated
+	Created string `json:"created,omitempty"`
 }
 
 // IsZero reports whether no field is set
 func (l WorkflowLabels) IsZero() bool {
-	return l.Status == "" && l.Version == 0 && l.Parent == ""
+	return l.Status == "" && l.Version == 0 && l.Parent == "" && l.Created == ""
 }
 
 // JSON encodes the labels as the JSON object a provider stores in the row's label column
@@ -479,8 +513,9 @@ func (l WorkflowLabels) JSON() (string, error) {
 	return string(res), nil
 }
 
-// Fields returns the label fields that are set, keyed by the names above, with every value rendered as the string the stored JSON holds
+// Fields returns the equality-filter label fields that are set, keyed by the names above, with every value rendered as the string the stored JSON holds
 // A provider that filters per field iterates this rather than reaching for the struct fields one at a time
+// Created is not included, since it is filtered by range through ListStatesReq
 func (l WorkflowLabels) Fields() map[string]string {
 	res := make(map[string]string, 3)
 	if l.Status != "" {
@@ -524,6 +559,8 @@ type ActorStateInfo struct {
 	ActorID string
 	// Stored state data, populated only when the request set IncludeData
 	Data []byte
+	// WorkflowLabels stored with the state, nil when the row has none
+	WorkflowLabels *WorkflowLabels
 }
 
 // JobStatus is the provider-level lifecycle stage of a job.
