@@ -839,7 +839,12 @@ func (rc *runtimeClient) handleInbound(ctx context.Context, admissionCtx context
 	resp := rc.dispatchInbound(ctx, req, identity)
 	// Bound response writes so an unresponsive runtime cannot stall graceful teardown
 	_ = stream.SetWriteDeadline(time.Now().Add(rc.cfg.requestTimeout))
-	_ = protocol.WriteMessage(stream, resp)
+	err = protocol.WriteMessage(stream, resp)
+
+	// Once admission stopped, the teardown closes the session as soon as the admitted handlers return, which would discard a response that is still in flight
+	if err == nil && admissionCtx.Err() != nil {
+		rc.awaitResponseRead(stream)
+	}
 
 	// An accepted drain starts its teardown only once the acknowledgement is written, so the runtime receives it before the session goes away
 	if req.Kind == protocol.KindHostDrain && resp.Kind == protocol.KindHostDrainResponse {
@@ -849,6 +854,17 @@ func (rc *runtimeClient) handleInbound(ctx context.Context, admissionCtx context
 			rc.drain.Trigger()
 		}
 	}
+}
+
+// awaitResponseRead waits until the runtime closes its side of a stream whose response was written, bounded by the request timeout
+// The runtime closes its side only after it read the response, so the session can then close without discarding the response
+// Writing the response only hands it to the QUIC stack, which drops any data the runtime hasn't received yet when the connection closes
+func (rc *runtimeClient) awaitResponseRead(stream *webtransport.Stream) {
+	// End the stream right after the response, then wait for the runtime to end its side
+	_ = stream.Close()
+	_ = stream.SetReadDeadline(time.Now().Add(rc.cfg.requestTimeout))
+	var b [1]byte
+	_, _ = stream.Read(b[:])
 }
 
 // dispatchInbound routes a runtime-initiated request to its handler
