@@ -152,3 +152,5 @@ require (
 	modernc.org/memory v1.12.1 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+ignore ./dashboard/node_modules

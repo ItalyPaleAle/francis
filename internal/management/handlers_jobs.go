@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
+	"strings"
 	"time"
 	"uuid"
 
@@ -62,7 +64,17 @@ func newJob(j components.JobInfo) jobJSON {
 
 // jobsCursor is decoded as a UUID, so a cursor that is not one is rejected as invalid
 type jobsCursor struct {
+	// Group is the index of the combination of filter values the next page continues in, when the filters have several
+	Group int                   `json:"g,omitempty"`
 	After components.UUIDCursor `json:"a"`
+}
+
+// jobStatusOrder is the order a listing with several statuses lists them in, which is their lifecycle
+var jobStatusOrder = []components.JobStatus{
+	components.JobStatusPending,
+	components.JobStatusActive,
+	components.JobStatusCompleted,
+	components.JobStatusDeadLettered,
 }
 
 // handleListJobs serves GET /api/v1/jobs
@@ -72,6 +84,7 @@ type jobsCursor struct {
 //	@Description	Requires scope `jobs:read`.
 //	@Description
 //	@Description		Lists durable jobs, ordered by job ID.
+//	@Description		The filters can be repeated, and the jobs are then listed one combination of their values after another: by actor type and actor ID, both in alphabetical order, then by status in the order `pending`, `active`, `completed`, `dead`, and ordered by job ID within each.
 //	@Description		Terminal jobs (`completed`, `dead`) are only listed while a record of them is retained, as configured by the actor type's job retention.
 //	@Tags				Jobs
 //	@Security			bearerAuth
@@ -79,9 +92,9 @@ type jobsCursor struct {
 //	@Produce			json
 //	@Param				limit	query		int					false	"Maximum number of items to return"	minimum(1)	maximum(1000)	default(100)
 //	@Param				cursor	query		string				false	"Opaque cursor returned as nextCursor by the previous page; omit for the first page"
-//	@Param				type	query		string				false	"Only return jobs of this actor type"
-//	@Param				id		query		string				false	"Only return jobs of this actor ID, which requires type"
-//	@Param				status	query		string				false	"Only return jobs in this status"	Enums(pending, active, completed, dead)
+//	@Param				type	query		[]string			false	"Only return jobs of these actor types; repeat the parameter for several"	collectionFormat(multi)
+//	@Param				id		query		[]string			false	"Only return jobs of these actor IDs, which requires type; repeat the parameter for several"	collectionFormat(multi)
+//	@Param				status	query		[]string			false	"Only return jobs in these statuses; repeat the parameter for several"	Enums(pending, active, completed, dead)	collectionFormat(multi)
 //	@Success			200		{object}	page[jobJSON]		"A page of jobs"
 //	@Failure			400		{object}	apiError			"`badRequest`: an invalid path segment, query parameter, cursor, or request body"
 //	@Failure			401		{object}	apiError			"`unauthorized`: the bearer token is missing or unknown"
@@ -98,40 +111,63 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) *apiErro
 		return apiErr
 	}
 
+	// Parse the filters, each of which can be repeated
 	q := r.URL.Query()
-	req := components.QueryJobsReq{
-		ActorType: q.Get("type"),
-		ActorID:   q.Get("id"),
-		Status:    components.JobStatus(q.Get("status")),
-		After:     cursor.After,
-		Limit:     limit,
-	}
-	switch req.Status {
-	case "", components.JobStatusPending, components.JobStatusActive, components.JobStatusCompleted, components.JobStatusDeadLettered:
-	default:
-		return errBadRequest("status must be one of: pending, active, completed, dead")
-	}
-	if req.ActorID != "" && req.ActorType == "" {
-		return errBadRequest("the id filter requires the type filter")
+	types := queryValues(q, "type", strings.Compare)
+	ids := queryValues(q, "id", strings.Compare)
+	statuses := queryValues(q, "status", inOrder(jobStatusOrder))
+	for _, status := range statuses {
+		if status != "" && !slices.Contains(jobStatusOrder, components.JobStatus(status)) {
+			return errBadRequest("status must be one of: pending, active, completed, dead")
+		}
 	}
 
-	res, err := s.backend.Provider().QueryJobs(r.Context(), req)
+	apiErr = requireTypeForID(types, ids)
+	if apiErr != nil {
+		return apiErr
+	}
+
+	// Every combination of the filters' values is a listing of its own
+	filters := make([]components.QueryJobsReq, 0, len(types)*len(ids)*len(statuses))
+	for _, actorType := range types {
+		for _, actorID := range ids {
+			for _, status := range statuses {
+				filters = append(filters, components.QueryJobsReq{ActorType: actorType, ActorID: actorID, Status: components.JobStatus(status)})
+			}
+		}
+	}
+	if !validGroup(cursor.Group, filters) {
+		return errBadRequest("invalid cursor")
+	}
+
+	// List the combinations one after another, continuing after the last job ID of each page
+	res, err := pageAcrossValues(filters, cursor.Group, cursor.After, limit, func(req components.QueryJobsReq, after components.UUIDCursor, limit int) ([]components.JobInfo, components.UUIDCursor, bool, error) {
+		req.After = after
+		req.Limit = limit
+		page, err := s.backend.Provider().QueryJobs(r.Context(), req)
+		if err != nil || !page.HasMore || len(page.Jobs) == 0 {
+			return page.Jobs, after, false, err
+		}
+
+		next, err := uuid.Parse(page.Jobs[len(page.Jobs)-1].JobID)
+		if err != nil {
+			return nil, after, false, fmt.Errorf("provider returned a job ID that is not a UUID: %w", err)
+		}
+
+		return page.Jobs, next, true, nil
+	})
 	if err != nil {
 		return s.fail(r, "failed to list jobs", err)
 	}
 
-	items := make([]jobJSON, len(res.Jobs))
-	for i, j := range res.Jobs {
+	items := make([]jobJSON, len(res.Items))
+	for i, j := range res.Items {
 		items[i] = newJob(j)
 	}
 
 	var next string
-	if res.HasMore && len(items) > 0 {
-		after, err := uuid.Parse(items[len(items)-1].JobID)
-		if err != nil {
-			return s.fail(r, "failed to list jobs", fmt.Errorf("provider returned a job ID that is not a UUID: %w", err))
-		}
-		next = encodeCursor(jobsCursor{After: after})
+	if res.HasMore {
+		next = encodeCursor(jobsCursor{Group: res.Group, After: res.After})
 	}
 
 	writeJSON(w, http.StatusOK, newPage(items, next))
@@ -194,9 +230,11 @@ type alarmJSON struct {
 } //	@name	Alarm
 
 type alarmsCursor struct {
-	Type string `json:"t"`
-	ID   string `json:"i"`
-	Name string `json:"n"`
+	// Group is the index of the combination of filter values the next page continues in, when the filters have several
+	Group int    `json:"g,omitempty"`
+	Type  string `json:"t"`
+	ID    string `json:"i"`
+	Name  string `json:"n"`
 }
 
 // handleListAlarms serves GET /api/v1/alarms
@@ -206,14 +244,15 @@ type alarmsCursor struct {
 //	@Description	Requires scope `jobs:read`.
 //	@Description
 //	@Description		Lists alarms, ordered by actor type, actor ID, and alarm name.
+//	@Description		The filters can be repeated, and the alarms are then listed one combination of their values after another, by actor type and then actor ID, both in alphabetical order.
 //	@Tags				Jobs
 //	@Security			bearerAuth
 //	@x-required-scope	"jobs:read"
 //	@Produce			json
 //	@Param				limit	query		int					false	"Maximum number of items to return"	minimum(1)	maximum(1000)	default(100)
 //	@Param				cursor	query		string				false	"Opaque cursor returned as nextCursor by the previous page; omit for the first page"
-//	@Param				type	query		string				false	"Only return alarms of this actor type"
-//	@Param				id		query		string				false	"Only return alarms of this actor ID, which requires type"
+//	@Param				type	query		[]string			false	"Only return alarms of these actor types; repeat the parameter for several"	collectionFormat(multi)
+//	@Param				id		query		[]string			false	"Only return alarms of these actor IDs, which requires type; repeat the parameter for several"	collectionFormat(multi)
 //	@Success			200		{object}	page[alarmJSON]		"A page of alarms"
 //	@Failure			400		{object}	apiError			"`badRequest`: an invalid path segment, query parameter, cursor, or request body"
 //	@Failure			401		{object}	apiError			"`unauthorized`: the bearer token is missing or unknown"
@@ -230,24 +269,43 @@ func (s *Server) handleListAlarms(w http.ResponseWriter, r *http.Request) *apiEr
 		return apiErr
 	}
 
+	// Parse the filters, each of which can be repeated, and list every combination of their values on its own
 	q := r.URL.Query()
-	req := components.ListAlarmsReq{
-		ActorType: q.Get("type"),
-		ActorID:   q.Get("id"),
-		After:     ref.NewAlarmRef(cursor.Type, cursor.ID, cursor.Name),
-		Limit:     limit,
-	}
-	if req.ActorID != "" && req.ActorType == "" {
-		return errBadRequest("the id filter requires the type filter")
+	types := queryValues(q, "type", strings.Compare)
+	ids := queryValues(q, "id", strings.Compare)
+	apiErr = requireTypeForID(types, ids)
+	if apiErr != nil {
+		return apiErr
 	}
 
-	res, err := s.backend.Provider().ListAlarms(r.Context(), req)
+	filters := make([]components.ListAlarmsReq, 0, len(types)*len(ids))
+	for _, actorType := range types {
+		for _, actorID := range ids {
+			filters = append(filters, components.ListAlarmsReq{ActorType: actorType, ActorID: actorID})
+		}
+	}
+	if !validGroup(cursor.Group, filters) {
+		return errBadRequest("invalid cursor")
+	}
+
+	// List the combinations one after another, continuing after the last alarm of each page
+	res, err := pageAcrossValues(filters, cursor.Group, ref.NewAlarmRef(cursor.Type, cursor.ID, cursor.Name), limit, func(req components.ListAlarmsReq, after ref.AlarmRef, limit int) ([]components.AlarmInfo, ref.AlarmRef, bool, error) {
+		req.After = after
+		req.Limit = limit
+		page, err := s.backend.Provider().ListAlarms(r.Context(), req)
+		if err != nil || !page.HasMore || len(page.Alarms) == 0 {
+			return page.Alarms, after, false, err
+		}
+
+		last := page.Alarms[len(page.Alarms)-1]
+		return page.Alarms, ref.NewAlarmRef(last.ActorType, last.ActorID, last.Name), true, nil
+	})
 	if err != nil {
 		return s.fail(r, "failed to list alarms", err)
 	}
 
-	items := make([]alarmJSON, len(res.Alarms))
-	for i, a := range res.Alarms {
+	items := make([]alarmJSON, len(res.Items))
+	for i, a := range res.Items {
 		items[i] = alarmJSON{
 			AlarmID:     a.AlarmID,
 			ActorType:   a.ActorType,
@@ -267,9 +325,8 @@ func (s *Server) handleListAlarms(w http.ResponseWriter, r *http.Request) *apiEr
 	}
 
 	var next string
-	if res.HasMore && len(items) > 0 {
-		last := items[len(items)-1]
-		next = encodeCursor(alarmsCursor{Type: last.ActorType, ID: last.ActorID, Name: last.Name})
+	if res.HasMore {
+		next = encodeCursor(alarmsCursor{Group: res.Group, Type: res.After.ActorType, ID: res.After.ActorID, Name: res.After.Name})
 	}
 
 	writeJSON(w, http.StatusOK, newPage(items, next))

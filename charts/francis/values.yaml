@@ -178,6 +178,9 @@ management:
   readOnlyTokens: []
   # Bearer tokens that grant every scope, including actions such as draining a host or cancelling a workflow instance
   managementTokens: []
+  # Browser origins allowed to call the API across origins, such as a dashboard served by "francis dashboard" (for example "http://localhost:7402")
+  # The dashboard the API serves itself needs no entry, and "*" allows any origin
+  allowedOrigins: []
   tls:
     # Name of an existing kubernetes.io/tls Secret, whose certificate the management API serves over HTTPS
     # When empty the API is served over plain HTTP, and the runtime logs a warning because it listens on a non-loopback address

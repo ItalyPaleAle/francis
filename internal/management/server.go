@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/dashboardserver"
 	"github.com/italypaleale/francis/internal/netutils"
 	"k8s.io/utils/clock"
 )
@@ -26,10 +27,14 @@ type Server struct {
 	cfg     Config
 	backend Backend
 	auth    *authenticator
+	cors    corsPolicy
 	log     *slog.Logger
 	audit   *slog.Logger
 	clock   clock.PassiveClock
 	handler http.Handler
+
+	// dashboard serves the compiled dashboard, nil when none is configured
+	dashboard *dashboardserver.Dashboard
 
 	// hostTimeout limits each request sent to a host
 	hostTimeout time.Duration
@@ -73,12 +78,25 @@ func NewServer(opts ServerOptions) (*Server, error) {
 		cfg:               opts.Config,
 		backend:           opts.Backend,
 		auth:              newAuthenticator(opts.Config),
+		cors:              newCORSPolicy(opts.Config.AllowedOrigins),
 		log:               opts.Logger,
 		audit:             opts.Logger.With(slog.String("audit", "management")),
 		clock:             opts.Clock,
 		hostTimeout:       10 * time.Second,
 		fanOutConcurrency: 16,
 	}
+
+	// Load the dashboard's files
+	if opts.Config.Dashboard != nil {
+		s.dashboard, err = dashboardserver.New(dashboardserver.Options{
+			Files: opts.Config.Dashboard,
+			Mode:  dashboardserver.ModeEmbedded,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to load the management dashboard: %w", err)
+		}
+	}
+
 	s.handler = s.routes()
 
 	return s, nil

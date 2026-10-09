@@ -392,6 +392,34 @@ func TestListInstances(t *testing.T) {
 		assert.Equal(t, testNow.Format(time.RFC3339), obj(t, items[0])["createdAt"])
 		assert.Equal(t, "unknown", obj(t, items[1])["status"])
 	})
+
+	t.Run("lists several statuses one after another", func(t *testing.T) {
+		ts := newTestServer(t)
+		ts.provider.EXPECT().ListStates(mock.Anything, components.ListStatesReq{
+			ActorType:      orchRef.ActorType,
+			WorkflowLabels: &components.WorkflowLabels{Status: "running", Parent: "p"},
+			Limit:          components.DefaultManagementListLimit,
+		}).Return(components.ListStatesRes{States: []components.ActorStateInfo{
+			{ActorID: "i2", WorkflowLabels: &components.WorkflowLabels{Status: "running"}},
+		}}, nil)
+		ts.provider.EXPECT().ListStates(mock.Anything, components.ListStatesReq{
+			ActorType:      orchRef.ActorType,
+			WorkflowLabels: &components.WorkflowLabels{Status: "failed", Parent: "p"},
+			Limit:          components.DefaultManagementListLimit - 1,
+		}).Return(components.ListStatesRes{States: []components.ActorStateInfo{
+			{ActorID: "i1", WorkflowLabels: &components.WorkflowLabels{Status: "failed"}},
+		}, HasMore: true}, nil)
+
+		res := decodeJSON(t, ts.do(t, http.MethodGet, "/api/v1/workflows/wf/instances?status=failed&status=running&parent=p", testReadOnlyToken, ""), http.StatusOK)
+		items := arr(t, res["items"])
+		require.Len(t, items, 2)
+		assert.Equal(t, "i2", obj(t, items[0])["instanceId"])
+		assert.Equal(t, "i1", obj(t, items[1])["instanceId"])
+
+		var next instancesCursor
+		require.Nil(t, decodeCursor(str(t, res["nextCursor"]), &next))
+		assert.Equal(t, instancesCursor{Group: 1, After: "i1"}, next)
+	})
 }
 
 // TestInstanceStatuses checks the statuses listed by hand in isInstanceStatus and countWorkflowInstances against every Status the workflow package declares

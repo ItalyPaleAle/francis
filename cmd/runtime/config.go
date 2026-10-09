@@ -71,6 +71,8 @@ type managementConfig struct {
 	ManagementTokens []string `yaml:"managementTokens"`
 	// TLS optionally serves the management API over HTTPS
 	TLS managementTLSConfig `yaml:"tls"`
+	// AllowedOrigins lists the browser origins that may call the API, such as a dashboard served by "francis dashboard"
+	AllowedOrigins []string `yaml:"allowedOrigins"`
 }
 
 type managementTLSConfig struct {
@@ -86,6 +88,7 @@ func (cfg managementConfig) managementServerConfig() (management.Config, error) 
 		Bind:             cfg.Bind,
 		ReadOnlyTokens:   cfg.ReadOnlyTokens,
 		ManagementTokens: cfg.ManagementTokens,
+		AllowedOrigins:   cfg.AllowedOrigins,
 	}
 
 	switch {

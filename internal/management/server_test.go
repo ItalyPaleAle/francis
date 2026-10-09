@@ -32,6 +32,7 @@ var protectedRoutes = []struct {
 	method string
 	path   string
 }{
+	{http.MethodGet, "/api/v1/token"},
 	{http.MethodGet, "/api/v1/cluster/summary"},
 	{http.MethodGet, "/api/v1/runtimes"},
 	{http.MethodGet, "/api/v1/hosts"},

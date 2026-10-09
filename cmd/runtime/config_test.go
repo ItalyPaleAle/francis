@@ -115,7 +115,7 @@ func TestManagementServerConfig(t *testing.T) {
 
 	t.Run("parses the management block", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "config.yaml")
-		err := os.WriteFile(path, []byte("management:\n  enabled: true\n  bind: 0.0.0.0:7401\n  readOnlyTokens: ["+readOnly+"]\n  managementTokens: ["+manage+"]\n"), 0o600)
+		err := os.WriteFile(path, []byte("management:\n  enabled: true\n  bind: 0.0.0.0:7401\n  readOnlyTokens: ["+readOnly+"]\n  managementTokens: ["+manage+"]\n  allowedOrigins: [\"HTTP://LocalHost:7402\"]\n"), 0o600)
 		require.NoError(t, err)
 
 		cfg, err := loadConfig(path)
@@ -127,7 +127,13 @@ func TestManagementServerConfig(t *testing.T) {
 		assert.Equal(t, "0.0.0.0:7401", res.Bind)
 		assert.Equal(t, []string{readOnly}, res.ReadOnlyTokens)
 		assert.Equal(t, []string{manage}, res.ManagementTokens)
+		assert.Equal(t, []string{"http://localhost:7402"}, res.AllowedOrigins)
 		assert.Nil(t, res.TLSConfig)
+	})
+
+	t.Run("rejects an invalid allowed origin", func(t *testing.T) {
+		_, err := managementConfig{Enabled: true, ReadOnlyTokens: []string{readOnly}, AllowedOrigins: []string{"localhost:7402"}}.managementServerConfig()
+		require.ErrorContains(t, err, "management allowed origin at index 0 is invalid")
 	})
 
 	t.Run("defaults the bind address", func(t *testing.T) {

@@ -173,6 +173,9 @@ func (rc *runtimeClient) Run(ctx context.Context) error {
 	idx := rand.IntN(len(rc.cfg.addresses))
 	attempt := 0
 
+	// lockReported is true while the host keeps finding the cluster locked, after it has said so once
+	lockReported := false
+
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -199,11 +202,21 @@ func (rc *runtimeClient) Run(ctx context.Context) error {
 			rc.cfg.log.ErrorContext(ctx, "Runtime permanently rejected registration; giving up", slog.String("address", addr), slog.Any("error", err))
 			return err
 		}
-		if err != nil {
+
+		// A locked cluster rejects every registration until an administrator releases the lock, which is expected rather than a failure
+		// The host says so once, rather than on every attempt, and again only if the lock comes back after something else happened
+		locked := isProtocolErrorCode(err, protocol.ErrCodeClusterLocked)
+		switch {
+		case locked && !lockReported:
+			rc.cfg.log.InfoContext(ctx, "Cluster is locked for exclusive access; will keep trying to register until it's released", slog.String("address", addr))
+		case locked:
+			rc.cfg.log.DebugContext(ctx, "Cluster is still locked for exclusive access", slog.String("address", addr))
+		case err != nil:
 			rc.cfg.log.WarnContext(ctx, "Runtime connection failed, will reconnect", slog.String("address", addr), slog.Any("error", err))
-		} else {
+		default:
 			rc.cfg.log.InfoContext(ctx, "Runtime session ended, will reconnect", slog.String("address", addr))
 		}
+		lockReported = locked
 
 		// Invoke the onSessionEnd callback before reconnecting
 		if established && rc.cfg.onSessionEnd != nil {

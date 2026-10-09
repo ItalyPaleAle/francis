@@ -53,6 +53,7 @@ The management API is enabled, over {{ if .Values.management.tls.existingSecret 
      {{ if .Values.management.tls.existingSecret }}https{{ else }}http{{ end }}://{{ include "francis.managementServiceName" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ int .Values.management.port }}/api/v1/
 
    Every route except /healthz and /api/v1/openapi.yaml needs an "Authorization: Bearer <token>" header.
+   The same address serves the management dashboard at /, where you sign in with one of the tokens.
 {{- if not .Values.management.tls.existingSecret }}
    Without management.tls.existingSecret, tokens and actor state travel unencrypted: keep the Service private or put a TLS proxy in front of it.
 {{- end }}

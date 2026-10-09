@@ -1,14 +1,20 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 
 	"github.com/italypaleale/francis/internal/runtime"
 )
 
+func init() {
+	// The print-ca subcommand derives and prints the cluster CA, so operators can pin it out-of-band
+	registerSubcommand("print-ca", runPrintCA)
+}
+
 // runPrintCA derives the cluster CA from the configured runtime PSKs and writes the PEM-encoded certificates to stdout
-func runPrintCA(_ []string) int {
+func runPrintCA(_ context.Context, _ []string) int {
 	// Resolve the config file from the FRANCIS_CONFIG env var or the well-known paths
 	configPath, err := resolveConfigPath()
 	if err != nil {

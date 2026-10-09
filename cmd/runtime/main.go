@@ -17,6 +17,7 @@ import (
 	"github.com/italypaleale/francis/components/postgres"
 	"github.com/italypaleale/francis/components/sqlite"
 	"github.com/italypaleale/francis/components/standalone"
+	"github.com/italypaleale/francis/dashboard"
 	"github.com/italypaleale/francis/internal/bootstrapauth"
 	"github.com/italypaleale/francis/internal/providerfactory"
 	"github.com/italypaleale/francis/internal/runtime"
@@ -26,29 +27,12 @@ import (
 func main() {
 	ctx := signals.SignalContext(context.Background())
 
-	// Check if there's a subcommand
+	// Run a subcommand instead of the runtime when the first argument names one
 	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "healthcheck":
-			// Probes the locally-running runtime over WebTransport, for use as the Docker HEALTHCHECK
-			retCode := runHealthcheck(os.Args[2:])
+		run, ok := subcommands[os.Args[1]]
+		if ok {
+			retCode := run(ctx, os.Args[2:])
 			os.Exit(retCode)
-		case "print-ca":
-			// Drives and prints the cluster CA so operators can pin it out-of-band
-			retCode := runPrintCA(os.Args[2:])
-			os.Exit(retCode)
-		case "backup":
-			// Streams a portable snapshot of all persistent data to a file (or stdout)
-			retCode := runBackup(ctx, os.Args[2:])
-			os.Exit(retCode)
-		case "restore":
-			// Loads a snapshot from a file (or stdin), wiping existing data
-			retCode := runRestore(ctx, os.Args[2:])
-			os.Exit(retCode)
-		case "version":
-			// Prints out the application version
-			runVersion()
-			os.Exit(0)
 		}
 	}
 
@@ -157,6 +141,12 @@ func run(ctx context.Context, cfg *config) error {
 		mgmtCfg, err := cfg.Management.managementServerConfig()
 		if err != nil {
 			return err
+		}
+
+		// The dashboard is served with the management API whenever the binary includes it
+		mgmtCfg.Dashboard = dashboard.Files()
+		if mgmtCfg.Dashboard == nil {
+			log.Warn("This binary was built without the management dashboard, so only the management API is served")
 		}
 
 		opts = append(opts, runtime.WithManagement(mgmtCfg))

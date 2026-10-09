@@ -32,6 +32,8 @@ const (
 	ErrCodeHostDraining ErrorCode = "host_draining"
 	// ErrCodeHostMismatch indicates the request reached the wrong host, likely due to stale placement
 	ErrCodeHostMismatch ErrorCode = "host_mismatch"
+	// ErrCodeClusterLocked indicates the cluster is locked for exclusive access, such as during a restore, so a host can't register until the lock is released
+	ErrCodeClusterLocked ErrorCode = "cluster_locked"
 	// ErrCodeRetryLater indicates the operation cannot complete now and the caller should retry after a delay
 	ErrCodeRetryLater ErrorCode = "retry_later"
 	// ErrCodeOverloaded indicates the target has too many in-flight requests and the caller should retry after a delay

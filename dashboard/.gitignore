@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Compiled files, except the placeholder that lets the Go package compile before the dashboard is built
+dist/*
+!dist/.gitkeep
+
+# Playwright output
+playwright-report/
+test-results/
+blob-report/
+
+# Logs and caches
+*.log
+.vite/
+*.tsbuildinfo

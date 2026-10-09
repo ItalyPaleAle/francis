@@ -346,6 +346,28 @@ func TestRegisterIgnoresForgedPreviousHostIDOnBootstrap(t *testing.T) {
 	require.Same(t, victimConn, stillTracked, "the victim's session must not be superseded by a forged bootstrap")
 }
 
+func TestRegisterRejectedWhileClusterLocked(t *testing.T) {
+	_, prov, addr := runRuntimeServer(t)
+
+	// An exclusive-access lease locks the cluster, as a restore does
+	_, err := prov.AcquireExclusiveLease(t.Context(), "restore", time.Minute)
+	require.NoError(t, err)
+
+	// The registration is refused with its own code, so the host can tell the lock apart from a failure
+	lockedSession := dialRuntime(t, t.Context(), addr)
+	_, perr := pskBootstrap(t, t.Context(), lockedSession, "", "10.9.0.3:3")
+	require.NotNil(t, perr)
+	assert.Equal(t, protocol.ErrCodeClusterLocked, perr.Code)
+
+	// The host can register once the lease is released
+	err = prov.ReleaseExclusiveLease(t.Context(), "restore")
+	require.NoError(t, err)
+	session := dialRuntime(t, t.Context(), addr)
+	registered, perr := pskBootstrap(t, t.Context(), session, "", "10.9.0.3:3")
+	require.Nil(t, perr)
+	assert.NotEmpty(t, registered.HostID)
+}
+
 // unregisterOnSession sends a graceful UnregisterHost on a new stream, stamped with the host identity the runtime assigned
 func unregisterOnSession(t *testing.T, ctx context.Context, session *webtransport.Session, hostID string, sessionID string) {
 	t.Helper()

@@ -4,6 +4,7 @@ run:
     - unit
     - integration
     - e2e
+    - demo
 output:
   formats:
     text:

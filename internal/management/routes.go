@@ -2,10 +2,13 @@ package management
 
 import (
 	_ "embed"
+	"errors"
 	"net/http"
 	"strings"
 
 	"github.com/italypaleale/go-kit/httpserver"
+
+	"github.com/italypaleale/francis/internal/dashboardserver"
 )
 
 // openAPISpec is the OpenAPI document, which `make gen-openapi` generates from the swag annotations in this package
@@ -18,12 +21,13 @@ var openAPISpec []byte
 func (s *Server) routes() http.Handler {
 	mux := httpserver.NewMux()
 
-	// Every route gets a request ID, panic recovery, a deadline, and a bounded body, since no route takes a large one
-	// httpserver makes the last middleware the outermost, so the request ID is assigned before anything else runs
+	// Every route gets a request ID, the CORS policy, panic recovery, a deadline, and a bounded body, since no route takes a large one
+	// httpserver makes the last middleware the outermost, so the request ID is assigned before anything else runs, and CORS preflights are answered before routing
 	root := mux.Group("",
 		httpserver.MiddlewareMaxBodySize(maxRequestBodySize),
 		middlewareTimeout(requestTimeout),
 		s.middlewareRecover,
+		s.middlewareCORS,
 		middlewareRequestID,
 	)
 	api := root.Group("/api/v1")
@@ -43,6 +47,9 @@ func (s *Server) routes() http.Handler {
 	// Public routes
 	handle(root, http.MethodGet, "/healthz", s.handleHealthz)
 	handle(api, http.MethodGet, "/openapi.yaml", s.handleOpenAPI)
+
+	// Any valid token can describe itself, which is how clients learn whether they may offer actions
+	handle(api, http.MethodGet, "/token", s.handleGetToken, s.middlewareAuthenticate)
 
 	// Cluster
 	handle(api, http.MethodGet, "/cluster/summary", s.handleClusterSummary, s.middlewareRequireScope(ScopeClusterRead))
@@ -74,7 +81,7 @@ func (s *Server) routes() http.Handler {
 	handle(api, http.MethodPost, "/workflows/{name}/instances/{instanceId}/suspend", s.handleSuspendInstance, s.middlewareRequireScope(ScopeWorkflowsManage))
 	handle(api, http.MethodPost, "/workflows/{name}/instances/{instanceId}/resume", s.handleResumeInstance, s.middlewareRequireScope(ScopeWorkflowsManage))
 
-	// Answer other methods on known paths with 405, and unknown paths with 404
+	// Answer other methods on known paths with 405, and unknown paths with 404 unless they belong to the dashboard
 	for key, allowed := range methods {
 		allow := strings.Join(allowed, ", ")
 		key.group.Handle(key.path, handlerFunc(func(w http.ResponseWriter, r *http.Request) *apiError {
@@ -83,11 +90,27 @@ func (s *Server) routes() http.Handler {
 		}))
 	}
 
-	root.Handle("/", handlerFunc(func(w http.ResponseWriter, r *http.Request) *apiError {
-		return newAPIError(http.StatusNotFound, CodeNotFound, "no such route")
-	}))
+	root.Handle("/", handlerFunc(s.handleRoot))
 
 	return mux
+}
+
+// handleRoot serves the paths that no other route matches
+// Paths under /api/ always get a JSON 404, so a client never mistakes the dashboard's page for an API response
+func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) *apiError {
+	if s.dashboard == nil || r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
+		return newAPIError(http.StatusNotFound, CodeNotFound, "no such route")
+	}
+
+	err := s.dashboard.Serve(w, r)
+	switch {
+	case errors.Is(err, dashboardserver.ErrMethodNotAllowed):
+		return newAPIErrorf(http.StatusMethodNotAllowed, CodeMethodNotAllowed, "method %s is not allowed, use GET, HEAD", r.Method)
+	case err != nil:
+		return newAPIError(http.StatusNotFound, CodeNotFound, "no such file")
+	default:
+		return nil
+	}
 }
 
 // handleOpenAPI serves GET /api/v1/openapi.yaml
@@ -126,5 +149,38 @@ type healthJSON struct {
 //	@Router			/healthz [get]
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) *apiError {
 	writeJSON(w, http.StatusOK, healthJSON{Status: "ok"})
+	return nil
+}
+
+type tokenJSON struct {
+	// The scopes the token grants, sorted
+	Scopes []string `json:"scopes" enums:"actors:manage,actors:read,actors:state:read,cluster:read,hosts:manage,jobs:read,workflows:data:read,workflows:manage,workflows:read"`
+} //	@name	Token
+
+// handleGetToken serves GET /api/v1/token
+//
+//	@Summary		Describe the caller's token
+//	@ID				getToken
+//	@Description	Requires a valid token, with no particular scope.
+//	@Description
+//	@Description	Returns the scopes the bearer token grants, so a client can tell a read-only token from a management token before it offers an action.
+//	@Tags			Meta
+//	@Security		bearerAuth
+//	@Produce		json
+//	@Success		200	{object}	tokenJSON			"The scopes of the token"
+//	@Failure		401	{object}	apiError			"`unauthorized`: the bearer token is missing or unknown"
+//	@Header			all	{string}	X-Request-Id		"A unique ID assigned to the request, also returned as requestId in error bodies and recorded in audit logs"
+//	@Header			401	{string}	WWW-Authenticate	"Always Bearer realm="francis-management" when the token is missing or unknown"
+//	@Router			/api/v1/token [get]
+func (s *Server) handleGetToken(w http.ResponseWriter, r *http.Request) *apiError {
+	scopes := callerFromContext(r.Context()).Scopes()
+	res := tokenJSON{
+		Scopes: make([]string, len(scopes)),
+	}
+	for i, sc := range scopes {
+		res.Scopes[i] = string(sc)
+	}
+
+	writeJSON(w, http.StatusOK, res)
 	return nil
 }

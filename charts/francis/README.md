@@ -250,6 +250,10 @@ When enabled, the chart:
 - Renders a `management` block into the config Secret, binding the API to all interfaces on `management.port` (`7401` by default, TCP) so the Service can reach it. The tokens end up in that Secret too, so handle them like the other [secrets](#secrets).
 - Adds a `management` TCP container port and a separate `<release>-francis-management` Service in front of it. It's kept apart from the UDP runtime Service because a single `LoadBalancer` Service mixing TCP and UDP needs Kubernetes' `MixedProtocolLBService` support.
 
+The same Service serves the [management dashboard](https://gofrancis.dev/docs/dashboard/) at its root path. For example, run `kubectl port-forward -n francis svc/<release>-francis-management 7401:7401` and open `http://localhost:7401/`, then sign in with one of the tokens.
+
+To use a [standalone dashboard](https://gofrancis.dev/docs/dashboard/#standalone) instead, list its origin in `management.allowedOrigins`, for example `--set-string 'management.allowedOrigins[0]=http://localhost:7402'`.
+
 By default the API is served over plain HTTP, and the runtime logs a warning at startup because it's listening on a non-loopback address without TLS. Actor state and workflow payloads are readable through the API, so either keep the Service private and terminate TLS in a proxy or ingress, or have the runtime serve HTTPS itself from a `kubernetes.io/tls` Secret (for example, one issued by cert-manager):
 
 ```yaml
@@ -271,6 +275,9 @@ management:
     - "<read-only token>"
   managementTokens:
     - "<management token>"
+  # Optional: browser origins allowed to call the API, such as a standalone dashboard
+  allowedOrigins:
+    - "http://localhost:7402"
   # Only when management.tls.existingSecret is set
   tls:
     certFile: /etc/francis-management-tls/tls.crt
@@ -391,6 +398,7 @@ Anything else can be set through `extraEnv`, since the runtime reads the standar
 | `management.port` | int | `7401` | TCP port the management API listens on, on all interfaces. |
 | `management.readOnlyTokens` | list | `[]` | Bearer tokens that get every scope except actions. Each must be at least 32 characters. |
 | `management.managementTokens` | list | `[]` | Bearer tokens that get every scope, including actions. Each must be at least 32 characters, and no token may also be a read-only token. |
+| `management.allowedOrigins` | list | `[]` | Browser origins allowed to call the API across origins, such as a standalone dashboard at `http://localhost:7402`. `*` allows any origin. |
 | `management.tls.existingSecret` | string | `""` | Existing `kubernetes.io/tls` Secret to serve HTTPS from. Plain HTTP when empty. |
 | `management.service.type` | string | `ClusterIP` | Type of the management Service. |
 | `management.service.nodePort` | int | `null` | Node port, for `NodePort` and `LoadBalancer`. |

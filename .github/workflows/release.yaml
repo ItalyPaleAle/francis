@@ -38,6 +38,13 @@ jobs:
           # Do not cache in release workflows
           cache: false
 
+      - name: Set up Node.js and pnpm
+        uses: pnpm/setup@fbda4c85fc2e1e08721cd8763afea8f48d60f024 # v3.0.0
+        with:
+          package-json-file: 'dashboard/package.json'
+          # Do not cache in release workflows
+          cache: false
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
         with:
@@ -113,6 +120,18 @@ jobs:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The runtime binaries embed the dashboard, so it must be built first
+      - name: Build the dashboard
+        working-directory: dashboard
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+          if [[ ! -f dist/index.html ]]; then
+            echo "::error::The dashboard build produced no index.html"
+            exit 1
+          fi
 
       - name: Build binaries
         env:

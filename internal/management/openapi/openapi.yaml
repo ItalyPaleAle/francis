@@ -1269,6 +1269,26 @@ components:
       - taskCount
       - tasksRemaining
       type: object
+    Token:
+      properties:
+        scopes:
+          description: The scopes the token grants, sorted
+          items:
+            enum:
+            - actors:manage
+            - actors:read
+            - actors:state:read
+            - cluster:read
+            - hosts:manage
+            - jobs:read
+            - workflows:data:read
+            - workflows:manage
+            - workflows:read
+            type: string
+          type: array
+      required:
+      - scopes
+      type: object
     Workflow:
       properties:
         conflicts:
@@ -1476,6 +1496,9 @@ info:
     | `workflows:manage` | Cancelling, suspending, and resuming workflow instances |
 
     A missing or unknown token yields `401` with a `WWW-Authenticate: Bearer realm="francis-management"` header; a valid token lacking the route's scope yields `403`.
+    `GET /api/v1/token` accepts any valid token and returns the scopes it grants, so a client can find out whether it holds a read-only token before offering an action.
+
+    Browser pages on other origins can call the API only when the server's configuration lists their origin; the server answers their CORS preflight requests, and refuses those from other origins with `403 forbidden`.
 
     ## Pagination
 
@@ -1528,6 +1551,7 @@ paths:
 
         Walks the hosts in host ID order, querying a batch of hosts concurrently, until the page is full.
         Items are ordered by host, then by actor type and actor ID within each host.
+        The filters can be repeated, and each host is then queried for one of the actor types after another, in alphabetical order.
 
         This is a fan-out endpoint: a host that cannot be queried is reported in `errors` and sets `partial: true`, and its activations are missing from the page.
         If every queried host failed, the response is `503 noHostsReachable` with the host errors in `details.errors`.
@@ -1548,17 +1572,22 @@ paths:
         name: cursor
         schema:
           type: string
-      - description: Only return activations of this actor type
+      - description: Only return activations of these actor types; repeat the parameter
+          for several
         in: query
         name: type
         schema:
-          type: string
-      - description: Only query this host, returning 404 notFound when the host is
-          not registered
+          items:
+            type: string
+          type: array
+      - description: Only query these hosts, returning 404 notFound when none of them
+          is registered; repeat the parameter for several
         in: query
         name: host
         schema:
-          type: string
+          items:
+            type: string
+          type: array
       responses:
         "200":
           content:
@@ -2070,6 +2099,7 @@ paths:
         Requires scope `jobs:read`.
 
         Lists alarms, ordered by actor type, actor ID, and alarm name.
+        The filters can be repeated, and the alarms are then listed one combination of their values after another, by actor type and then actor ID, both in alphabetical order.
       operationId: listAlarms
       parameters:
       - description: Maximum number of items to return
@@ -2086,16 +2116,22 @@ paths:
         name: cursor
         schema:
           type: string
-      - description: Only return alarms of this actor type
+      - description: Only return alarms of these actor types; repeat the parameter
+          for several
         in: query
         name: type
         schema:
-          type: string
-      - description: Only return alarms of this actor ID, which requires type
+          items:
+            type: string
+          type: array
+      - description: Only return alarms of these actor IDs, which requires type; repeat
+          the parameter for several
         in: query
         name: id
         schema:
-          type: string
+          items:
+            type: string
+          type: array
       responses:
         "200":
           content:
@@ -2517,6 +2553,7 @@ paths:
         Asks the host directly for a page of the actors it holds in memory, ordered by actor type and then actor ID.
         This is the freshest view of a single host; unlike `/activations`, a host that cannot be reached fails the request with `503 hostUnavailable`.
         `activeCount` is the number of matching activations on the host, across all pages.
+        With several actor types, the activations are listed one type after another, in the same order.
       operationId: listHostActivations
       parameters:
       - description: The host ID
@@ -2539,11 +2576,14 @@ paths:
         name: cursor
         schema:
           type: string
-      - description: Only return activations of this actor type
+      - description: Only return activations of these actor types; repeat the parameter
+          for several
         in: query
         name: type
         schema:
-          type: string
+          items:
+            type: string
+          type: array
       responses:
         "200":
           content:
@@ -2845,6 +2885,7 @@ paths:
         Requires scope `jobs:read`.
 
         Lists durable jobs, ordered by job ID.
+        The filters can be repeated, and the jobs are then listed one combination of their values after another: by actor type and actor ID, both in alphabetical order, then by status in the order `pending`, `active`, `completed`, `dead`, and ordered by job ID within each.
         Terminal jobs (`completed`, `dead`) are only listed while a record of them is retained, as configured by the actor type's job retention.
       operationId: listJobs
       parameters:
@@ -2862,26 +2903,35 @@ paths:
         name: cursor
         schema:
           type: string
-      - description: Only return jobs of this actor type
+      - description: Only return jobs of these actor types; repeat the parameter for
+          several
         in: query
         name: type
         schema:
-          type: string
-      - description: Only return jobs of this actor ID, which requires type
+          items:
+            type: string
+          type: array
+      - description: Only return jobs of these actor IDs, which requires type; repeat
+          the parameter for several
         in: query
         name: id
         schema:
-          type: string
-      - description: Only return jobs in this status
+          items:
+            type: string
+          type: array
+      - description: Only return jobs in these statuses; repeat the parameter for
+          several
         in: query
         name: status
         schema:
-          enum:
-          - pending
-          - active
-          - completed
-          - dead
-          type: string
+          items:
+            enum:
+            - pending
+            - active
+            - completed
+            - dead
+            type: string
+          type: array
       responses:
         "200":
           content:
@@ -3106,6 +3156,7 @@ paths:
 
         Lists the placements recorded in the provider, ordered by actor type and then actor ID.
         A placement records which host an actor is assigned to; it does not prove the actor is currently in memory (see `/activations`).
+        The filters can be repeated, and the placements are then listed one combination of their values after another, by actor type and then host, both in alphabetical order.
       operationId: listPlacements
       parameters:
       - description: Maximum number of items to return
@@ -3122,16 +3173,22 @@ paths:
         name: cursor
         schema:
           type: string
-      - description: Only return placements on this host
+      - description: Only return placements on these hosts; repeat the parameter for
+          several
         in: query
         name: host
         schema:
-          type: string
-      - description: Only return placements of this actor type
+          items:
+            type: string
+          type: array
+      - description: Only return placements of these actor types; repeat the parameter
+          for several
         in: query
         name: type
         schema:
-          type: string
+          items:
+            type: string
+          type: array
       responses:
         "200":
           content:
@@ -3326,6 +3383,48 @@ paths:
       tags:
       - Cluster
       x-required-scope: cluster:read
+  /api/v1/token:
+    get:
+      description: |-
+        Requires a valid token, with no particular scope.
+
+        Returns the scopes the bearer token grants, so a client can tell a read-only token from a management token before it offers an action.
+      operationId: getToken
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Token'
+          description: The scopes of the token
+          headers:
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: '`unauthorized`: the bearer token is missing or unknown'
+          headers:
+            WWW-Authenticate:
+              description: Always Bearer realm="francis-management" when the token
+                is missing or unknown
+              schema:
+                type: string
+            X-Request-Id:
+              description: A unique ID assigned to the request, also returned as requestId
+                in error bodies and recorded in audit logs
+              schema:
+                type: string
+      security:
+      - bearerAuth: []
+      summary: Describe the caller's token
+      tags:
+      - Meta
   /api/v1/workflows:
     get:
       description: |-
@@ -3418,6 +3517,7 @@ paths:
 
         Lists the instances of a workflow, ordered by instance ID, from the labels stored with each instance (the journals are not read, so items stay at summary size).
         When no label filter (`status`, `version`, `parent`) is set, instances without labels are listed too, with `status: "unknown"`.
+        With several statuses, the instances are listed one status after another, in the order `pending`, `running`, `suspended`, `compensating`, `completed`, `failed`, `cancelled`, and ordered by instance ID within each.
       operationId: listWorkflowInstances
       parameters:
       - description: The workflow name, which must not contain a slash or a dot
@@ -3440,19 +3540,22 @@ paths:
         name: cursor
         schema:
           type: string
-      - description: Only return instances in this status
+      - description: Only return instances in these statuses; repeat the parameter
+          for several
         in: query
         name: status
         schema:
-          enum:
-          - pending
-          - running
-          - suspended
-          - compensating
-          - completed
-          - failed
-          - cancelled
-          type: string
+          items:
+            enum:
+            - pending
+            - running
+            - suspended
+            - compensating
+            - completed
+            - failed
+            - cancelled
+            type: string
+          type: array
       - description: Only return instances running this definition version
         in: query
         name: version
@@ -4399,7 +4502,7 @@ paths:
       tags:
       - Meta
 tags:
-- description: Public endpoints.
+- description: The public endpoints, and the scopes of the caller's token.
   name: Meta
 - description: Cluster-wide summary, runtime replicas, and hosts.
   name: Cluster
