@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - devel
     tags:
       # Push to tags matching v*
       - 'v*'
@@ -64,6 +65,7 @@ jobs:
           images: ghcr.io/${{ env.REPO_OWNER }}/francis
           tags: |
             type=edge,branch=main
+            type=next,branch=devel
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}

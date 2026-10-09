@@ -2,9 +2,13 @@ name: "CI Test"
 
 on:
   push:
-    branches: ["main"]
+    branches:
+      - main
+      - devel
   pull_request:
-    branches: ["main"]
+    branches:
+      - main
+      - devel
 
 env:
   HELM_VERSION: "v4.2.4"
