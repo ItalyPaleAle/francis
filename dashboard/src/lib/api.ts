@@ -174,6 +174,70 @@ export function getToken(token?: string, signal?: AbortSignal) {
     return request<Token>('/token', { token, signal })
 }
 
+// An endpoint that doesn't answer its check by then is reported as unreachable, since an address nothing listens on can otherwise hang for minutes
+const checkTimeout = 10_000
+
+// checkEndpoint makes sure a management API answers this page, before the endpoint is saved
+// It calls the public liveness route across origins, as every later request will, and throws an error that says what's wrong
+// When the caller's signal aborts the check, it throws the abort error instead
+export async function checkEndpoint(endpoint: string, signal?: AbortSignal): Promise<void> {
+    // The check has its own deadline, and the caller can still cancel it
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), checkTimeout)
+    const cancel = () => controller.abort()
+    signal?.addEventListener('abort', cancel, { once: true })
+
+    const url = `${endpoint}/healthz`
+    try {
+        let res: Response
+        try {
+            res = await fetch(url, { cache: 'no-store', credentials: 'omit', signal: controller.signal })
+        } catch {
+            signal?.throwIfAborted()
+
+            // The browser reports a request CORS refused the same way as a server that's down
+            // A request that skips CORS gets an unreadable response from a server that's up, which tells the two apart
+            let reachable = false
+            if (!controller.signal.aborted) {
+                reachable = await fetch(url, {
+                    mode: 'no-cors',
+                    cache: 'no-store',
+                    credentials: 'omit',
+                    signal: controller.signal,
+                }).then(
+                    () => true,
+                    () => false
+                )
+            }
+            signal?.throwIfAborted()
+
+            if (reachable) {
+                throw new Error(
+                    `${endpoint} doesn't allow requests from this page. Add ${window.location.origin} to its management.allowedOrigins setting.`
+                )
+            }
+            if (endpoint.startsWith('https:')) {
+                throw new Error(
+                    `Couldn't reach ${endpoint}. Check the address, that the runtime is running, and that this browser trusts its certificate.`
+                )
+            }
+            throw new Error(`Couldn't reach ${endpoint}. Check the address, and that the runtime is running.`)
+        }
+
+        // Another service at the address, such as one on the wrong port, answers the liveness route differently or not at all
+        const body: unknown = await res.json().catch(() => null)
+        signal?.throwIfAborted()
+        if (!res.ok || (body as { status?: unknown } | null)?.status !== 'ok') {
+            throw new Error(
+                `${endpoint} responded, but it isn't a Francis management API. Check the address and the port.`
+            )
+        }
+    } finally {
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', cancel)
+    }
+}
+
 // Cluster
 
 export function getClusterSummary(signal?: AbortSignal) {

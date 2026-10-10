@@ -32,7 +32,7 @@ francis dashboard
 
 It listens on `127.0.0.1:7402` by default. Change it with the `-bind` and `-port` flags, for example `francis dashboard -bind 0.0.0.0 -port 8080`. The command serves plain HTTP and prints a warning when it's reachable from other machines: in that case, put it behind a TLS-terminating proxy.
 
-In the standalone dashboard, add the endpoints to connect to, with the address and port of a runtime's or a local host's management API. The browser keeps the list in its local storage, and the dashboard asks for a token for each endpoint. Use **Switch** in the sidebar to move between endpoints.
+In the standalone dashboard, add the endpoints to connect to, with the address and port of a runtime's or a local host's management API. Before it saves an endpoint, the dashboard checks that the endpoint answers and allows the dashboard's origin. The browser keeps the list in its local storage, and the dashboard asks for a token each time you connect to an endpoint. The sidebar shows the endpoint you're connected to under **Sign out**, which takes you back to the list.
 
 ### Allowing the dashboard's origin
 
@@ -57,4 +57,4 @@ local.WithManagementAPI(local.ManagementOptions{
 
 Optionally use the wildcard `"*"` to allow any origin, although this is not recommended in production.
 
-When an endpoint doesn't allow the origin, signing in fails with a message that names the origin to add.
+When an endpoint doesn't allow the origin, adding it fails with a message that names the origin to add. Signing in to a saved endpoint that no longer allows it fails the same way.

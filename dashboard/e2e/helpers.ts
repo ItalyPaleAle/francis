@@ -78,6 +78,18 @@ export async function useToken(page: Page, token = MANAGEMENT_TOKEN) {
     )
 }
 
+// saveEndpoints fills the standalone dashboard's list of endpoints before the page loads, skipping the form for tests about other things
+export async function saveEndpoints(page: Page, list: { url: string; name: string }[]) {
+    await page.addInitScript(
+        ([key, value]) => {
+            if (!localStorage.getItem(key)) {
+                localStorage.setItem(key, value)
+            }
+        },
+        [ENDPOINTS_KEY, JSON.stringify(list)]
+    )
+}
+
 // heading returns the page's main heading
 // filterButton is the trigger of a multi-select filter, whose name is the filter's label followed by its value
 export function filterButton(page: Page, label: string) {
@@ -176,7 +188,8 @@ export async function startInstance(id: string) {
     await control(`/instances/${encodeURIComponent(id)}`)
 }
 
-async function freePort(): Promise<number> {
+// freePort returns a port that nothing listened on a moment ago
+export async function freePort(): Promise<number> {
     return new Promise((resolve, reject) => {
         const srv = createServer()
         srv.once('error', reject)

@@ -2,11 +2,10 @@
 import { getToken } from '$lib/api'
 import { endpoints, standalone } from '$lib/endpoints.svelte'
 import { matchPath } from '$lib/paths'
-import { activity, clearCache } from '$lib/query.svelte'
+import { activity } from '$lib/query.svelte'
 import { handleLinkClick, route } from '$lib/router.svelte'
 import { NotFound, routes, type Section } from '$lib/routes'
 import { session } from '$lib/session.svelte'
-import Button from './Button.svelte'
 import ErrorPanel from './ErrorPanel.svelte'
 import Icon from './Icon.svelte'
 import Toasts from './Toasts.svelte'
@@ -44,6 +43,9 @@ const match = $derived(matchPath(route.path, routes))
 
 let menuOpen = $state(false)
 
+// In standalone mode the sidebar names the endpoint the dashboard is connected to
+const endpointName = $derived(endpoints.list.find((e) => e.url === session.endpoint)?.name ?? '')
+
 // A session restored from storage learns its scopes again, which decides the actions on offer
 $effect(() => {
     if (session.token && session.scopes === null) {
@@ -62,13 +64,7 @@ $effect(() => {
 })
 
 function signOut() {
-    session.end()
-}
-
-// Cached responses belong to the endpoint that sent them, so they go before switching
-function switchEndpoint() {
-    clearCache()
-    session.disconnect()
+    session.signOut()
 }
 </script>
 
@@ -98,15 +94,6 @@ function switchEndpoint() {
         </div>
 
         <div id="sidebar-nav" class={`flex-1 flex-col overflow-y-auto px-3 pb-4 lg:flex ${menuOpen ? 'flex' : 'hidden'}`}>
-            {#if standalone && session.endpoint}
-                <div class="mb-3 flex items-center gap-2 rounded-md border border-gray-200 px-2.5 py-2 dark:border-gray-850">
-                    <div class="min-w-0 flex-1">
-                        <p class="truncate text-[13px] font-medium text-gray-950 dark:text-gray-50">{endpoints.label(session.endpoint)}</p>
-                        <p class="truncate font-mono text-[11px] text-gray-500 dark:text-gray-400" title={session.endpoint}>{session.endpoint}</p>
-                    </div>
-                    <Button size="sm" variant="ghost" onclick={switchEndpoint}>Switch</Button>
-                </div>
-            {/if}
             <nav aria-label="Main" class="flex flex-col gap-5 pt-2">
                 {#each nav as group (group.heading)}
                     <div>
@@ -140,6 +127,15 @@ function switchEndpoint() {
                     class="flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-[13px] whitespace-nowrap text-gray-600 transition-colors duration-100 hover:bg-gray-100 hover:text-gray-950 dark:text-gray-400 dark:hover:bg-gray-900 dark:hover:text-gray-50">
                     <Icon name="signout" class="size-3.5" />Sign out
                 </button>
+                <!-- The address rarely fits the sidebar, so hovering shows it in full -->
+                {#if standalone && session.endpoint}
+                    <div class="mt-2 px-2" title={session.endpoint}>
+                        {#if endpointName}
+                            <p class="truncate text-xs font-medium text-gray-700 dark:text-gray-300">{endpointName}</p>
+                        {/if}
+                        <p class="truncate font-mono text-[11px] text-gray-500 dark:text-gray-400">{session.endpoint}</p>
+                    </div>
+                {/if}
             </div>
         </div>
     </aside>

@@ -1,19 +1,25 @@
 import { EMBEDDED_URL, MANAGEMENT_TOKEN, STANDALONE_PORT, STANDALONE_URL } from './cluster.mjs'
-import { ENDPOINTS_KEY, expect, heading, test } from './helpers'
-
-const endpointHost = new URL(EMBEDDED_URL).hostname
-const endpointPort = new URL(EMBEDDED_URL).port
+import { ENDPOINTS_KEY, expect, freePort, heading, saveEndpoints, test } from './helpers'
 
 test('the standalone dashboard connects to an endpoint across origins', async ({ page }) => {
+    // With nothing saved, the page opens on the form
     await page.goto(STANDALONE_URL)
     await expect(page.getByRole('heading', { name: 'Connect to a cluster' })).toBeVisible()
-    await expect(page.getByText(STANDALONE_URL, { exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Saved endpoints' })).toBeHidden()
 
-    // Adding an endpoint saves it and connects to it
-    await page.getByLabel('Host or IP address').fill(endpointHost)
-    await page.getByLabel('Port').fill(endpointPort)
+    // The info button next to the address names the origin to allow
+    await expect(page.getByText(STANDALONE_URL, { exact: true })).toBeHidden()
+    await page.getByRole('button', { name: 'About allowed origins' }).click()
+    await expect(page.getByText(STANDALONE_URL, { exact: true })).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(page.getByText(STANDALONE_URL, { exact: true })).toBeHidden()
+
+    // Adding an endpoint checks it, saves it, and connects to it
+    const check = page.waitForRequest(`${EMBEDDED_URL}/healthz`)
+    await page.getByLabel('URL').fill(EMBEDDED_URL)
     await page.getByLabel('Name (optional)').fill('E2E cluster')
     await page.getByRole('button', { name: 'Add and connect' }).click()
+    await check
 
     await expect(page.getByRole('heading', { name: 'E2E cluster' })).toBeVisible()
     await page.getByLabel('API token').fill(MANAGEMENT_TOKEN)
@@ -37,42 +43,124 @@ test('the standalone dashboard connects to an endpoint across origins', async ({
     expect(saved).toEqual([{ url: EMBEDDED_URL, name: 'E2E cluster' }])
     await page.reload()
     await expect(heading(page)).toHaveText('user-01')
-    await expect(page.getByText('E2E cluster')).toBeVisible()
 
-    // Switching goes back to the list, where the endpoint is marked as signed in
-    await page.getByRole('button', { name: 'Switch' }).click()
+    // The sidebar names the endpoint under Sign out, with its full address on hover
+    const connected = page.getByTitle(EMBEDDED_URL, { exact: true })
+    await expect(connected).toContainText('E2E cluster')
+    await expect(connected).toContainText(EMBEDDED_URL)
+
+    // Signing out goes back to the list, and the token goes with the session, so connecting again asks for one
+    await page.getByRole('button', { name: 'Sign out' }).click()
     await expect(page.getByRole('heading', { name: 'Connect to a cluster' })).toBeVisible()
     const item = page.getByRole('listitem').filter({ hasText: 'E2E cluster' })
-    await expect(item.getByText('Signed in')).toBeVisible()
-
-    // Connecting again needs no new sign-in
-    await item.getByRole('button', { name: 'Connect' }).click()
+    await item.getByRole('button', { name: 'E2E cluster' }).click()
+    await expect(page.getByRole('heading', { name: 'E2E cluster' })).toBeVisible()
+    await page.getByLabel('API token').fill(MANAGEMENT_TOKEN)
+    await page.getByRole('button', { name: 'Sign in' }).click()
     await expect(heading(page)).toHaveText('user-01')
 
-    await page.getByRole('button', { name: 'Switch' }).click()
+    // The form opens from the list, and going back leaves the list as it was
+    await page.getByRole('button', { name: 'Sign out' }).click()
+    await page.getByRole('button', { name: 'Add an endpoint' }).click()
+    await expect(page.getByRole('heading', { name: 'Add an endpoint' })).toBeVisible()
+    await expect(page.getByLabel('URL')).toBeFocused()
+    await page.getByRole('button', { name: 'Saved endpoints' }).click()
+    await expect(page.getByRole('listitem')).toHaveCount(1)
+
+    // Removing the last endpoint opens the form
     await item.getByRole('button', { name: 'Remove' }).click()
-    await expect(page.getByRole('listitem')).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'Connect to a cluster' })).toBeVisible()
+    await expect(page.getByLabel('URL')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Saved endpoints' })).toBeHidden()
     expect(await page.evaluate((key) => localStorage.getItem(key), ENDPOINTS_KEY)).toBe('[]')
+})
+
+test('a saved endpoint shows its remove button beside the list while the pointer is on it', async ({ page }) => {
+    await saveEndpoints(page, [
+        { url: EMBEDDED_URL, name: 'E2E cluster' },
+        { url: 'http://127.0.0.1:7401', name: 'Elsewhere' },
+    ])
+    await page.goto(STANDALONE_URL)
+
+    // The button fades in rather than appearing, so its holder's opacity tells whether it shows
+    const list = page.getByRole('list')
+    const item = list.getByRole('listitem').filter({ hasText: 'E2E cluster' })
+    const remove = item.getByRole('button', { name: 'Remove' })
+    const holder = remove.locator('..')
+    await expect(holder).toHaveCSS('opacity', '0')
+    await item.getByRole('button', { name: 'E2E cluster' }).hover()
+    await expect(holder).toHaveCSS('opacity', '1')
+
+    // It sits outside the list, to the right of its row
+    const listBox = await list.boundingBox()
+    const removeBox = await remove.boundingBox()
+    expect(removeBox?.x).toBeGreaterThanOrEqual((listBox?.x ?? 0) + (listBox?.width ?? 0))
+
+    // Removing one endpoint leaves the others
+    await remove.click()
+    await expect(list.getByRole('listitem')).toHaveCount(1)
+    await expect(list.getByRole('button', { name: 'Elsewhere' })).toBeVisible()
 })
 
 test('the endpoint form rejects an invalid address', async ({ page }) => {
     await page.goto(STANDALONE_URL)
-    await page.getByLabel('Host or IP address').fill('not a host')
+    await page.getByLabel('URL').fill('not a host')
     await page.getByRole('button', { name: 'Add and connect' }).click()
-    await expect(page.getByRole('alert')).toHaveText('Enter a host name or IP address, and a port between 1 and 65535.')
+    await expect(page.getByRole('alert')).toHaveText('Enter a URL such as https://1.2.3.4:7401.')
+})
+
+test('the endpoint form refuses a server that is not a management API', async ({ page }) => {
+    // The dashboard's own server answers, but not as a management API
+    await page.goto(STANDALONE_URL)
+    await page.getByLabel('URL').fill(STANDALONE_URL)
+    await page.getByRole('button', { name: 'Add and connect' }).click()
+    await expect(page.getByRole('alert')).toHaveText(
+        `${STANDALONE_URL} responded, but it isn't a Francis management API. Check the address and the port.`
+    )
+    expect(await page.evaluate((key) => localStorage.getItem(key), ENDPOINTS_KEY)).toBeNull()
+})
+
+test.describe('an endpoint that is not running', () => {
+    // The browser reports the refused connection, in its own words: Chromium first, then WebKit
+    test.use({ allowedConsoleErrors: /ERR_CONNECTION_REFUSED|Could not connect to the server/ })
+
+    test('adding it explains that it could not be reached', async ({ page }) => {
+        const url = `http://127.0.0.1:${await freePort()}`
+        await page.goto(STANDALONE_URL)
+        await page.getByLabel('URL').fill(url)
+        await page.getByRole('button', { name: 'Add and connect' }).click()
+        await expect(page.getByRole('alert')).toHaveText(
+            `Couldn't reach ${url}. Check the address, and that the runtime is running.`
+        )
+        expect(await page.evaluate((key) => localStorage.getItem(key), ENDPOINTS_KEY)).toBeNull()
+    })
 })
 
 test.describe('from an origin the endpoint does not allow', () => {
-    // The browser reports the refused preflight, in its own words: Chromium first, then WebKit
+    // The browser reports the refused request, in its own words: Chromium first, then WebKit
     test.use({
-        allowedConsoleErrors: /CORS policy|net::ERR_FAILED|Preflight response is not successful|access control checks/,
+        allowedConsoleErrors:
+            /CORS policy|net::ERR_FAILED|Preflight response is not successful|access control checks|not allowed by Access-Control-Allow-Origin/,
     })
 
-    test('signing in explains the missing allowed origin', async ({ page }) => {
+    test('adding the endpoint names the origin to allow', async ({ page }) => {
         const origin = `http://localhost:${STANDALONE_PORT}`
         await page.goto(origin)
-        await page.getByLabel('Host or IP address').fill(`${endpointHost}:${endpointPort}`)
+        // An address without a scheme gets the page's own
+        await page.getByLabel('URL').fill(new URL(EMBEDDED_URL).host)
         await page.getByRole('button', { name: 'Add and connect' }).click()
+        await expect(page.getByRole('alert')).toHaveText(
+            `${EMBEDDED_URL} doesn't allow requests from this page. Add ${origin} to its management.allowedOrigins setting.`
+        )
+        expect(await page.evaluate((key) => localStorage.getItem(key), ENDPOINTS_KEY)).toBeNull()
+    })
+
+    test('signing in to a saved endpoint names the origin to allow', async ({ page }) => {
+        // The endpoint was saved before it stopped allowing the origin, so it skips the check
+        const origin = `http://localhost:${STANDALONE_PORT}`
+        await saveEndpoints(page, [{ url: EMBEDDED_URL, name: '' }])
+        await page.goto(origin)
+        await page.getByRole('button', { name: new URL(EMBEDDED_URL).host }).click()
 
         await page.getByLabel('API token').fill(MANAGEMENT_TOKEN)
         await page.getByRole('button', { name: 'Sign in' }).click()
