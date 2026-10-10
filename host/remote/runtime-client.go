@@ -855,18 +855,27 @@ func (rc *runtimeClient) handleInbound(ctx context.Context, admissionCtx context
 	err = protocol.WriteMessage(stream, resp)
 
 	// Once admission stopped, the teardown closes the session as soon as the admitted handlers return, which would discard a response that is still in flight
-	if err == nil && admissionCtx.Err() != nil {
+	// The acknowledgement of a new drain is in the same position, since it starts that teardown right below
+	drainAccepted := startsDrain(req, resp)
+	if err == nil && (admissionCtx.Err() != nil || drainAccepted) {
 		rc.awaitResponseRead(stream)
 	}
 
-	// An accepted drain starts its teardown only once the acknowledgement is written, so the runtime receives it before the session goes away
-	if req.Kind == protocol.KindHostDrain && resp.Kind == protocol.KindHostDrainResponse {
-		var ack protocol.HostDrainResponse
-		err = resp.DecodePayload(&ack)
-		if err == nil && !ack.AlreadyDraining {
-			rc.drain.Trigger()
-		}
+	// An accepted drain starts its teardown only once the runtime read the acknowledgement, so the acknowledgement isn't lost when the session goes away
+	if drainAccepted {
+		rc.drain.Trigger()
 	}
+}
+
+// startsDrain reports whether a response accepts a new administrative drain, which starts the host's teardown
+func startsDrain(req *protocol.Envelope, resp *protocol.Envelope) bool {
+	if req.Kind != protocol.KindHostDrain || resp.Kind != protocol.KindHostDrainResponse {
+		return false
+	}
+
+	var ack protocol.HostDrainResponse
+	err := resp.DecodePayload(&ack)
+	return err == nil && !ack.AlreadyDraining
 }
 
 // awaitResponseRead waits until the runtime closes its side of a stream whose response was written, bounded by the request timeout

@@ -390,6 +390,38 @@ func TestRuntimeClientAdministrativeDrain(t *testing.T) {
 		assert.Equal(t, int32(1), rt.registrations.Load())
 	})
 
+	t.Run("the acknowledgement reaches a runtime that is slow to read it", func(t *testing.T) {
+		rt := startScriptedRuntime(t)
+		rc := newReconnectingClient(t, rt.addr, runtimeClientConfig{})
+
+		runErr := make(chan error, 1)
+		go func() {
+			runErr <- rc.Run(t.Context())
+		}()
+		session := waitSession(t, rt)
+
+		// Send the drain, then hold off reading the acknowledgement for long enough that a teardown that didn't wait for it would close the session first
+		req, err := protocol.NewRequest(protocol.KindHostDrain, protocol.HostDrainRequest{Reason: "test"})
+		require.NoError(t, err)
+		req.HostID = "host-1"
+		req.SessionID = "session-1"
+		stream, err := session.OpenStreamSync(t.Context())
+		require.NoError(t, err)
+		err = protocol.WriteMessage(stream, req)
+		require.NoError(t, err)
+		time.Sleep(500 * time.Millisecond)
+
+		// The acknowledgement is still delivered, and closing our side lets the teardown proceed
+		_ = stream.SetReadDeadline(time.Now().Add(5 * time.Second))
+		resp, err := protocol.ReadMessage(stream)
+		require.NoError(t, err)
+		require.Equal(t, protocol.KindHostDrainResponse, resp.Kind)
+		wt.CloseStream(stream)
+
+		err = waitRun(t, runErr)
+		require.ErrorIs(t, err, host.ErrAdministrativeDrain)
+	})
+
 	t.Run("session dropping mid-drain does not reconnect", func(t *testing.T) {
 		rt := startScriptedRuntime(t)
 
