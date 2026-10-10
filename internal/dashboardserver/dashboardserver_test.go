@@ -116,7 +116,7 @@ func TestServe(t *testing.T) {
 		w := get(d, http.MethodGet, "/assets/index.abc123.js")
 		require.Equal(t, http.StatusOK, w.Code)
 		assert.Equal(t, testScript, w.Body.String())
-		assert.Contains(t, "text/javascript", w.Header().Get("Content-Type"))
+		assert.Contains(t, w.Header().Get("Content-Type"), "text/javascript")
 		assert.Equal(t, "public, max-age=31536000, immutable", w.Header().Get("Cache-Control"))
 		assert.Empty(t, w.Header().Get("Content-Security-Policy"))
 
