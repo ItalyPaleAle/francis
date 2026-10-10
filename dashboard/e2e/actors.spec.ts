@@ -64,6 +64,8 @@ test('stored state lists the actors of the chosen type', async ({ page }) => {
 })
 
 test("stored state shows when a workflow's instances were created, relative to now", async ({ page }) => {
+    // The fixture creates the instance when the cluster starts, and a time under 5 seconds old reads as "now" until the clock's next tick, so the page looks at it a minute later
+    await page.clock.setFixedTime(Date.now() + 60_000)
     await page.goto('/actor-states?type=francis.builtin.workflow.checkout')
     const created = page.getByRole('row', { name: /^order-completed / }).locator('time')
     await expect(created).toHaveText(/ago$/)
