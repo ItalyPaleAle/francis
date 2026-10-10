@@ -30,6 +30,8 @@ func runLocalHost(t *testing.T, host *Host) {
 
 	select {
 	case <-host.Ready():
+	case runErr := <-errCh:
+		t.Fatalf("host stopped before becoming ready: %v", runErr)
 	case <-time.After(15 * time.Second):
 		t.Fatal("host did not register")
 	}
@@ -125,6 +127,7 @@ func TestHostLocalInvocationSmoke(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- host.Run(ctx)
@@ -133,6 +136,8 @@ func TestHostLocalInvocationSmoke(t *testing.T) {
 	// Wait until the host has registered with the provider
 	select {
 	case <-host.Ready():
+	case runErr := <-errCh:
+		t.Fatalf("host stopped before becoming ready: %v", runErr)
 	case <-time.After(15 * time.Second):
 		t.Fatal("host did not register")
 	}
@@ -170,12 +175,13 @@ func (a slowDeactivateActor) Deactivate(ctx context.Context) error {
 // TestHostLocalKeepsHealthChecksWhileActorsHalt verifies a host stays registered while its actors take longer to halt than the health check deadline
 // If the registration expired meanwhile, the provider would let another host activate actors that are still halting here
 func TestHostLocalKeepsHealthChecksWhileActorsHalt(t *testing.T) {
-	const deadline = 2 * time.Second
+	// Use the normal SQLite request timeout while ensuring actor shutdown still outlasts the health deadline
+	const deadline = 2 * sqlite.DefaultTimeout
 	dbPath := filepath.Join(t.TempDir(), "health.db")
 
 	h, err := NewHost(
 		WithAddress(localFreeUDPAddr(t)),
-		WithSQLiteProvider(sqlite.SQLiteProviderOptions{ConnectionString: dbPath, Timeout: time.Second}),
+		WithSQLiteProvider(sqlite.SQLiteProviderOptions{ConnectionString: dbPath}),
 		WithRuntimePSKs(localTestRuntimePSK),
 		WithHostHealthCheckDeadline(deadline),
 		WithLogger(slog.New(slog.DiscardHandler)),
@@ -196,6 +202,8 @@ func TestHostLocalKeepsHealthChecksWhileActorsHalt(t *testing.T) {
 	}()
 	select {
 	case <-h.Ready():
+	case runErr := <-errCh:
+		t.Fatalf("host stopped before becoming ready: %v", runErr)
 	case <-time.After(15 * time.Second):
 		t.Fatal("host did not register")
 	}
@@ -206,7 +214,7 @@ func TestHostLocalKeepsHealthChecksWhileActorsHalt(t *testing.T) {
 	// A second provider on the same database watches the registration from outside the host
 	watcherCfg := components.NewProviderConfig()
 	watcherCfg.HostHealthCheckDeadline = deadline
-	watcher, err := sqlite.NewSQLiteProvider(slog.New(slog.DiscardHandler), sqlite.SQLiteProviderOptions{ConnectionString: dbPath, Timeout: time.Second}, watcherCfg)
+	watcher, err := sqlite.NewSQLiteProvider(slog.New(slog.DiscardHandler), sqlite.SQLiteProviderOptions{ConnectionString: dbPath}, watcherCfg)
 	require.NoError(t, err)
 	err = watcher.Init(t.Context())
 	require.NoError(t, err)
