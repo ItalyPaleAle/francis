@@ -158,6 +158,21 @@ func (rc *runtimeClient) doRequest(ctx context.Context, kind string, payload any
 }
 ```
 
+## Markdown
+
+Do not hard-wrap Markdown prose or limit it to a maximum line length
+
+## Running the Go linter
+
+The Go linter is pinned to a specific version (included in `.golangci-lint-version`), which must be installed from the pre-compiled binary: builds from package managers are compiled with an older Go and refuse this module's Go version.
+
+```sh
+VERSION="2.x.x" # From .golangci-lint-version
+curl -sSL https://github.com/golangci/golangci-lint/releases/download/v${VERSION}/golangci-lint-${VERSION}-linux-amd64.tar.gz | tar -xz -C /tmp
+install /tmp/golangci-lint-${VERSION}-linux-amd64/golangci-lint /usr/local/bin
+make lint
+```
+
 ## Git
 
 Do not stage or unstage changes unless the user explicitly asks you to.
