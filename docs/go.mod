@@ -1,6 +1,6 @@
 module github.com/italypaleale/tsiam/docs
 
-go 1.27
+go 1.27.2
 
 tool github.com/italypaleale/hugo-assets/cmd/vercel-docs-build
 
