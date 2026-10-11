@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   tests:
-    runs-on: "ubuntu-latest"
+    runs-on: "ubuntu-26.04"
     timeout-minutes: 30
 
     services:
@@ -87,7 +87,7 @@ jobs:
           go test -tags integration -v -count=1 -timeout 15m ./tests/integration/...
 
   dashboard:
-    runs-on: "ubuntu-latest"
+    runs-on: "ubuntu-26.04"
     timeout-minutes: 20
 
     steps:
@@ -163,7 +163,7 @@ jobs:
 
   e2e:
     name: "K8s E2E (${{ matrix.database }}, ${{ matrix.authentication }})"
-    runs-on: "ubuntu-latest"
+    runs-on: "ubuntu-26.04"
     timeout-minutes: 30
 
     strategy:
