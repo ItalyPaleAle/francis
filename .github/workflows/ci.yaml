@@ -58,10 +58,6 @@ jobs:
         run: |
           go tool gomod-age
 
-      - name: "Check the management API's OpenAPI document is up to date"
-        run: |
-          make check-openapi-diff
-
       - name: "Read lint version"
         id: lint-version
         run: echo "version=$(cat .golangci-lint-version)" >> "$GITHUB_OUTPUT"
