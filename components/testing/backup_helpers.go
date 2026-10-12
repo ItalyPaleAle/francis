@@ -3,6 +3,7 @@ package comptesting
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"fmt"
 	"testing"
 	"time"
@@ -205,7 +206,9 @@ func SeedBackupSample(t testing.TB, ctx context.Context, p components.ActorProvi
 	require.NoError(t, err)
 
 	// A dead job: dispatch a job due now, lease it through the fetcher, then dead-letter it
-	deadJobID, _, _, err := p.DispatchJob(ctx, ref.NewAlarmRef(actorType, "dead-actor", "dead-job"), components.SetAlarmReq{
+	// Postgres skips leasing an actor whose advisory lock is held elsewhere, and those locks span the whole database rather than one schema
+	// The actor ID is unique per seed so a concurrent seed in another test package, against the same database, cannot make the fetcher skip this job
+	deadJobID, _, _, err := p.DispatchJob(ctx, ref.NewAlarmRef(actorType, "dead-actor-"+rand.Text(), "dead-job"), components.SetAlarmReq{
 		DueTime:   now,
 		Data:      []byte("dead-job-data"),
 		Kind:      components.AlarmKindJob,

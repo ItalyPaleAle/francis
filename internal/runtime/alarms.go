@@ -194,8 +194,7 @@ func (rt *Runtime) enqueueAlarms(leases ...*ref.AlarmLease) error {
 
 		// If the alarm is due within the next 0.1ms, execute it right away rather than enqueueing it
 		if a.DueTime().Sub(rt.clock.Now()) < 100*time.Microsecond {
-			rt.activeAlarms[a.Key()] = struct{}{}
-			rt.alarmWg.Add(1)
+			rt.startAlarmExecutionLocked(a)
 			go rt.executeActiveAlarm(a)
 			continue
 		}
@@ -244,12 +243,68 @@ func (rt *Runtime) executeAlarm(lease *ref.AlarmLease) {
 		rt.activeAlarmsLock.Unlock()
 		return
 	}
-	rt.activeAlarms[lease.Key()] = struct{}{}
-	rt.alarmWg.Add(1)
+	rt.startAlarmExecutionLocked(lease)
 	rt.activeAlarmsLock.Unlock()
 
 	// Run each execution on its own goroutine
 	go rt.executeActiveAlarm(lease)
+}
+
+// actorAlarmExecutions counts the alarm executions in flight for one actor, and done is closed once the last of them has been finalized
+type actorAlarmExecutions struct {
+	count int
+	done  chan struct{}
+}
+
+// startAlarmExecutionLocked marks an alarm as in flight, both by its own key and against its actor, and counts it towards the shutdown drain
+// The caller must hold activeAlarmsLock for writing
+func (rt *Runtime) startAlarmExecutionLocked(lease *ref.AlarmLease) {
+	rt.activeAlarms[lease.Key()] = struct{}{}
+	rt.alarmWg.Add(1)
+
+	actorKey := lease.ActorRef().String()
+	ex, ok := rt.activeAlarmActors[actorKey]
+	if !ok {
+		ex = &actorAlarmExecutions{done: make(chan struct{})}
+		rt.activeAlarmActors[actorKey] = ex
+	}
+	ex.count++
+}
+
+// finishAlarmExecutionLocked clears an alarm's in-flight marker, and releases the removals waiting on its actor once no other execution for it remains
+// The caller must hold activeAlarmsLock for writing
+func (rt *Runtime) finishAlarmExecutionLocked(lease *ref.AlarmLease) {
+	delete(rt.activeAlarms, lease.Key())
+
+	actorKey := lease.ActorRef().String()
+	ex, ok := rt.activeAlarmActors[actorKey]
+	if !ok {
+		return
+	}
+	ex.count--
+	if ex.count == 0 {
+		close(ex.done)
+		delete(rt.activeAlarmActors, actorKey)
+	}
+}
+
+// waitActorAlarmExecutions blocks until the alarm executions in flight for an actor have been finalized, the timeout elapses, or ctx is done
+// It never fails: a caller that gives up waiting proceeds as it would have without the wait
+func (rt *Runtime) waitActorAlarmExecutions(ctx context.Context, aRef ref.ActorRef, timeout time.Duration) {
+	rt.activeAlarmsLock.RLock()
+	ex, ok := rt.activeAlarmActors[aRef.String()]
+	rt.activeAlarmsLock.RUnlock()
+	if !ok {
+		return
+	}
+
+	t := rt.clock.NewTimer(timeout)
+	defer t.Stop()
+	select {
+	case <-ex.done:
+	case <-t.C():
+	case <-ctx.Done():
+	}
 }
 
 // executeActiveAlarm dispatches an alarm to its owning host and handles the outcome
@@ -289,7 +344,7 @@ func (rt *Runtime) executeActiveAlarm(lease *ref.AlarmLease) {
 	reEnqueue := false
 	defer func() {
 		rt.activeAlarmsLock.Lock()
-		delete(rt.activeAlarms, key)
+		rt.finishAlarmExecutionLocked(lease)
 		if isRetrying {
 			rt.retryingAlarms[key] = struct{}{}
 		} else {

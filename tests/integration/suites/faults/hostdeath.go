@@ -4,6 +4,7 @@ package faults
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -173,6 +174,10 @@ func (s *alarmAfterSilentDeath) Run(t *testing.T) {
 	}
 
 	// Stop the alarm so it cannot leak into later scenarios
-	err = s.cluster.Service(survivor).DeleteAlarm(ctx, shared.ProbeActorType, actorID, "a")
-	require.NoError(t, err)
+	// The survivor keeps executing the alarm while it is deleted, and on a slow disk a single delete can outlast the query timeout, so it is retried until the alarm is gone
+	// The SQLite driver reports a timeout even for a delete that committed as the deadline passed, so a retry that finds no alarm means an earlier attempt removed it
+	require.Eventually(t, func() bool {
+		dErr := s.cluster.Service(survivor).DeleteAlarm(ctx, shared.ProbeActorType, actorID, "a")
+		return dErr == nil || errors.Is(dErr, actor.ErrAlarmNotFound)
+	}, 30*time.Second, 100*time.Millisecond, "the alarm should be deleted from the surviving host")
 }

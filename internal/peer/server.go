@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/italypaleale/go-kit/utils"
@@ -271,17 +272,23 @@ func (s *Server) handleStream(ctx context.Context, stream *webtransport.Stream, 
 	// If the session is already at its limit, reject with a retryable overloaded error so the caller backs off and re-resolves
 	select {
 	case inFlight <- struct{}{}:
-		defer func() { <-inFlight }()
 	default:
 		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeOverloaded, "host has too many in-flight requests").WithRetryAfter(overloadRetryAfter)))
 		return
 	}
+	releaseSlot := sync.OnceFunc(func() {
+		<-inFlight
+	})
+	defer releaseSlot()
 
 	// Dispatch by invocation mode
 	// Object responses are a single frame, stream responses carry a trailing body
 	switch payload.Mode {
 	case protocol.InvocationModeObject:
-		_ = protocol.WriteMessage(stream, s.handleObject(ctx, req, payload))
+		// The slot is freed before the reply is written, so a caller that has received a reply can count on its capacity being back for the next invocation
+		resp := s.handleObject(ctx, req, payload)
+		releaseSlot()
+		_ = protocol.WriteMessage(stream, resp)
 	case protocol.InvocationModeStream:
 		s.handleStreamInvoke(ctx, stream, req, payload)
 	default:

@@ -68,6 +68,8 @@ type Runtime struct {
 	activeAlarmsLock sync.RWMutex
 	activeAlarms     map[string]struct{}
 	retryingAlarms   map[string]struct{}
+	// activeAlarmActors counts the in-flight executions per actor, also guarded by activeAlarmsLock, so removing an actor's placement can wait for them to be finalized
+	activeAlarmActors map[string]*actorAlarmExecutions
 	// alarmsDraining is set during shutdown to stop new executions from starting, also guarded by activeAlarmsLock
 	alarmsDraining bool
 	// alarmWg counts in-flight alarm executions so shutdown can wait for them to finish
@@ -173,6 +175,7 @@ func NewRuntime(provider components.ActorProvider, opts ...RuntimeOption) (*Runt
 		shutdownGracePeriod:     options.shutdownGracePeriod,
 		activeAlarms:            make(map[string]struct{}),
 		retryingAlarms:          make(map[string]struct{}),
+		activeAlarmActors:       make(map[string]*actorAlarmExecutions),
 		metrics:                 metrics,
 		advertiseAddress:        advertiseAddress,
 		peers:                   newRuntimePeerClient(cas, serverCert, options.logger),

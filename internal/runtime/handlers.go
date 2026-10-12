@@ -558,6 +558,11 @@ func (rt *Runtime) handleRemoveActor(parentCtx context.Context, _ *hostConn, req
 
 	aRef := ref.NewActorRef(payload.ActorType, payload.ActorID)
 
+	// Let any occurrence this actor has just run be finalized before its placement goes away
+	// An actor that halts itself from its own handler sends this removal as soon as its turn ends, which can reach us before we have recorded the occurrence
+	// Removing the placement drops the leases of the actor's alarms, so the occurrence would otherwise be left behind and delivered a second time
+	rt.waitActorAlarmExecutions(parentCtx, aRef, rt.providerRequestTimeout)
+
 	// Drop any cached placement so callers are no longer routed to the deactivated actor
 	rt.deletePlacement(aRef.String())
 

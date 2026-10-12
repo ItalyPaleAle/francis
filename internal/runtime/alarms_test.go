@@ -10,6 +10,7 @@ import (
 	"github.com/italypaleale/go-kit/eventqueue"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	clocktesting "k8s.io/utils/clock/testing"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/components/standalone"
@@ -437,6 +438,102 @@ func TestDrainActiveAlarmsTimesOut(t *testing.T) {
 	elapsed := time.Since(start)
 	assert.GreaterOrEqual(t, elapsed, 150*time.Millisecond)
 	assert.Less(t, elapsed, 2*time.Second)
+}
+
+// TestRemoveActorWaitsForInFlightOccurrence verifies that removing an actor which halted itself from its own handler is held until the runtime has finalized the occurrence the actor just ran
+// Removing the placement drops the leases of the actor's alarms, so a removal that overtook the finalization would leave the occurrence behind to be delivered a second time
+func TestRemoveActorWaitsForInFlightOccurrence(t *testing.T) {
+	rt, prov := newTestRuntime(t)
+	clk := clocktesting.NewFakeClock(time.Now())
+	rt.clock = clk
+	c := connectTestHost(t, rt, prov, "10.1.0.40:1", protocol.ActorHostType{ActorType: "T"})
+
+	aref := ref.NewAlarmRef("T", "a1", "wake")
+	lease := leaseTestAlarm(t, prov, c.hostID, aref, ref.AlarmProperties{DueTime: time.Now().Add(-time.Second)})
+
+	removeReq, err := protocol.NewRequest(protocol.KindRemoveActor, protocol.RemoveActorRequest{ActorType: "T", ActorID: "a1"})
+	require.NoError(t, err)
+
+	// The host's removal reaches the runtime before the host's reply does, which is the order an actor that halts itself at the end of its handler produces
+	// The reply is held back until the removal is parked on the runtime's clock, so the removal cannot win the race by luck
+	removed := make(chan *protocol.Envelope, 1)
+	rt.sendToHost = func(_ context.Context, _ *hostConn, env *protocol.Envelope) (*protocol.Envelope, error) {
+		go func() {
+			removed <- rt.dispatch(t.Context(), c, removeReq)
+		}()
+		assert.Eventually(t, clk.HasWaiters, 5*time.Second, 5*time.Millisecond, "the removal should wait for the in-flight occurrence")
+		return env.ReplyWith(protocol.KindExecuteAlarmResponse, protocol.ExecuteAlarmResponse{})
+	}
+
+	// Run the occurrence, which is already due
+	err = rt.enqueueAlarms(lease)
+	require.NoError(t, err)
+
+	var resp *protocol.Envelope
+	select {
+	case resp = <-removed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the removal did not complete after the occurrence was finalized")
+	}
+	assert.Equal(t, protocol.KindRemoveActorResponse, resp.Kind)
+
+	// Wait for the execution to end too, so a removal that did not wait is reported here rather than after the test returns
+	rt.alarmWg.Wait()
+
+	// The occurrence was finalized while the runtime still held its lease, so nothing is left to be delivered again
+	_, err = prov.GetAlarm(t.Context(), aref)
+	require.ErrorIs(t, err, components.ErrNoAlarm)
+}
+
+// TestRemoveActorStopsWaitingForStuckOccurrence verifies that a removal does not wait forever on an occurrence that never finishes, since leaving the placement behind would be worse than a repeated delivery
+func TestRemoveActorStopsWaitingForStuckOccurrence(t *testing.T) {
+	rt, prov := newTestRuntime(t)
+	clk := clocktesting.NewFakeClock(time.Now())
+	rt.clock = clk
+	c := connectTestHost(t, rt, prov, "10.1.0.41:1", protocol.ActorHostType{ActorType: "T"})
+
+	aref := ref.NewAlarmRef("T", "a1", "wake")
+	lease := leaseTestAlarm(t, prov, c.hostID, aref, ref.AlarmProperties{DueTime: time.Now().Add(-time.Second)})
+
+	// The host never replies until the end of the test
+	started := make(chan struct{})
+	release := make(chan struct{})
+	rt.sendToHost = func(_ context.Context, _ *hostConn, env *protocol.Envelope) (*protocol.Envelope, error) {
+		close(started)
+		<-release
+		return env.ReplyWith(protocol.KindExecuteAlarmResponse, protocol.ExecuteAlarmResponse{})
+	}
+	t.Cleanup(func() {
+		close(release)
+		rt.alarmWg.Wait()
+	})
+
+	err := rt.enqueueAlarms(lease)
+	require.NoError(t, err)
+	<-started
+
+	removeReq, err := protocol.NewRequest(protocol.KindRemoveActor, protocol.RemoveActorRequest{ActorType: "T", ActorID: "a1"})
+	require.NoError(t, err)
+	removed := make(chan *protocol.Envelope, 1)
+	go func() {
+		removed <- rt.dispatch(t.Context(), c, removeReq)
+	}()
+
+	// Once the removal is parked behind the stuck occurrence, letting its timeout elapse releases it
+	require.Eventually(t, clk.HasWaiters, 5*time.Second, 5*time.Millisecond, "the removal should wait for the in-flight occurrence")
+	clk.Step(rt.providerRequestTimeout)
+
+	var resp *protocol.Envelope
+	select {
+	case resp = <-removed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the removal did not proceed after its wait timed out")
+	}
+	assert.Equal(t, protocol.KindRemoveActorResponse, resp.Kind)
+
+	// The placement is gone even though the occurrence is still running
+	_, err = prov.LookupActor(t.Context(), ref.NewActorRef("T", "a1"), components.LookupActorOpts{ActiveOnly: true})
+	require.ErrorIs(t, err, components.ErrNoActor)
 }
 
 func TestDrainActiveAlarmsStopsNewExecutions(t *testing.T) {

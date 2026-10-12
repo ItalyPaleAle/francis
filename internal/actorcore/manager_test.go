@@ -1214,10 +1214,8 @@ func TestIdleActorHandling(t *testing.T) {
 		// Verify the actor is NOT marked as halted
 		assert.False(t, activeAct.halted.Load(), "Busy actor should not be marked as halted")
 
-		// Unlock the actor now so it can be processed
-		activeAct.Unlock()
-
-		// Set up expectations for successful deactivation now
+		// Set up expectations for successful deactivation before unlocking
+		// The last step of the poll above can leave an idle callback in flight, which deactivates the actor as soon as it is unlocked
 		instance.
 			On("Deactivate", mock.MatchedBy(testutil.MatchContextInterface)).
 			Return(nil).
@@ -1226,6 +1224,9 @@ func TestIdleActorHandling(t *testing.T) {
 			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef).
 			Return(nil).
 			Once()
+
+		// Unlock the actor now so it can be processed
+		activeAct.Unlock()
 
 		// Advance time past the re-enqueue interval and wait for the actor to be processed and removed
 		// The busy re-enqueue runs in the processor goroutine, so we step the clock inside the poll to avoid racing a single step ahead of the re-enqueue registering its timer
