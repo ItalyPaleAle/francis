@@ -216,7 +216,7 @@ spec:
     - metadata:
         name: data
         labels:
-          {{- include "francis.labels" . | nindent 10 }}
+          {{- include "francis.selectorLabels" . | nindent 10 }}
         {{- if or $persistence.annotations .Values.commonAnnotations }}
         annotations:
           {{- with .Values.commonAnnotations }}
