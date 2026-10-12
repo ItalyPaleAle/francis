@@ -26,7 +26,7 @@ jobs:
 
   build:
     name: Build and release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
 
     steps:
 
@@ -40,14 +40,14 @@ jobs:
           cache: false
 
       - name: Set up Node.js and pnpm
-        uses: pnpm/setup@fbda4c85fc2e1e08721cd8763afea8f48d60f024 # v3.0.0
+        uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4 # v3.1.1
         with:
           package-json-file: 'dashboard/package.json'
           # Do not cache in release workflows
           cache: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # 4.2.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # 4.4.1
         with:
           # Do not cache in release workflows
           cache-binary: false
@@ -187,7 +187,7 @@ jobs:
           cat checksums.txt
 
       - name: Build and push Container images
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # 7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # 7.4.0
         id: docker-build-push
         with:
           tags: ${{ steps.meta.outputs.tags }}
@@ -200,13 +200,13 @@ jobs:
       # A single attestation covering every file attached to the release: the archives plus checksums.txt
       - name: Attestation for release archives
         id: attest-archives
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # 4.2.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # 4.2.2
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           subject-path: '.out/*'
 
       - name: Publish binaries as Actions Artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # 7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: artifacts
           path: .out
@@ -214,7 +214,7 @@ jobs:
           compression-level: 0
 
       - name: Container image attestation
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # 4.2.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # 4.2.2
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           subject-name: 'ghcr.io/${{ env.REPO_OWNER }}/francis'
@@ -223,7 +223,7 @@ jobs:
 
   helm-chart:
     name: Publish Helm chart
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
 
     # The chart pins the container image by its appVersion, so it is only published once that image exists
     needs: build
@@ -334,7 +334,7 @@ jobs:
           echo "CHART_DIGEST: '$CHART_DIGEST'"
 
       - name: Helm chart attestation
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # 4.2.1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # 4.2.2
         with:
           subject-name: 'ghcr.io/${{ env.REPO_OWNER }}/charts/francis'
           subject-digest: ${{ steps.helm-push.outputs.digest }}
@@ -342,7 +342,7 @@ jobs:
 
   release:
     name: Publish release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - build
       - helm-chart

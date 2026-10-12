@@ -101,7 +101,7 @@ jobs:
           go-version-file: "go.mod"
 
       - name: "Set up Node.js and pnpm"
-        uses: pnpm/setup@fbda4c85fc2e1e08721cd8763afea8f48d60f024 # v3.0.0
+        uses: pnpm/setup@a0881977cd8ea73b1ed212236c99ca10dcc80cf4 # v3.1.1
         with:
           package-json-file: "dashboard/package.json"
           cache: true
@@ -132,7 +132,7 @@ jobs:
 
       - name: "Upload the Playwright results"
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
         with:
           name: "dashboard-playwright"
           path: |
