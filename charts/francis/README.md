@@ -392,9 +392,11 @@ Workload certificates are short-lived, so members re-issue under the new primary
 
 ### Migrating from SQLite to PostgreSQL
 
-Back up the SQLite store, restore it into PostgreSQL, and then upgrade the release:
+Back up the SQLite store and restore it into PostgreSQL. With PostgreSQL the StatefulSet has no volume claim template, which is a change Kubernetes refuses to apply, so [delete the StatefulSet](#changing-the-volume-claim-template) without its pods before upgrading the release:
 
 ```sh
+kubectl delete statefulset francis -n francis --cascade=orphan
+
 helm upgrade francis <chart> -n francis --reuse-values \
   --set database.type=postgres \
   --set-string 'database.postgres.connectionString=postgres://…' \
