@@ -8,6 +8,8 @@ export const RUNTIME_ADDRESS = '127.0.0.1:17400'
 export const EMBEDDED_URL = 'http://127.0.0.1:17401'
 export const STANDALONE_PORT = 17402
 export const STANDALONE_URL = `http://127.0.0.1:${STANDALONE_PORT}`
+export const HOSTED_PORT = 17403
+export const HOSTED_URL = `http://127.0.0.1:${HOSTED_PORT}`
 export const CONTROL_URL = 'http://127.0.0.1:17499'
 export const SEED_HOST_ADDRESS = '127.0.0.1:17571'
 
@@ -21,3 +23,6 @@ export const HOST_BOOTSTRAP_PSK = 'e2e-host-bootstrap-psk-0123456789abcdef'
 export const BIN_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '.bin', 'e2e')
 export const RUNTIME_BIN = resolve(BIN_DIR, 'francis')
 export const FIXTURE_BIN = resolve(BIN_DIR, 'fixture-host')
+
+// The dashboard's directory, where "pnpm run e2e:build" also leaves the hosted build in dist-hosted
+export const DASHBOARD_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..')

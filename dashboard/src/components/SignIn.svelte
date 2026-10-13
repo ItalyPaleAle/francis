@@ -39,7 +39,7 @@ async function submit(event: SubmitEvent) {
 }
 </script>
 
-<main class="min-h-dvh px-4 pt-[12vh] pb-16 sm:px-8 lg:pl-[16vw]">
+<main class="flex-1 px-4 pt-[12vh] pb-16 sm:px-8 lg:pl-[16vw]">
     <div class="w-full max-w-sm">
         <Wordmark />
 

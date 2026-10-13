@@ -4,6 +4,7 @@ node_modules/
 # Compiled files, except the placeholder that lets the Go package compile before the dashboard is built
 dist/*
 !dist/.gitkeep
+dist-hosted/
 
 # Playwright output
 playwright-report/

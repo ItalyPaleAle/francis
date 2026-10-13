@@ -8,9 +8,12 @@ import { createInterface } from 'node:readline'
 import {
     BIN_DIR,
     CONTROL_URL,
+    DASHBOARD_DIR,
     EMBEDDED_URL,
     FIXTURE_BIN,
     HOST_BOOTSTRAP_PSK,
+    HOSTED_PORT,
+    HOSTED_URL,
     MANAGEMENT_TOKEN,
     READ_ONLY_TOKEN,
     RUNTIME_ADDRESS,
@@ -24,7 +27,8 @@ import {
 // Starts the cluster the Playwright tests run against, and keeps it running until Playwright stops this process
 // Playwright waits for the fixture host's /ready endpoint, which answers once the seeded data has settled
 
-for (const bin of [RUNTIME_BIN, FIXTURE_BIN]) {
+const viteBin = join(DASHBOARD_DIR, 'node_modules', 'vite', 'bin', 'vite.js')
+for (const bin of [RUNTIME_BIN, FIXTURE_BIN, join(DASHBOARD_DIR, 'dist-hosted', 'index.html')]) {
     if (!existsSync(bin)) {
         throw new Error(`Missing ${bin}. Run "pnpm run e2e:build" first.`)
     }
@@ -53,8 +57,8 @@ const configData = {
         bind: new URL(EMBEDDED_URL).host,
         readOnlyTokens: [READ_ONLY_TOKEN],
         managementTokens: [MANAGEMENT_TOKEN],
-        // Only the standalone dashboard's 127.0.0.1 origin is allowed so its localhost origin tests a refused one
-        allowedOrigins: [STANDALONE_URL],
+        // Only the 127.0.0.1 origins of the standalone and hosted dashboards are allowed so the standalone dashboard's localhost origin tests a refused one
+        allowedOrigins: [STANDALONE_URL, HOSTED_URL],
     },
     log: {
         level: 'warn',
@@ -133,6 +137,21 @@ try {
     // The standalone dashboard needs nothing else
     start('dashboard', [RUNTIME_BIN, 'dashboard', '-bind', '127.0.0.1', '-port', String(STANDALONE_PORT)])
 
+    // The hosted dashboard is static files, which Vite's preview server serves with the headers from vercel.json
+    start('hosted', [
+        process.execPath,
+        viteBin,
+        'preview',
+        DASHBOARD_DIR,
+        '--mode',
+        'hosted',
+        '--host',
+        '127.0.0.1',
+        '--port',
+        String(HOSTED_PORT),
+        '--strictPort',
+    ])
+
     // The runtime comes first, since the host connects to it
     start('runtime', [RUNTIME_BIN])
     await waitForHTTP(`${EMBEDDED_URL}/healthz`, 60_000)
@@ -151,6 +170,7 @@ try {
     ])
 
     await waitForHTTP(`${STANDALONE_URL}/`, 30_000)
+    await waitForHTTP(`${HOSTED_URL}/`, 30_000)
 } catch (err) {
     process.stderr.write(`Failed to start the E2E cluster: ${err instanceof Error ? err.message : err}\n`)
     stop(1)

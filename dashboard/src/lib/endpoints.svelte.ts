@@ -1,7 +1,11 @@
+// isHosted is true in the build deployed at my.gofrancis.dev, made with "vite build --mode hosted"
+export const isHosted = import.meta.env.MODE === 'hosted'
+
 // The server rewrites the page's mode tag: "embedded" when it also serves the management API, "standalone" when the dashboard runs on its own
 // The dev server runs in standalone mode with "vite --mode standalone"
+// No runtime serves the hosted build, so nothing rewrites its tag, and it's always standalone
 function readMode(): 'embedded' | 'standalone' {
-    if (import.meta.env.MODE === 'standalone') {
+    if (import.meta.env.MODE === 'standalone' || isHosted) {
         return 'standalone'
     }
 

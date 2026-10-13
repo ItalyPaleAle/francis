@@ -5,9 +5,12 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
+    "build:hosted": "vite build --mode hosted",
     "dev": "vite",
     "dev:standalone": "vite --mode standalone",
+    "dev:hosted": "vite --mode hosted",
     "preview": "vite preview",
+    "preview:hosted": "vite preview --mode hosted",
     "format": "biome format --write .",
     "lint": "biome lint . && svelte-check",
     "check": "biome check --write .",
@@ -15,7 +18,7 @@
     "svelte-check": "svelte-check",
     "test": "vitest run",
     "e2e": "pnpm run e2e:build && playwright test",
-    "e2e:build": "vite build && go build -o ../.bin/e2e/francis ../cmd/runtime && go build -o ../.bin/e2e/fixture-host ./e2e/fixture",
+    "e2e:build": "vite build && vite build --mode hosted && go build -o ../.bin/e2e/francis ../cmd/runtime && go build -o ../.bin/e2e/fixture-host ./e2e/fixture",
     "e2e:install": "node ./e2e/install-browsers.mjs"
   },
   "packageManager": "pnpm@12.6.0",
@@ -42,6 +45,7 @@
     "svelte-check": "4.7.6",
     "typescript": "6.0.3",
     "vite": "8.3.1",
+    "vite-plugin-pwa": "2.0.0",
     "vite-plugin-sri-gen": "1.7.4",
     "vitest": "5.0.3"
   }

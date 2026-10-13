@@ -38,6 +38,21 @@ To work on the standalone mode, where the dashboard asks for the endpoints to co
 
 The runtime serves the same build in both modes: at `/` on the management listener, and on its own with `francis dashboard`.
 
+## Hosted dashboard
+
+The hosted dashboard at [my.gofrancis.dev](https://my.gofrancis.dev) is the standalone dashboard, built as a PWA and deployed on Vercel. The browser connects to the runtimes directly, so each runtime must list `https://my.gofrancis.dev` in its `management.allowedOrigins` setting.
+
+```sh
+# Build into dist-hosted/, which the runtime never embeds
+pnpm run build:hosted
+
+# Serve that build with the headers it gets on Vercel
+pnpm run preview:hosted
+
+# Or run the dev server in hosted mode
+pnpm run dev:hosted
+```
+
 ## Checks and builds
 
 From the root of the repository:
@@ -58,12 +73,13 @@ The tests in `e2e/` drive the dashboard in a browser, against a real cluster tha
 - A runtime with the management API, serving the embedded dashboard on `127.0.0.1:17401`.
 - The fixture host in `e2e/fixture`, which seeds actors, alarms, jobs, and workflow instances in fixed states, and serves a control API on `127.0.0.1:17499` that tests use to create the actors and instances they change.
 - `francis dashboard`, serving the standalone dashboard on `127.0.0.1:17402`.
+- Vite's preview server, serving the hosted dashboard from `dist-hosted/` on `127.0.0.1:17403`.
 
 ```sh
 # Once, to download the browsers
 pnpm run e2e:install
 
-# Build the dashboard, the runtime, and the fixture host, then run the tests
+# Build both dashboards, the runtime, and the fixture host, then run the tests
 pnpm run e2e
 ```
 
