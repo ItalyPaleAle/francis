@@ -8,6 +8,7 @@ import { NotFound, routes, type Section } from '$lib/routes'
 import { session } from '$lib/session.svelte'
 import ErrorPanel from './ErrorPanel.svelte'
 import Icon from './Icon.svelte'
+import PoweredBy from './PoweredBy.svelte'
 import Toasts from './Toasts.svelte'
 import Wordmark from './Wordmark.svelte'
 
@@ -77,7 +78,7 @@ function signOut() {
     </div>
 {/if}
 
-<div class="min-h-dvh lg:grid lg:grid-cols-[15rem_minmax(0,1fr)]">
+<div class="flex min-h-dvh flex-col lg:grid lg:grid-cols-[15rem_minmax(0,1fr)]">
     <aside
         class="border-b border-gray-200 bg-gray-0 lg:sticky lg:top-0 lg:flex lg:h-dvh lg:flex-col lg:border-r lg:border-b-0 dark:border-gray-850 dark:bg-gray-950">
         <div class="flex h-14 items-center justify-between px-4 lg:h-16 lg:px-5">
@@ -140,25 +141,33 @@ function signOut() {
         </div>
     </aside>
 
-    <main class="min-w-0 px-4 pt-6 pb-16 sm:px-6 lg:px-10 lg:pt-8">
-        <div class="mx-auto max-w-360">
-            <!-- Each page mounts fresh, inside its own boundary, so one page's failure never takes the shell down -->
-            {#key route.path}
-                <svelte:boundary>
-                    {#if match}
-                        {@const Page = match.value.component}
-                        <Page params={match.params} />
-                    {:else}
-                        <NotFound />
-                    {/if}
+    <div class="flex min-w-0 flex-1 flex-col">
+        <main class="min-w-0 flex-1 px-4 pt-6 pb-16 sm:px-6 lg:px-10 lg:pt-8">
+            <div class="mx-auto max-w-360">
+                <!-- Each page mounts fresh, inside its own boundary, so one page's failure never takes the shell down -->
+                {#key route.path}
+                    <svelte:boundary>
+                        {#if match}
+                            {@const Page = match.value.component}
+                            <Page params={match.params} />
+                        {:else}
+                            <NotFound />
+                        {/if}
 
-                    {#snippet failed(error, reset)}
-                        <ErrorPanel {error} retry={reset} />
-                    {/snippet}
-                </svelte:boundary>
-            {/key}
-        </div>
-    </main>
+                        {#snippet failed(error, reset)}
+                            <ErrorPanel {error} retry={reset} />
+                        {/snippet}
+                    </svelte:boundary>
+                {/key}
+            </div>
+        </main>
+
+        <footer class="px-4 pb-8 sm:px-6 lg:px-10">
+            <div class="mx-auto max-w-360">
+                <PoweredBy />
+            </div>
+        </footer>
+    </div>
 </div>
 
 <Toasts />

@@ -7,6 +7,11 @@ export function capitalize(s: string): string {
     return s.charAt(0).toUpperCase() + s.slice(1)
 }
 
+// formatVersion prefixes a release version such as "1.2.3" with a "v", and leaves a build name such as "canary" or "edge" as it is
+export function formatVersion(version: string): string {
+    return /^\d/.test(version) ? `v${version}` : version
+}
+
 export function formatCount(n: number): string {
     return numberFormat.format(n)
 }

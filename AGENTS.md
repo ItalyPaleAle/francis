@@ -61,7 +61,7 @@ If you change any of them, run `make gen-openapi` before finishing the task, and
 The management dashboard in `dashboard/` is a Svelte 5 SPA built with Vite and Tailwind 4, and managed with pnpm.
 
 The runtime embeds its build output from `dashboard/dist` through the `dashboard` Go package, and `internal/dashboardserver` serves it in one of two modes: next to the management API at `/` ("embedded"), or on its own with the `francis dashboard` command ("standalone"), where users add the endpoints to connect to.
-The server tells the page its mode by rewriting the `francis-dashboard-mode` meta tag in `dashboard/index.html`, so keep that tag.
+The server tells the page its mode and the version of Francis serving it by rewriting the `francis-dashboard-mode` and `francis-version` meta tags in `dashboard/index.html`, so keep those tags.
 `dashboard/dist/.gitkeep` keeps the directory in the source tree so Go code compiles before the dashboard is built; never delete it.
 
 The TypeScript types in `dashboard/src/lib/types.ts` and the client in `dashboard/src/lib/api.ts` mirror the management API by hand.

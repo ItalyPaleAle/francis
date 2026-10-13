@@ -53,6 +53,8 @@ pnpm run preview:hosted
 pnpm run dev:hosted
 ```
 
+The footer shows the version of Francis behind the dashboard. The runtime fills it in with its own version, while the hosted build takes it from the `FRANCIS_VERSION` environment variable when it's built, and shows `canary` without it, like a runtime built without a version.
+
 ## Checks and builds
 
 From the root of the repository:

@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"html"
 	"io/fs"
 	"mime"
 	"net/http"
@@ -39,6 +40,9 @@ const indexFile = "index.html"
 // modeMeta finds the tag in the page that tells the dashboard its mode
 // The page's Content-Security-Policy forbids inline scripts, so the mode travels in a meta tag that the server rewrites
 var modeMeta = regexp.MustCompile(`<meta name="francis-dashboard-mode" content="[a-z]*"`)
+
+// versionMeta finds the tag in the page that tells the dashboard the version of Francis serving it, which its footer shows
+var versionMeta = regexp.MustCompile(`<meta name="francis-version" content="[^"]*"`)
 
 // isCompressible reports whether a file with the extension is text, which is worth compressing
 func isCompressible(ext string) bool {
@@ -76,6 +80,8 @@ type Options struct {
 	Files fs.FS
 	// Mode decides where the dashboard sends its API requests
 	Mode Mode
+	// Version is the version of Francis serving the dashboard
+	Version string
 }
 
 // Dashboard serves the compiled dashboard from memory
@@ -123,13 +129,15 @@ func New(opts Options) (*Dashboard, error) {
 			return fmt.Errorf("failed to read dashboard file '%s': %w", name, err)
 		}
 
-		// The page tells the dashboard its mode
+		// The page tells the dashboard its mode, and the version of Francis serving it
+		// The version is only shown, so a page without its tag still works
 		var csp string
 		if name == indexFile {
 			if !modeMeta.Match(data) {
 				return errors.New("the dashboard page has no francis-dashboard-mode meta tag")
 			}
 			data = modeMeta.ReplaceAllLiteral(data, []byte(`<meta name="francis-dashboard-mode" content="`+string(opts.Mode)+`"`))
+			data = versionMeta.ReplaceAllLiteral(data, []byte(`<meta name="francis-version" content="`+html.EscapeString(opts.Version)+`"`))
 			csp = pageCSP(opts.Mode)
 		}
 

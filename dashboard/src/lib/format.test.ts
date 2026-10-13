@@ -7,6 +7,7 @@ import {
     formatRelative,
     formatRetention,
     formatUTC,
+    formatVersion,
     parseTime,
     shortHash,
     shortId,
@@ -112,5 +113,19 @@ describe('shortId', () => {
     it('leaves other values alone', () => {
         expect(shortId('user-102')).toBe('user-102')
         expect(shortId('01a120e3-619e-7374-b057-1785f25c4e2c-extra')).toBe('01a120e3-619e-7374-b057-1785f25c4e2c-extra')
+    })
+})
+
+describe('formatVersion', () => {
+    it('prefixes release versions', () => {
+        expect(formatVersion('1.2.3')).toBe('v1.2.3')
+        expect(formatVersion('1.2.3-rc.1')).toBe('v1.2.3-rc.1')
+    })
+
+    it('leaves build names and empty versions as they are', () => {
+        expect(formatVersion('canary')).toBe('canary')
+        expect(formatVersion('edge')).toBe('edge')
+        expect(formatVersion('v1.2.3')).toBe('v1.2.3')
+        expect(formatVersion('')).toBe('')
     })
 })

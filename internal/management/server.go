@@ -9,10 +9,12 @@ import (
 	"net/http"
 	"time"
 
+	"k8s.io/utils/clock"
+
 	"github.com/italypaleale/francis/components"
+	"github.com/italypaleale/francis/internal/buildinfo"
 	"github.com/italypaleale/francis/internal/dashboardserver"
 	"github.com/italypaleale/francis/internal/netutils"
-	"k8s.io/utils/clock"
 )
 
 const (
@@ -89,8 +91,9 @@ func NewServer(opts ServerOptions) (*Server, error) {
 	// Load the dashboard's files
 	if opts.Config.Dashboard != nil {
 		s.dashboard, err = dashboardserver.New(dashboardserver.Options{
-			Files: opts.Config.Dashboard,
-			Mode:  dashboardserver.ModeEmbedded,
+			Files:   opts.Config.Dashboard,
+			Mode:    dashboardserver.ModeEmbedded,
+			Version: buildinfo.AppVersion,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to load the management dashboard: %w", err)

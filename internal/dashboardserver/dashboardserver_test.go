@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	testPage   = `<!doctype html><html><head><meta name="francis-dashboard-mode" content="embedded" /><script type="module" src="/assets/index.abc123.js"></script></head><body></body></html>`
+	testPage   = `<!doctype html><html><head><meta name="francis-dashboard-mode" content="embedded" /><meta name="francis-version" content="" /><script type="module" src="/assets/index.abc123.js"></script></head><body></body></html>`
 	testScript = `console.log("the dashboard bundle, long enough to be worth compressing, the dashboard bundle, the dashboard bundle")`
 )
 
@@ -68,6 +68,31 @@ func TestNew(t *testing.T) {
 	t.Run("requires the mode tag in the page", func(t *testing.T) {
 		_, err := New(Options{Files: fstest.MapFS{"index.html": {Data: []byte("<html></html>")}}, Mode: ModeStandalone})
 		require.ErrorContains(t, err, "francis-dashboard-mode")
+	})
+}
+
+func TestVersion(t *testing.T) {
+	t.Run("the page names the version", func(t *testing.T) {
+		d, err := New(Options{Files: testFiles(), Mode: ModeEmbedded, Version: "1.2.3"})
+		require.NoError(t, err)
+
+		w := get(d, http.MethodGet, "/")
+		assert.Contains(t, w.Body.String(), `<meta name="francis-version" content="1.2.3"`)
+	})
+
+	t.Run("the version is escaped", func(t *testing.T) {
+		d, err := New(Options{Files: testFiles(), Mode: ModeEmbedded, Version: `"><script>`})
+		require.NoError(t, err)
+
+		w := get(d, http.MethodGet, "/")
+		assert.Contains(t, w.Body.String(), `<meta name="francis-version" content="&#34;&gt;&lt;script&gt;"`)
+		assert.NotContains(t, w.Body.String(), `"><script>`)
+	})
+
+	t.Run("a page without the version tag still loads", func(t *testing.T) {
+		page := `<html><head><meta name="francis-dashboard-mode" content="embedded" /></head></html>`
+		_, err := New(Options{Files: fstest.MapFS{"index.html": {Data: []byte(page)}}, Mode: ModeEmbedded, Version: "1.2.3"})
+		require.NoError(t, err)
 	})
 }
 

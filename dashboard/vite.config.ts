@@ -27,6 +27,20 @@ function cleanOutDir(): Plugin {
     }
 }
 
+// hostedVersion fills in the page's version tag, since no runtime serves the hosted build to rewrite it
+function hostedVersion(version: string): Plugin {
+    const escaped = version.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`)
+    return {
+        name: 'hosted-version',
+        transformIndexHtml(html) {
+            return html.replace(
+                /<meta name="francis-version" content="[^"]*"/,
+                `<meta name="francis-version" content="${escaped}"`
+            )
+        },
+    }
+}
+
 // vercelHeaders returns the headers that vercel.json sets on every path of the hosted dashboard
 // The preview server sends them too, so the Playwright tests run the hosted build under the Content-Security-Policy it's deployed with
 function vercelHeaders(): Record<string, string> {
@@ -46,6 +60,8 @@ export default defineConfig(({ mode }) => {
     const additionalPlugins: PluginOption[] = []
 
     if (isHosted) {
+        // The hosted build names the version it's built as, which matches the runtime's own default when it isn't set
+        additionalPlugins.push(hostedVersion(process.env.FRANCIS_VERSION || 'canary'))
         additionalPlugins.push(
             VitePWA({
                 registerType: 'autoUpdate',

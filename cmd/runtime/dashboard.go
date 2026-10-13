@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/italypaleale/francis/dashboard"
+	"github.com/italypaleale/francis/internal/buildinfo"
 	"github.com/italypaleale/francis/internal/dashboardserver"
 	"github.com/italypaleale/francis/internal/netutils"
 )
@@ -59,8 +60,9 @@ func runDashboard(ctx context.Context, args []string) int {
 // serveDashboard serves the dashboard in standalone mode on addr until the context is canceled
 func serveDashboard(ctx context.Context, files fs.FS, addr string) error {
 	handler, err := dashboardserver.New(dashboardserver.Options{
-		Files: files,
-		Mode:  dashboardserver.ModeStandalone,
+		Files:   files,
+		Mode:    dashboardserver.ModeStandalone,
+		Version: buildinfo.AppVersion,
 	})
 	if err != nil {
 		return err
