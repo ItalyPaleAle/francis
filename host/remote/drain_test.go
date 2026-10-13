@@ -390,6 +390,36 @@ func TestRuntimeClientAdministrativeDrain(t *testing.T) {
 		assert.Equal(t, int32(1), rt.registrations.Load())
 	})
 
+	t.Run("Run returns once the runtime was told the connection closed", func(t *testing.T) {
+		rt := startScriptedRuntime(t)
+		rc := newReconnectingClient(t, rt.addr, runtimeClientConfig{})
+
+		runErr := make(chan error, 1)
+		go func() {
+			runErr <- rc.Run(t.Context())
+		}()
+		session := waitSession(t, rt)
+
+		resp := rt.send(t, session, protocol.KindHostDrain, protocol.HostDrainRequest{Reason: "test"})
+		require.Equal(t, protocol.KindHostDrainResponse, resp.Kind)
+		err := waitRun(t, runErr)
+		require.ErrorIs(t, err, host.ErrAdministrativeDrain)
+
+		// A drained host's process usually exits as soon as Run returns, so the QUIC connection must already be closed by then, or the runtime would only see the host leave once the connection idles out
+		select {
+		case <-rc.dialedConn.Context().Done():
+		default:
+			t.Fatal("the QUIC connection was still open when Run returned")
+		}
+
+		// The runtime sees the session end right away
+		select {
+		case <-session.Context().Done():
+		case <-time.After(2 * time.Second):
+			t.Fatal("the runtime did not see the session end")
+		}
+	})
+
 	t.Run("the acknowledgement reaches a runtime that is slow to read it", func(t *testing.T) {
 		rt := startScriptedRuntime(t)
 		rc := newReconnectingClient(t, rt.addr, runtimeClientConfig{})

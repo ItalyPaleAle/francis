@@ -16,6 +16,8 @@ import (
 
 	"github.com/cenkalti/backoff/v5"
 	"github.com/italypaleale/go-kit/utils"
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/webtransport-go"
 	"go.opentelemetry.io/otel/trace"
 	"k8s.io/utils/clock"
@@ -102,6 +104,9 @@ type runtimeClient struct {
 	// transportDialed records that the transport has dialed at least once, which is what makes it safe to close
 	// The WebTransport dialer initializes its cancel function on its first dial, and its Close calls that function without checking, so closing one that never dialed dereferences a nil
 	transportDialed atomic.Bool
+	// dialedConn is the QUIC connection the transport dialed last, which dialQUIC records so the session's teardown can close it
+	// Only the goroutine running Run dials, so only it reads and writes the field
+	dialedConn *quic.Conn
 
 	mu        sync.RWMutex
 	session   *webtransport.Session
@@ -133,11 +138,13 @@ func newRuntimeClient(cfg runtimeClientConfig) *runtimeClient {
 	cfg.minBackoff = utils.PositiveOr(cfg.minBackoff, 500*time.Millisecond)
 	cfg.maxBackoff = utils.PositiveOr(cfg.maxBackoff, 10*time.Second)
 
-	return &runtimeClient{
+	rc := &runtimeClient{
 		cfg:       cfg,
 		transport: wt.NewDialer(cfg.tlsConfig),
 		ready:     make(chan struct{}),
 	}
+	rc.transport.DialAddr = rc.dialQUIC
+	return rc
 }
 
 // Ready returns a channel that is closed once the client has registered with a runtime for the first time
@@ -246,7 +253,7 @@ func (rc *runtimeClient) Run(ctx context.Context) error {
 func (rc *runtimeClient) connectAndServe(ctx context.Context, addr string) (bool, error) {
 	// Open the QUIC/WebTransport connection to this runtime address
 	dialCtx, cancel := context.WithTimeout(ctx, rc.cfg.requestTimeout)
-	session, err := rc.dial(dialCtx, addr)
+	session, conn, err := rc.dial(dialCtx, addr)
 	cancel()
 	if err != nil {
 		return false, fmt.Errorf("failed to dial runtime: %w", err)
@@ -255,6 +262,10 @@ func (rc *runtimeClient) connectAndServe(ctx context.Context, addr string) (bool
 	defer func() {
 		// Always tear the session down when we stop serving it
 		_ = session.CloseWithError(0, "")
+
+		// The transport closes the session's QUIC connection from a goroutine of its own, which a process that exits as soon as Run returns may never get to run
+		// The runtime would then only see the host leave once the connection idles out, so the connection is closed here, which returns once the CONNECTION_CLOSE is sent
+		_ = conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")
 	}()
 
 	// Perform the registration handshake, which (re)claims our host identity with the runtime
@@ -331,23 +342,35 @@ func (rc *runtimeClient) connectAndServe(ctx context.Context, addr string) (bool
 	return true, nil
 }
 
-// dial establishes a WebTransport session with the runtime at addr
-func (rc *runtimeClient) dial(ctx context.Context, addr string) (*webtransport.Session, error) {
+// dial establishes a WebTransport session with the runtime at addr, and returns it with the QUIC connection it runs on
+func (rc *runtimeClient) dial(ctx context.Context, addr string) (*webtransport.Session, *quic.Conn, error) {
 	url := "https://" + addr + protocol.RuntimeConnectPath
 
 	// Recorded before the call rather than after, since the dial initializes the transport before it can fail
 	rc.transportDialed.Store(true)
+	rc.dialedConn = nil
 	rsp, session, err := rc.transport.Dial(ctx, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if rsp.StatusCode < 200 || rsp.StatusCode >= 300 {
 		_ = session.CloseWithError(0, "")
-		return nil, fmt.Errorf("runtime returned unexpected status %d", rsp.StatusCode)
+		return nil, nil, fmt.Errorf("runtime returned unexpected status %d", rsp.StatusCode)
 	}
 
-	return session, nil
+	return session, rc.dialedConn, nil
+}
+
+// dialQUIC dials the QUIC connection of a new session for the transport, the same way the transport does by default, and records it in dialedConn
+func (rc *runtimeClient) dialQUIC(ctx context.Context, addr string, tlsConfig *tls.Config, quicConfig *quic.Config) (*quic.Conn, error) {
+	conn, err := quic.DialAddrEarly(ctx, addr, tlsConfig, quicConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	rc.dialedConn = conn
+	return conn, nil
 }
 
 // reconnectCertMargin is how much valid lifetime the workload certificate must have left to be used for an mTLS reconnect
