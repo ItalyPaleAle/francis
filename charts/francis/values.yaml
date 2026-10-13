@@ -179,6 +179,7 @@ management:
   # Bearer tokens that grant every scope, including actions such as draining a host or cancelling a workflow instance
   managementTokens: []
   # Browser origins allowed to call the API across origins, such as a dashboard served by "francis dashboard" (for example "http://localhost:7402")
+  # Add "https://my.gofrancis.dev" to allow the hosted dashboard
   # The dashboard the API serves itself needs no entry, and "*" allows any origin
   allowedOrigins: []
   tls:

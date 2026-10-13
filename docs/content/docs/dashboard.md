@@ -3,10 +3,11 @@ title: "Dashboard"
 weight: 31
 ---
 
-Francis has a web dashboard for the [management API](/docs/management-api), built into the runtime binary and container image. You can use it in two ways:
+Francis has a web dashboard for the [management API](/docs/management-api), built into the runtime binary and container image. You can use it in three ways:
 
 - [Next to the management API](#next-to-the-management-api), served by a runtime on the same listener as the API.
 - [Standalone](#standalone), served by the `francis dashboard` command, connecting to the endpoints you add.
+- [Hosted](#hosted), at [my.gofrancis.dev](https://my.gofrancis.dev), with nothing to run, connecting to the endpoints you add.
 
 ## Next to the management API
 
@@ -58,3 +59,21 @@ local.WithManagementAPI(local.ManagementOptions{
 Optionally use the wildcard `"*"` to allow any origin, although this is not recommended in production.
 
 When an endpoint doesn't allow the origin, adding it fails with a message that names the origin to add. Signing in to a saved endpoint that no longer allows it fails the same way.
+
+## Hosted
+
+The hosted dashboard at [my.gofrancis.dev](https://my.gofrancis.dev) is the [standalone dashboard](#standalone), without anything to install or run: open it, add your endpoints, and sign in to them.
+
+The hosted dashboard runs entirely in your browser and doesn't log or store any of your data. Your browser connects to the endpoints directly, and keeps the list of endpoints in its local storage. The service is free to use and offered on a best-effort basis.
+
+Because your browser connects to the endpoints directly, each endpoint must be reachable from it, and must allow the hosted dashboard's origin, `https://my.gofrancis.dev`:
+
+```yaml
+management:
+  allowedOrigins:
+    - "https://my.gofrancis.dev"
+```
+
+For the Helm chart and the local topology, see [Allowing the dashboard's origin](#allowing-the-dashboards-origin).
+
+The hosted dashboard is served over HTTPS, and browsers block an HTTPS page's requests to plain HTTP addresses, so each endpoint must serve the management API over HTTPS, with a certificate your browser trusts. Some browsers also ask for your permission before a public site connects to an address on your local network. To connect to endpoints without TLS, use the [standalone dashboard](#standalone).

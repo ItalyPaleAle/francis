@@ -4,7 +4,7 @@ import { EMBEDDED_URL, HOSTED_URL, MANAGEMENT_TOKEN, STANDALONE_URL } from './cl
 import { expect, heading, test } from './helpers'
 
 function hostedFooter(page: Page) {
-    return page.getByRole('contentinfo', { name: 'About the hosted dashboard' })
+    return page.getByRole('contentinfo', { name: 'About my.gofrancis.dev' })
 }
 
 test("the hosted dashboard says what it does with its users' data until they sign in", async ({ page }) => {

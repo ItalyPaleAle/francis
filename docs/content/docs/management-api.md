@@ -103,7 +103,7 @@ In addition, there are two public routes which don't require a token:
 
 Paths outside `/api/` and `/healthz` belong to the [dashboard](/docs/dashboard).
 
-Browsers can call the API from other origins only when `management.allowedOrigins` lists them, as the [standalone dashboard](/docs/dashboard#standalone) does. Third-party origins not in the allowlist fail with a CORS error.
+Browsers can call the API from other origins only when `management.allowedOrigins` lists them, as the [standalone](/docs/dashboard#standalone) and [hosted](/docs/dashboard#hosted) dashboards do. Third-party origins not in the allowlist fail with a CORS error.
 
 > Path segments must be percent-encoded. This matters for workflow child instance IDs, which contain `|`, and for actor IDs, which may contain any character other than `/`.
 

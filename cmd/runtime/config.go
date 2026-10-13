@@ -72,6 +72,7 @@ type managementConfig struct {
 	// TLS optionally serves the management API over HTTPS
 	TLS managementTLSConfig `yaml:"tls"`
 	// AllowedOrigins lists the browser origins that may call the API, such as a dashboard served by "francis dashboard"
+	// Add `https://my.gofrancis.dev` to allow the hosted dashboard service
 	AllowedOrigins []string `yaml:"allowedOrigins"`
 }
 

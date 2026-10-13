@@ -167,7 +167,7 @@
           "items": { "type": "string", "minLength": 32 }
         },
         "allowedOrigins": {
-          "description": "Browser origins allowed to call the API across origins, such as http://localhost:7402, or * for any origin.",
+          "description": "Browser origins allowed to call the API across origins, such as http://localhost:7402, https://my.gofrancis.dev for the hosted dashboard, or * for any origin.",
           "type": "array",
           "uniqueItems": true,
           "items": { "type": "string", "minLength": 1 }
