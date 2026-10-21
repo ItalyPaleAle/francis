@@ -13,7 +13,7 @@ require (
 	github.com/alphadose/haxmap v1.4.1
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/italypaleale/go-kit v1.2.5
-	github.com/italypaleale/go-sql-utils v0.3.11
+	github.com/italypaleale/go-sql-utils v0.3.12
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/jwx-go/jwkfetch/v4 v4.0.4

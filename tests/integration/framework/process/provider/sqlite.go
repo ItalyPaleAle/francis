@@ -24,6 +24,9 @@ import (
 // stallAcquireTimeout bounds how long Stall waits to take the connection it parks, so a scenario fails loudly rather than hanging if the pool never frees one up
 const stallAcquireTimeout = 30 * time.Second
 
+// migrateTimeout is the time limit for the initial schema migration, which can be long because no scenario measures it
+const migrateTimeout = 2 * time.Minute
+
 // sqliteBackend is a multi-host backend backed by a shared on-disk SQLite file
 //
 // A file is used rather than :memory:, which is per-connection and not shareable, so multiple hosts can open independent connections to the same database and coordinate through it
@@ -59,6 +62,28 @@ func (b *sqliteBackend) Run(t *testing.T) {
 	path := filepath.Join(b.dir, "it.db")
 	b.connStr = "file:" + path + "?_pragma=busy_timeout(15000)"
 	b.stalled = make(map[int]*sql.Conn)
+
+	// Run the schema migrations once, before any host or runtime starts
+	// On a fresh database the migrations are the slowest part of provider initialization, and on slow runners they can take longer than the short request timeouts the fault scenarios use
+	// With the schema in place, each host and runtime only reads the migration level when it initializes
+	b.migrate(t)
+}
+
+// migrate runs the provider's schema migrations on the shared database, using a temporary provider that it closes when done
+// The provider opens the database from the connection string instead of using providerOptions, because on a stallable backend providerOptions gives out a consumer's database handle
+func (b *sqliteBackend) migrate(t *testing.T) {
+	t.Helper()
+
+	p, err := sqlite.NewSQLiteProvider(slog.New(slog.DiscardHandler), b.sharedOptions(), providerConfig(b.opts))
+	require.NoError(t, err, "failed to create the SQLite provider that migrates the database")
+
+	// Close the provider even if the migrations fail, because Windows can't delete a database file that is still open
+	ctx, cancel := context.WithTimeout(t.Context(), migrateTimeout)
+	defer cancel()
+	err = p.Init(ctx)
+	closeErr := p.Close()
+	require.NoError(t, err, "failed to migrate the SQLite database")
+	require.NoError(t, closeErr, "failed to close the SQLite provider that migrated the database")
 }
 
 func (b *sqliteBackend) LocalHostOption(t *testing.T) local.HostOption {
@@ -86,18 +111,23 @@ func (b *sqliteBackend) providerOptions(t *testing.T) sqlite.SQLiteProviderOptio
 	t.Helper()
 	require.NotEmpty(t, b.connStr, "SQLite backend used before Run")
 
-	opts := sqlite.SQLiteProviderOptions{
-		ConnectionString: b.connStr,
-		Timeout:          b.opts.QueryTimeout,
-		// Disable background GC to keep test logs quiet and behavior deterministic
-		CleanupInterval: -1,
-	}
+	opts := b.sharedOptions()
 	if b.opts.Stallable {
 		opts.ConnectionString = ""
 		opts.DB = b.newHandle(t)
 	}
 
 	return opts
+}
+
+// sharedOptions returns the provider options that open the shared database from its connection string
+func (b *sqliteBackend) sharedOptions() sqlite.SQLiteProviderOptions {
+	return sqlite.SQLiteProviderOptions{
+		ConnectionString: b.connStr,
+		Timeout:          b.opts.QueryTimeout,
+		// Disable background GC to keep test logs quiet and behavior deterministic
+		CleanupInterval: -1,
+	}
 }
 
 // newHandle opens a database handle the backend owns, so a scenario can stall the consumer it belongs to by exhausting its pool
