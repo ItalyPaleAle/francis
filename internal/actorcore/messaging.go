@@ -215,7 +215,7 @@ func (m *Manager) invokeLocalObject(ctx context.Context, resolver PlacementResol
 	res, err := m.lockAndInvokeLocal(ctx, resolver, r, activeOnly, readOnly, invoke)
 	if err != nil {
 		// A halted, inactive, or elsewhere-owned actor means the actor may now be active on another host, so re-resolve and retry
-		// ErrActorHalted is included because the manager removes the actor from its map after halting, so a re-resolve activates a fresh instance
+		// ErrActorHalted is included because it is only returned once the halted activation has been torn down, so a re-resolve activates a fresh instance
 		retry := errors.Is(err, actor.ErrActorNotActive) ||
 			errors.Is(err, actor.ErrActorNotHosted) ||
 			errors.Is(err, actor.ErrActorHalted)
@@ -520,35 +520,72 @@ func (m *Manager) PeerInvokeStream(ctx context.Context, resolver PlacementResolv
 // lockAndInvokeLocal runs fn against a local actor, claiming the actor for this host first unless the invocation is active-only
 // readOnly selects the shared-lock LockAndPeek(Active) path instead of the exclusive-lock LockAndInvoke(Active) path
 func (m *Manager) lockAndInvokeLocal(ctx context.Context, resolver PlacementResolver, r ref.ActorRef, activeOnly bool, readOnly bool, fn func(ctx context.Context, act *ActiveActor) (any, error)) (any, error) {
-	// An active-only invocation is authoritative locally: only invoke if already active here, never activate or claim
-	if activeOnly {
-		if readOnly {
-			return m.LockAndPeekActive(ctx, r, fn)
+	// Authoritatively claim the actor for this host before activating it
+	// An active-only invocation is authoritative locally: it only invokes if already active here, so it never activates or claims
+	if !activeOnly {
+		err := m.claimLocal(ctx, resolver, r)
+		if err != nil {
+			return nil, err
 		}
-
-		return m.LockAndInvokeActive(ctx, r, fn)
 	}
 
-	// Authoritatively claim the actor for this host, then activate and invoke it
-	err := m.claimLocal(ctx, resolver, r)
-	if err != nil {
-		return nil, err
+	var (
+		res any
+		err error
+	)
+	switch {
+	case activeOnly && readOnly:
+		res, err = m.LockAndPeekActive(ctx, r, fn)
+	case activeOnly:
+		res, err = m.LockAndInvokeActive(ctx, r, fn)
+	case readOnly:
+		res, err = m.LockAndPeek(ctx, r, fn)
+	default:
+		res, err = m.LockAndInvoke(ctx, r, fn)
 	}
 
-	if readOnly {
-		return m.LockAndPeek(ctx, r, fn)
+	// The actor began halting after the claim, or while the call was in flight
+	// Hold the error until the halted activation has been torn down, so the caller's re-resolve sees the cleared placement rather than routing back to the same halted instance
+	if errors.Is(err, actor.ErrActorHalted) {
+		waitErr := m.waitForDeactivation(ctx, r)
+		if waitErr != nil {
+			return nil, waitErr
+		}
 	}
 
-	return m.LockAndInvoke(ctx, r, fn)
+	return res, err
 }
 
 // claimLocal authoritatively claims an actor for this host before it is activated
 // An actor already active here is, by definition, ours and needs no claim, which keeps warm invocations free of a placement lookup
 func (m *Manager) claimLocal(ctx context.Context, resolver PlacementResolver, r ref.ActorRef) error {
-	_, active := m.Actors.Get(r.String())
-	if active {
+	act, active := m.Actors.Get(r.String())
+	if active && act != nil && !act.halted.Load() {
 		return nil
 	}
 
+	// A halting activation still holds the placement until its teardown clears it, so wait for that before claiming a fresh one
+	err := m.waitForDeactivation(ctx, r)
+	if err != nil {
+		return err
+	}
+
 	return resolver.ConfirmLocal(ctx, r)
+}
+
+// waitForDeactivation blocks until the halted activation of an actor, if one is still registered on this host, has been fully torn down
+// A halted activation stays in the active actors map until its placement is cleared, so that a concurrent call cannot activate a replacement that the deactivation would then orphan
+// It returns immediately when the actor is not registered here, or when the registered activation is not halted
+func (m *Manager) waitForDeactivation(ctx context.Context, r ref.ActorRef) error {
+	act, ok := m.Actors.Get(r.String())
+	if !ok || act == nil || !act.halted.Load() {
+		return nil
+	}
+
+	select {
+	case <-act.deactivatedCh:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
