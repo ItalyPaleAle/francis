@@ -5,5 +5,13 @@
     "golang.org/x/*"
   ],
   "allow": [
+    {
+      "module": "modernc.org/sqlite",
+      "version": "v1.61.0"
+    },
+    {
+      "module": "github.com/lestrrat-go/jwx/v4",
+      "version": "v4.6.0"
+    }
   ]
 }
