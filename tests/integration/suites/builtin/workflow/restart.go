@@ -65,6 +65,10 @@ func (s *workflowRestart) Name() string {
 }
 
 func (s *workflowRestart) Setup(t *testing.T) []framework.Option {
+	// Reset the per-run state, since the suite registers a single instance that go test reuses when -count runs the scenario again
+	// A leftover count would make the step succeed on its first attempt, so the retry the scenario waits for would never be scheduled
+	s.ran.Store(0)
+	s.once = sync.Once{}
 	s.firstAttempt = make(chan struct{})
 
 	pipeline, err := workflow.New("e2e-restart",
