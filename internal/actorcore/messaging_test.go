@@ -700,6 +700,236 @@ func TestManagerInvokeHonorsRetryAfter(t *testing.T) {
 	}
 }
 
+// parkingActor parks every call on its first activation until the actor begins halting, then reports the halt the way the built-in signal actor does
+// Later activations answer immediately, so a test can tell that a retry reached a fresh instance
+type parkingActor struct {
+	first  bool
+	parked chan struct{}
+}
+
+func (a *parkingActor) Invoke(ctx context.Context, method string, _ actor.Envelope) (any, error) {
+	if !a.first {
+		return "fresh:" + method, nil
+	}
+
+	close(a.parked)
+	select {
+	case <-actor.HaltingFromContext(ctx):
+		return nil, actor.ErrActorHalted
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// blockRemoveActor makes the manager's placement removal block until release is closed, closing started when a deactivation reaches it
+// This holds a halted activation in the window between halting and leaving the active actors map, which is where the invocation race lives
+func blockRemoveActor(m *Manager) (started chan struct{}, release chan struct{}) {
+	started = make(chan struct{})
+	release = make(chan struct{})
+	m.removeActor = func(_ context.Context, _ ref.ActorRef) error {
+		close(started)
+		<-release
+		return nil
+	}
+	return started, release
+}
+
+type invokeResult struct {
+	env actor.Envelope
+	err error
+}
+
+// TestManagerInvokeHaltingActor guards invocations that race an actor's deactivation, such as a request arriving right as an idle actor times out
+// The halted activation stays registered until its placement is cleared, so a caller that retried straight away would land on it again and fail
+func TestManagerInvokeHaltingActor(t *testing.T) {
+	// Halts the actor in the background and returns once the halted activation is parked in the placement-removal window
+	startHalt := func(t *testing.T, m *Manager, aRef ref.ActorRef, drain bool, removeStarted chan struct{}) (*ActiveActor, chan error) {
+		t.Helper()
+
+		halted, ok := m.Actors.Get(aRef.String())
+		require.True(t, ok)
+
+		haltErr := make(chan error, 1)
+		go func() {
+			haltErr <- m.HaltActiveActor(halted, drain)
+		}()
+
+		select {
+		case <-removeStarted:
+		case <-time.After(3 * time.Second):
+			t.Fatal("Deactivation did not reach placement removal")
+		}
+
+		return halted, haltErr
+	}
+
+	// Asserts that the invocation is still parked, then returns its result once teardown has been released
+	awaitAfterTeardown := func(t *testing.T, done chan invokeResult, releaseRemove chan struct{}, haltErr chan error) invokeResult {
+		t.Helper()
+
+		select {
+		case res := <-done:
+			t.Fatalf("Invoke returned before the halted activation was torn down: %v", res.err)
+		case <-time.After(100 * time.Millisecond):
+		}
+
+		close(releaseRemove)
+		require.NoError(t, <-haltErr)
+
+		select {
+		case res := <-done:
+			return res
+		case <-time.After(3 * time.Second):
+			t.Fatal("Invoke did not complete after the halted activation was torn down")
+			return invokeResult{}
+		}
+	}
+
+	t.Run("an invocation that finds the actor halting waits for its teardown and activates a fresh instance", func(t *testing.T) {
+		m := newMessagingManager(t, echoFactory)
+		removeStarted, releaseRemove := blockRemoveActor(m)
+		resolver := &fakeResolver{
+			localHostID: "h1",
+			placements:  []*Placement{{HostID: "h1", Address: "addr1"}, {HostID: "h1", Address: "addr1"}},
+		}
+		peer := &fakePeer{}
+		aRef := ref.NewActorRef("testactor", "a1")
+
+		// Activate the actor, then deactivate it as the idle processor would
+		_, err := m.Invoke(t.Context(), resolver, peer, aRef, "ping", "x", false, false)
+		require.NoError(t, err)
+		halted, haltErr := startHalt(t, m, aRef, false, removeStarted)
+
+		// An invocation arriving in the deactivation window must wait for the teardown rather than fail on the halted activation
+		done := make(chan invokeResult, 1)
+		go func() {
+			env, err := m.Invoke(t.Context(), resolver, peer, aRef, "ping", "y", false, false)
+			done <- invokeResult{env: env, err: err}
+		}()
+
+		res := awaitAfterTeardown(t, done, releaseRemove, haltErr)
+		require.NoError(t, res.err)
+		assert.Equal(t, "echo:ping:y", decodeEnvelope(t, res.env))
+
+		// The call claimed and activated a fresh instance, without having to spend its retry
+		current, ok := m.Actors.Get(aRef.String())
+		require.True(t, ok)
+		assert.NotSame(t, halted, current)
+		assert.Equal(t, 2, resolver.confirmCalls)
+		assert.Equal(t, 0, resolver.invalidated)
+	})
+
+	t.Run("an invocation halted mid-flight retries against a fresh instance once the teardown finishes", func(t *testing.T) {
+		var activations atomic.Int32
+		parked := make(chan struct{})
+		m := newMessagingManager(t, func(_ string, _ *actor.Service) actor.Actor {
+			return &parkingActor{first: activations.Add(1) == 1, parked: parked}
+		})
+		removeStarted, releaseRemove := blockRemoveActor(m)
+		resolver := &fakeResolver{
+			localHostID: "h1",
+			placements:  []*Placement{{HostID: "h1", Address: "addr1"}, {HostID: "h1", Address: "addr1"}},
+		}
+		peer := &fakePeer{}
+		aRef := ref.NewActorRef("testactor", "a1")
+
+		// Start an invocation that parks inside the first activation
+		done := make(chan invokeResult, 1)
+		go func() {
+			env, err := m.Invoke(t.Context(), resolver, peer, aRef, "park", nil, false, false)
+			done <- invokeResult{env: env, err: err}
+		}()
+		select {
+		case <-parked:
+		case <-time.After(3 * time.Second):
+			t.Fatal("Invocation did not reach the actor")
+		}
+
+		// Halting the actor makes the parked call report the halt, and the call must not retry until the halted activation is gone
+		_, haltErr := startHalt(t, m, aRef, true, removeStarted)
+
+		res := awaitAfterTeardown(t, done, releaseRemove, haltErr)
+		require.NoError(t, res.err)
+		assert.Equal(t, "fresh:park", decodeEnvelope(t, res.env))
+
+		// The stale placement was dropped and the single retry claimed a fresh activation
+		assert.Equal(t, 1, resolver.invalidated)
+		assert.Equal(t, 2, resolver.resolveCalls)
+		assert.Equal(t, 2, resolver.confirmCalls)
+		assert.EqualValues(t, 2, activations.Load())
+	})
+
+	t.Run("a peer invocation that finds the actor halting waits for its teardown and claims a fresh instance", func(t *testing.T) {
+		m := newMessagingManager(t, echoFactory)
+		removeStarted, releaseRemove := blockRemoveActor(m)
+		resolver := &fakeResolver{localHostID: "h1"}
+		aRef := ref.NewActorRef("testactor", "a1")
+
+		// Activate the actor on behalf of a peer, then deactivate it
+		_, perr := m.PeerInvokeObject(t.Context(), resolver, protocol.InvokeActorRequest{ActorType: "testactor", ActorID: "a1", Method: "ping"})
+		require.Nil(t, perr)
+		_, haltErr := startHalt(t, m, aRef, false, removeStarted)
+
+		// The owning host must hold the peer's request until the halted activation is gone, rather than bouncing it back to a caller that would re-resolve to this host again
+		done := make(chan invokeResult, 1)
+		go func() {
+			argData, _ := msgpack.Marshal("y")
+			resp, perr := m.PeerInvokeObject(t.Context(), resolver, protocol.InvokeActorRequest{ActorType: "testactor", ActorID: "a1", Method: "ping", Data: argData})
+			if perr != nil {
+				done <- invokeResult{err: perr}
+				return
+			}
+			var out any
+			_ = msgpack.Unmarshal(resp.Data, &out)
+			done <- invokeResult{env: NewObjectEnvelope(out)}
+		}()
+
+		res := awaitAfterTeardown(t, done, releaseRemove, haltErr)
+		require.NoError(t, res.err)
+		assert.Equal(t, "echo:ping:y", decodeEnvelope(t, res.env))
+		assert.Equal(t, 2, resolver.confirmCalls)
+	})
+
+	t.Run("a caller that gives up while the actor is halting returns its context error", func(t *testing.T) {
+		m := newMessagingManager(t, echoFactory)
+		removeStarted, releaseRemove := blockRemoveActor(m)
+		resolver := &fakeResolver{
+			localHostID: "h1",
+			placements:  []*Placement{{HostID: "h1", Address: "addr1"}, {HostID: "h1", Address: "addr1"}},
+		}
+		peer := &fakePeer{}
+		aRef := ref.NewActorRef("testactor", "a1")
+
+		_, err := m.Invoke(t.Context(), resolver, peer, aRef, "ping", "x", false, false)
+		require.NoError(t, err)
+		_, haltErr := startHalt(t, m, aRef, false, removeStarted)
+
+		// Cancel the caller while it waits on the teardown
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan invokeResult, 1)
+		go func() {
+			env, err := m.Invoke(ctx, resolver, peer, aRef, "ping", "y", false, false)
+			done <- invokeResult{env: env, err: err}
+		}()
+		select {
+		case res := <-done:
+			t.Fatalf("Invoke returned before the halted activation was torn down: %v", res.err)
+		case <-time.After(100 * time.Millisecond):
+		}
+		cancel()
+
+		select {
+		case res := <-done:
+			require.ErrorIs(t, res.err, context.Canceled)
+		case <-time.After(3 * time.Second):
+			t.Fatal("Invoke did not return after its context was canceled")
+		}
+
+		close(releaseRemove)
+		require.NoError(t, <-haltErr)
+	})
+}
+
 func TestManagerPeerInvokeObject(t *testing.T) {
 	t.Run("claims and invokes for a peer caller", func(t *testing.T) {
 		m := newMessagingManager(t, echoFactory)
