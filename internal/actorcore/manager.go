@@ -552,6 +552,10 @@ func (m *Manager) haltActiveActor(act *ActiveActor, drain bool, abandon bool) (e
 		return fmt.Errorf("failed to halt actor: %w", err)
 	}
 
+	// Release callers waiting on this activation once teardown finishes, however it ends
+	// Only the goroutine that won the halt gets here, so the channel is closed exactly once
+	defer close(act.deactivatedCh)
+
 	// Send the actor a message it has been deactivated
 	err = m.deactivateActor(act, abandon)
 	if err != nil {

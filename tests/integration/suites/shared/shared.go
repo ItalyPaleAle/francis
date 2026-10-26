@@ -92,7 +92,12 @@ const (
 	ProbeMethodBlock = "block"
 	// ProbeMethodBlockingWrite reads the state, then waits to be released before writing it back, so a scenario can break the store between an actor's read and its write
 	ProbeMethodBlockingWrite = "blocking-write"
+	// ProbeMethodBlockUntilHalt occupies the actor's turn until the actor starts halting, then reports the halt the way the built-in signal actor does, so a scenario can halt an actor while an invocation is provably in flight
+	ProbeMethodBlockUntilHalt = "block-until-halt"
 )
+
+// ProbeBlockUntilHaltReply is what ProbeMethodBlockUntilHalt returns when it is released or was never armed, so a test can tell the call reached an activation that answered
+const ProbeBlockUntilHaltReply = "released"
 
 // blockMaxHold caps how long ProbeMethodBlock waits to be released, so a scenario that forgets to release it cannot wedge the suite
 const blockMaxHold = 2 * time.Minute
@@ -148,6 +153,21 @@ func (a *ProbeActor) Invoke(ctx context.Context, method string, _ actor.Envelope
 		case <-time.After(blockMaxHold):
 		}
 		return nil, nil
+
+	case ProbeMethodBlockUntilHalt:
+		// Signal that the invocation has reached the actor, then hold the turn until the actor starts halting or the test lets go
+		// An actor that was never armed, or was already released, answers at once
+		ProbeObserver.enterBlock(a.actorID)
+		select {
+		case <-ProbeObserver.blockRelease(a.actorID):
+			return ProbeBlockUntilHaltReply, nil
+		case <-actor.HaltingFromContext(ctx):
+			return nil, actor.ErrActorHalted
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(blockMaxHold):
+			return nil, errors.New("block-until-halt was never released")
+		}
 
 	case ProbeMethodBlockingWrite:
 		// Read first, so the value being written back is one the actor genuinely loaded
@@ -264,8 +284,21 @@ func (a *ProbeActor) JobFailed(_ context.Context, jobID string, method string, _
 }
 
 // Deactivate records that the actor was deactivated, so lifecycle scenarios can observe idle and halt-driven deactivation
-func (a *ProbeActor) Deactivate(_ context.Context) error {
+// When the actor is armed with ArmDeactivateBlock, it then holds the deactivation open until the test releases it, so a scenario can act while the actor is halted but still registered on its host
+func (a *ProbeActor) Deactivate(ctx context.Context) error {
 	ProbeObserver.recordDeactivate(a.actorID)
+
+	release, armed := ProbeObserver.enterDeactivateBlock(a.actorID)
+	if !armed {
+		return nil
+	}
+
+	// The context is honored too, so the hook still returns once the actor type's deactivation timeout expires
+	select {
+	case <-release:
+	case <-ctx.Done():
+	case <-time.After(blockMaxHold):
+	}
 	return nil
 }
 
@@ -347,6 +380,9 @@ var ProbeObserver = &probeObserver{
 	jobHost:       map[string]string{},
 	blockEntered:  map[string]int{},
 	blockReleases: map[string]chan struct{}{},
+
+	deactivateEntered:  map[string]int{},
+	deactivateReleases: map[string]chan struct{}{},
 }
 
 // JobFire is a single recorded execution of a probe actor's job
@@ -391,6 +427,51 @@ type probeObserver struct {
 	// blockEntered counts how many times an actor has entered ProbeMethodBlock, and blockReleases holds the channel each one waits on
 	blockEntered  map[string]int
 	blockReleases map[string]chan struct{}
+	// deactivateEntered counts how many times an armed actor's Deactivate hook has started holding, and deactivateReleases holds the channel it waits on
+	deactivateEntered  map[string]int
+	deactivateReleases map[string]chan struct{}
+}
+
+// ArmDeactivateBlock makes an actor's next deactivation hold its Deactivate hook open until ReleaseDeactivateBlock
+// It must be called before the deactivation starts, and resets any count from an earlier use
+func (o *probeObserver) ArmDeactivateBlock(actorID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.deactivateEntered[actorID] = 0
+	o.deactivateReleases[actorID] = make(chan struct{})
+}
+
+// ReleaseDeactivateBlock lets a held Deactivate hook return and disarms the actor, and is safe to call more than once
+func (o *probeObserver) ReleaseDeactivateBlock(actorID string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	ch, ok := o.deactivateReleases[actorID]
+	if !ok {
+		return
+	}
+	delete(o.deactivateReleases, actorID)
+	close(ch)
+}
+
+// DeactivateBlockEnteredCount reports how many deactivations of an armed actor have started holding, so a test can wait for one to be genuinely in progress
+func (o *probeObserver) DeactivateBlockEnteredCount(actorID string) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.deactivateEntered[actorID]
+}
+
+// enterDeactivateBlock returns the channel an armed actor's Deactivate hook waits on, and reports false when the actor is not armed so the hook returns at once
+func (o *probeObserver) enterDeactivateBlock(actorID string) (chan struct{}, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	ch, ok := o.deactivateReleases[actorID]
+	if !ok {
+		return nil, false
+	}
+	o.deactivateEntered[actorID]++
+	return ch, true
 }
 
 // ArmBlock prepares an actor's ProbeMethodBlock so a later invocation holds its turn until ReleaseBlock

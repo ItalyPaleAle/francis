@@ -50,6 +50,10 @@ type ActiveActor struct {
 	// This is used by callers who currently have a lock to understand if they need to cancel in-flight requests
 	haltCh chan struct{}
 
+	// Channel that is closed once the halted actor has been fully torn down, after it has left the active actors map and, unless abandoned, the placement store
+	// Callers that found the actor halting wait on it, so their next attempt resolves a fresh placement instead of landing on this activation again
+	deactivatedCh chan struct{}
+
 	locker        locker.TurnBasedLocker
 	idleProcessor idleActorProcessor
 	clock         clock.Clock
@@ -68,6 +72,7 @@ func NewActiveActor(ref ref.ActorRef, instance actor.Actor, idleTimeout time.Dur
 		idleTimeout:   idleTimeout,
 		lockMode:      lockMode,
 		haltCh:        make(chan struct{}),
+		deactivatedCh: make(chan struct{}),
 		locker:        locker.TurnBasedLocker{},
 		idleProcessor: idleProcessor,
 		clock:         cl,
