@@ -219,9 +219,30 @@ func (b *sqliteBackend) Cleanup(t *testing.T) {
 		return
 	}
 
-	// Removal is asserted rather than ignored, since a failure here means something still holds the database file open
-	err := os.RemoveAll(b.dir)
+	// Removal is asserted rather than ignored, since a failure that outlasts the retries means something still holds the database file open
+	err := removeAllWithRetry(b.dir)
 	require.NoError(t, err, "failed to remove the temp directory holding the SQLite database")
 
 	b.dir = ""
+}
+
+// removeRetryTimeout bounds how long Cleanup keeps retrying the removal of the temp directory, so a database file that is really still open fails the scenario instead of hanging it
+const removeRetryTimeout = 5 * time.Second
+
+// removeAllWithRetry removes a directory tree, retrying with backoff until removeRetryTimeout if the removal fails
+// On Windows another process, such as an antivirus scanner or the search indexer, can briefly hold a file that was just closed, which fails the removal with a sharing violation
+// Go's t.TempDir cleanup retries for the same reason, but this backend manages its own directory so it has to do the same itself
+func removeAllWithRetry(dir string) error {
+	deadline := time.Now().Add(removeRetryTimeout)
+	delay := 10 * time.Millisecond
+	for {
+		err := os.RemoveAll(dir)
+		if err == nil || time.Now().Add(delay).After(deadline) {
+			return err
+		}
+
+		// t.Context is already canceled while cleanups run, so this waits on the clock alone
+		time.Sleep(delay)
+		delay = min(delay*2, 500*time.Millisecond)
+	}
 }
