@@ -116,7 +116,7 @@ jobs:
           echo "CONTAINER_PLATFORMS: '$container_platforms'"
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # 4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
@@ -187,7 +187,7 @@ jobs:
           cat checksums.txt
 
       - name: Build and push Container images
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # 7.4.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         id: docker-build-push
         with:
           tags: ${{ steps.meta.outputs.tags }}
@@ -200,13 +200,13 @@ jobs:
       # A single attestation covering every file attached to the release: the archives plus checksums.txt
       - name: Attestation for release archives
         id: attest-archives
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # 4.2.2
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           subject-path: '.out/*'
 
       - name: Publish binaries as Actions Artifacts
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # 7.0.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: artifacts
           path: .out
@@ -214,7 +214,7 @@ jobs:
           compression-level: 0
 
       - name: Container image attestation
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # 4.2.2
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           subject-name: 'ghcr.io/${{ env.REPO_OWNER }}/francis'
@@ -303,7 +303,7 @@ jobs:
 
       # Helm and the attestation action use the same Docker-format credential file
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # 4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
@@ -334,7 +334,7 @@ jobs:
           echo "CHART_DIGEST: '$CHART_DIGEST'"
 
       - name: Helm chart attestation
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # 4.2.2
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: 'ghcr.io/${{ env.REPO_OWNER }}/charts/francis'
           subject-digest: ${{ steps.helm-push.outputs.digest }}
@@ -365,7 +365,7 @@ jobs:
           fetch-tags: true
 
       - name: Download build artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: artifacts
           path: .out
