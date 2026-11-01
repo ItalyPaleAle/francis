@@ -52,7 +52,7 @@ func (a AlarmProperties) NextExecution(executionTime time.Time) (time.Time, erro
 	}
 
 	// Compute the next execution time
-	t := executionTime.Add(d.Time).AddDate(d.Years, d.Months, d.Days)
+	t := d.AddTo(executionTime)
 
 	// Check if there's a TTL and if we're going beyond that
 	if a.TTL != nil && t.After(*a.TTL) {

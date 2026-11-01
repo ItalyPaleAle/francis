@@ -55,6 +55,18 @@ func (d Duration) IsZero() bool {
 	return d.Time < time.Millisecond && d.Days == 0 && d.Months == 0 && d.Years == 0
 }
 
+// AddTo returns t advanced by the duration
+// The time portion is added as elapsed time, and the calendar portion (years, months, days) as wall-clock dates in t's location
+// AddDate is skipped when the calendar portion is empty, because it re-resolves the wall-clock time and, during a daylight saving fall-back hour, can move the result back by the length of the transition
+func (d Duration) AddTo(t time.Time) time.Time {
+	t = t.Add(d.Time)
+	if d.Years == 0 && d.Months == 0 && d.Days == 0 {
+		return t
+	}
+
+	return t.AddDate(d.Years, d.Months, d.Days)
+}
+
 // String returns the ISO8601-formatted representation of the duration
 // The time portion is emitted at millisecond granularity, so any sub-millisecond remainder is truncated
 // Durations are not representable when negative

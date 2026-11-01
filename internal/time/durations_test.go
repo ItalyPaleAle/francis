@@ -7,6 +7,7 @@ package time
 import (
 	"testing"
 	"time"
+	_ "time/tzdata"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -371,4 +372,38 @@ func TestDuration_IsZero(t *testing.T) {
 	assert.False(t, Duration{Days: 1}.IsZero())
 	assert.False(t, Duration{Months: 1}.IsZero())
 	assert.False(t, Duration{Years: 1}.IsZero())
+}
+
+func TestDuration_AddTo(t *testing.T) {
+	ny, err := time.LoadLocation("America/New_York")
+	require.NoError(t, err)
+
+	// 2026-11-01 01:30 EDT is inside the hour that repeats when daylight saving time ends at 02:00 EDT
+	fallBack := time.Date(2026, 11, 1, 5, 30, 0, 0, time.UTC).In(ny)
+
+	t.Run("time-only duration in UTC", func(t *testing.T) {
+		start := time.Date(2026, 8, 13, 10, 30, 0, 0, time.UTC)
+		assert.Equal(t, start.Add(time.Hour), Duration{Time: time.Hour}.AddTo(start))
+	})
+
+	t.Run("time-only duration across a fall-back transition adds elapsed time", func(t *testing.T) {
+		assert.Equal(t, time.Hour, Duration{Time: time.Hour}.AddTo(fallBack).Sub(fallBack))
+		assert.Equal(t, 10*time.Minute, Duration{Time: 10 * time.Minute}.AddTo(fallBack.Add(25*time.Minute)).Sub(fallBack.Add(25*time.Minute)))
+	})
+
+	t.Run("time-only duration starting in the repeated hour adds elapsed time", func(t *testing.T) {
+		// 01:30 EST, the second pass through the repeated hour
+		start := time.Date(2026, 11, 1, 6, 30, 0, 0, time.UTC).In(ny)
+		assert.Equal(t, 10*time.Minute, Duration{Time: 10 * time.Minute}.AddTo(start).Sub(start))
+	})
+
+	t.Run("calendar duration keeps the wall-clock time across a transition", func(t *testing.T) {
+		start := time.Date(2026, 10, 31, 12, 0, 0, 0, ny)
+		assert.Equal(t, time.Date(2026, 11, 1, 12, 0, 0, 0, ny), Duration{Days: 1}.AddTo(start))
+	})
+
+	t.Run("mixed duration", func(t *testing.T) {
+		start := time.Date(2026, 8, 13, 10, 30, 0, 0, time.UTC)
+		assert.Equal(t, start.Add(2*time.Hour).AddDate(0, 1, 0), Duration{Months: 1, Time: 2 * time.Hour}.AddTo(start))
+	})
 }
