@@ -43,6 +43,29 @@ err = svc.ForgetVersion(ctx, 3)
 
 It refuses a version that still has instances, with `ErrVersionInUse`. Forgetting the version this service itself serves replaces the recorded entry with this host's definition.
 
+## Inspecting a definition
+
+The fingerprint is the SHA-256 of the definition's canonical encoding, which `CanonicalIR` returns. `RenderIR` turns those bytes into a Markdown document, with a Mermaid diagram of the graph and every setting with its defaults resolved, or into the Mermaid diagram alone:
+
+```go
+data, err := checkout.CanonicalIR()
+if err != nil {
+	return err
+}
+
+doc, err := workflow.RenderIR(data, workflow.IRFormatMarkdown)
+```
+
+The `workflow-ir` command does the same from a file or standard input, accepting the raw bytes or the same bytes as hex or base64. The output is deterministic, so diffing the renderings of two definitions shows exactly which settings changed the fingerprint:
+
+```sh
+go install github.com/italypaleale/francis/cmd/workflow-ir@latest
+
+workflow-ir checkout.ir > checkout.md
+workflow-ir -format mermaid checkout.ir
+diff <(workflow-ir old.ir) <(workflow-ir new.ir)
+```
+
 ## Rolling deployments
 
 The version is stamped on each instance when it starts, and a host without that version declines to advance it.  

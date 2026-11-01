@@ -290,7 +290,8 @@ func (ir *definitionIR) canonicalBytes() ([]byte, error) {
 	return msgpack.Marshal(canonicalDefinition(ir))
 }
 
-// canonicalDefinition projects the workflow-wide IR into the positional schema defined by IR format version 1
+// canonicalDefinition projects the workflow-wide IR into the positional schema of the IR format version named by definitionIRVersion
+// Any change to the fields or their order is a new format version, and decodeCanonicalIR must be changed in the same way
 func canonicalDefinition(ir *definitionIR) []any {
 	return []any{
 		canonicalIRMagic,
@@ -321,7 +322,8 @@ func canonicalSteps(steps []*stepDef) []any {
 	return encoded
 }
 
-// canonicalStep projects one IR node into the positional schema defined by IR format version 1
+// canonicalStep projects one IR node into the positional schema of the IR format version named by definitionIRVersion
+// Any change to the fields or their order is a new format version, and irFieldReader.step must be changed in the same way
 func canonicalStep(step *stepDef) []any {
 	var child any
 	if step.child != nil {
