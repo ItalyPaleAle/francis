@@ -55,16 +55,11 @@ func (d Duration) IsZero() bool {
 	return d.Time < time.Millisecond && d.Days == 0 && d.Months == 0 && d.Years == 0
 }
 
-// AddTo returns t advanced by the duration
-// The time portion is added as elapsed time, and the calendar portion (years, months, days) as wall-clock dates in t's location
-// AddDate is skipped when the calendar portion is empty, because it re-resolves the wall-clock time and, during a daylight saving fall-back hour, can move the result back by the length of the transition
+// AddTo returns t advanced by the duration, in t's location
+// The whole calculation is done in UTC, so the result doesn't depend on t's location and daylight saving transitions never shift it
+// Calendar parts (years, months, days) therefore follow UTC dates, so P1D is always 24 hours
 func (d Duration) AddTo(t time.Time) time.Time {
-	t = t.Add(d.Time)
-	if d.Years == 0 && d.Months == 0 && d.Days == 0 {
-		return t
-	}
-
-	return t.AddDate(d.Years, d.Months, d.Days)
+	return t.UTC().Add(d.Time).AddDate(d.Years, d.Months, d.Days).In(t.Location())
 }
 
 // String returns the ISO8601-formatted representation of the duration

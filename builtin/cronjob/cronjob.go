@@ -777,7 +777,7 @@ func jitterDueTime(t time.Time, jitter time.Duration) time.Time {
 	return t.Add(rand.N(2*jitter) - jitter)
 }
 
-// validateJitter checks that the jitter is less than half of the interval, measured from now
+// validateJitter checks that the jitter is less than half of the interval
 // Calendar-aware intervals (months, years) have no fixed length, so they are measured from now, which is enough for a sanity check on a value this far from the boundary
 func validateJitter(interval timeutils.Duration, jitter time.Duration, now time.Time) error {
 	if jitter <= 0 {

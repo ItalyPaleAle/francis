@@ -397,13 +397,26 @@ func TestDuration_AddTo(t *testing.T) {
 		assert.Equal(t, 10*time.Minute, Duration{Time: 10 * time.Minute}.AddTo(start).Sub(start))
 	})
 
-	t.Run("calendar duration keeps the wall-clock time across a transition", func(t *testing.T) {
+	t.Run("calendar duration is computed in UTC across a transition", func(t *testing.T) {
+		// One day after 12:00 EDT is exactly 24 hours later, which reads as 11:00 EST
 		start := time.Date(2026, 10, 31, 12, 0, 0, 0, ny)
-		assert.Equal(t, time.Date(2026, 11, 1, 12, 0, 0, 0, ny), Duration{Days: 1}.AddTo(start))
+		assert.Equal(t, time.Date(2026, 11, 1, 11, 0, 0, 0, ny), Duration{Days: 1}.AddTo(start))
+	})
+
+	t.Run("result does not depend on the location of the input", func(t *testing.T) {
+		start := time.Date(2026, 10, 31, 16, 0, 0, 0, time.UTC)
+		for _, d := range []Duration{{Days: 1}, {Months: 1}, {Days: 1, Time: 90 * time.Minute}} {
+			assert.True(t, d.AddTo(start).Equal(d.AddTo(start.In(ny))), "duration %v", d)
+		}
+	})
+
+	t.Run("result keeps the location of the input", func(t *testing.T) {
+		assert.Equal(t, ny, Duration{Days: 1}.AddTo(fallBack).Location())
+		assert.Equal(t, ny, Duration{Time: time.Hour}.AddTo(fallBack).Location())
 	})
 
 	t.Run("mixed duration", func(t *testing.T) {
 		start := time.Date(2026, 8, 13, 10, 30, 0, 0, time.UTC)
-		assert.Equal(t, start.Add(2*time.Hour).AddDate(0, 1, 0), Duration{Months: 1, Time: 2 * time.Hour}.AddTo(start))
+		assert.Equal(t, time.Date(2026, 9, 13, 12, 30, 0, 0, time.UTC), Duration{Months: 1, Time: 2 * time.Hour}.AddTo(start))
 	})
 }

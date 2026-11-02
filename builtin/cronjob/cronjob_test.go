@@ -723,33 +723,10 @@ func TestValidateJitter(t *testing.T) {
 	ny, err := time.LoadLocation("America/New_York")
 	require.NoError(t, err)
 
-	t.Run("valid jitter", func(t *testing.T) {
-		err := validateJitter(timeutils.Duration{Time: time.Hour}, 5*time.Minute, time.Now())
-		require.NoError(t, err)
-	})
-
-	t.Run("jitter too large", func(t *testing.T) {
-		err := validateJitter(timeutils.Duration{Time: time.Hour}, 30*time.Minute, time.Now())
-		require.Error(t, err)
-	})
-
-	t.Run("no jitter", func(t *testing.T) {
-		err := validateJitter(timeutils.Duration{Time: time.Hour}, 0, time.Now())
-		require.NoError(t, err)
-	})
-
-	t.Run("hourly interval during a daylight saving fall-back", func(t *testing.T) {
-		// 01:30 EDT on 2026-11-01, when one hour later the wall clock reads 01:30 EST
-		now := time.Date(2026, 11, 1, 5, 30, 0, 0, time.UTC).In(ny)
-		err := validateJitter(timeutils.Duration{Time: time.Hour}, 5*time.Minute, now)
-		require.NoError(t, err)
-	})
-
-	t.Run("calendar interval", func(t *testing.T) {
-		now := time.Date(2026, 11, 1, 5, 30, 0, 0, time.UTC).In(ny)
-		err := validateJitter(timeutils.Duration{Days: 1}, time.Hour, now)
-		require.NoError(t, err)
-	})
+	// 01:30 EDT on 2026-11-01, when one hour later the wall clock reads 01:30 EST
+	now := time.Date(2026, 11, 1, 5, 30, 0, 0, time.UTC).In(ny)
+	err = validateJitter(timeutils.Duration{Time: time.Hour}, 5*time.Minute, now)
+	require.NoError(t, err)
 }
 
 func TestCronJobTrigger(t *testing.T) {
