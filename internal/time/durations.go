@@ -59,7 +59,10 @@ func (d Duration) IsZero() bool {
 // The whole calculation is done in UTC, so the result doesn't depend on t's location and daylight saving transitions never shift it
 // Calendar parts (years, months, days) therefore follow UTC dates, so P1D is always 24 hours
 func (d Duration) AddTo(t time.Time) time.Time {
-	return t.UTC().Add(d.Time).AddDate(d.Years, d.Months, d.Days).In(t.Location())
+	return t.UTC().
+		Add(d.Time).
+		AddDate(d.Years, d.Months, d.Days).
+		In(t.Location())
 }
 
 // String returns the ISO8601-formatted representation of the duration
