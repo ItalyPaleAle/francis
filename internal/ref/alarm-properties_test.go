@@ -3,6 +3,7 @@ package ref
 import (
 	"testing"
 	"time"
+	_ "time/tzdata"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -58,6 +59,18 @@ func TestAlarmProperties_NextExecution(t *testing.T) {
 		a := AlarmProperties{Interval: "PT-1H"}
 		_, err := a.NextExecution(base)
 		require.Error(t, err)
+	})
+
+	t.Run("interval across a daylight saving fall-back", func(t *testing.T) {
+		ny, err := time.LoadLocation("America/New_York")
+		require.NoError(t, err)
+
+		// 01:30 EDT on 2026-11-01; one hour later the wall clock reads 01:30 EST
+		exec := time.Date(2026, 11, 1, 5, 30, 0, 0, time.UTC).In(ny)
+		a := AlarmProperties{Interval: "PT1H"}
+		next, err := a.NextExecution(exec)
+		require.NoError(t, err)
+		assert.Equal(t, time.Hour, next.Sub(exec))
 	})
 }
 

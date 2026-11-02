@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"testing"
 	"time"
+	_ "time/tzdata"
 
 	"github.com/robfig/cron/v3"
 	"github.com/stretchr/testify/assert"
@@ -15,6 +16,7 @@ import (
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/internal/builtinactor"
 	"github.com/italypaleale/francis/internal/ref"
+	timeutils "github.com/italypaleale/francis/internal/time"
 )
 
 func TestNew(t *testing.T) {
@@ -704,6 +706,27 @@ func TestNextOccurrence(t *testing.T) {
 		_, err := nextOccurrence("", "", from)
 		require.Error(t, err)
 	})
+
+	t.Run("interval across a daylight saving fall-back", func(t *testing.T) {
+		ny, err := time.LoadLocation("America/New_York")
+		require.NoError(t, err)
+
+		// 01:55 EDT; ten minutes later the wall clock reads 01:05 EST
+		dst := time.Date(2026, 11, 1, 5, 55, 0, 0, time.UTC).In(ny)
+		got, err := nextOccurrence("", "PT10M", dst)
+		require.NoError(t, err)
+		assert.Equal(t, 10*time.Minute, got.Sub(dst))
+	})
+}
+
+func TestValidateJitter(t *testing.T) {
+	ny, err := time.LoadLocation("America/New_York")
+	require.NoError(t, err)
+
+	// 01:30 EDT on 2026-11-01, when one hour later the wall clock reads 01:30 EST
+	now := time.Date(2026, 11, 1, 5, 30, 0, 0, time.UTC).In(ny)
+	err = validateJitter(timeutils.Duration{Time: time.Hour}, 5*time.Minute, now)
+	require.NoError(t, err)
 }
 
 func TestCronJobTrigger(t *testing.T) {

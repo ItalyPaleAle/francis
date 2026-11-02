@@ -109,13 +109,9 @@ func New(name string, opts ...Option) (*CronJob, error) {
 		}
 
 		// Jitter must be less than half of the period
-		if o.jitter > 0 {
-			// Calendar-aware intervals (months, years) have no fixed length, so they are measured from now, which is enough for a sanity check on a value this far from the boundary
-			now := time.Now()
-			period := now.Add(d.Time).AddDate(d.Years, d.Months, d.Days).Sub(now)
-			if o.jitter >= period/2 {
-				return nil, fmt.Errorf("jitter must be less than half of the interval/period (%v)", period/2)
-			}
+		err = validateJitter(d, o.jitter, time.Now())
+		if err != nil {
+			return nil, err
 		}
 	case o.cron != "":
 		_, err = cron.ParseStandard(o.cron)
@@ -781,6 +777,21 @@ func jitterDueTime(t time.Time, jitter time.Duration) time.Time {
 	return t.Add(rand.N(2*jitter) - jitter)
 }
 
+// validateJitter checks that the jitter is less than half of the interval
+// Calendar-aware intervals (months, years) have no fixed length, so they are measured from now, which is enough for a sanity check on a value this far from the boundary
+func validateJitter(interval timeutils.Duration, jitter time.Duration, now time.Time) error {
+	if jitter <= 0 {
+		return nil
+	}
+
+	period := interval.AddTo(now).Sub(now)
+	if jitter >= period/2 {
+		return fmt.Errorf("jitter must be less than half of the interval/period (%v)", period/2)
+	}
+
+	return nil
+}
+
 // nextOccurrence returns the time the given schedule is next due after from, before any jitter is applied
 // It mirrors how the framework advances a repeating job, so the occurrences planned here line up with the recurring job's own ticks
 func nextOccurrence(cronExpr string, interval string, from time.Time) (time.Time, error) {
@@ -798,7 +809,7 @@ func nextOccurrence(cronExpr string, interval string, from time.Time) (time.Time
 			return time.Time{}, fmt.Errorf("invalid interval: %w", err)
 		}
 
-		return from.Add(d.Time).AddDate(d.Years, d.Months, d.Days), nil
+		return d.AddTo(from), nil
 	default:
 		return time.Time{}, errors.New("no schedule configured")
 	}
