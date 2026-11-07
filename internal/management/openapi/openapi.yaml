@@ -1574,20 +1574,24 @@ paths:
           type: string
       - description: Only return activations of these actor types; repeat the parameter
           for several
+        explode: true
         in: query
         name: type
         schema:
           items:
             type: string
           type: array
+        style: form
       - description: Only query these hosts, returning 404 notFound when none of them
           is registered; repeat the parameter for several
+        explode: true
         in: query
         name: host
         schema:
           items:
             type: string
           type: array
+        style: form
       responses:
         "200":
           content:
@@ -2118,20 +2122,24 @@ paths:
           type: string
       - description: Only return alarms of these actor types; repeat the parameter
           for several
+        explode: true
         in: query
         name: type
         schema:
           items:
             type: string
           type: array
+        style: form
       - description: Only return alarms of these actor IDs, which requires type; repeat
           the parameter for several
+        explode: true
         in: query
         name: id
         schema:
           items:
             type: string
           type: array
+        style: form
       responses:
         "200":
           content:
@@ -2578,12 +2586,14 @@ paths:
           type: string
       - description: Only return activations of these actor types; repeat the parameter
           for several
+        explode: true
         in: query
         name: type
         schema:
           items:
             type: string
           type: array
+        style: form
       responses:
         "200":
           content:
@@ -2905,22 +2915,27 @@ paths:
           type: string
       - description: Only return jobs of these actor types; repeat the parameter for
           several
+        explode: true
         in: query
         name: type
         schema:
           items:
             type: string
           type: array
+        style: form
       - description: Only return jobs of these actor IDs, which requires type; repeat
           the parameter for several
+        explode: true
         in: query
         name: id
         schema:
           items:
             type: string
           type: array
+        style: form
       - description: Only return jobs in these statuses; repeat the parameter for
           several
+        explode: true
         in: query
         name: status
         schema:
@@ -2932,6 +2947,7 @@ paths:
             - dead
             type: string
           type: array
+        style: form
       responses:
         "200":
           content:
@@ -3175,20 +3191,24 @@ paths:
           type: string
       - description: Only return placements on these hosts; repeat the parameter for
           several
+        explode: true
         in: query
         name: host
         schema:
           items:
             type: string
           type: array
+        style: form
       - description: Only return placements of these actor types; repeat the parameter
           for several
+        explode: true
         in: query
         name: type
         schema:
           items:
             type: string
           type: array
+        style: form
       responses:
         "200":
           content:
@@ -3542,6 +3562,7 @@ paths:
           type: string
       - description: Only return instances in these statuses; repeat the parameter
           for several
+        explode: true
         in: query
         name: status
         schema:
@@ -3556,6 +3577,7 @@ paths:
             - cancelled
             type: string
           type: array
+        style: form
       - description: Only return instances running this definition version
         in: query
         name: version
@@ -4501,6 +4523,8 @@ paths:
       summary: Liveness check
       tags:
       - Meta
+servers:
+- url: /
 tags:
 - description: The public endpoints, and the scopes of the caller's token.
   name: Meta
