@@ -536,6 +536,117 @@ func TestPeerInvocationRejectedWhenOverloaded(t *testing.T) {
 	assert.Equal(t, []byte("after"), resp.Data)
 }
 
+func TestPeerInvocationCanceledWhenCallerAbandons(t *testing.T) {
+	addr := freeUDPAddr(t)
+
+	srvTLS, cliTLS := peerTLSPair(t)
+
+	// The "block" method parks until its context is canceled, like a wait on an event that never comes
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	handler := func(ctx context.Context, req protocol.InvokeActorRequest) (protocol.InvokeActorResponse, *protocol.Error) {
+		if req.Method == "block" {
+			close(started)
+			<-ctx.Done()
+			close(canceled)
+			return protocol.InvokeActorResponse{}, protocol.NewError(protocol.ErrCodeCanceled, "canceled")
+		}
+		return protocol.InvokeActorResponse{Data: req.Data}, nil
+	}
+
+	// A single in-flight slot makes a leaked slot visible as an overloaded rejection
+	ps := NewServer(ServerConfig{
+		Bind:                addr,
+		TLSConfig:           srvTLS,
+		HostID:              func() string { return "host-b" },
+		Handler:             handler,
+		MaxInFlightRequests: 1,
+		Log:                 slog.New(slog.DiscardHandler),
+	})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() {
+		_ = ps.Run(ctx)
+	}()
+
+	pc := NewClient(ClientConfig{
+		TLSConfig:   cliTLS,
+		DialTimeout: 5 * time.Second,
+		Log:         slog.New(slog.DiscardHandler),
+	})
+	defer pc.Close()
+
+	baseReq := protocol.InvokeActorRequest{
+		TargetHostID: "host-b",
+		ActorType:    "T",
+		ActorID:      "a1",
+		Mode:         protocol.InvocationModeObject,
+	}
+
+	// Warm up with a quick echo, retrying until the server is accepting connections
+	var perr *protocol.Error
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		warmReq := baseReq
+		warmReq.Method = "echo"
+		reqCtx, reqCancel := context.WithTimeout(ctx, 2*time.Second)
+		_, perr = pc.InvokeObject(reqCtx, addr, warmReq)
+		reqCancel()
+		if perr == nil || !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	require.Nil(t, perr, "warmup invocation should succeed")
+
+	// Start an invocation that blocks in the handler, then abandon it from the caller side
+	blockCtx, blockCancel := context.WithCancel(ctx)
+	abandoned := make(chan *protocol.Error, 1)
+	go func() {
+		req := baseReq
+		req.Method = "block"
+		_, bperr := pc.InvokeObject(blockCtx, addr, req)
+		abandoned <- bperr
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("blocking invocation did not start")
+	}
+	blockCancel()
+
+	select {
+	case bperr := <-abandoned:
+		require.NotNil(t, bperr, "the abandoned invocation should fail on the caller side")
+		assert.Equal(t, protocol.ErrCodeCanceled, bperr.Code)
+	case <-time.After(10 * time.Second):
+		t.Fatal("abandoned invocation did not return to the caller")
+	}
+
+	// The handler on the server must observe the cancellation, otherwise it keeps holding the slot
+	select {
+	case <-canceled:
+	case <-time.After(10 * time.Second):
+		t.Fatal("handler of the abandoned invocation was not canceled")
+	}
+
+	// With the slot freed, a fresh invocation succeeds instead of being rejected as overloaded
+	// The release happens right after the handler returns, so retry briefly to avoid racing it
+	var resp protocol.InvokeActorResponse
+	require.Eventually(t, func() bool {
+		freeReq := baseReq
+		freeReq.Method = "echo"
+		freeReq.Data = []byte("after")
+		reqCtx, reqCancel := context.WithTimeout(ctx, 2*time.Second)
+		defer reqCancel()
+		resp, perr = pc.InvokeObject(reqCtx, addr, freeReq)
+		return perr == nil
+	}, 5*time.Second, 50*time.Millisecond, "an invocation after the abandoned one should succeed")
+	assert.Equal(t, []byte("after"), resp.Data)
+}
+
 func TestPeerInvocationPinsHostIdentity(t *testing.T) {
 	addr := freeUDPAddr(t)
 
