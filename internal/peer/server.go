@@ -175,7 +175,8 @@ func (s *Server) serveSession(ctx context.Context, session *webtransport.Session
 			return
 		}
 
-		go s.handleStream(sessCtx, stream, inFlight)
+		// The stream's context is canceled when the caller abandons the invocation or the session closes, so a handler never outlives its caller
+		go s.handleStream(stream.Context(), stream, inFlight)
 	}
 }
 
