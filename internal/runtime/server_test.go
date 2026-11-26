@@ -509,13 +509,11 @@ func TestServeSessionRejectsNonRegistrationFirstMessage(t *testing.T) {
 	resp, err := protocol.RoundTrip(t.Context(), stream, req)
 	_ = stream.Close()
 
-	// The runtime replies with a bad-request error before closing the session
-	// The close may race the reply, so only assert the code when a reply arrives
-	if err == nil {
-		perr, isErr := resp.AsError()
-		require.True(t, isErr)
-		assert.Equal(t, protocol.ErrCodeBadRequest, perr.Code)
-	}
+	// The runtime replies with a bad-request error and waits for the stream to close before tearing down the session
+	require.NoError(t, err)
+	perr, isErr := resp.AsError()
+	require.True(t, isErr)
+	assert.Equal(t, protocol.ErrCodeBadRequest, perr.Code)
 
 	// No host was ever registered, and serveSession closes the session after the failed handshake
 	assert.Zero(t, rt.hosts.Count(), "a failed handshake must not register a host")

@@ -7,6 +7,7 @@ import (
 	"time"
 	"uuid"
 
+	"github.com/quic-go/webtransport-go"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
@@ -26,6 +27,9 @@ const lookupCacheMaxTTL = 5 * time.Second
 
 // registrationReadTimeout bounds the registration handshake read more tightly than a regular request, since a new session must register promptly before it is allowed to do anything else
 const registrationReadTimeout = 10 * time.Second
+
+// registrationErrorAckTimeout bounds how long the runtime waits for a rejected host to read its registration error before closing the session
+const registrationErrorAckTimeout = 2 * time.Second
 
 // cachedPlacement is a placement lookup result held in the runtime placement cache
 type cachedPlacement struct {
@@ -59,7 +63,7 @@ func (rt *Runtime) handleRegistration(ctx context.Context, c *hostConn) bool {
 	preAuthed := false
 	switch req.Kind {
 	case protocol.KindRegisterHostAuth:
-		regReq, ok := rt.handleAuthBegin(stream, c, cb, req)
+		regReq, ok := rt.handleAuthBegin(ctx, stream, c, cb, req)
 		if !ok {
 			return false
 		}
@@ -68,39 +72,63 @@ func (rt *Runtime) handleRegistration(ctx context.Context, c *hostConn) bool {
 	case protocol.KindRegisterHost:
 		// No challenge round-trip is needed for these paths
 	default:
-		_ = protocol.WriteMessage(stream, req.ErrorReply(
+		writeRegistrationError(ctx, stream, req.ErrorReply(
 			protocol.NewError(protocol.ErrCodeBadRequest, "expected host registration as the first message"),
 		))
 		return false
 	}
 
 	resp := rt.handleRegister(ctx, c, req, preAuthed)
-	_ = protocol.WriteMessage(stream, resp)
+	if resp.Kind == protocol.KindError {
+		writeRegistrationError(ctx, stream, resp)
+		return false
+	}
 
-	// Registration succeeded unless the response is an error
-	return resp.Kind != protocol.KindError
+	_ = protocol.WriteMessage(stream, resp)
+	return true
+}
+
+// writeRegistrationError sends a structured registration rejection and waits briefly for the host to close its side of the stream before the caller closes the session
+// Writing the reply only hands it to the QUIC stack, which discards unread stream data if the session closes first
+func writeRegistrationError(ctx context.Context, stream *webtransport.Stream, resp *protocol.Envelope) {
+	_ = stream.SetWriteDeadline(time.Now().Add(registrationErrorAckTimeout))
+	err := protocol.WriteMessage(stream, resp)
+	if err != nil {
+		return
+	}
+
+	// End our write half right after the error, then wait for the host to finish reading and close its side
+	_ = stream.Close()
+	stop := context.AfterFunc(ctx, func() {
+		stream.CancelRead(0)
+	})
+	defer stop()
+
+	_ = stream.SetReadDeadline(time.Now().Add(registrationErrorAckTimeout))
+	var b [1]byte
+	_, _ = stream.Read(b[:])
 }
 
 // handleAuthBegin runs the runtime side of the PSK challenge-response and returns the follow-up registration envelope on success
 // It proves to the host that the runtime holds the host PSK, then verifies the host's own proof, both bound to the channel binding
-func (rt *Runtime) handleAuthBegin(stream protocol.Stream, _ *hostConn, cb []byte, req *protocol.Envelope) (*protocol.Envelope, bool) {
+func (rt *Runtime) handleAuthBegin(ctx context.Context, stream *webtransport.Stream, _ *hostConn, cb []byte, req *protocol.Envelope) (*protocol.Envelope, bool) {
 	// A PSK challenge is only valid when the cluster is configured for PSK bootstrap
 	if rt.bootstrapMethod != bootstrapauth.MethodPSK {
-		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeUnauthorized, "PSK bootstrap is not enabled")))
+		writeRegistrationError(ctx, stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeUnauthorized, "PSK bootstrap is not enabled")))
 		return nil, false
 	}
 
 	var begin protocol.RegisterAuthBeginRequest
 	err := req.DecodePayload(&begin)
 	if err != nil || begin.Method != bootstrapauth.MethodPSK || len(begin.ClientNonce) == 0 {
-		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "invalid PSK bootstrap request")))
+		writeRegistrationError(ctx, stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "invalid PSK bootstrap request")))
 		return nil, false
 	}
 
 	// Generate the server nonce and compute the runtime proof, which the host checks before sending its own proof
 	serverNonce, err := bootstrapauth.Nonce()
 	if err != nil {
-		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to generate nonce")))
+		writeRegistrationError(ctx, stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to generate nonce")))
 		return nil, false
 	}
 	serverProof := rt.bootstrapPSK.ServerProof(cb, begin.ClientNonce, serverNonce)
@@ -110,7 +138,7 @@ func (rt *Runtime) handleAuthBegin(stream protocol.Stream, _ *hostConn, cb []byt
 		ServerProof: serverProof,
 	})
 	if err != nil {
-		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to encode challenge")))
+		writeRegistrationError(ctx, stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to encode challenge")))
 		return nil, false
 	}
 	err = protocol.WriteMessage(stream, challenge)
@@ -124,21 +152,21 @@ func (rt *Runtime) handleAuthBegin(stream protocol.Stream, _ *hostConn, cb []byt
 		return nil, false
 	}
 	if regReq.Kind != protocol.KindRegisterHost {
-		_ = protocol.WriteMessage(stream, regReq.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "expected host registration after the challenge")))
+		writeRegistrationError(ctx, stream, regReq.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "expected host registration after the challenge")))
 		return nil, false
 	}
 
 	var payload protocol.RegisterHostRequest
 	err = regReq.DecodePayload(&payload)
 	if err != nil {
-		_ = protocol.WriteMessage(stream, regReq.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode registration request")))
+		writeRegistrationError(ctx, stream, regReq.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode registration request")))
 		return nil, false
 	}
 
 	// Verify the host proof over the same channel binding and nonces, which fails for a wrong PSK, a replay, or a MitM
 	ok := payload.Auth.Method == bootstrapauth.MethodPSK && rt.bootstrapPSK.VerifyClientProof(cb, begin.ClientNonce, serverNonce, payload.Auth.Proof)
 	if !ok {
-		_ = protocol.WriteMessage(stream, regReq.ErrorReply(protocol.NewError(protocol.ErrCodeUnauthorized, "PSK authentication failed")))
+		writeRegistrationError(ctx, stream, regReq.ErrorReply(protocol.NewError(protocol.ErrCodeUnauthorized, "PSK authentication failed")))
 		return nil, false
 	}
 
