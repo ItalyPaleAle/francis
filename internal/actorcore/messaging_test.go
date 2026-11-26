@@ -930,6 +930,14 @@ func TestManagerInvokeHaltingActor(t *testing.T) {
 	})
 }
 
+type funcActor struct {
+	fn func(ctx context.Context, method string, data actor.Envelope) (any, error)
+}
+
+func (a *funcActor) Invoke(ctx context.Context, method string, data actor.Envelope) (any, error) {
+	return a.fn(ctx, method, data)
+}
+
 func TestManagerPeerInvokeObject(t *testing.T) {
 	t.Run("claims and invokes for a peer caller", func(t *testing.T) {
 		m := newMessagingManager(t, echoFactory)
@@ -976,6 +984,164 @@ func TestManagerPeerInvokeObject(t *testing.T) {
 		require.NotNil(t, perr)
 		assert.Equal(t, protocol.ErrCodeActorNotActive, perr.Code)
 		assert.Equal(t, 0, resolver.confirmCalls)
+	})
+
+	t.Run("coalesced retry succeeds when the first caller abandons", func(t *testing.T) {
+		var calls atomic.Int32
+		started := make(chan struct{})
+		release := make(chan struct{})
+		m := newMessagingManager(t, func(_ string, _ *actor.Service) actor.Actor {
+			return &funcActor{fn: func(ctx context.Context, _ string, _ actor.Envelope) (any, error) {
+				calls.Add(1)
+				close(started)
+				select {
+				case <-release:
+					return "done", nil
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}}
+		})
+		resolver := &fakeResolver{localHostID: "h1"}
+
+		req := protocol.InvokeActorRequest{
+			ActorType: "testactor",
+			ActorID:   "a1",
+			Method:    "work",
+			RequestID: "req-shared-1",
+		}
+
+		// Start the first caller, then coalesce a retry with the same RequestID while the actor is still running
+		ctx1, cancel1 := context.WithCancel(t.Context())
+		firstErr := make(chan *protocol.Error, 1)
+		go func() {
+			_, perr := m.PeerInvokeObject(ctx1, resolver, req)
+			firstErr <- perr
+		}()
+
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("actor invocation did not start")
+		}
+
+		type secondResult struct {
+			resp protocol.InvokeActorResponse
+			perr *protocol.Error
+		}
+		secondRes := make(chan secondResult, 1)
+		go func() {
+			resp, perr := m.PeerInvokeObject(t.Context(), resolver, req)
+			secondRes <- secondResult{resp: resp, perr: perr}
+		}()
+
+		require.Eventually(t, func() bool {
+			m.inflightMu.Lock()
+			defer m.inflightMu.Unlock()
+			c := m.inflightCalls[req.RequestID]
+			return c != nil && c.refs == 2
+		}, 5*time.Second, 10*time.Millisecond, "retry should attach to the in-flight execution")
+
+		// Abandoning the first stream must return promptly to that caller without canceling the shared execution
+		cancel1()
+		select {
+		case perr := <-firstErr:
+			require.NotNil(t, perr)
+			assert.Equal(t, protocol.ErrCodeCanceled, perr.Code)
+		case <-time.After(5 * time.Second):
+			t.Fatal("first caller did not return on context cancellation")
+		}
+
+		close(release)
+		select {
+		case res := <-secondRes:
+			require.Nil(t, res.perr)
+			var got string
+			err := msgpack.Unmarshal(res.resp.Data, &got)
+			require.NoError(t, err)
+			assert.Equal(t, "done", got)
+		case <-time.After(5 * time.Second):
+			t.Fatal("coalesced retry did not complete")
+		}
+		assert.Equal(t, int32(1), calls.Load(), "coalesced callers must execute the actor only once")
+	})
+
+	t.Run("coalesced execution cancels only once the last caller abandons", func(t *testing.T) {
+		started := make(chan struct{})
+		actorCanceled := make(chan struct{})
+		m := newMessagingManager(t, func(_ string, _ *actor.Service) actor.Actor {
+			return &funcActor{fn: func(ctx context.Context, _ string, _ actor.Envelope) (any, error) {
+				close(started)
+				<-ctx.Done()
+				close(actorCanceled)
+				return nil, ctx.Err()
+			}}
+		})
+		resolver := &fakeResolver{localHostID: "h1"}
+
+		req := protocol.InvokeActorRequest{
+			ActorType: "testactor",
+			ActorID:   "a1",
+			Method:    "work",
+			RequestID: "req-shared-2",
+		}
+
+		ctx1, cancel1 := context.WithCancel(t.Context())
+		firstErr := make(chan *protocol.Error, 1)
+		go func() {
+			_, perr := m.PeerInvokeObject(ctx1, resolver, req)
+			firstErr <- perr
+		}()
+
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("actor invocation did not start")
+		}
+
+		ctx2, cancel2 := context.WithCancel(t.Context())
+		secondErr := make(chan *protocol.Error, 1)
+		go func() {
+			_, perr := m.PeerInvokeObject(ctx2, resolver, req)
+			secondErr <- perr
+		}()
+
+		require.Eventually(t, func() bool {
+			m.inflightMu.Lock()
+			defer m.inflightMu.Unlock()
+			c := m.inflightCalls[req.RequestID]
+			return c != nil && c.refs == 2
+		}, 5*time.Second, 10*time.Millisecond, "second caller should attach to the in-flight execution")
+
+		// Canceling the follower unblocks it immediately while leaving the actor running for the remaining caller
+		cancel2()
+		select {
+		case perr := <-secondErr:
+			require.NotNil(t, perr)
+			assert.Equal(t, protocol.ErrCodeCanceled, perr.Code)
+		case <-time.After(5 * time.Second):
+			t.Fatal("second caller did not return on context cancellation")
+		}
+		select {
+		case <-actorCanceled:
+			t.Fatal("actor execution must not cancel while another caller is still waiting")
+		default:
+		}
+
+		// Canceling the last remaining caller cancels the actor execution too
+		cancel1()
+		select {
+		case <-actorCanceled:
+		case <-time.After(5 * time.Second):
+			t.Fatal("actor execution was not canceled after the last caller abandoned")
+		}
+		select {
+		case perr := <-firstErr:
+			require.NotNil(t, perr)
+			assert.Equal(t, protocol.ErrCodeCanceled, perr.Code)
+		case <-time.After(5 * time.Second):
+			t.Fatal("last caller did not return after canceling")
+		}
 	})
 }
 

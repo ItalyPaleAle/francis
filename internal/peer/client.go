@@ -157,11 +157,9 @@ func (c *Client) InvokeObject(ctx context.Context, address string, req protocol.
 	// Pre-send: a write failure means the peer never received the full request, so the caller can safely retry
 	err = protocol.WriteMessage(stream, env)
 	if err != nil {
-		ctxErr := ctx.Err()
-		if errors.Is(ctxErr, context.DeadlineExceeded) {
-			return protocol.InvokeActorResponse{}, protocol.NewErrorf(protocol.ErrCodeDeadlineExceeded, "deadline exceeded before invocation reached peer %s", address)
-		} else if ctxErr != nil {
-			return protocol.InvokeActorResponse{}, protocol.NewErrorf(protocol.ErrCodeCanceled, "canceled before invocation reached peer %s", address)
+		ctxErr := contextError(ctx, "before invocation reached peer "+address)
+		if ctxErr != nil {
+			return protocol.InvokeActorResponse{}, ctxErr
 		}
 
 		return protocol.InvokeActorResponse{}, protocol.NewErrorf(protocol.ErrCodeRetryLater, "failed to send invocation to peer %s: %v", address, err)
@@ -171,11 +169,9 @@ func (c *Client) InvokeObject(ctx context.Context, address string, req protocol.
 	// A read failure must not trigger an auto-retry to avoid double-execution of non-idempotent methods
 	respEnv, err := protocol.ReadMessage(stream)
 	if err != nil {
-		ctxErr := ctx.Err()
-		if errors.Is(ctxErr, context.DeadlineExceeded) {
-			return protocol.InvokeActorResponse{}, protocol.NewErrorf(protocol.ErrCodeDeadlineExceeded, "deadline exceeded while waiting for response from peer %s", address)
-		} else if ctxErr != nil {
-			return protocol.InvokeActorResponse{}, protocol.NewErrorf(protocol.ErrCodeCanceled, "canceled while waiting for response from peer %s", address)
+		ctxErr := contextError(ctx, "while waiting for response from peer "+address)
+		if ctxErr != nil {
+			return protocol.InvokeActorResponse{}, ctxErr
 		}
 
 		return protocol.InvokeActorResponse{}, protocol.NewErrorf(protocol.ErrCodeTransportFailure, "lost response from peer %s after the request was delivered: %v", address, err)
@@ -275,6 +271,11 @@ func (c *Client) InvokeStream(ctx context.Context, address string, req protocol.
 	err = protocol.WriteMessage(stream, env)
 	if err != nil {
 		wt.CloseStream(stream)
+		ctxErr := contextError(ctx, "before invocation reached peer "+address)
+		if ctxErr != nil {
+			return "", nil, ctxErr
+		}
+
 		return "", nil, protocol.NewErrorf(protocol.ErrCodeRetryLater, "failed to send invocation to peer %s: %v", address, err)
 	}
 
@@ -282,7 +283,14 @@ func (c *Client) InvokeStream(ctx context.Context, address string, req protocol.
 	if body != nil {
 		_, err = io.Copy(stream, body)
 		if err != nil {
-			wt.CloseStream(stream)
+			// Reset the send half rather than closing it cleanly so the peer sees an aborted upload as a read error instead of EOF
+			stream.CancelWrite(0)
+			stream.CancelRead(0)
+			ctxErr := contextError(ctx, "while streaming request body to peer "+address)
+			if ctxErr != nil {
+				return "", nil, ctxErr
+			}
+
 			return "", nil, protocol.NewErrorf(protocol.ErrCodeRetryLater, "failed to stream request body to peer %s: %v", address, err)
 		}
 	}
@@ -292,6 +300,11 @@ func (c *Client) InvokeStream(ctx context.Context, address string, req protocol.
 	respEnv, err := protocol.ReadMessage(stream)
 	if err != nil {
 		stream.CancelRead(0)
+		ctxErr := contextError(ctx, "while waiting for response from peer "+address)
+		if ctxErr != nil {
+			return "", nil, ctxErr
+		}
+
 		return "", nil, protocol.NewErrorf(protocol.ErrCodeRetryLater, "failed to read response from peer %s: %v", address, err)
 	}
 

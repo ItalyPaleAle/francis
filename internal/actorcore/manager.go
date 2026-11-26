@@ -12,7 +12,6 @@ import (
 	"github.com/alphadose/haxmap"
 	"github.com/italypaleale/go-kit/eventqueue"
 	"go.opentelemetry.io/otel/trace"
-	"golang.org/x/sync/singleflight"
 	"k8s.io/utils/clock"
 
 	"github.com/italypaleale/francis/actor"
@@ -97,8 +96,10 @@ type Manager struct {
 	forceHalt     chan struct{}
 	forceHaltOnce sync.Once
 
-	// inflightDedup coalesces concurrent peer requests that carry the same RequestID so a retry arriving while the first execution is still in progress shares the result rather than running the actor a second time
-	inflightDedup singleflight.Group
+	// inflightMu guards inflightCalls
+	inflightMu sync.Mutex
+	// inflightCalls coalesces concurrent peer requests that carry the same RequestID so a retry arriving while the first execution is still in progress shares the result rather than running the actor a second time
+	inflightCalls map[string]*inflightCall
 }
 
 // NewManager returns a Manager ready to register actors
@@ -124,6 +125,7 @@ func NewManager(opts Options) *Manager {
 		actorTypeLockMode:      map[string]LockMode{},
 		Actors:                 haxmap.New[string, *ActiveActor](defaultActorsMapSize),
 		forceHalt:              make(chan struct{}),
+		inflightCalls:          map[string]*inflightCall{},
 	}
 }
 

@@ -536,46 +536,132 @@ func TestPeerInvocationRejectedWhenOverloaded(t *testing.T) {
 	assert.Equal(t, []byte("after"), resp.Data)
 }
 
-func TestPeerInvocationCanceledWhenCallerAbandons(t *testing.T) {
-	addr := freeUDPAddr(t)
+// startTestPeerServer starts a peer server and matching client wired with mTLS for host-b, stopping both when the test finishes
+func startTestPeerServer(t *testing.T, cfg ServerConfig) (addr string, pc *Client) {
+	t.Helper()
 
+	addr = freeUDPAddr(t)
 	srvTLS, cliTLS := peerTLSPair(t)
 
+	cfg.Bind = addr
+	cfg.TLSConfig = srvTLS
+	if cfg.HostID == nil {
+		cfg.HostID = func() string { return "host-b" }
+	}
+	if cfg.Log == nil {
+		cfg.Log = slog.New(slog.DiscardHandler)
+	}
+	ps := NewServer(cfg)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	go func() {
+		_ = ps.Run(ctx)
+	}()
+
+	pc = NewClient(ClientConfig{
+		TLSConfig:   cliTLS,
+		DialTimeout: 5 * time.Second,
+		Log:         slog.New(slog.DiscardHandler),
+	})
+	t.Cleanup(pc.Close)
+
+	return addr, pc
+}
+
+// abandonProbe records when a blocking test handler starts and what error ended it
+type abandonProbe struct {
+	started chan struct{}
+	done    chan error
+}
+
+func newAbandonProbe() *abandonProbe {
+	return &abandonProbe{
+		started: make(chan struct{}),
+		done:    make(chan error, 1),
+	}
+}
+
+// blockingReader yields initial on the first Read and then blocks until done is closed, simulating an upload aborted mid-body
+type blockingReader struct {
+	initial []byte
+	sent    bool
+	done    <-chan struct{}
+}
+
+func (r *blockingReader) Read(p []byte) (int, error) {
+	if !r.sent {
+		r.sent = true
+		n := copy(p, r.initial)
+		return n, nil
+	}
+
+	<-r.done
+	return 0, context.Canceled
+}
+
+func TestPeerInvocationCanceledWhenCallerAbandons(t *testing.T) {
+	var activeProbe atomic.Pointer[abandonProbe]
+
 	// The "block" method parks until its context is canceled, like a wait on an event that never comes
-	started := make(chan struct{})
-	canceled := make(chan struct{})
 	handler := func(ctx context.Context, req protocol.InvokeActorRequest) (protocol.InvokeActorResponse, *protocol.Error) {
 		if req.Method == "block" {
-			close(started)
+			p := activeProbe.Load()
+			close(p.started)
 			<-ctx.Done()
-			close(canceled)
+			p.done <- ctx.Err()
 			return protocol.InvokeActorResponse{}, protocol.NewError(protocol.ErrCodeCanceled, "canceled")
 		}
 		return protocol.InvokeActorResponse{Data: req.Data}, nil
 	}
 
-	// A single in-flight slot makes a leaked slot visible as an overloaded rejection
-	ps := NewServer(ServerConfig{
-		Bind:                addr,
-		TLSConfig:           srvTLS,
-		HostID:              func() string { return "host-b" },
+	streamHandler := func(ctx context.Context, req protocol.InvokeActorRequest, body io.Reader, w actor.StreamResponseWriter) *protocol.Error {
+		switch req.Method {
+		case "block-before-headers":
+			_, err := io.ReadAll(body)
+			if err != nil {
+				return protocol.NewErrorf(protocol.ErrCodeInvokeFailed, "failed to read body: %v", err)
+			}
+			p := activeProbe.Load()
+			close(p.started)
+			<-ctx.Done()
+			p.done <- ctx.Err()
+			return protocol.NewError(protocol.ErrCodeCanceled, "canceled")
+		case "block-after-chunk":
+			_, err := io.ReadAll(body)
+			if err != nil {
+				return protocol.NewErrorf(protocol.ErrCodeInvokeFailed, "failed to read body: %v", err)
+			}
+			w.SetContentType("application/test")
+			_, err = w.Write([]byte("chunk"))
+			if err != nil {
+				return protocol.NewErrorf(protocol.ErrCodeInvokeFailed, "failed to write chunk: %v", err)
+			}
+			p := activeProbe.Load()
+			close(p.started)
+			<-ctx.Done()
+			p.done <- ctx.Err()
+			return protocol.NewError(protocol.ErrCodeCanceled, "canceled")
+		case "read-upload":
+			p := activeProbe.Load()
+			close(p.started)
+			_, err := io.ReadAll(body)
+			p.done <- err
+			if err != nil {
+				return protocol.NewErrorf(protocol.ErrCodeInvokeFailed, "failed to read body: %v", err)
+			}
+			return nil
+		default:
+			return echoStreamHandler(ctx, req, body, w)
+		}
+	}
+
+	// A single in-flight slot makes any leaked slot across the subtests visible as an overloaded rejection
+	addr, pc := startTestPeerServer(t, ServerConfig{
 		Handler:             handler,
+		StreamHandler:       streamHandler,
 		MaxInFlightRequests: 1,
-		Log:                 slog.New(slog.DiscardHandler),
 	})
-
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	go func() {
-		_ = ps.Run(ctx)
-	}()
-
-	pc := NewClient(ClientConfig{
-		TLSConfig:   cliTLS,
-		DialTimeout: 5 * time.Second,
-		Log:         slog.New(slog.DiscardHandler),
-	})
-	defer pc.Close()
 
 	baseReq := protocol.InvokeActorRequest{
 		TargetHostID: "host-b",
@@ -590,7 +676,7 @@ func TestPeerInvocationCanceledWhenCallerAbandons(t *testing.T) {
 	for {
 		warmReq := baseReq
 		warmReq.Method = "echo"
-		reqCtx, reqCancel := context.WithTimeout(ctx, 2*time.Second)
+		reqCtx, reqCancel := context.WithTimeout(t.Context(), 2*time.Second)
 		_, perr = pc.InvokeObject(reqCtx, addr, warmReq)
 		reqCancel()
 		if perr == nil || !time.Now().Before(deadline) {
@@ -600,51 +686,231 @@ func TestPeerInvocationCanceledWhenCallerAbandons(t *testing.T) {
 	}
 	require.Nil(t, perr, "warmup invocation should succeed")
 
-	// Start an invocation that blocks in the handler, then abandon it from the caller side
-	blockCtx, blockCancel := context.WithCancel(ctx)
-	abandoned := make(chan *protocol.Error, 1)
-	go func() {
+	// assertSlotFreed verifies that the session's sole in-flight slot is returned after an abandoned call
+	// The slot is released right after the handler returns, so retry briefly to avoid racing it
+	assertSlotFreed := func(t *testing.T) {
+		t.Helper()
+
+		var resp protocol.InvokeActorResponse
+		require.Eventually(t, func() bool {
+			freeReq := baseReq
+			freeReq.Method = "echo"
+			freeReq.Data = []byte("after")
+			reqCtx, reqCancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer reqCancel()
+			var echoErr *protocol.Error
+			resp, echoErr = pc.InvokeObject(reqCtx, addr, freeReq)
+			return echoErr == nil
+		}, 5*time.Second, 50*time.Millisecond, "an invocation after the abandoned one should succeed")
+		assert.Equal(t, []byte("after"), resp.Data)
+	}
+
+	t.Run("object invocation canceled", func(t *testing.T) {
+		probe := newAbandonProbe()
+		activeProbe.Store(probe)
+
+		blockCtx, blockCancel := context.WithCancel(t.Context())
+		abandoned := make(chan *protocol.Error, 1)
+		go func() {
+			req := baseReq
+			req.Method = "block"
+			_, bperr := pc.InvokeObject(blockCtx, addr, req)
+			abandoned <- bperr
+		}()
+
+		select {
+		case <-probe.started:
+		case <-time.After(10 * time.Second):
+			t.Fatal("blocking invocation did not start")
+		}
+		blockCancel()
+
+		select {
+		case bperr := <-abandoned:
+			require.NotNil(t, bperr, "the abandoned invocation should fail on the caller side")
+			assert.Equal(t, protocol.ErrCodeCanceled, bperr.Code)
+			assert.False(t, bperr.Retryable())
+		case <-time.After(10 * time.Second):
+			t.Fatal("abandoned invocation did not return to the caller")
+		}
+
+		// The handler on the server must observe the cancellation, otherwise it keeps holding the slot
+		select {
+		case herr := <-probe.done:
+			require.ErrorIs(t, herr, context.Canceled)
+		case <-time.After(10 * time.Second):
+			t.Fatal("handler of the abandoned invocation was not canceled")
+		}
+
+		assertSlotFreed(t)
+	})
+
+	t.Run("object invocation deadline exceeded", func(t *testing.T) {
+		probe := newAbandonProbe()
+		activeProbe.Store(probe)
+
+		// Start with a generous context and let a short deadline expire once the handler has parked
 		req := baseReq
 		req.Method = "block"
-		_, bperr := pc.InvokeObject(blockCtx, addr, req)
-		abandoned <- bperr
-	}()
-
-	select {
-	case <-started:
-	case <-time.After(10 * time.Second):
-		t.Fatal("blocking invocation did not start")
-	}
-	blockCancel()
-
-	select {
-	case bperr := <-abandoned:
-		require.NotNil(t, bperr, "the abandoned invocation should fail on the caller side")
-		assert.Equal(t, protocol.ErrCodeCanceled, bperr.Code)
-	case <-time.After(10 * time.Second):
-		t.Fatal("abandoned invocation did not return to the caller")
-	}
-
-	// The handler on the server must observe the cancellation, otherwise it keeps holding the slot
-	select {
-	case <-canceled:
-	case <-time.After(10 * time.Second):
-		t.Fatal("handler of the abandoned invocation was not canceled")
-	}
-
-	// With the slot freed, a fresh invocation succeeds instead of being rejected as overloaded
-	// The release happens right after the handler returns, so retry briefly to avoid racing it
-	var resp protocol.InvokeActorResponse
-	require.Eventually(t, func() bool {
-		freeReq := baseReq
-		freeReq.Method = "echo"
-		freeReq.Data = []byte("after")
-		reqCtx, reqCancel := context.WithTimeout(ctx, 2*time.Second)
+		reqCtx, reqCancel := context.WithTimeout(t.Context(), 150*time.Millisecond)
 		defer reqCancel()
-		resp, perr = pc.InvokeObject(reqCtx, addr, freeReq)
-		return perr == nil
-	}, 5*time.Second, 50*time.Millisecond, "an invocation after the abandoned one should succeed")
-	assert.Equal(t, []byte("after"), resp.Data)
+
+		_, bperr := pc.InvokeObject(reqCtx, addr, req)
+		require.NotNil(t, bperr, "the timed-out invocation should fail on the caller side")
+		assert.Equal(t, protocol.ErrCodeDeadlineExceeded, bperr.Code)
+		assert.False(t, bperr.Retryable())
+
+		select {
+		case herr := <-probe.done:
+			require.ErrorIs(t, herr, context.Canceled)
+		case <-time.After(10 * time.Second):
+			t.Fatal("handler of the timed-out invocation was not canceled")
+		}
+
+		assertSlotFreed(t)
+	})
+
+	t.Run("stream invocation canceled before response headers", func(t *testing.T) {
+		probe := newAbandonProbe()
+		activeProbe.Store(probe)
+
+		blockCtx, blockCancel := context.WithCancel(t.Context())
+		abandoned := make(chan *protocol.Error, 1)
+		go func() {
+			req := baseReq
+			req.Method = "block-before-headers"
+			_, _, sperr := pc.InvokeStream(blockCtx, addr, req, bytes.NewReader([]byte("req")))
+			abandoned <- sperr
+		}()
+
+		select {
+		case <-probe.started:
+		case <-time.After(10 * time.Second):
+			t.Fatal("blocking stream invocation did not start")
+		}
+		blockCancel()
+
+		select {
+		case sperr := <-abandoned:
+			require.NotNil(t, sperr)
+			assert.Equal(t, protocol.ErrCodeCanceled, sperr.Code)
+			assert.False(t, sperr.Retryable(), "caller cancellation must not be marked retryable")
+		case <-time.After(10 * time.Second):
+			t.Fatal("abandoned stream invocation did not return to the caller")
+		}
+
+		select {
+		case herr := <-probe.done:
+			require.ErrorIs(t, herr, context.Canceled)
+		case <-time.After(10 * time.Second):
+			t.Fatal("stream handler was not canceled")
+		}
+
+		assertSlotFreed(t)
+	})
+
+	t.Run("stream invocation deadline exceeded before response headers", func(t *testing.T) {
+		probe := newAbandonProbe()
+		activeProbe.Store(probe)
+
+		req := baseReq
+		req.Method = "block-before-headers"
+		reqCtx, reqCancel := context.WithTimeout(t.Context(), 150*time.Millisecond)
+		defer reqCancel()
+
+		_, _, sperr := pc.InvokeStream(reqCtx, addr, req, bytes.NewReader([]byte("req")))
+		require.NotNil(t, sperr)
+		assert.Equal(t, protocol.ErrCodeDeadlineExceeded, sperr.Code)
+		assert.False(t, sperr.Retryable(), "caller deadline expiration must not be marked retryable")
+
+		select {
+		case herr := <-probe.done:
+			require.ErrorIs(t, herr, context.Canceled)
+		case <-time.After(10 * time.Second):
+			t.Fatal("stream handler of the timed-out invocation was not canceled")
+		}
+
+		assertSlotFreed(t)
+	})
+
+	t.Run("stream invocation abandoned mid-response by closing body", func(t *testing.T) {
+		probe := newAbandonProbe()
+		activeProbe.Store(probe)
+
+		req := baseReq
+		req.Method = "block-after-chunk"
+		reqCtx, reqCancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer reqCancel()
+
+		ct, respBody, sperr := pc.InvokeStream(reqCtx, addr, req, bytes.NewReader([]byte("req")))
+		require.Nil(t, sperr)
+		require.NotNil(t, respBody)
+		assert.Equal(t, "application/test", ct)
+
+		// Read the initial chunk, wait until the server handler has parked, then abandon the response stream early
+		buf := make([]byte, 5)
+		_, err := io.ReadFull(respBody, buf)
+		require.NoError(t, err)
+		assert.Equal(t, []byte("chunk"), buf)
+
+		select {
+		case <-probe.started:
+		case <-time.After(10 * time.Second):
+			t.Fatal("stream handler did not park after writing initial chunk")
+		}
+
+		err = respBody.Close()
+		require.NoError(t, err)
+
+		select {
+		case herr := <-probe.done:
+			require.ErrorIs(t, herr, context.Canceled)
+		case <-time.After(10 * time.Second):
+			t.Fatal("stream handler was not canceled when caller closed response body")
+		}
+
+		assertSlotFreed(t)
+	})
+
+	t.Run("stream invocation canceled mid-upload resets request body", func(t *testing.T) {
+		probe := newAbandonProbe()
+		activeProbe.Store(probe)
+
+		uploadCtx, uploadCancel := context.WithCancel(t.Context())
+		abandoned := make(chan *protocol.Error, 1)
+		go func() {
+			req := baseReq
+			req.Method = "read-upload"
+			body := &blockingReader{initial: []byte("partial"), done: uploadCtx.Done()}
+			_, _, sperr := pc.InvokeStream(uploadCtx, addr, req, body)
+			abandoned <- sperr
+		}()
+
+		select {
+		case <-probe.started:
+		case <-time.After(10 * time.Second):
+			t.Fatal("upload stream handler did not start")
+		}
+		uploadCancel()
+
+		select {
+		case sperr := <-abandoned:
+			require.NotNil(t, sperr)
+			assert.Equal(t, protocol.ErrCodeCanceled, sperr.Code)
+		case <-time.After(10 * time.Second):
+			t.Fatal("aborted upload did not return to the caller")
+		}
+
+		// The server must observe a read error on the truncated upload rather than a clean EOF
+		select {
+		case readErr := <-probe.done:
+			require.Error(t, readErr, "an aborted upload must reset the stream rather than sending a clean EOF")
+		case <-time.After(10 * time.Second):
+			t.Fatal("upload stream handler did not finish reading")
+		}
+
+		assertSlotFreed(t)
+	})
 }
 
 func TestPeerInvocationPinsHostIdentity(t *testing.T) {

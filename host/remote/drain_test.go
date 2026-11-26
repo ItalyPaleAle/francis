@@ -338,6 +338,109 @@ func TestRemoteDrainCancelsIdleStreamReads(t *testing.T) {
 	}
 }
 
+type methodRemoteJob struct {
+	run func(ctx context.Context, method string) error
+}
+
+func (j methodRemoteJob) Job(ctx context.Context, method string, _ actor.Envelope) error {
+	return j.run(ctx, method)
+}
+
+func TestRemoteInboundCanceledWhenRuntimeAbandons(t *testing.T) {
+	rt := startScriptedRuntime(t)
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+
+	h := &Host{clock: &clock.RealClock{}, log: slog.New(slog.DiscardHandler)}
+	h.core = actorcore.NewManager(actorcore.Options{
+		RemoveActor:         func(context.Context, ref.ActorRef) error { return nil },
+		ShutdownGracePeriod: time.Hour,
+	})
+
+	err := h.core.RegisterActor("T", func(string, *actor.Service) actor.Actor {
+		return methodRemoteJob{run: func(ctx context.Context, method string) error {
+			if method == "block" {
+				close(started)
+				<-ctx.Done()
+				close(canceled)
+				return ctx.Err()
+			}
+			return nil
+		}}
+	}, actorcore.RegisterActorOptions{})
+	require.NoError(t, err)
+
+	h.core.Start()
+	defer h.core.Close()
+
+	rc := newReconnectingClient(t, rt.addr, runtimeClientConfig{
+		handlers: runtimeHandlers{executeAlarm: h.executeAlarm},
+		onDrain:  h.core.DrainAll,
+	})
+
+	runCtx, stopRun := context.WithCancel(t.Context())
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- rc.Run(runCtx)
+	}()
+	defer func() {
+		stopRun()
+		_ = waitRun(t, runErr)
+	}()
+
+	session := waitSession(t, rt)
+
+	// Start a job execution over an inbound stream, then abandon the stream as the runtime does on an execution timeout
+	jobReq, err := protocol.NewRequest(protocol.KindExecuteAlarm, protocol.ExecuteAlarmRequest{
+		ActorType: "T", ActorID: "one", Name: "job-1", Kind: string(components.AlarmKindJob), JobMethod: "block",
+	})
+	require.NoError(t, err)
+	jobReq.HostID = "host-1"
+	jobReq.SessionID = "session-1"
+
+	jobCtx, cancelJob := context.WithCancel(t.Context())
+	abandoned := make(chan error, 1)
+	go func() {
+		stream, openErr := session.OpenStreamSync(jobCtx)
+		if openErr != nil {
+			abandoned <- openErr
+			return
+		}
+		defer wt.CloseStream(stream)
+		_, rtErr := protocol.RoundTrip(jobCtx, stream, jobReq)
+		abandoned <- rtErr
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("inbound job did not start")
+	}
+	cancelJob()
+
+	select {
+	case rtErr := <-abandoned:
+		require.ErrorIs(t, rtErr, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("abandoned round trip did not return")
+	}
+
+	// The host handler must observe stream cancellation, releasing the actor's exclusive lock while the session stays open
+	select {
+	case <-canceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("host handler was not canceled when the runtime abandoned the stream")
+	}
+
+	// A follow-up job on the same actor succeeds instead of blocking behind the abandoned execution
+	require.Eventually(t, func() bool {
+		resp := rt.send(t, session, protocol.KindExecuteAlarm, protocol.ExecuteAlarmRequest{
+			ActorType: "T", ActorID: "one", Name: "job-2", Kind: string(components.AlarmKindJob), JobMethod: "ok",
+		})
+		return resp.Kind == protocol.KindExecuteAlarmResponse
+	}, 5*time.Second, 50*time.Millisecond, "follow-up job on the same actor should succeed after the abandoned execution releases its lock")
+}
+
 func TestRuntimeClientAdministrativeDrain(t *testing.T) {
 	t.Run("drain acknowledges, tears down, and ends Run", func(t *testing.T) {
 		rt := startScriptedRuntime(t)

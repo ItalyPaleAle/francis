@@ -750,8 +750,6 @@ type sessionIdentity struct {
 // serveInbound accepts and dispatches runtime-initiated streams until the session ends
 // The identity is the one assigned to this session, so requests are checked against the session they arrived on rather than a newer one
 func (rc *runtimeClient) serveInbound(ctx context.Context, session *webtransport.Session, identity sessionIdentity) func() {
-	// The accepting context stops admission while admitted handlers retain the live session through actor draining
-	executionCtx := session.Context()
 	var handlers sync.WaitGroup
 	// Per-session semaphores that bound how many inbound streams are handled concurrently, and how many rejections are in flight
 	sem := make(chan struct{}, inboundConcurrencyLimit)
@@ -777,8 +775,8 @@ func (rc *runtimeClient) serveInbound(ctx context.Context, session *webtransport
 				<-sem
 			}()
 
-			// Handle the stream
-			rc.handleInbound(executionCtx, ctx, stream, identity)
+			// Run the handler on the stream's context so it outlives admission during actor draining, while still canceling if the runtime abandons the request or the session closes
+			rc.handleInbound(stream.Context(), ctx, stream, identity)
 		})
 	}
 }

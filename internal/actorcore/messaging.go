@@ -374,23 +374,107 @@ func (m *Manager) invokePeerStream(ctx context.Context, peer PeerInvoker, r ref.
 	return ct, resp, false, nil
 }
 
+// inflightCall is an in-flight deduplicated peer object invocation, shared by concurrent callers carrying the same RequestID
+type inflightCall struct {
+	done   chan struct{}
+	cancel context.CancelFunc
+	refs   int
+
+	resp protocol.InvokeActorResponse
+	perr *protocol.Error
+}
+
 // PeerInvokeObject executes an object invocation for an actor owned by this host, on behalf of a peer caller
 func (m *Manager) PeerInvokeObject(ctx context.Context, resolver PlacementResolver, req protocol.InvokeActorRequest) (protocol.InvokeActorResponse, *protocol.Error) {
 	// If the caller provided a request ID, coalesce any concurrent duplicate into the in-flight execution so the actor runs at most once even when the caller retried after losing the response
 	if req.RequestID != "" {
-		type dedupResult struct {
-			resp protocol.InvokeActorResponse
-			perr *protocol.Error
-		}
-		val, _, _ := m.inflightDedup.Do(req.RequestID, func() (any, error) {
-			resp, perr := m.peerInvokeObjectCore(ctx, resolver, req)
-			return dedupResult{resp: resp, perr: perr}, nil
-		})
-		res, _ := val.(dedupResult)
-		return res.resp, res.perr
+		return m.peerInvokeObjectDedup(ctx, resolver, req)
 	}
 
 	return m.peerInvokeObjectCore(ctx, resolver, req)
+}
+
+// peerInvokeObjectDedup coalesces concurrent PeerInvokeObject calls carrying the same RequestID while decoupling cancellation from any single stream
+// An abandoned stream returns right away when another caller is still waiting, and the underlying execution is only canceled once the last waiting caller gives up
+func (m *Manager) peerInvokeObjectDedup(ctx context.Context, resolver PlacementResolver, req protocol.InvokeActorRequest) (protocol.InvokeActorResponse, *protocol.Error) {
+	err := ctx.Err()
+	if err != nil {
+		return protocol.InvokeActorResponse{}, InvokeErrorToProtocol(err)
+	}
+
+	// Attach to an existing execution for this RequestID, or start one on a detached context so one caller abandoning its stream never cancels a live retry
+	call := m.attachInflightCall(ctx, resolver, req)
+	defer m.detachInflightCall(req.RequestID, call)
+
+	select {
+	case <-call.done:
+		return call.resp, call.perr
+	case <-ctx.Done():
+		return protocol.InvokeActorResponse{}, InvokeErrorToProtocol(ctx.Err())
+	}
+}
+
+// attachInflightCall joins an existing in-flight execution for req.RequestID or starts a new one
+func (m *Manager) attachInflightCall(ctx context.Context, resolver PlacementResolver, req protocol.InvokeActorRequest) *inflightCall {
+	m.inflightMu.Lock()
+	defer m.inflightMu.Unlock()
+
+	existing, ok := m.inflightCalls[req.RequestID]
+	if ok {
+		existing.refs++
+		return existing
+	}
+
+	// Keep the first caller's context values (such as trace context) without tying cancellation to its stream alone
+	callCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	call := &inflightCall{
+		done:   make(chan struct{}),
+		cancel: cancel,
+		refs:   1,
+	}
+	if m.inflightCalls == nil {
+		m.inflightCalls = map[string]*inflightCall{}
+	}
+	m.inflightCalls[req.RequestID] = call
+
+	go func() {
+		resp, perr := m.peerInvokeObjectCore(callCtx, resolver, req)
+
+		m.inflightMu.Lock()
+		cur, exists := m.inflightCalls[req.RequestID]
+		if exists && cur == call {
+			delete(m.inflightCalls, req.RequestID)
+		}
+		m.inflightMu.Unlock()
+
+		// Publish the outcome before closing done so every attached caller sees the completed result
+		call.resp = resp
+		call.perr = perr
+		cancel()
+		close(call.done)
+	}()
+
+	return call
+}
+
+// detachInflightCall releases one caller's hold on a shared execution, canceling and awaiting it once the last caller has left
+func (m *Manager) detachInflightCall(requestID string, call *inflightCall) {
+	m.inflightMu.Lock()
+	call.refs--
+	last := call.refs <= 0
+	if last {
+		cur, ok := m.inflightCalls[requestID]
+		if ok && cur == call {
+			delete(m.inflightCalls, requestID)
+		}
+	}
+	m.inflightMu.Unlock()
+
+	// Wait for the execution goroutine to finish unwinding when the last caller leaves so it never outlives all of its callers
+	if last {
+		call.cancel()
+		<-call.done
+	}
 }
 
 // peerInvokeObjectCore runs the actor invocation for PeerInvokeObject
