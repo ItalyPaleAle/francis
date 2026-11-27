@@ -140,16 +140,28 @@ type RenewCertResponse struct {
 	CertNotAfterMs int64 `msgpack:"certExp"`
 }
 
-// UnregisterHostRequest requests a graceful, drain-oriented shutdown of the host
-type UnregisterHostRequest struct {
+// StartDrainRequest notifies the runtime that the host is beginning a graceful drain
+// Existing actor placements remain active while the host drains, and new placements and alarm leases stop targeting it
+type StartDrainRequest struct {
 	// DrainTimeoutMs is an optional hint for how long the host expects to take to drain, in milliseconds
 	DrainTimeoutMs int64 `msgpack:"drain,omitempty"`
 }
 
-// UnregisterHostResponse acknowledges a graceful shutdown request
-// After receiving it the host stops accepting new work and drains its active actors
-type UnregisterHostResponse struct {
+// StartDrainResponse acknowledges that the runtime has marked the host draining
+type StartDrainResponse struct {
 	// DrainDeadlineUnixMs is when the runtime expects the host to have finished draining, in Unix milliseconds
+	DrainDeadlineUnixMs int64 `msgpack:"drainDeadline,omitempty"`
+}
+
+// UnregisterHostRequest completes a graceful shutdown once all local actors and inbound turns on the host have finished draining
+type UnregisterHostRequest struct {
+	// DrainTimeoutMs is retained for wire compatibility with earlier callers
+	DrainTimeoutMs int64 `msgpack:"drain,omitempty"`
+}
+
+// UnregisterHostResponse acknowledges that the drained host registration has been removed from the provider
+type UnregisterHostResponse struct {
+	// DrainDeadlineUnixMs is retained for wire compatibility with earlier callers
 	DrainDeadlineUnixMs int64 `msgpack:"drainDeadline,omitempty"`
 }
 

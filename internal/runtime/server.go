@@ -391,8 +391,9 @@ func (rt *Runtime) serveSession(parentCtx context.Context, session *webtransport
 	}
 }
 
-// handleHostDisconnect removes a disconnected host from the manager and, for a host that drained gracefully, from the provider
-// It runs on session teardown, only if we still own the host's current session
+// handleHostDisconnect removes a disconnected host from the in-memory manager on session teardown
+// Provider registration is never deleted here because a session can close mid-drain (for example during a runtime rolling restart or transient network drop) while the host's actors are still running
+// A host that finishes draining sends an explicit KindUnregisterHost before closing, and one whose session dropped mid-drain expires via HostHealthCheckDeadline once its health checks stop
 func (rt *Runtime) handleHostDisconnect(c *hostConn) {
 	// Only act if the session being torn down is still the one tracked for this host
 	// A superseded or stale session must not evict the host's newer session
@@ -405,29 +406,6 @@ func (rt *Runtime) handleHostDisconnect(c *hostConn) {
 	rt.metrics.hostsConnected.Add(context.Background(), -1)
 
 	rt.log.Info("Host disconnected", slog.String("hostId", c.hostID))
-
-	// A host that did not drain disconnected ungracefully: leave its provider record to the health deadline, since it may reconnect and reattach
-	if !c.IsDraining() {
-		return
-	}
-
-	// A draining host whose session has now closed is completely done, so remove it from the provider
-	// This also reaps any active-actor placements the host did not clear while draining
-	// The removal is conditional on this session still owning the registration, because the host may have reattached through another runtime replica, which this replica's HostManager cannot see
-	// Use a fresh context since the session context is already canceled
-	ctx, cancel := context.WithTimeout(context.Background(), rt.providerRequestTimeout)
-	defer cancel()
-	err := rt.provider.UnregisterHost(ctx, c.hostID, components.UnregisterHostOpts{SessionID: c.sessionID})
-	if errors.Is(err, components.ErrHostSuperseded) {
-		rt.log.Info("Drained host is now owned by another session, leaving its registration in place", slog.String("hostId", c.hostID))
-		return
-	}
-	if err != nil && !errors.Is(err, components.ErrHostUnregistered) {
-		rt.log.Warn("Error unregistering drained host from provider",
-			slog.String("hostId", c.hostID),
-			slog.Any("error", err),
-		)
-	}
 }
 
 // requestReadTimeout bounds how long an inbound request frame may take to arrive on an accepted stream before it is abandoned

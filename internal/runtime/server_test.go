@@ -468,19 +468,25 @@ func TestRuntimeRunWaitsForSessionTeardown(t *testing.T) {
 		runErrC <- rt.Run(runCtx)
 	}()
 
-	// Register and gracefully drain a host so closing its session starts provider cleanup
+	// Send an explicit UnregisterHost on its own stream so the handler blocks inside UnregisterHost while the runtime shuts down
 	session := dialRuntime(t, t.Context(), addr)
 	reg := registerOnSession(t, t.Context(), session)
-	unregisterOnSession(t, t.Context(), session, reg.HostID, reg.SessionID)
-	err = session.CloseWithError(0, "")
+	stream, err := session.OpenStreamSync(t.Context())
+	require.NoError(t, err)
+	defer stream.Close()
+	unregReq, err := protocol.NewRequest(protocol.KindUnregisterHost, protocol.UnregisterHostRequest{})
+	require.NoError(t, err)
+	unregReq.HostID = reg.HostID
+	unregReq.SessionID = reg.SessionID
+	err = protocol.WriteMessage(stream, unregReq)
 	require.NoError(t, err)
 	select {
 	case <-prov.started:
 	case <-time.After(10 * time.Second):
-		t.Fatal("session teardown did not reach the provider")
+		t.Fatal("unregister handler did not reach the provider")
 	}
 
-	// Canceling the runtime must not return while the session still owns provider work
+	// Canceling the runtime must not return while the session's stream handler still owns provider work
 	cancel()
 	select {
 	case err = <-runErrC:
@@ -488,7 +494,7 @@ func TestRuntimeRunWaitsForSessionTeardown(t *testing.T) {
 	case <-time.After(250 * time.Millisecond):
 	}
 
-	// Releasing provider cleanup allows the tracked session to finish and Runtime.Run to return
+	// Releasing provider cleanup allows the tracked stream handler and session to finish and Runtime.Run to return
 	close(prov.release)
 	select {
 	case err = <-runErrC:
@@ -529,7 +535,7 @@ func TestServeSessionRejectsNonRegistrationFirstMessage(t *testing.T) {
 	}, 10*time.Second, 50*time.Millisecond, "the runtime should close a session whose first message is not a registration")
 }
 
-func TestHandleHostDisconnectGracefulUnregisters(t *testing.T) {
+func TestHandleHostDisconnectMidDrainKeepsRegistration(t *testing.T) {
 	rt, prov := newTestRuntime(t)
 	c := connectTestHost(t, rt, prov, "10.0.0.21:1", protocol.ActorHostType{ActorType: "T"})
 
@@ -537,15 +543,14 @@ func TestHandleHostDisconnectGracefulUnregisters(t *testing.T) {
 	_, err := prov.LookupActor(t.Context(), aref, components.LookupActorOpts{})
 	require.NoError(t, err)
 
-	// A host that drained gracefully is completely done once its session closes
+	// A session closing while the host is mid-drain (such as during a runtime rolling restart) must not cascade-delete active placements before KindUnregisterHost
 	c.setDraining()
 	rt.handleHostDisconnect(c)
 
-	// It is gone from the host manager and unregistered from the provider, taking its active-actor placements with it
 	_, ok := rt.hosts.Get(c.hostID)
 	assert.False(t, ok)
 	_, err = prov.LookupActor(t.Context(), aref, components.LookupActorOpts{ActiveOnly: true})
-	require.ErrorIs(t, err, components.ErrNoActor, "a gracefully drained host must be unregistered, clearing its placements")
+	require.NoError(t, err, "a session closing mid-drain must leave active actor placements intact")
 }
 
 func TestHandleHostDisconnectUngracefulKeepsRegistration(t *testing.T) {

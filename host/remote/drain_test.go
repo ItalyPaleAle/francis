@@ -34,6 +34,7 @@ type scriptedRuntime struct {
 	addr string
 
 	registrations atomic.Int32
+	startDrains   atomic.Int32
 	unregisters   atomic.Int32
 	healthChecks  atomic.Int32
 
@@ -98,6 +99,9 @@ func startScriptedRuntime(t *testing.T) *scriptedRuntime {
 					return
 				}
 				switch in.Kind {
+				case protocol.KindStartDrain:
+					rt.startDrains.Add(1)
+					_ = protocol.WriteMessage(s, in.Reply(protocol.KindStartDrainResponse, nil))
 				case protocol.KindUnregisterHost:
 					rt.unregisters.Add(1)
 					_ = protocol.WriteMessage(s, in.Reply(protocol.KindUnregisterHostResponse, nil))
@@ -484,6 +488,7 @@ func TestRuntimeClientAdministrativeDrain(t *testing.T) {
 		}
 		assert.True(t, drainStarted.Load())
 		assert.Equal(t, 1500*time.Millisecond, time.Duration(drainTimeout.Load()))
+		assert.Equal(t, int32(1), rt.startDrains.Load())
 		assert.Equal(t, int32(1), rt.unregisters.Load())
 
 		// The host never registers again, and a later Run refuses to start
@@ -592,6 +597,8 @@ func TestRuntimeClientAdministrativeDrain(t *testing.T) {
 		require.ErrorIs(t, err, host.ErrAdministrativeDrain)
 		time.Sleep(200 * time.Millisecond)
 		assert.Equal(t, int32(1), rt.registrations.Load())
+		assert.Equal(t, int32(1), rt.startDrains.Load())
+		assert.Zero(t, rt.unregisters.Load())
 	})
 
 	t.Run("health checks keep running while actors drain", func(t *testing.T) {
@@ -647,6 +654,7 @@ func TestRuntimeClientAdministrativeDrain(t *testing.T) {
 		default:
 			t.Fatal("onDrain was not called")
 		}
+		assert.Equal(t, int32(1), rt.startDrains.Load())
 		assert.Equal(t, int32(1), rt.unregisters.Load())
 	})
 }

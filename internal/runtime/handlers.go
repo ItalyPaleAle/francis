@@ -210,6 +210,8 @@ func (rt *Runtime) route(ctx context.Context, c *hostConn, req *protocol.Envelop
 	switch req.Kind {
 	case protocol.KindRenewCert:
 		return rt.handleRenewCert(ctx, c, req)
+	case protocol.KindStartDrain:
+		return rt.handleStartDrain(ctx, c, req)
 	case protocol.KindUnregisterHost:
 		return rt.handleUnregister(ctx, c, req)
 	case protocol.KindHealthCheck:
@@ -445,14 +447,13 @@ func (rt *Runtime) handleRenewCert(_ context.Context, c *hostConn, req *protocol
 	})
 }
 
-// handleUnregister handles a graceful, drain-oriented host shutdown request
-func (rt *Runtime) handleUnregister(parentCtx context.Context, c *hostConn, req *protocol.Envelope) *protocol.Envelope {
+// handleStartDrain marks a host draining before it begins halting its local actors, while keeping its existing placements intact
+func (rt *Runtime) handleStartDrain(parentCtx context.Context, c *hostConn, req *protocol.Envelope) *protocol.Envelope {
 	// Mark the host draining so it is no longer selected for new placement or alarm work by this runtime
 	// ConnectedHostIDs excludes draining hosts and handleLookupActor returns retry-later for any actor resolved onto one
 	c.setDraining()
 
-	// Persist the draining flag too, so no runtime replica has the provider place a new actor on the host
-	// A failure is not fatal, since the host is draining regardless: it only leaves other replicas able to place new actors on it until it disconnects
+	// Persist the draining flag so no runtime replica has the provider place a new actor on the host
 	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
 	defer cancel()
 	err := rt.provider.UpdateActorHost(ctx, c.hostID, components.UpdateActorHostReq{Draining: true})
@@ -463,9 +464,31 @@ func (rt *Runtime) handleUnregister(parentCtx context.Context, c *hostConn, req 
 		)
 	}
 
-	// Deliberately do not remove the host from the provider here
-	// Its actors are still active and must stay resolvable until the host has finished draining them (provider removal happens once the session closes, in handleHostDisconnect)
-	// Removing it now would delete every active-actor placement for the host, yanking actors that are still running
+	resp, err := req.ReplyWith(protocol.KindStartDrainResponse, protocol.StartDrainResponse{})
+	if err != nil {
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to encode start drain response"))
+	}
+	return resp
+}
+
+// handleUnregister removes a host's provider registration once the host has finished draining all local actors and inbound turns
+func (rt *Runtime) handleUnregister(parentCtx context.Context, c *hostConn, req *protocol.Envelope) *protocol.Envelope {
+	c.setDraining()
+
+	// Detach cancellation from the session context so a concurrent runtime shutdown does not abort an already-drained host's cleanup
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), rt.providerRequestTimeout)
+	defer cancel()
+	err := rt.provider.UnregisterHost(ctx, c.hostID, components.UnregisterHostOpts{SessionID: c.sessionID})
+	switch {
+	case errors.Is(err, components.ErrHostSuperseded):
+		rt.log.InfoContext(ctx, "Drained host is now owned by another session, leaving its registration in place", slog.String("hostId", c.hostID))
+	case err != nil && !errors.Is(err, components.ErrHostUnregistered):
+		rt.log.ErrorContext(ctx, "Failed to unregister drained host from provider",
+			slog.String("hostId", c.hostID),
+			slog.Any("error", err),
+		)
+		return req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to unregister host"))
+	}
 
 	resp, err := req.ReplyWith(protocol.KindUnregisterHostResponse, protocol.UnregisterHostResponse{})
 	if err != nil {

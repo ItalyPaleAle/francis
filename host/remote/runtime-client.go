@@ -342,16 +342,25 @@ func (rc *runtimeClient) connectAndServe(ctx context.Context, addr string) (bool
 			rc.cfg.onDrainStart()
 		}
 
-		// Tell the runtime we are draining so it stops selecting us for new placement and alarm work
-		rc.sendUnregister(session, resp.HostID, resp.SessionID)
+		// Tell the runtime we are starting to drain so it excludes us from new placements and alarm leases while keeping existing placements intact
+		rc.sendStartDrain(session, resp.HostID, resp.SessionID, drainTimeout)
+
+		// If the session drops mid-drain and the health check deadline elapses before draining finishes, abandon remaining actors so they cannot overlap with placements moved elsewhere
+		stopDrainWatch := rc.watchMidDrainExpiry(session, healthDeadline)
 
 		// Drain local actors so their deactivation can persist state and clear placement through the still-open runtime session
 		if rc.cfg.onDrain != nil {
 			rc.cfg.onDrain(drainTimeout)
 		}
+		stopDrainWatch()
 
 		// Let admitted jobs write their responses before the session closes, after actor draining releases their executions
 		waitInbound()
+
+		// Unregister the host in the provider only after all local actors and inbound turns have finished
+		if session.Context().Err() == nil {
+			rc.sendUnregister(session, resp.HostID, resp.SessionID)
+		}
 	}
 	return true, nil
 }
@@ -1191,7 +1200,72 @@ func (rc *runtimeClient) doRequest(ctx context.Context, kind string, payload any
 	return nil
 }
 
-// sendUnregister sends a best-effort graceful unregister on the given session during shutdown
+// sendStartDrain notifies the runtime that this host is starting to drain while keeping its active placements intact
+func (rc *runtimeClient) sendStartDrain(session *webtransport.Session, hostID string, sessionID string, drainTimeout time.Duration) {
+	if session.Context().Err() != nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(session.Context(), rc.cfg.requestTimeout)
+	defer cancel()
+
+	req, err := protocol.NewRequest(protocol.KindStartDrain, protocol.StartDrainRequest{
+		DrainTimeoutMs: drainTimeout.Milliseconds(),
+	})
+	if err != nil {
+		return
+	}
+	req.HostID = hostID
+	req.SessionID = sessionID
+
+	stream, err := session.OpenStreamSync(ctx)
+	if err != nil {
+		return
+	}
+	defer wt.CloseStream(stream)
+
+	_, _ = protocol.RoundTrip(ctx, stream, req)
+}
+
+// watchMidDrainExpiry watches for session loss during onDrain and abandons remaining actors if the health check deadline expires before draining completes
+func (rc *runtimeClient) watchMidDrainExpiry(session *webtransport.Session, healthDeadline time.Duration) func() {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-session.Context().Done():
+		case <-done:
+			return
+		}
+
+		rc.mu.RLock()
+		lastCheck := rc.lastHealthCheck
+		expired := rc.registrationExpired
+		rc.mu.RUnlock()
+
+		remaining := time.Duration(0)
+		if !expired {
+			remaining = max(time.Duration(0), healthDeadline-rc.cfg.clock.Since(lastCheck))
+		}
+
+		t := rc.cfg.clock.NewTimer(remaining)
+		select {
+		case <-t.C():
+			rc.mu.Lock()
+			rc.hostID = ""
+			rc.mu.Unlock()
+			if rc.cfg.onIdentityReset != nil {
+				rc.cfg.onIdentityReset()
+			}
+		case <-done:
+			t.Stop()
+		}
+	}()
+	return func() {
+		close(done)
+	}
+}
+
+// sendUnregister sends a best-effort final unregister once all local actors and inbound turns have finished draining
 func (rc *runtimeClient) sendUnregister(session *webtransport.Session, hostID string, sessionID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), rc.cfg.requestTimeout)
 	defer cancel()

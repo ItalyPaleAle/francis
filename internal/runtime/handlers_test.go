@@ -309,30 +309,30 @@ func TestHandleLookupActorDrainingHost(t *testing.T) {
 	assert.Positive(t, d)
 }
 
-func TestHandleUnregisterKeepsHostRegistered(t *testing.T) {
+func TestHandleStartDrainKeepsHostRegistered(t *testing.T) {
 	rt, prov := newTestRuntime(t)
 	c := connectTestHost(t, rt, prov, "10.0.0.20:1", protocol.ActorHostType{ActorType: "T"})
 
-	// Activate an actor on the host so we can prove its placement survives the unregister
+	// Activate an actor on the host so we can prove its placement survives starting the drain
 	aref := ref.NewActorRef("T", "a1")
 	_, err := prov.LookupActor(t.Context(), aref, components.LookupActorOpts{})
 	require.NoError(t, err)
 
-	resp := dispatchReq(t, rt, c, protocol.KindUnregisterHost, protocol.UnregisterHostRequest{})
-	require.Equal(t, protocol.KindUnregisterHostResponse, resp.Kind)
+	resp := dispatchReq(t, rt, c, protocol.KindStartDrain, protocol.StartDrainRequest{})
+	require.Equal(t, protocol.KindStartDrainResponse, resp.Kind)
 
-	// The host is marked draining but must stay registered with its actor still active, so existing actors keep serving until the host is completely done
+	// The host is marked draining while remaining registered with its actor still active until KindUnregisterHost arrives
 	assert.True(t, c.IsDraining())
 	_, err = prov.LookupActor(t.Context(), aref, components.LookupActorOpts{ActiveOnly: true})
-	require.NoError(t, err, "the active actor must still be placed after a graceful unregister")
+	require.NoError(t, err, "the active actor must still be placed while the host is draining")
 }
 
-func TestHandleUnregisterExcludesHostFromNewPlacements(t *testing.T) {
+func TestHandleStartDrainExcludesHostFromNewPlacements(t *testing.T) {
 	rt, prov := newTestRuntime(t)
 	c := connectTestHost(t, rt, prov, "10.0.0.25:1", protocol.ActorHostType{ActorType: "T"})
 
-	resp := dispatchReq(t, rt, c, protocol.KindUnregisterHost, protocol.UnregisterHostRequest{})
-	require.Equal(t, protocol.KindUnregisterHostResponse, resp.Kind)
+	resp := dispatchReq(t, rt, c, protocol.KindStartDrain, protocol.StartDrainRequest{})
+	require.Equal(t, protocol.KindStartDrainResponse, resp.Kind)
 
 	// The draining flag is persisted in the provider, so a lookup for a new actor finds no capable host
 	_, err := prov.LookupActor(t.Context(), ref.NewActorRef("T", "new"), components.LookupActorOpts{})
@@ -343,6 +343,41 @@ func TestHandleUnregisterExcludesHostFromNewPlacements(t *testing.T) {
 	res, err := prov.LookupActor(t.Context(), ref.NewActorRef("T", "new"), components.LookupActorOpts{})
 	require.NoError(t, err)
 	assert.Equal(t, other, res.HostID)
+}
+
+func TestHandleUnregisterRemovesHostAndRespectsSessionOwnership(t *testing.T) {
+	rt, prov := newTestRuntime(t)
+	c := connectTestHost(t, rt, prov, "10.0.0.27:1", protocol.ActorHostType{ActorType: "T"})
+
+	aref := ref.NewActorRef("T", "a1")
+	_, err := prov.LookupActor(t.Context(), aref, components.LookupActorOpts{})
+	require.NoError(t, err)
+
+	resp := dispatchReq(t, rt, c, protocol.KindUnregisterHost, protocol.UnregisterHostRequest{})
+	require.Equal(t, protocol.KindUnregisterHostResponse, resp.Kind)
+
+	_, err = prov.LookupActor(t.Context(), aref, components.LookupActorOpts{ActiveOnly: true})
+	require.ErrorIs(t, err, components.ErrNoActor)
+
+	// A registration reattached under another session on a second replica survives a stale session's unregister
+	c2 := connectTestHost(t, rt, prov, "10.0.0.28:1", protocol.ActorHostType{ActorType: "T"})
+	_, err = prov.LookupActor(t.Context(), aref, components.LookupActorOpts{})
+	require.NoError(t, err)
+
+	reattached, err := prov.RegisterHost(t.Context(), components.RegisterHostReq{
+		Address:        c2.address,
+		ActorTypes:     []components.ActorHostType{{ActorType: "T", IdleTimeout: time.Minute}},
+		ExistingHostID: c2.hostID,
+		SessionID:      "newer-session",
+	})
+	require.NoError(t, err)
+	require.True(t, reattached.Reattached)
+
+	staleResp := dispatchReq(t, rt, c2, protocol.KindUnregisterHost, protocol.UnregisterHostRequest{})
+	require.Equal(t, protocol.KindUnregisterHostResponse, staleResp.Kind)
+
+	_, err = prov.LookupActor(t.Context(), aref, components.LookupActorOpts{ActiveOnly: true})
+	require.NoError(t, err)
 }
 
 func TestHandleRemoveActor(t *testing.T) {

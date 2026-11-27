@@ -6,12 +6,17 @@
 package runtimefailover
 
 import (
+	"context"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/italypaleale/francis/actor"
 	"github.com/italypaleale/francis/internal/actorcore"
 	"github.com/italypaleale/francis/tests/integration/framework"
 	"github.com/italypaleale/francis/tests/integration/framework/cluster"
@@ -30,6 +35,7 @@ var variants = []provider.Variant{provider.SQLite, provider.Postgres}
 func init() {
 	for _, v := range variants {
 		suite.Register(&runtimeFailover{variant: v})
+		suite.Register(&runtimeDrainFailover{variant: v})
 	}
 }
 
@@ -100,4 +106,180 @@ func (s *runtimeFailover) Run(t *testing.T) {
 		return true
 	}, 60*time.Second, 500*time.Millisecond, "the surviving replica should accept new work")
 	assert.Greater(t, got, int64(1), "a post-outage increment should persist on top of the survived state")
+}
+
+const drainGuardActorType = "drain-guard"
+
+type drainGuardActor struct {
+	svc      *actor.Service
+	scenario *runtimeDrainFailover
+}
+
+func (a *drainGuardActor) Invoke(ctx context.Context, method string, _ actor.Envelope) (any, error) {
+	concurrent := a.scenario.inFlight.Add(1)
+	if concurrent > 1 {
+		a.scenario.overlapped.Store(true)
+	}
+	defer a.scenario.inFlight.Add(-1)
+
+	switch method {
+	case "place", "ping":
+		return shared.HostLabel(a.svc), nil
+	case "hold":
+		a.scenario.turnEnteredOnce.Do(func() {
+			close(a.scenario.turnEntered)
+		})
+		select {
+		case <-actor.HaltingFromContext(ctx):
+			a.scenario.haltingObservedOnce.Do(func() {
+				close(a.scenario.haltingObserved)
+			})
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		select {
+		case <-a.scenario.releaseTurn:
+			return shared.HostLabel(a.svc), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	default:
+		return nil, fmt.Errorf("unknown method %q", method)
+	}
+}
+
+// runtimeDrainFailover verifies that stopping a runtime replica while a connected remote host is mid-drain does not cascade-delete active placements or allow a second host to activate the actor concurrently
+type runtimeDrainFailover struct {
+	variant provider.Variant
+
+	cluster             *cluster.Cluster
+	inFlight            atomic.Int32
+	overlapped          atomic.Bool
+	turnEntered         chan struct{}
+	turnEnteredOnce     sync.Once
+	haltingObserved     chan struct{}
+	haltingObservedOnce sync.Once
+	releaseTurn         chan struct{}
+}
+
+func (s *runtimeDrainFailover) Name() string {
+	return "runtimefailover-drain/remote/" + string(s.variant)
+}
+
+func (s *runtimeDrainFailover) Setup(t *testing.T) []framework.Option {
+	s.inFlight.Store(0)
+	s.overlapped.Store(false)
+	s.turnEntered = make(chan struct{})
+	s.turnEnteredOnce = sync.Once{}
+	s.haltingObserved = make(chan struct{})
+	s.haltingObservedOnce = sync.Once{}
+	s.releaseTurn = make(chan struct{})
+
+	reg := frameworkhost.ActorReg{
+		Type: drainGuardActorType,
+		Factory: func(_ string, svc *actor.Service) actor.Actor {
+			return &drainGuardActor{svc: svc, scenario: s}
+		},
+		Opts: []actorcore.RegisterActorOption{actorcore.WithIdleTimeout(time.Minute)},
+	}
+
+	s.cluster = cluster.New(t, cluster.Options{
+		Kind:                    cluster.Remote,
+		Variant:                 s.variant,
+		Hosts:                   2,
+		RuntimeReplicas:         2,
+		HostHealthCheckDeadline: 4 * time.Second,
+		ProviderQueryTimeout:    time.Second,
+		HostRequestTimeout:      2 * time.Second,
+		Actors:                  []frameworkhost.ActorReg{reg},
+	})
+	return []framework.Option{
+		framework.WithProcesses(s.cluster.Processes()...),
+	}
+}
+
+func (s *runtimeDrainFailover) Run(t *testing.T) {
+	ctx := t.Context()
+	actorID := "drain-mid-rollover-" + string(s.variant)
+
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			close(s.releaseTurn)
+		})
+	}
+	defer release()
+
+	// Pin Host 0 onto Runtime 0 and place the actor on Host 0 deterministically before bringing Runtime 1 and Host 1 back up
+	s.cluster.Runtime(1).Stop(t)
+	s.cluster.Host(1).Stop(t)
+	s.cluster.Host(0).Stop(t)
+	s.cluster.Host(0).Run(t)
+	shared.SetHostLabel(s.cluster.Service(0), "h0")
+
+	env, err := s.cluster.Service(0).Invoke(ctx, drainGuardActorType, actorID, "place", nil)
+	require.NoError(t, err)
+	var owner string
+	err = env.Decode(&owner)
+	require.NoError(t, err)
+	require.Equal(t, "h0", owner)
+
+	s.cluster.Runtime(1).Run(t)
+	s.cluster.Host(1).Run(t)
+	shared.SetHostLabel(s.cluster.Service(1), "h1")
+
+	// Hold an active turn on Host 0 while starting Host 0's graceful drain so Runtime 0 receives KindStartDrain
+	holdErrCh := make(chan error, 1)
+	go func() {
+		_, holdErr := s.cluster.Service(0).Invoke(ctx, drainGuardActorType, actorID, "hold", nil)
+		holdErrCh <- holdErr
+	}()
+	select {
+	case <-s.turnEntered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("in-flight turn on Host 0 did not start")
+	}
+
+	hostStopDone := make(chan struct{})
+	go func() {
+		s.cluster.Host(0).Stop(t)
+		close(hostStopDone)
+	}()
+	select {
+	case <-s.haltingObserved:
+	case <-time.After(10 * time.Second):
+		t.Fatal("in-flight turn on Host 0 did not observe drain halting signal")
+	}
+
+	// Shut down Runtime 0 while Host 0 is mid-drain; handleHostDisconnect must not unregister Host 0 or delete its active_actors row
+	s.cluster.Runtime(0).Stop(t)
+
+	// Before Host 0's health check deadline elapses, Host 1 (via Runtime 1) must not be able to activate a second copy of the actor concurrently
+	probeCtx, probeCancel := context.WithTimeout(ctx, 800*time.Millisecond)
+	_, err = s.cluster.Service(1).Invoke(probeCtx, drainGuardActorType, actorID, "ping", nil)
+	probeCancel()
+	require.Error(t, err, "surviving runtime must not re-place the actor onto Host 1 while Host 0 is still mid-drain within its health deadline")
+	assert.False(t, s.overlapped.Load(), "actor turns must never overlap across Host 0 and Host 1")
+
+	// Let Host 0 finish its turn and complete shutdown
+	release()
+	<-holdErrCh
+	select {
+	case <-hostStopDone:
+	case <-time.After(15 * time.Second):
+		t.Fatal("Host 0 did not finish shutting down")
+	}
+
+	// Once Host 0's registration expires past HostHealthCheckDeadline, Runtime 1 places the actor onto Host 1 cleanly without any turn overlap
+	var newOwner string
+	require.Eventually(t, func() bool {
+		pingEnv, pingErr := s.cluster.Service(1).Invoke(ctx, drainGuardActorType, actorID, "ping", nil)
+		if pingErr != nil {
+			return false
+		}
+		decErr := pingEnv.Decode(&newOwner)
+		return decErr == nil
+	}, 20*time.Second, 200*time.Millisecond, "Host 1 should take over the actor once Host 0's health check deadline expires")
+	assert.Equal(t, "h1", newOwner)
+	assert.False(t, s.overlapped.Load(), "actor turns must never overlap across hosts")
 }
