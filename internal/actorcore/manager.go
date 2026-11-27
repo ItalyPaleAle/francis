@@ -558,6 +558,96 @@ func (m *Manager) Halt(actorType string, actorID string) error {
 	return nil
 }
 
+// HaltAndWait halts an actor on this host and waits for any already-running deactivation of that instance to complete before returning
+func (m *Manager) HaltAndWait(actorType string, actorID string) error {
+	aRef := ref.NewActorRef(actorType, actorID)
+	act, ok := m.Actors.Get(aRef.String())
+	if !ok || act == nil {
+		return actor.ErrActorNotHosted
+	}
+
+	err := m.HaltActiveActor(act, true)
+	<-act.deactivationDone
+	if err != nil {
+		return fmt.Errorf("failed to halt actor: %w", err)
+	}
+
+	return nil
+}
+
+// DeactivateForReroute drains in-flight turns, runs Deactivate, and drops the actor from the local map synchronously, while running placement removal asynchronously
+// Remote job rejection uses this so local turns and Deactivate finish before the runtime re-routes the job, without deadlocking KindRemoveActor against the in-flight alarm execution on the runtime
+func (m *Manager) DeactivateForReroute(ctx context.Context, actorType string, actorID string) error {
+	aRef := ref.NewActorRef(actorType, actorID)
+	key := aRef.String()
+	act, ok := m.Actors.Get(key)
+	if !ok || act == nil {
+		return nil
+	}
+
+	if !act.deactivationStarted.CompareAndSwap(false, true) {
+		select {
+		case <-act.localDeactivated:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	// Span the deactivation and guarantee both completion channels close on exit
+	_, span := tracing.Start(context.Background(), "actor.deactivate",
+		trace.WithAttributes(tracing.ActorRef(key)),
+	)
+
+	err := act.Halt(true)
+	if errors.Is(err, ErrActorAlreadyHalted) {
+		act.markLocalDeactivated()
+		close(act.deactivationDone)
+		tracing.End(span, nil)
+		return nil
+	} else if err != nil {
+		act.markLocalDeactivated()
+		close(act.deactivationDone)
+		tracing.End(span, err)
+		return fmt.Errorf("failed to halt actor: %w", err)
+	}
+
+	err = m.deactivateActor(act, act.abandoned.Load())
+	if err != nil {
+		m.log.Error("Actor returned an error during deactivation", slog.Any("error", err))
+	}
+
+	// Remove the halted activation from the local map before replying so no local or peer call can use it while the runtime re-routes
+	current, stillPresent := m.Actors.Get(key)
+	if stillPresent && current == act {
+		m.Actors.GetAndDel(key)
+	}
+	act.markLocalDeactivated()
+
+	if !stillPresent || current != act || act.abandoned.Load() {
+		close(act.deactivationDone)
+		tracing.End(span, nil)
+		return nil
+	}
+
+	// Clear placement in the background so KindRemoveActor does not wait on the runtime's own in-flight ExecuteAlarm call
+	bgCtx := context.WithoutCancel(ctx)
+	go func() {
+		defer close(act.deactivationDone)
+		rmCtx, cancel := context.WithTimeout(bgCtx, m.providerRequestTimeout)
+		defer cancel()
+		rErr := m.removeActor(rmCtx, act.ref)
+		if rErr != nil && !errors.Is(rErr, components.ErrNoActor) {
+			m.log.Error("Failed to remove actor from the placement store", slog.String("actorRef", key), slog.Any("error", rErr))
+			tracing.End(span, rErr)
+			return
+		}
+		tracing.End(span, nil)
+	}()
+
+	return nil
+}
+
 // HaltDeferred halts an actor in the background, logging any error
 func (m *Manager) HaltDeferred(actorType string, actorID string) {
 	go func() {
@@ -637,6 +727,7 @@ func (m *Manager) haltActiveActor(act *ActiveActor, drain bool, abandon bool) (e
 // finishHaltActiveActor completes the deactivation whose ownership the caller already claimed
 func (m *Manager) finishHaltActiveActor(act *ActiveActor, drain bool, abandon bool) (err error) {
 	defer close(act.deactivationDone)
+	defer act.markLocalDeactivated()
 	key := act.Key()
 
 	// Deactivation runs off the idle processor or shutdown, not a caller request, so it begins its own trace
@@ -667,6 +758,7 @@ func (m *Manager) finishHaltActiveActor(act *ActiveActor, drain bool, abandon bo
 		// Otherwise, we are in a state where the object is still in-memory and that will cause many issues
 		m.log.Error("Actor returned an error during deactivation", slog.Any("error", err))
 	}
+	act.markLocalDeactivated()
 
 	// Confirm this activation is still the one registered before changing its placement
 	current, ok := m.Actors.Get(key)

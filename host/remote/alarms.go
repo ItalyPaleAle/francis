@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 
 	"go.opentelemetry.io/otel/trace"
@@ -136,13 +137,22 @@ func (h *Host) executeAlarm(ctx context.Context, req protocol.ExecuteAlarmReques
 		tracing.Fail(ctx, err.Error())
 
 		// The host declined this job occurrence, either because its capacity group is full or the handler returned ErrJobRejected
-		// It is signaled with a distinct code so the runtime re-routes it to another host without counting an attempt, and the actor is halted here to clear its placement so the re-route does not return to this host
+		// Drain and deactivate the actor locally before replying so no queued turn or Deactivate hook on this host overlaps with the host the runtime re-routes the job to
 		if errors.Is(err, actorcore.ErrCapacityExhausted) {
-			h.core.HaltDeferred(req.ActorType, req.ActorID)
+			h.placementCache.Delete(aRef.String())
+			err = h.core.DeactivateForReroute(ctx, req.ActorType, req.ActorID)
+			if err != nil {
+				h.log.WarnContext(ctx, "Failed to deactivate actor after capacity exhaustion", slog.String("actorRef", aRef.String()), slog.Any("error", err))
+			}
 			return protocol.ExecuteAlarmResponse{}, protocol.NewError(protocol.ErrCodeCapacityExhausted, err.Error())
 		}
+
 		if errors.Is(err, actor.ErrJobRejected) {
-			h.core.HaltDeferred(req.ActorType, req.ActorID)
+			h.placementCache.Delete(aRef.String())
+			err = h.core.DeactivateForReroute(ctx, req.ActorType, req.ActorID)
+			if err != nil {
+				h.log.WarnContext(ctx, "Failed to deactivate actor after job rejection", slog.String("actorRef", aRef.String()), slog.Any("error", err))
+			}
 			return protocol.ExecuteAlarmResponse{}, protocol.NewError(protocol.ErrCodeJobRejected, err.Error())
 		}
 

@@ -1566,3 +1566,76 @@ func TestAbandonAllUpgradesInFlightDeactivationAndCancelsTurn(t *testing.T) {
 	assert.False(t, removeCalled.Load())
 	assert.Zero(t, m.Actors.Len())
 }
+
+func TestDeactivateForRerouteWaitsForLocalDrainWithoutBlockingOnRemoveActor(t *testing.T) {
+	removeStarted := make(chan struct{})
+	releaseRemove := make(chan struct{})
+	m := NewManager(Options{
+		RemoveActor: func(context.Context, ref.ActorRef) error {
+			close(removeStarted)
+			<-releaseRemove
+			return nil
+		},
+		ProviderRequestTimeout: 5 * time.Second,
+		ShutdownGracePeriod:    5 * time.Second,
+	})
+	err := m.RegisterActor("testactor", func(string, *actor.Service) actor.Actor {
+		return &actor_mocks.MockActorDeactivate{}
+	}, RegisterActorOptions{DeactivationTimeout: 5 * time.Second})
+	require.NoError(t, err)
+	m.Start()
+	defer m.Close()
+
+	aRef := ref.NewActorRef("testactor", "reroute-1")
+	var deactivated atomic.Bool
+	instance := &actor_mocks.MockActorDeactivate{}
+	instance.
+		On("Deactivate", mock.MatchedBy(testutil.MatchContextInterface)).
+		Run(func(args mock.Arguments) {
+			//nolint:forcetypeassert
+			dCtx := args.Get(0).(context.Context)
+			assert.False(t, types.IsReadOnly(dCtx))
+			deactivated.Store(true)
+		}).
+		Return(nil).
+		Once()
+
+	act := NewActiveActor(aRef, instance, 5*time.Minute, LockModeExclusive, m.IdleProcessor, m.clock)
+	m.Actors.Set(aRef.String(), act)
+
+	// Hold an in-flight turn on the actor while DeactivateForReroute starts
+	turnStarted := make(chan struct{})
+	releaseTurn := make(chan struct{})
+	go func() {
+		_, _ = m.LockAndInvokeActive(t.Context(), aRef, func(_ context.Context, _ *ActiveActor) (any, error) {
+			close(turnStarted)
+			<-releaseTurn
+			return nil, nil
+		})
+	}()
+	<-turnStarted
+
+	rerouteDone := make(chan error, 1)
+	go func() {
+		rerouteDone <- m.DeactivateForReroute(t.Context(), "testactor", "reroute-1")
+	}()
+
+	// DeactivateForReroute must not return while the in-flight turn is still running
+	select {
+	case rErr := <-rerouteDone:
+		t.Fatalf("DeactivateForReroute returned before in-flight turn completed: %v", rErr)
+	case <-time.After(30 * time.Millisecond):
+	}
+
+	// Finish the turn; DeactivateForReroute must finish Deactivate and clear m.Actors even while RemoveActor is still blocked
+	close(releaseTurn)
+	err = <-rerouteDone
+	require.NoError(t, err)
+
+	assert.True(t, deactivated.Load())
+	assert.Zero(t, m.Actors.Len())
+
+	<-removeStarted
+	close(releaseRemove)
+	<-act.deactivationDone
+}

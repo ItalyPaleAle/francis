@@ -51,8 +51,11 @@ type ActiveActor struct {
 	halted atomic.Bool
 
 	// deactivationDone lets invocations and host drains wait until the lifecycle hook and placement cleanup finish
-	deactivationStarted atomic.Bool
-	deactivationDone    chan struct{}
+	// localDeactivated closes as soon as in-flight turns and Deactivate finish locally, before any placement-store RPC
+	deactivationStarted  atomic.Bool
+	localDeactivated     chan struct{}
+	localDeactivatedOnce sync.Once
+	deactivationDone     chan struct{}
 
 	// abandoned marks an actor whose host lost ownership, upgrading in-flight deactivations to read-only and cutting in-flight calls short via forceCancelCh
 	abandoned       atomic.Bool
@@ -76,6 +79,7 @@ func NewActiveActor(ref ref.ActorRef, instance actor.Actor, idleTimeout time.Dur
 	}
 
 	a := &ActiveActor{
+		localDeactivated: make(chan struct{}),
 		deactivationDone: make(chan struct{}),
 		forceCancelCh:    make(chan struct{}),
 		Instance:         instance,
@@ -98,6 +102,12 @@ func (a *ActiveActor) markAbandoned() {
 	a.abandoned.Store(true)
 	a.forceCancelOnce.Do(func() {
 		close(a.forceCancelCh)
+	})
+}
+
+func (a *ActiveActor) markLocalDeactivated() {
+	a.localDeactivatedOnce.Do(func() {
+		close(a.localDeactivated)
 	})
 }
 

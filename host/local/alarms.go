@@ -535,7 +535,8 @@ func (h *Host) fireJobFailed(parentCtx context.Context, lease *ref.AlarmLease, m
 // It never counts an attempt or dead-letters, since a reject is not a failure
 func (h *Host) releaseForReroute(parentCtx context.Context, lease *ref.AlarmLease, aRef ref.ActorRef, log *slog.Logger) {
 	// Clear the actor's placement so the occurrence is re-allocated to a host with free capacity rather than back to this one
-	err := h.core.Halt(aRef.ActorType, aRef.ActorID)
+	h.placementCache.Delete(aRef.String())
+	err := h.core.HaltAndWait(aRef.ActorType, aRef.ActorID)
 	if err != nil && !errors.Is(err, actor.ErrActorNotHosted) {
 		log.Warn("Failed to halt actor while releasing job for re-route", slog.Any("error", err))
 	}
