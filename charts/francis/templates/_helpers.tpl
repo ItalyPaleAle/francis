@@ -332,6 +332,9 @@ Every template includes this so the error surfaces no matter which resource rend
 {{- if and (eq $method "psk") (not .Values.bootstrap.hostPSK) -}}
 {{- fail "\nfrancis: bootstrap.hostPSK is required when bootstrap.method is \"psk\"" -}}
 {{- end -}}
+{{- if and (eq $method "psk") (lt (len (toString .Values.bootstrap.hostPSK)) 32) -}}
+{{- fail "\nfrancis: bootstrap.hostPSK must be at least 32 characters long" -}}
+{{- end -}}
 {{- if eq $method "jwt" -}}
 {{- if not .Values.bootstrap.jwt.issuer -}}
 {{- fail "\nfrancis: bootstrap.jwt.issuer is required when bootstrap.method is \"jwt\"" -}}

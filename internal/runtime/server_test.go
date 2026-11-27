@@ -166,7 +166,7 @@ func registerOnSessionWithKey(t *testing.T, ctx context.Context, session *webtra
 	require.False(t, isErr)
 	var challenge protocol.RegisterAuthChallengeResponse
 	require.NoError(t, challengeEnv.DecodePayload(&challenge))
-	require.True(t, psk.VerifyServerProof(cb, clientNonce, challenge.ServerNonce, challenge.ServerProof))
+	require.Len(t, challenge.ServerNonce, bootstrapauth.NonceSize)
 
 	// Generate a workload key the runtime signs into a certificate
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -189,6 +189,7 @@ func registerOnSessionWithKey(t *testing.T, ctx context.Context, session *webtra
 	var out protocol.RegisterHostResponse
 	err = resp.DecodePayload(&out)
 	require.NoError(t, err)
+	require.True(t, psk.VerifyServerProof(cb, clientNonce, challenge.ServerNonce, out.ServerProof))
 	return out, priv
 }
 
@@ -292,7 +293,7 @@ func pskBootstrap(t *testing.T, ctx context.Context, session *webtransport.Sessi
 	require.False(t, isErr)
 	var challenge protocol.RegisterAuthChallengeResponse
 	require.NoError(t, challengeEnv.DecodePayload(&challenge))
-	require.True(t, psk.VerifyServerProof(cb, clientNonce, challenge.ServerNonce, challenge.ServerProof))
+	require.Len(t, challenge.ServerNonce, bootstrapauth.NonceSize)
 
 	// Generate a workload key the runtime signs into a certificate
 	pub, _, err := ed25519.GenerateKey(rand.Reader)
@@ -317,6 +318,7 @@ func pskBootstrap(t *testing.T, ctx context.Context, session *webtransport.Sessi
 
 	var out protocol.RegisterHostResponse
 	require.NoError(t, resp.DecodePayload(&out))
+	require.True(t, psk.VerifyServerProof(cb, clientNonce, challenge.ServerNonce, out.ServerProof))
 	return out, nil
 }
 
@@ -625,4 +627,69 @@ func TestHandleHostDisconnectLeavesRegistrationOwnedByAnotherReplica(t *testing.
 	assert.False(t, ok, "the stale session is removed from this replica's host manager")
 	_, err = prov.LookupActor(t.Context(), aref, components.LookupActorOpts{ActiveOnly: true})
 	require.NoError(t, err, "a registration owned by another session must survive the stale teardown")
+}
+
+func TestPSKBootstrapRejectsInvalidNonceAndWithholdsServerProof(t *testing.T) {
+	_, _, addr := runRuntimeServer(t)
+
+	t.Run("rejects wrong-size client nonce", func(t *testing.T) {
+		session := dialRuntime(t, t.Context(), addr)
+		stream, err := session.OpenStreamSync(t.Context())
+		require.NoError(t, err)
+		defer stream.Close()
+
+		begin, err := protocol.NewRequest(protocol.KindRegisterHostAuth, protocol.RegisterAuthBeginRequest{
+			Method:      bootstrapauth.MethodPSK,
+			ClientNonce: []byte("too-short"),
+		})
+		require.NoError(t, err)
+
+		resp, err := protocol.RoundTrip(t.Context(), stream, begin)
+		require.NoError(t, err)
+		perr, isErr := resp.AsError()
+		require.True(t, isErr)
+		assert.Equal(t, protocol.ErrCodeBadRequest, perr.Code)
+	})
+
+	t.Run("withholds server proof when client proof fails", func(t *testing.T) {
+		session := dialRuntime(t, t.Context(), addr)
+		stream, err := session.OpenStreamSync(t.Context())
+		require.NoError(t, err)
+		defer stream.Close()
+
+		clientNonce, err := bootstrapauth.Nonce()
+		require.NoError(t, err)
+		begin, err := protocol.NewRequest(protocol.KindRegisterHostAuth, protocol.RegisterAuthBeginRequest{
+			Method:      bootstrapauth.MethodPSK,
+			ClientNonce: clientNonce,
+		})
+		require.NoError(t, err)
+
+		// The pre-authentication challenge carries only the server nonce
+		challengeEnv, err := protocol.RoundTrip(t.Context(), stream, begin)
+		require.NoError(t, err)
+		_, isErr := challengeEnv.AsError()
+		require.False(t, isErr)
+		var rawChallenge map[string]any
+		err = challengeEnv.DecodePayload(&rawChallenge)
+		require.NoError(t, err)
+		assert.NotContains(t, rawChallenge, "sproof")
+
+		// A registration with a wrong PSK proof receives an unauthorized error with no server proof
+		pub, _, err := ed25519.GenerateKey(rand.Reader)
+		require.NoError(t, err)
+		req, err := protocol.NewRequest(protocol.KindRegisterHost, protocol.RegisterHostRequest{
+			Address:        "10.9.0.99:1",
+			ActorTypes:     []protocol.ActorHostType{{ActorType: "T", IdleTimeoutMs: 60000}},
+			Auth:           protocol.RegisterAuth{Method: bootstrapauth.MethodPSK, Proof: []byte("forged-proof")},
+			WorkloadPubKey: pub,
+		})
+		require.NoError(t, err)
+
+		resp, err := protocol.RoundTrip(t.Context(), stream, req)
+		require.NoError(t, err)
+		perr, isErr := resp.AsError()
+		require.True(t, isErr)
+		assert.Equal(t, protocol.ErrCodeUnauthorized, perr.Code)
+	})
 }

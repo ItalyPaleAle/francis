@@ -164,10 +164,15 @@ func (p *Provider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, r
 
 	// Resolve placement only when the stored occurrence is inside fetch-ahead
 	actorKey := NewActorKey(aRef.ActorType, aRef.ActorID)
-	var newActor *ActiveActor
+	var (
+		existingActor   *ActiveActor
+		actorWasPresent bool
+		newActor        *ActiveActor
+	)
 	canLease := false
 	if !job.DueTime.After(now.Add(p.Cfg.AlarmsFetchAheadInterval)) {
-		existingActor, actorExists := p.ActiveActors[actorKey]
+		existingActor, actorWasPresent = p.ActiveActors[actorKey]
+		actorExists := actorWasPresent
 		if actorExists {
 			host, hostExists := p.Hosts[existingActor.HostID]
 			if hostExists && p.IsHostHealthy(host) {
@@ -205,6 +210,11 @@ func (p *Provider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, r
 		job.LeaseExpiration = &leaseExpiration
 		lease = ref.NewAlarmLease(aRef, job.ID, job.DueTime, leaseID)
 	}
+
+	clearLeasesApply := func() {}
+	if actorWasPresent && newActor != nil && existingActor.HostID != newActor.HostID {
+		clearLeasesApply = p.stageClearActorAlarmLeases([]ActorKey{actorKey}, map[string]struct{}{job.ID: {}}, changes)
+	}
 	p.Mu.RUnlock()
 	if exists && !canLease {
 		if stateChange != nil {
@@ -222,6 +232,7 @@ func (p *Provider) dispatchAndLeaseJob(ctx context.Context, aRef ref.AlarmRef, r
 		changes.ActiveActors.Set = append(changes.ActiveActors.Set, ActiveActorChange{Key: actorKey, Value: newActor})
 	}
 	err := p.persistThenApplyWithState(ctx, changes, stateChange, func() {
+		clearLeasesApply()
 		p.Alarms[key] = job
 		p.AlarmsByID[job.ID] = job
 		if newActor != nil {

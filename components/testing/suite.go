@@ -5008,6 +5008,30 @@ func (s Suite) TestRenewAlarmLeases(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, renewRes.Leases, "no leases should be renewed without a host list, even when leases are specified")
 	})
+
+	t.Run("ignores leases on unhealthy hosts", func(t *testing.T) {
+		ctx := t.Context()
+
+		err := s.p.Seed(ctx, GetSpec())
+		require.NoError(t, err)
+
+		// Fetch alarms on H7 while H7 is healthy (lease duration and health deadline are both 1 minute, and H7's last health check is 2s ago)
+		res, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{SpecHostH7},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, res)
+
+		// Advance 59 seconds: H7's last health check is now 61s ago (past the 1m health deadline), while the 1m alarm leases still have ~1s left
+		err = s.p.AdvanceClock(59 * time.Second)
+		require.NoError(t, err)
+
+		renewRes, err := s.p.RenewAlarmLeases(ctx, components.RenewAlarmLeasesReq{
+			Hosts: []string{SpecHostH7},
+		})
+		require.NoError(t, err)
+		assert.Empty(t, renewRes.Leases, "should not renew leases owned by an unhealthy host")
+	})
 }
 
 func (s Suite) TestReleaseAlarmLease(t *testing.T) {

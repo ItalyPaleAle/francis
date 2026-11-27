@@ -5,7 +5,7 @@ import (
 )
 
 func TestPSKChallengeResponse(t *testing.T) {
-	hostPSK := []byte("host-psk-abcdefghijklmnop")
+	hostPSK := []byte("host-psk-0123456789abcdefghijklmn")
 	p, err := NewPSK(hostPSK)
 	if err != nil {
 		t.Fatalf("NewPSK: %v", err)
@@ -47,7 +47,7 @@ func TestPSKChallengeResponse(t *testing.T) {
 	}
 
 	// A different host PSK must not verify
-	other, err := NewPSK([]byte("other-psk-abcdefghijklmnop"))
+	other, err := NewPSK([]byte("other-psk-0123456789abcdefghijklm"))
 	if err != nil {
 		t.Fatalf("NewPSK: %v", err)
 	}
@@ -60,5 +60,11 @@ func TestNewPSKTooShort(t *testing.T) {
 	_, err := NewPSK([]byte("short"))
 	if err == nil {
 		t.Fatal("expected error for a too-short PSK")
+	}
+
+	// 31 bytes is one byte below minPSKLen
+	_, err = NewPSK([]byte("0123456789abcdef0123456789abcde"))
+	if err == nil {
+		t.Fatal("expected error for a 31-byte PSK")
 	}
 }

@@ -329,10 +329,11 @@ func (s *SQLiteProvider) RenewAlarmLeases(ctx context.Context, req components.Re
 
 	now := s.clock.Now()
 	expTime := now.Add(s.cfg.AlarmsLeaseDuration).UnixMilli()
+	healthCutoff := now.Add(-1 * s.cfg.HostHealthCheckDeadline).UnixMilli()
 
 	var leaseIdCondition string
 
-	args := make([]any, 2+len(req.Leases)+len(req.Hosts))
+	args := make([]any, 3+len(req.Leases)+len(req.Hosts))
 	args[0] = expTime
 	args[1] = now.UnixMilli()
 
@@ -355,8 +356,9 @@ func (s *SQLiteProvider) RenewAlarmLeases(ctx context.Context, req components.Re
 		leaseIdCondition = b.String()
 	}
 
-	// Add host conditions
+	// Add host and health-cutoff conditions
 	hostPlaceholders := getInPlaceholders(req.Hosts, args, 2+len(req.Leases))
+	args[2+len(req.Leases)+len(req.Hosts)] = healthCutoff
 
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
@@ -372,9 +374,12 @@ func (s *SQLiteProvider) RenewAlarmLeases(ctx context.Context, req components.Re
 			AND alarm_lease_expiration_time >= ?
 			`+leaseIdCondition+`
 			AND alarm_id IN (
-				SELECT alarm_id FROM `+s.tablePrefix+`alarms a
+				SELECT a.alarm_id FROM `+s.tablePrefix+`alarms a
 				JOIN `+s.tablePrefix+`active_actors aa ON a.actor_type = aa.actor_type AND a.actor_id = aa.actor_id
-				WHERE aa.host_id IN (`+hostPlaceholders+`)
+				JOIN `+s.tablePrefix+`hosts h ON aa.host_id = h.host_id
+				WHERE
+					aa.host_id IN (`+hostPlaceholders+`)
+					AND h.host_last_health_check >= ?
 			)
 		RETURNING actor_type, actor_id, alarm_name, alarm_id, alarm_lease_id, alarm_due_time`,
 		args...)

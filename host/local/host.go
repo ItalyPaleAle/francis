@@ -119,10 +119,11 @@ type Host struct {
 	// Actor placement cache
 	placementCache *ttlcache.Cache[string, *actorcore.Placement]
 
-	// List of currently-active alarms
+	// Active, retrying, and owned alarm leases on this host
 	activeAlarmsLock sync.Mutex
 	activeAlarms     map[string]struct{}
 	retryingAlarms   map[string]struct{}
+	leasedAlarms     map[string]*ref.AlarmLease
 
 	bind                   string
 	alarmsPollInterval     time.Duration
@@ -232,6 +233,7 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 		holder:                 holder,
 		activeAlarms:           map[string]struct{}{},
 		retryingAlarms:         map[string]struct{}{},
+		leasedAlarms:           map[string]*ref.AlarmLease{},
 		alarmsPollInterval:     options.AlarmsPollInterval,
 		shutdownGracePeriod:    options.ShutdownGracePeriod,
 		providerRequestTimeout: options.ProviderRequestTimeout,

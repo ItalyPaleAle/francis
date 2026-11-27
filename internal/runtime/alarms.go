@@ -181,6 +181,10 @@ func (rt *Runtime) enqueueAlarms(leases ...*ref.AlarmLease) error {
 		return nil
 	}
 
+	if rt.leasedAlarms == nil {
+		rt.leasedAlarms = make(map[string]*ref.AlarmLease)
+	}
+
 	var i int
 	for _, a := range leases {
 		_, ok := rt.activeAlarms[a.Key()]
@@ -191,6 +195,8 @@ func (rt *Runtime) enqueueAlarms(leases ...*ref.AlarmLease) error {
 		if ok {
 			continue
 		}
+
+		rt.leasedAlarms[a.Key()] = a
 
 		// If the alarm is due within the next 0.1ms, execute it right away rather than enqueueing it
 		if a.DueTime().Sub(rt.clock.Now()) < 100*time.Microsecond {
@@ -208,6 +214,16 @@ func (rt *Runtime) enqueueAlarms(leases ...*ref.AlarmLease) error {
 	if i > 0 {
 		err := rt.alarmProcessor.Enqueue(leases[:i]...)
 		if err != nil {
+			rt.activeAlarmsLock.Lock()
+			for _, a := range leases[:i] {
+				cur, exists := rt.leasedAlarms[a.Key()]
+				_, active := rt.activeAlarms[a.Key()]
+				if exists && cur == a && !active {
+					delete(rt.leasedAlarms, a.Key())
+				}
+			}
+			rt.activeAlarmsLock.Unlock()
+
 			return fmt.Errorf("error enqueueing alarms: %w", err)
 		}
 	}
@@ -235,6 +251,10 @@ func (rt *Runtime) executeAlarm(lease *ref.AlarmLease) {
 	rt.activeAlarmsLock.Lock()
 	// Do not start a new execution once the runtime is draining for shutdown
 	if rt.alarmsDraining {
+		cur, exists := rt.leasedAlarms[lease.Key()]
+		if exists && cur == lease {
+			delete(rt.leasedAlarms, lease.Key())
+		}
 		rt.activeAlarmsLock.Unlock()
 		return
 	}
@@ -347,8 +367,16 @@ func (rt *Runtime) executeActiveAlarm(lease *ref.AlarmLease) {
 		rt.finishAlarmExecutionLocked(lease)
 		if isRetrying {
 			rt.retryingAlarms[key] = struct{}{}
+			if rt.leasedAlarms == nil {
+				rt.leasedAlarms = make(map[string]*ref.AlarmLease)
+			}
+			rt.leasedAlarms[key] = lease
 		} else {
 			delete(rt.retryingAlarms, key)
+			cur, exists := rt.leasedAlarms[key]
+			if exists && cur == lease {
+				delete(rt.leasedAlarms, key)
+			}
 		}
 		rt.activeAlarmsLock.Unlock()
 
@@ -398,8 +426,9 @@ func (rt *Runtime) executeActiveAlarm(lease *ref.AlarmLease) {
 			enqErr := rt.alarmProcessor.Enqueue(lease)
 			if enqErr != nil {
 				log.Error("Error re-enqueueing alarm", slog.Any("error", enqErr))
+			} else {
+				isRetrying = true
 			}
-			isRetrying = true
 		}
 		return
 
@@ -788,8 +817,66 @@ func (rt *Runtime) completeAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 	return false, nil
 }
 
-// runLeaseRenewal periodically renews the leases for alarms owned by connected hosts
-// When a host disconnects it leaves the connected set, so its leases are no longer renewed and naturally expire
+// snapshotOwnedLeases returns the leases currently owned in memory by this runtime
+func (rt *Runtime) snapshotOwnedLeases() []*ref.AlarmLease {
+	rt.activeAlarmsLock.RLock()
+	defer rt.activeAlarmsLock.RUnlock()
+
+	if len(rt.leasedAlarms) == 0 {
+		return nil
+	}
+
+	out := make([]*ref.AlarmLease, 0, len(rt.leasedAlarms))
+	for _, l := range rt.leasedAlarms {
+		out = append(out, l)
+	}
+
+	return out
+}
+
+// pruneUnrenewedLeases drops idle leases from the owned set when the provider reports they are no longer valid for connected hosts
+func (rt *Runtime) pruneUnrenewedLeases(requested []*ref.AlarmLease, renewed []*ref.AlarmLease) {
+	renewedIDs := make(map[any]struct{}, len(renewed))
+	for _, l := range renewed {
+		renewedIDs[l.LeaseID()] = struct{}{}
+	}
+
+	var dequeueKeys []string
+	rt.activeAlarmsLock.Lock()
+	for _, sent := range requested {
+		_, ok := renewedIDs[sent.LeaseID()]
+		if ok {
+			continue
+		}
+
+		key := sent.Key()
+		cur, tracked := rt.leasedAlarms[key]
+		if !tracked || cur.LeaseID() != sent.LeaseID() {
+			continue
+		}
+
+		_, active := rt.activeAlarms[key]
+		if active {
+			continue
+		}
+
+		delete(rt.leasedAlarms, key)
+		delete(rt.retryingAlarms, key)
+
+		dequeueKeys = append(dequeueKeys, key)
+	}
+	processor := rt.alarmProcessor
+	rt.activeAlarmsLock.Unlock()
+
+	if processor != nil {
+		for _, key := range dequeueKeys {
+			_ = processor.Dequeue(key)
+		}
+	}
+}
+
+// runLeaseRenewal periodically renews the leases this runtime holds for alarms on connected hosts
+// Scoping renewal to this runtime's own leasedAlarms prevents adopting a lease that another runtime replica still holds in flight
 func (rt *Runtime) runLeaseRenewal(parentCtx context.Context) error {
 	interval := rt.provider.RenewLeaseInterval()
 	rt.log.DebugContext(parentCtx, "Starting background alarm lease renewal", slog.Any("interval", interval))
@@ -806,9 +893,15 @@ func (rt *Runtime) runLeaseRenewal(parentCtx context.Context) error {
 				continue
 			}
 
+			leases := rt.snapshotOwnedLeases()
+			if len(leases) == 0 {
+				continue
+			}
+
 			ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
 			res, err := rt.provider.RenewAlarmLeases(ctx, components.RenewAlarmLeasesReq{
-				Hosts: hosts,
+				Hosts:  hosts,
+				Leases: leases,
 			})
 			cancel()
 			if err != nil {
@@ -816,12 +909,9 @@ func (rt *Runtime) runLeaseRenewal(parentCtx context.Context) error {
 				continue
 			}
 
+			rt.pruneUnrenewedLeases(leases, res.Leases)
 			if len(res.Leases) > 0 {
 				rt.log.DebugContext(parentCtx, "Renewed alarm leases", slog.Int("count", len(res.Leases)))
-				err = rt.enqueueAlarms(res.Leases...)
-				if err != nil {
-					rt.log.ErrorContext(parentCtx, "Error while re-enqueueing alarms", slog.Any("error", err))
-				}
 			}
 		case <-parentCtx.Done():
 			return parentCtx.Err()

@@ -71,7 +71,7 @@ type RegisterAuth struct {
 }
 
 // RegisterAuthBeginRequest opens the PSK challenge-response on a new session
-// The host sends its nonce so the runtime can compute its own proof in the challenge response
+// The host sends its nonce so the runtime can return a fresh server nonce for the channel-bound proof
 type RegisterAuthBeginRequest struct {
 	// Method is the bootstrap method the host intends to use
 	Method string `msgpack:"method"`
@@ -80,12 +80,10 @@ type RegisterAuthBeginRequest struct {
 }
 
 // RegisterAuthChallengeResponse is the runtime's reply to RegisterAuthBeginRequest
-// The server proof lets the host authenticate the runtime before it sends its own proof
+// It carries only the server nonce so an unauthenticated caller never receives PSK-derived proof material before proving knowledge of the host PSK
 type RegisterAuthChallengeResponse struct {
 	// ServerNonce is the runtime's random nonce for the PSK challenge-response
 	ServerNonce []byte `msgpack:"snonce,omitempty"`
-	// ServerProof is the runtime's channel-bound HMAC proof, proving it holds the host PSK and observed the same TLS session
-	ServerProof []byte `msgpack:"sproof,omitempty"`
 }
 
 // RegisterHostRequest registers or reattaches a host with the runtime
@@ -122,6 +120,8 @@ type RegisterHostResponse struct {
 	CABundlePEM [][]byte `msgpack:"cabundle,omitempty"`
 	// CertNotAfterMs is the workload certificate's expiry in Unix milliseconds, used to schedule renewal
 	CertNotAfterMs int64 `msgpack:"certExp,omitempty"`
+	// ServerProof is the runtime's channel-bound HMAC proof for PSK bootstrap, sent only after the host's proof has been verified
+	ServerProof []byte `msgpack:"sproof,omitempty"`
 }
 
 // RenewCertRequest asks the runtime for a fresh workload certificate over an already authenticated session

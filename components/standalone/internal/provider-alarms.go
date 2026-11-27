@@ -170,7 +170,8 @@ func (p *Provider) setAndLeaseAlarm(ctx context.Context, aRef ref.AlarmRef, req 
 
 	// Resolve an existing healthy placement without moving an actor that belongs to a different runtime
 	actorKey := NewActorKey(aRef.ActorType, aRef.ActorID)
-	existingActor, actorExists := p.ActiveActors[actorKey]
+	existingActor, actorWasPresent := p.ActiveActors[actorKey]
+	actorExists := actorWasPresent
 	var newActor *ActiveActor
 	canLease := false
 	if actorExists {
@@ -210,6 +211,15 @@ func (p *Provider) setAndLeaseAlarm(ctx context.Context, aRef ref.AlarmRef, req 
 		alarm.LeaseExpiration = &leaseExpiration
 		lease = ref.NewAlarmLease(aRef, alarm.ID, alarm.DueTime, leaseID)
 	}
+
+	clearLeasesApply := func() {}
+	if actorWasPresent && newActor != nil && existingActor.HostID != newActor.HostID {
+		skipIDs := map[string]struct{}{alarm.ID: {}}
+		if exists {
+			skipIDs[existing.ID] = struct{}{}
+		}
+		clearLeasesApply = p.stageClearActorAlarmLeases([]ActorKey{actorKey}, skipIDs, changes)
+	}
 	p.Mu.RUnlock()
 
 	// Persist the complete change set before exposing the lease to the runtime
@@ -224,6 +234,7 @@ func (p *Provider) setAndLeaseAlarm(ctx context.Context, aRef ref.AlarmRef, req 
 	}
 
 	err := p.persistThenApply(ctx, &p.Mu, changes, func() {
+		clearLeasesApply()
 		if !sameProps || canLease {
 			p.Alarms[key] = alarm
 			p.AlarmsByID[alarm.ID] = alarm
@@ -467,9 +478,13 @@ func (p *Provider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req componen
 	// Generate a single lease ID prefix shared by this batch
 	leaseIDPrefix := uuid.NewV7().String()
 
+	var replacedActors []ActorKey
+	leasedIDs := make(map[string]struct{}, len(candidates))
+
 	result = make([]*ref.AlarmLease, 0, len(candidates))
 	for _, c := range candidates {
 		a := c.alarm
+		leasedIDs[a.ID] = struct{}{}
 
 		// Stage actor activation if needed (only once per actor in this batch)
 		if c.hostID != nil {
@@ -510,6 +525,9 @@ func (p *Provider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req componen
 					stagedActors[actKey] = struct{}{}
 					placements = append(placements, actorPlacement{key: actKey, actor: newActor})
 					changes.ActiveActors.Set = append(changes.ActiveActors.Set, ActiveActorChange{Key: actKey, Value: newActor})
+					if activeExists && existingActor.HostID != *c.hostID {
+						replacedActors = append(replacedActors, actKey)
+					}
 				}
 			}
 		}
@@ -533,9 +551,12 @@ func (p *Provider) FetchAndLeaseUpcomingAlarms(ctx context.Context, req componen
 			leaseID,
 		))
 	}
+
+	clearLeasesApply := p.stageClearActorAlarmLeases(replacedActors, leasedIDs, changes)
 	p.Mu.RUnlock()
 
 	err := p.persistThenApply(ctx, &p.Mu, changes, func() {
+		clearLeasesApply()
 		for _, pl := range placements {
 			p.ActiveActors[pl.key] = pl.actor
 		}
@@ -635,7 +656,7 @@ func (p *Provider) RenewAlarmLeases(ctx context.Context, req components.RenewAla
 			}
 		}
 
-		// Check that the actor is active on one of the specified hosts
+		// Check that the actor is active on one of the specified healthy hosts
 		actor, ok := p.ActiveActors[a.GetActorKey()]
 		if !ok {
 			continue
@@ -643,6 +664,11 @@ func (p *Provider) RenewAlarmLeases(ctx context.Context, req components.RenewAla
 
 		_, ok = hostIDSet[actor.HostID]
 		if !ok {
+			continue
+		}
+
+		host, ok := p.Hosts[actor.HostID]
+		if !ok || !p.IsHostHealthy(host) {
 			continue
 		}
 

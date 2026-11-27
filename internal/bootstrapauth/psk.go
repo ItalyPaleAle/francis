@@ -10,7 +10,7 @@ import (
 )
 
 // minPSKLen is the minimum acceptable host PSK length in bytes
-const minPSKLen = 16
+const minPSKLen = 32
 
 // pskClientInfo and pskServerInfo domain-separate the two MAC subkeys so the host and runtime proofs use different keys
 // Distinct keys per direction are what defeat a reflection attack, where an attacker bounces one side's proof back as the other side's

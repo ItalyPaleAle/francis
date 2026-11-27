@@ -340,7 +340,7 @@ The test runs the image's own `francis healthcheck` against the first replica, w
 | `runtimePSKs` | list | `[]` | **Required.** Pre-shared keys the cluster CA is derived from. The first is the primary, the rest stay trusted so keys can be rotated. |
 | `runtimeId` | string | `""` | Optional prefix for the runtime ID recorded in each replica's server certificate, logs, and traces. Each replica gets `<runtimeId>-<pod name>`, or just its pod name when this is empty, so IDs are distinct and stable across restarts. It is set with the `FRANCIS_RUNTIME_ID` env var, so it also applies (and overrides the file's `runtimeId`) with `existingConfigSecret`. |
 | `bootstrap.method` | string | `jwt` | How workers authenticate when joining: `psk` or `jwt`. |
-| `bootstrap.hostPSK` | string | `""` | Shared secret workers present, required with `method: psk`. |
+| `bootstrap.hostPSK` | string | `""` | Shared secret workers present (at least 32 bytes), required with `method: psk`. |
 | `bootstrap.jwt.issuer` | string | `""` | Expected JWT issuer, required with `method: jwt`. |
 | `bootstrap.jwt.audience` | string | `""` | Expected JWT audience, required with `method: jwt`. |
 | `bootstrap.jwt.jwksURL` | string | `""` | JWKS endpoint used to validate tokens. |

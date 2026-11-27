@@ -36,7 +36,7 @@ const (
 // #nosec G101 -- These fixed credentials exist only inside an ephemeral E2E namespace
 const (
 	runtimeTrustValue  = "francis-e2e-runtime-psk-that-is-long-enough"
-	hostBootstrapValue = "francis-e2e-host-bootstrap-psk"
+	hostBootstrapValue = "francis-e2e-host-bootstrap-psk-01"
 	postgresCredential = "francis"
 )
 

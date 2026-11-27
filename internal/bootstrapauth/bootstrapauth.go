@@ -13,12 +13,12 @@ const (
 	MethodJWT = "jwt"
 )
 
-// nonceSize is the length of the random nonces exchanged during the PSK challenge-response
-const nonceSize = 32
+// NonceSize is the exact length in bytes of the random nonces exchanged during the PSK challenge-response
+const NonceSize = 32
 
 // Nonce returns a fresh random nonce for the PSK challenge-response
 func Nonce() ([]byte, error) {
-	b := make([]byte, nonceSize)
+	b := make([]byte, NonceSize)
 	_, err := rand.Read(b)
 	if err != nil {
 		return nil, err

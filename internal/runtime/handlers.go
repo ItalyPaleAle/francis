@@ -60,15 +60,15 @@ func (rt *Runtime) handleRegistration(ctx context.Context, c *hostConn) bool {
 	}
 
 	// A host either opens with a PSK challenge, or registers directly for JWT bootstrap or an mTLS reconnect
-	preAuthed := false
+	var pskServerProof []byte
 	switch req.Kind {
 	case protocol.KindRegisterHostAuth:
-		regReq, ok := rt.handleAuthBegin(ctx, stream, c, cb, req)
+		regReq, serverProof, ok := rt.handleAuthBegin(ctx, stream, c, cb, req)
 		if !ok {
 			return false
 		}
 		req = regReq
-		preAuthed = true
+		pskServerProof = serverProof
 	case protocol.KindRegisterHost:
 		// No challenge round-trip is needed for these paths
 	default:
@@ -78,7 +78,7 @@ func (rt *Runtime) handleRegistration(ctx context.Context, c *hostConn) bool {
 		return false
 	}
 
-	resp := rt.handleRegister(ctx, c, req, preAuthed)
+	resp := rt.handleRegister(ctx, c, req, pskServerProof)
 	if resp.Kind == protocol.KindError {
 		writeRegistrationError(ctx, stream, resp)
 		return false
@@ -109,68 +109,67 @@ func writeRegistrationError(ctx context.Context, stream *webtransport.Stream, re
 	_, _ = stream.Read(b[:])
 }
 
-// handleAuthBegin runs the runtime side of the PSK challenge-response and returns the follow-up registration envelope on success
-// It proves to the host that the runtime holds the host PSK, then verifies the host's own proof, both bound to the channel binding
-func (rt *Runtime) handleAuthBegin(ctx context.Context, stream *webtransport.Stream, _ *hostConn, cb []byte, req *protocol.Envelope) (*protocol.Envelope, bool) {
+// handleAuthBegin runs the runtime side of the PSK challenge-response and returns the follow-up registration envelope and server proof on success
+// The host proves knowledge of the PSK first, so an unauthenticated caller never obtains an offline brute-force target from the challenge
+func (rt *Runtime) handleAuthBegin(ctx context.Context, stream *webtransport.Stream, _ *hostConn, cb []byte, req *protocol.Envelope) (*protocol.Envelope, []byte, bool) {
 	// A PSK challenge is only valid when the cluster is configured for PSK bootstrap
 	if rt.bootstrapMethod != bootstrapauth.MethodPSK {
 		writeRegistrationError(ctx, stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeUnauthorized, "PSK bootstrap is not enabled")))
-		return nil, false
+		return nil, nil, false
 	}
 
 	var begin protocol.RegisterAuthBeginRequest
 	err := req.DecodePayload(&begin)
-	if err != nil || begin.Method != bootstrapauth.MethodPSK || len(begin.ClientNonce) == 0 {
+	if err != nil || begin.Method != bootstrapauth.MethodPSK || len(begin.ClientNonce) != bootstrapauth.NonceSize {
 		writeRegistrationError(ctx, stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "invalid PSK bootstrap request")))
-		return nil, false
+		return nil, nil, false
 	}
 
-	// Generate the server nonce and compute the runtime proof, which the host checks before sending its own proof
+	// Generate the server nonce for the challenge without revealing a server proof yet
 	serverNonce, err := bootstrapauth.Nonce()
 	if err != nil {
 		writeRegistrationError(ctx, stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to generate nonce")))
-		return nil, false
+		return nil, nil, false
 	}
-	serverProof := rt.bootstrapPSK.ServerProof(cb, begin.ClientNonce, serverNonce)
 
 	challenge, err := req.ReplyWith(protocol.KindRegisterHostAuthChallenge, protocol.RegisterAuthChallengeResponse{
 		ServerNonce: serverNonce,
-		ServerProof: serverProof,
 	})
 	if err != nil {
 		writeRegistrationError(ctx, stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to encode challenge")))
-		return nil, false
+		return nil, nil, false
 	}
 	err = protocol.WriteMessage(stream, challenge)
 	if err != nil {
-		return nil, false
+		return nil, nil, false
 	}
 
 	// Read the follow-up registration carrying the host's proof
 	regReq, err := protocol.ReadMessageWithTimeout(stream, registrationReadTimeout)
 	if err != nil {
-		return nil, false
+		return nil, nil, false
 	}
 	if regReq.Kind != protocol.KindRegisterHost {
 		writeRegistrationError(ctx, stream, regReq.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "expected host registration after the challenge")))
-		return nil, false
+		return nil, nil, false
 	}
 
 	var payload protocol.RegisterHostRequest
 	err = regReq.DecodePayload(&payload)
 	if err != nil {
 		writeRegistrationError(ctx, stream, regReq.ErrorReply(protocol.NewError(protocol.ErrCodeBadRequest, "failed to decode registration request")))
-		return nil, false
+		return nil, nil, false
 	}
 
-	// Verify the host proof over the same channel binding and nonces, which fails for a wrong PSK, a replay, or a MitM
+	// Verify the host proof over the same channel binding and nonces before computing the server proof
 	ok := payload.Auth.Method == bootstrapauth.MethodPSK && rt.bootstrapPSK.VerifyClientProof(cb, begin.ClientNonce, serverNonce, payload.Auth.Proof)
 	if !ok {
 		writeRegistrationError(ctx, stream, regReq.ErrorReply(protocol.NewError(protocol.ErrCodeUnauthorized, "PSK authentication failed")))
-		return nil, false
+		return nil, nil, false
 	}
 
-	return regReq, true
+	serverProof := rt.bootstrapPSK.ServerProof(cb, begin.ClientNonce, serverNonce)
+	return regReq, serverProof, true
 }
 
 // dispatch routes a request to its handler and returns the response envelope
@@ -249,8 +248,8 @@ func (rt *Runtime) route(ctx context.Context, c *hostConn, req *protocol.Envelop
 }
 
 // handleRegister authenticates, registers or reattaches a host with the provider, tracks its session, and issues a workload certificate when needed
-// preAuthed is true when a PSK challenge-response already authenticated the session on this stream
-func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protocol.Envelope, preAuthed bool) *protocol.Envelope {
+// pskServerProof is non-empty when a PSK challenge-response already authenticated the session on this stream
+func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protocol.Envelope, pskServerProof []byte) *protocol.Envelope {
 	var payload protocol.RegisterHostRequest
 	err := req.DecodePayload(&payload)
 	if err != nil {
@@ -273,6 +272,7 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 		joinTokenExpiresAt time.Time
 		reattachID         string
 	)
+	preAuthed := len(pskServerProof) > 0
 	issueCert := preAuthed
 	if !preAuthed {
 		switch payload.Auth.Method {
@@ -370,6 +370,7 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 		HealthCheckDeadlineMs: healthCheckPolicy.Deadline().Milliseconds(),
 		Reattached:            res.Reattached,
 		CABundlePEM:           rt.caBundlePEM(),
+		ServerProof:           pskServerProof,
 	}
 
 	// Issue a workload certificate for every bootstrap and any reconnect that received a new identity

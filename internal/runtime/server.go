@@ -64,10 +64,11 @@ type Runtime struct {
 
 	// alarmProcessor schedules leased alarms for dispatch at their due time
 	alarmProcessor *eventqueue.Processor[string, *ref.AlarmLease]
-	// activeAlarms and retryingAlarms track in-flight and retrying alarms by key, guarded by activeAlarmsLock
+	// activeAlarms, retryingAlarms, and leasedAlarms track in-flight, retrying, and owned alarm leases by key, guarded by activeAlarmsLock
 	activeAlarmsLock sync.RWMutex
 	activeAlarms     map[string]struct{}
 	retryingAlarms   map[string]struct{}
+	leasedAlarms     map[string]*ref.AlarmLease
 	// activeAlarmActors counts the in-flight executions per actor, also guarded by activeAlarmsLock, so removing an actor's placement can wait for them to be finalized
 	activeAlarmActors map[string]*actorAlarmExecutions
 	// alarmsDraining is set during shutdown to stop new executions from starting, also guarded by activeAlarmsLock
@@ -175,6 +176,7 @@ func NewRuntime(provider components.ActorProvider, opts ...RuntimeOption) (*Runt
 		shutdownGracePeriod:     options.shutdownGracePeriod,
 		activeAlarms:            make(map[string]struct{}),
 		retryingAlarms:          make(map[string]struct{}),
+		leasedAlarms:            make(map[string]*ref.AlarmLease),
 		activeAlarmActors:       make(map[string]*actorAlarmExecutions),
 		metrics:                 metrics,
 		advertiseAddress:        advertiseAddress,

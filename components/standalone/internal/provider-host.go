@@ -156,6 +156,8 @@ func (p *Provider) reattachHost(ctx context.Context, req components.RegisterHost
 		}
 	}
 
+	clearCleanupLeases := p.stageClearActorAlarmLeases(cleanupActors, nil, changes)
+
 	// Build the reattach changes while still holding the read lock
 	var (
 		updatedHost *Host
@@ -204,6 +206,7 @@ func (p *Provider) reattachHost(ctx context.Context, req components.RegisterHost
 		for _, key := range cleanupActors {
 			delete(p.ActiveActors, key)
 		}
+		clearCleanupLeases()
 	}
 
 	// Reattach to the existing registration
@@ -399,6 +402,7 @@ func (p *Provider) UnregisterHost(ctx context.Context, hostID string, opts compo
 			changes.ActiveActors.Delete = append(changes.ActiveActors.Delete, key)
 		}
 	}
+	clearLeasesApply := p.stageClearActorAlarmLeases(deleteActors, nil, changes)
 	p.Mu.RUnlock()
 
 	switch {
@@ -415,6 +419,7 @@ func (p *Provider) UnregisterHost(ctx context.Context, hostID string, opts compo
 		for _, key := range deleteActors {
 			delete(p.ActiveActors, key)
 		}
+		clearLeasesApply()
 	})
 	if err != nil {
 		return err
@@ -461,13 +466,17 @@ func (p *Provider) LookupActor(ctx context.Context, r ref.ActorRef, opts compone
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 
+	changes := NewChanges()
+	defer changes.Release()
+
 	p.Mu.RLock()
 	var (
-		existingRes  components.LookupActorRes
-		haveExisting bool
-		restricted   bool // actor is active on a healthy host that's not allowed
-		host         *Host
-		idleTimeout  time.Duration
+		existingRes      components.LookupActorRes
+		haveExisting     bool
+		restricted       bool // actor is active on a healthy host that's not allowed
+		host             *Host
+		idleTimeout      time.Duration
+		clearLeasesApply = func() {}
 	)
 
 	// Check if the actor is already active on a healthy host
@@ -491,6 +500,9 @@ func (p *Provider) LookupActor(ctx context.Context, r ref.ActorRef, opts compone
 	// If not active on a healthy host, find a host with capacity to activate it on
 	if !haveExisting && !restricted {
 		host, idleTimeout = p.findHostWithCapacity(r.ActorType, opts.Hosts)
+		if host != nil && ok && actor.HostID != host.ID {
+			clearLeasesApply = p.stageClearActorAlarmLeases([]ActorKey{key}, nil, changes)
+		}
 	}
 	p.Mu.RUnlock()
 
@@ -512,12 +524,11 @@ func (p *Provider) LookupActor(ctx context.Context, r ref.ActorRef, opts compone
 		Activation:  p.Clock.Now(),
 	}
 
-	changes := NewChanges()
-	defer changes.Release()
 	changes.ActiveActors.Set = append(changes.ActiveActors.Set, ActiveActorChange{Key: key, Value: newActor})
 
 	err := p.persistThenApply(ctx, &p.Mu, changes, func() {
 		p.ActiveActors[key] = newActor
+		clearLeasesApply()
 	})
 	if err != nil {
 		return components.LookupActorRes{}, err
@@ -623,32 +634,12 @@ func (p *Provider) RemoveActor(ctx context.Context, r ref.ActorRef) error {
 	changes := NewChanges()
 	defer changes.Release()
 
-	// alarmUpdate carries the cloned alarm (with its lease cleared) that replaces the live one
-	type alarmUpdate struct {
-		key     AlarmKey
-		updated *Alarm
-	}
-
 	p.Mu.RLock()
 	_, ok := p.ActiveActors[key]
-	var alarmUpdates []alarmUpdate
+	var clearLeasesApply func()
 	if ok {
 		changes.ActiveActors.Delete = append(changes.ActiveActors.Delete, key)
-
-		// Release any alarm leases for this actor
-		// We clone the affected alarms (rather than mutate them in place) so nothing changes in memory until the change has been persisted
-		for k, a := range p.Alarms {
-			if a.ActorType != r.ActorType || a.ActorID != r.ActorID {
-				continue
-			}
-			if a.LeaseID != nil {
-				updated := a.Clone()
-				updated.LeaseID = nil
-				updated.LeaseExpiration = nil
-				alarmUpdates = append(alarmUpdates, alarmUpdate{key: k, updated: updated})
-				changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: updated.ID, Value: updated})
-			}
-		}
+		clearLeasesApply = p.stageClearActorAlarmLeases([]ActorKey{key}, nil, changes)
 	}
 	p.Mu.RUnlock()
 
@@ -658,9 +649,6 @@ func (p *Provider) RemoveActor(ctx context.Context, r ref.ActorRef) error {
 
 	return p.persistThenApply(ctx, &p.Mu, changes, func() {
 		delete(p.ActiveActors, key)
-		for _, au := range alarmUpdates {
-			p.Alarms[au.key] = au.updated
-			p.AlarmsByID[au.updated.ID] = au.updated
-		}
+		clearLeasesApply()
 	})
 }

@@ -418,13 +418,15 @@ func (rc *runtimeClient) bootstrap(ctx context.Context, session *webtransport.Se
 	}
 
 	// Attach the bootstrap credential for the configured method
+	var pskState *pskHandshakeState
 	switch {
 	case rc.cfg.bootstrapPSK != nil:
-		auth, authErr := rc.pskHandshake(ctx, session, stream)
+		var authErr error
+		pskState, authErr = rc.pskHandshake(ctx, session, stream)
 		if authErr != nil {
 			return protocol.RegisterHostResponse{}, authErr
 		}
-		reg.Auth = auth
+		reg.Auth = pskState.auth
 	case rc.cfg.bootstrapTokenFn != nil:
 		token, tokErr := rc.cfg.bootstrapTokenFn()
 		if tokErr != nil {
@@ -438,6 +440,11 @@ func (rc *runtimeClient) bootstrap(ctx context.Context, session *webtransport.Se
 	out, err := rc.sendRegister(ctx, stream, reg)
 	if err != nil {
 		return protocol.RegisterHostResponse{}, err
+	}
+
+	// Verify the runtime's channel-bound proof before trusting an unpinned CA bundle or issued certificate
+	if pskState != nil && !rc.cfg.bootstrapPSK.VerifyServerProof(pskState.cb, pskState.clientNonce, pskState.serverNonce, out.ServerProof) {
+		return protocol.RegisterHostResponse{}, errors.New("runtime failed PSK authentication")
 	}
 
 	// Install the issued certificate and trust bundle so this and later connections use mTLS
@@ -496,18 +503,26 @@ func (rc *runtimeClient) reconnect(ctx context.Context, stream protocol.Stream) 
 	return out, nil
 }
 
-// pskHandshake runs the host side of the PSK challenge-response on the registration stream and returns the host's proof
-// It authenticates the runtime from the server proof before producing the host proof
-func (rc *runtimeClient) pskHandshake(ctx context.Context, session *webtransport.Session, stream protocol.Stream) (protocol.RegisterAuth, error) {
+// pskHandshakeState holds the transcript inputs needed to verify the runtime's proof once registration succeeds
+type pskHandshakeState struct {
+	auth        protocol.RegisterAuth
+	cb          []byte
+	clientNonce []byte
+	serverNonce []byte
+}
+
+// pskHandshake performs the challenge step of the PSK bootstrap on the registration stream and produces the host proof
+// The runtime proves knowledge of the PSK in its registration reply only after verifying the host's proof
+func (rc *runtimeClient) pskHandshake(ctx context.Context, session *webtransport.Session, stream protocol.Stream) (*pskHandshakeState, error) {
 	// Bind the proofs to this exact TLS session so a MitM that terminates TLS cannot relay them
 	cb, err := channelbind.Export(session)
 	if err != nil {
-		return protocol.RegisterAuth{}, fmt.Errorf("failed to compute channel binding: %w", err)
+		return nil, fmt.Errorf("failed to compute channel binding: %w", err)
 	}
 
 	clientNonce, err := bootstrapauth.Nonce()
 	if err != nil {
-		return protocol.RegisterAuth{}, err
+		return nil, err
 	}
 
 	begin, err := protocol.NewRequest(protocol.KindRegisterHostAuth, protocol.RegisterAuthBeginRequest{
@@ -515,32 +530,34 @@ func (rc *runtimeClient) pskHandshake(ctx context.Context, session *webtransport
 		ClientNonce: clientNonce,
 	})
 	if err != nil {
-		return protocol.RegisterAuth{}, err
+		return nil, err
 	}
 
-	// First exchange on the stream: send the nonce and read the runtime's challenge
+	// First exchange on the stream: send the nonce and read the runtime's nonce challenge
 	challengeEnv, err := protocol.RoundTrip(ctx, stream, begin)
 	if err != nil {
-		return protocol.RegisterAuth{}, err
+		return nil, err
 	}
 	perr, isErr := challengeEnv.AsError()
 	if isErr {
-		return protocol.RegisterAuth{}, perr
+		return nil, perr
 	}
 	var challenge protocol.RegisterAuthChallengeResponse
 	err = challengeEnv.DecodePayload(&challenge)
 	if err != nil {
-		return protocol.RegisterAuth{}, fmt.Errorf("failed to decode challenge: %w", err)
+		return nil, fmt.Errorf("failed to decode challenge: %w", err)
 	}
-
-	// Authenticate the runtime before revealing our own proof
-	ok := rc.cfg.bootstrapPSK.VerifyServerProof(cb, clientNonce, challenge.ServerNonce, challenge.ServerProof)
-	if !ok {
-		return protocol.RegisterAuth{}, errors.New("runtime failed PSK authentication")
+	if len(challenge.ServerNonce) != bootstrapauth.NonceSize {
+		return nil, errors.New("invalid PSK challenge from runtime")
 	}
 
 	clientProof := rc.cfg.bootstrapPSK.ClientProof(cb, clientNonce, challenge.ServerNonce)
-	return protocol.RegisterAuth{Method: bootstrapauth.MethodPSK, Proof: clientProof}, nil
+	return &pskHandshakeState{
+		auth:        protocol.RegisterAuth{Method: bootstrapauth.MethodPSK, Proof: clientProof},
+		cb:          cb,
+		clientNonce: clientNonce,
+		serverNonce: challenge.ServerNonce,
+	}, nil
 }
 
 // sendRegister writes a registration request and decodes the runtime's response

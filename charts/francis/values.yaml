@@ -84,7 +84,7 @@ bootstrap:
   # Bootstrap method, either "psk" or "jwt"
   method: jwt
 
-  # Shared secret workers present when method is "psk"
+  # Shared secret workers present when method is "psk" (at least 32 bytes)
   # Workers pass the same value to remote.WithHostBootstrapPSK()
   hostPSK: ""
 

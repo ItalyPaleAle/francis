@@ -296,10 +296,11 @@ func (p *PostgresProvider) RenewAlarmLeases(ctx context.Context, req components.
 		return components.RenewAlarmLeasesRes{}, err
 	}
 
-	args := make([]any, 0, 3)
+	args := make([]any, 0, 4)
 	args = append(args,
 		p.cfg.AlarmsLeaseDuration,
 		hostUUIDs,
+		p.cfg.HostHealthCheckDeadline,
 	)
 
 	// If we have a list of leases, we restrict by them too
@@ -322,7 +323,7 @@ func (p *PostgresProvider) RenewAlarmLeases(ctx context.Context, req components.
 			leaseIDs[i] = u
 		}
 
-		leaseCondition = `AND alarm_lease_id = ANY($3)`
+		leaseCondition = `AND alarm_lease_id = ANY($4)`
 		args = append(args, leaseIDs)
 	}
 
@@ -337,9 +338,12 @@ func (p *PostgresProvider) RenewAlarmLeases(ctx context.Context, req components.
 			alarm_lease_expiration_time IS NOT NULL
 			AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')
 			AND alarm_id IN (
-				SELECT alarm_id FROM `+p.tablePrefix+`alarms a
+				SELECT a.alarm_id FROM `+p.tablePrefix+`alarms a
 				JOIN `+p.tablePrefix+`active_actors aa ON a.actor_type = aa.actor_type AND a.actor_id = aa.actor_id
-				WHERE aa.host_id = ANY($2)
+				JOIN `+p.tablePrefix+`hosts h ON aa.host_id = h.host_id
+				WHERE
+					aa.host_id = ANY($2)
+					AND h.host_last_health_check >= ((now() AT TIME ZONE 'utc') - $3::interval)
 				)
 			`+leaseCondition+`
 		RETURNING actor_type, actor_id, alarm_name, alarm_id, alarm_lease_id, alarm_due_time`,

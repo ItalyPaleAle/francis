@@ -322,6 +322,8 @@ func (p *Provider) CleanupUnhealthyHosts(changes *Changes) (apply func()) {
 		}
 	}
 
+	clearLeasesApply := p.stageClearActorAlarmLeases(deleteActors, nil, changes)
+
 	// Return the function that applies the changes in-memory
 	return func() {
 		for i, id := range deleteHostIDs {
@@ -331,6 +333,59 @@ func (p *Provider) CleanupUnhealthyHosts(changes *Changes) (apply func()) {
 		}
 		for _, key := range deleteActors {
 			delete(p.ActiveActors, key)
+		}
+		clearLeasesApply()
+	}
+}
+
+// stageClearActorAlarmLeases stages lease removals for every leased alarm belonging to actors, skipping any alarm IDs in skipAlarmIDs
+// Must be called while holding at least a read lock on Mu, and the returned apply function must run under the Mu write lock
+func (p *Provider) stageClearActorAlarmLeases(actors []ActorKey, skipAlarmIDs map[string]struct{}, changes *Changes) func() {
+	if len(actors) == 0 {
+		return func() {}
+	}
+
+	actorSet := make(map[ActorKey]struct{}, len(actors))
+	for _, key := range actors {
+		actorSet[key] = struct{}{}
+	}
+
+	type alarmUpdate struct {
+		key     AlarmKey
+		updated *Alarm
+	}
+	var updates []alarmUpdate
+
+	for k, a := range p.Alarms {
+		if a.LeaseID == nil {
+			continue
+		}
+		_, match := actorSet[a.GetActorKey()]
+		if !match {
+			continue
+		}
+		if skipAlarmIDs != nil {
+			_, skip := skipAlarmIDs[a.ID]
+			if skip {
+				continue
+			}
+		}
+
+		updated := a.Clone()
+		updated.LeaseID = nil
+		updated.LeaseExpiration = nil
+		updates = append(updates, alarmUpdate{key: k, updated: updated})
+		changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: updated.ID, Value: updated})
+	}
+
+	if len(updates) == 0 {
+		return func() {}
+	}
+
+	return func() {
+		for _, au := range updates {
+			p.Alarms[au.key] = au.updated
+			p.AlarmsByID[au.updated.ID] = au.updated
 		}
 	}
 }

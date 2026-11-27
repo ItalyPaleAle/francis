@@ -112,6 +112,10 @@ func (h *Host) enqueueAlarms(leases []*ref.AlarmLease) (err error) {
 		return nil
 	}
 
+	if h.leasedAlarms == nil {
+		h.leasedAlarms = make(map[string]*ref.AlarmLease)
+	}
+
 	var (
 		i  int
 		ok bool
@@ -128,6 +132,8 @@ func (h *Host) enqueueAlarms(leases []*ref.AlarmLease) (err error) {
 		if ok {
 			continue
 		}
+
+		h.leasedAlarms[a.Key()] = a
 
 		// If the alarm is to be executed immediately (within the next 0.1ms), skip enqueuing it and execute it right away
 		if a.DueTime().Sub(h.clock.Now()) < 100*time.Microsecond {
@@ -148,6 +154,15 @@ func (h *Host) enqueueAlarms(leases []*ref.AlarmLease) (err error) {
 		// Enqueue the alarms all at once as this is more efficient (we lock the processor only once)
 		err = h.alarmProcessor.Enqueue(leases[:i]...)
 		if err != nil {
+			h.activeAlarmsLock.Lock()
+			for _, a := range leases[:i] {
+				cur, exists := h.leasedAlarms[a.Key()]
+				_, active := h.activeAlarms[a.Key()]
+				if exists && cur == a && !active {
+					delete(h.leasedAlarms, a.Key())
+				}
+			}
+			h.activeAlarmsLock.Unlock()
 			return fmt.Errorf("error enqueueing alarms: %w", err)
 		}
 	}
@@ -175,6 +190,10 @@ func (h *Host) executeAlarm(lease *ref.AlarmLease) {
 	// Mark the alarm as active before spawning the goroutine so concurrent processor firings cannot start duplicate executions
 	h.activeAlarmsLock.Lock()
 	if h.alarmsDraining {
+		cur, exists := h.leasedAlarms[lease.Key()]
+		if exists && cur == lease {
+			delete(h.leasedAlarms, lease.Key())
+		}
 		h.activeAlarmsLock.Unlock()
 		return
 	}
@@ -241,8 +260,16 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		// If it's retrying, we add it to the list of retrying alarms
 		if isRetrying {
 			h.retryingAlarms[key] = struct{}{}
+			if h.leasedAlarms == nil {
+				h.leasedAlarms = make(map[string]*ref.AlarmLease)
+			}
+			h.leasedAlarms[key] = lease
 		} else {
 			delete(h.retryingAlarms, key)
+			cur, exists := h.leasedAlarms[key]
+			if exists && cur == lease {
+				delete(h.leasedAlarms, key)
+			}
 		}
 
 		h.activeAlarmsLock.Unlock()
@@ -392,11 +419,11 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 		if err != nil {
 			// Log the error only - we are in background goroutine
 			log.Error("Error re-enqueueing alarm", slog.Any("error", err))
+		} else {
+			// Here, we add it to the list of alarms that we're retrying
+			// Otherwise, if the lease renewal happens in background, it will clear the attempt counter
+			isRetrying = true
 		}
-
-		// Here, we add it to the list of alarms that we're retrying
-		// Otherwise, if the lease renewal happens in background, it will clear the attempt counter
-		isRetrying = true
 		return
 
 	case executeAlarmStatusCompleted:
@@ -671,10 +698,64 @@ func (h *Host) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, l
 	return false, nil
 }
 
+func (h *Host) snapshotOwnedLeases() []*ref.AlarmLease {
+	h.activeAlarmsLock.Lock()
+	defer h.activeAlarmsLock.Unlock()
+
+	if len(h.leasedAlarms) == 0 {
+		return nil
+	}
+
+	out := make([]*ref.AlarmLease, 0, len(h.leasedAlarms))
+	for _, l := range h.leasedAlarms {
+		out = append(out, l)
+	}
+	return out
+}
+
+func (h *Host) pruneUnrenewedLeases(requested []*ref.AlarmLease, renewed []*ref.AlarmLease) {
+	renewedIDs := make(map[any]struct{}, len(renewed))
+	for _, l := range renewed {
+		renewedIDs[l.LeaseID()] = struct{}{}
+	}
+
+	var dequeueKeys []string
+	h.activeAlarmsLock.Lock()
+	for _, sent := range requested {
+		_, ok := renewedIDs[sent.LeaseID()]
+		if ok {
+			continue
+		}
+
+		key := sent.Key()
+		cur, tracked := h.leasedAlarms[key]
+		if !tracked || cur.LeaseID() != sent.LeaseID() {
+			continue
+		}
+		_, active := h.activeAlarms[key]
+		if active {
+			continue
+		}
+
+		delete(h.leasedAlarms, key)
+		delete(h.retryingAlarms, key)
+
+		dequeueKeys = append(dequeueKeys, key)
+	}
+	processor := h.alarmProcessor
+	h.activeAlarmsLock.Unlock()
+
+	if processor != nil {
+		for _, key := range dequeueKeys {
+			_ = processor.Dequeue(key)
+		}
+	}
+}
+
 func (h *Host) runLeaseRenewal(parentCtx context.Context) (err error) {
 	var res components.RenewAlarmLeasesRes
 
-	// Renew the alarm leases on a loop
+	// Renew the alarm leases owned in memory by this host
 	interval := h.actorProvider.RenewLeaseInterval()
 	h.log.DebugContext(parentCtx, "Starting background alarm lease renewal", slog.Any("interval", interval))
 	defer h.log.Debug("Stopped background lease renewal")
@@ -686,22 +767,24 @@ func (h *Host) runLeaseRenewal(parentCtx context.Context) (err error) {
 	for {
 		select {
 		case <-t.C():
+			leases := h.snapshotOwnedLeases()
+			if len(leases) == 0 {
+				continue
+			}
+
 			ctx, cancel := context.WithTimeout(parentCtx, h.providerRequestTimeout)
-			defer cancel()
 			res, err = h.actorProvider.RenewAlarmLeases(ctx, components.RenewAlarmLeasesReq{
-				Hosts: hostList,
+				Hosts:  hostList,
+				Leases: leases,
 			})
+			cancel()
 			if err != nil {
 				// Log the error only
 				h.log.ErrorContext(parentCtx, "Error while renewing leases for alarms", slog.Any("error", err))
-			} else if len(res.Leases) > 0 {
-				h.log.DebugContext(parentCtx, "Renewed alarm leases", slog.Int("count", len(res.Leases)))
-
-				// Re-enqueue all leases
-				// The method is safe for concurrent access
-				err = h.enqueueAlarms(res.Leases)
-				if err != nil {
-					h.log.ErrorContext(parentCtx, "Error while re-enqueueing alarms", slog.Any("error", err))
+			} else {
+				h.pruneUnrenewedLeases(leases, res.Leases)
+				if len(res.Leases) > 0 {
+					h.log.DebugContext(parentCtx, "Renewed alarm leases", slog.Int("count", len(res.Leases)))
 				}
 			}
 		case <-parentCtx.Done():

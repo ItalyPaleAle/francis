@@ -1019,3 +1019,91 @@ func TestHandleDispatchJobStoresInitialState(t *testing.T) {
 	require.Len(t, res.States, 1)
 	assert.Equal(t, "a1", res.States[0].ActorID)
 }
+
+func TestRunLeaseRenewalOnlyRenewsOwnedLeases(t *testing.T) {
+	fakeClock := clocktesting.NewFakeClock(time.Now())
+	rt1, prov := newTestRuntime(t, WithAlarmsPollInterval(time.Hour))
+	rt1.clock = fakeClock
+	rt2, err := NewRuntime(prov,
+		WithBind("127.0.0.1:0"),
+		WithRuntimePSKs(testRuntimePSK),
+		WithHostBootstrapPSK(testHostPSK),
+		WithAlarmsPollInterval(time.Hour),
+	)
+	require.NoError(t, err)
+	rt2.clock = fakeClock
+
+	rt1.ensureAlarmProcessor()
+	defer func() {
+		closeErr := rt1.alarmProcessor.Close()
+		require.NoError(t, closeErr)
+	}()
+	rt2.ensureAlarmProcessor()
+	defer func() {
+		closeErr := rt2.alarmProcessor.Close()
+		require.NoError(t, closeErr)
+	}()
+
+	rt1.sendToHost = func(ctx context.Context, _ *hostConn, _ *protocol.Envelope) (*protocol.Envelope, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	dispatchedOnRT2 := make(chan struct{}, 1)
+	rt2.sendToHost = func(_ context.Context, _ *hostConn, _ *protocol.Envelope) (*protocol.Envelope, error) {
+		select {
+		case dispatchedOnRT2 <- struct{}{}:
+		default:
+		}
+		return protocol.NewEnvelope(protocol.KindExecuteAlarmResponse, nil), nil
+	}
+
+	// Host A connects to rt1, which leases an upcoming alarm for Actor X
+	c1 := connectTestHost(t, rt1, prov, "10.1.0.91:1", protocol.ActorHostType{ActorType: "T"})
+	aref := ref.NewAlarmRef("T", "x1", "reminder")
+	_, err = prov.SetAlarm(t.Context(), aref, components.SetAlarmReq{
+		AlarmProperties: ref.AlarmProperties{DueTime: fakeClock.Now().Add(time.Second)},
+	})
+	require.NoError(t, err)
+	err = rt1.fetchAndEnqueueAlarms(t.Context())
+	require.NoError(t, err)
+	require.Len(t, rt1.snapshotOwnedLeases(), 1)
+
+	// Host A reconnects and reattaches to rt2 while rt1 still holds the lease
+	reattachRes, err := prov.RegisterHost(t.Context(), components.RegisterHostReq{
+		Address:        c1.address,
+		ActorTypes:     []components.ActorHostType{{ActorType: "T", IdleTimeout: time.Minute}},
+		ExistingHostID: c1.hostID,
+		SessionID:      "s2",
+	})
+	require.NoError(t, err)
+	require.True(t, reattachRes.Reattached)
+	c2 := &hostConn{
+		hostID:    c1.hostID,
+		sessionID: "s2",
+		address:   c1.address,
+	}
+	c2.setActorTypes([]protocol.ActorHostType{{ActorType: "T"}})
+	rt2.hosts.Register(c2)
+
+	// Start rt2's lease renewal loop and step past one renewal interval: rt2 holds no leases of its own, so it must not adopt rt1's lease
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() {
+		done <- rt2.runLeaseRenewal(ctx)
+	}()
+	require.Eventually(t, fakeClock.HasWaiters, time.Second, 10*time.Millisecond)
+	fakeClock.Step(prov.RenewLeaseInterval())
+	time.Sleep(50 * time.Millisecond)
+
+	assert.Empty(t, rt2.snapshotOwnedLeases(), "rt2 must not adopt a lease acquired by rt1")
+	select {
+	case <-dispatchedOnRT2:
+		t.Fatal("rt2 dispatched an alarm whose lease belongs to rt1")
+	default:
+	}
+
+	cancel()
+	err = <-done
+	require.ErrorIs(t, err, context.Canceled)
+}
