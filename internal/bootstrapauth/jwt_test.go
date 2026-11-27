@@ -65,7 +65,7 @@ func TestJWTValidator(t *testing.T) {
 	assert.Empty(t, jt)
 	assert.True(t, jtExp.IsZero())
 
-	// A token whose remaining lifetime exceeds the maximum is rejected
+	// A token whose remaining lifetime exceeds the maximum is rejected, with or without a jti
 	_, _, _, err = v.Validate(sign(jwt.NewBuilder().
 		JwtID("too-long-lived").
 		Issuer("https://issuer.example").
@@ -75,17 +75,22 @@ func TestJWTValidator(t *testing.T) {
 	))
 	require.Error(t, err)
 
-	// A token with a jti but no exp is accepted
-	// The join token is empty because we cannot bound the replay window
-	_, jt, jtExp, err = v.Validate(sign(jwt.NewBuilder().
+	_, _, _, err = v.Validate(sign(jwt.NewBuilder().
+		Issuer("https://issuer.example").
+		Subject("x").
+		Audience([]string{"francis"}).
+		Expiration(time.Now().Add(2 * time.Hour)),
+	))
+	require.Error(t, err)
+
+	// A token without an exp claim is rejected even when it carries a jti
+	_, _, _, err = v.Validate(sign(jwt.NewBuilder().
 		JwtID("jti-no-exp").
 		Issuer("https://issuer.example").
 		Subject("x").
 		Audience([]string{"francis"}),
 	))
-	require.NoError(t, err)
-	assert.Empty(t, jt)
-	assert.True(t, jtExp.IsZero())
+	require.Error(t, err)
 
 	// A wrong audience is rejected
 	_, _, _, err = v.Validate(sign(jwt.NewBuilder().
@@ -195,6 +200,92 @@ func TestNewJWTValidatorRejectsBadConfig(t *testing.T) {
 
 	_, err = NewJWTValidator(context.Background(), JWTConfig{Issuer: "i", Audience: "a", JWKSURL: "https://x", StaticJWKS: json.RawMessage(`{"keys":[]}`)})
 	require.Error(t, err)
+
+	// Empty entries in AllowedSubjects are rejected
+	_, err = NewJWTValidator(context.Background(), JWTConfig{
+		Issuer:          "i",
+		Audience:        "a",
+		StaticJWKS:      json.RawMessage(`{"keys":[]}`),
+		AllowedSubjects: []string{"system:serviceaccount:ns:worker", ""},
+	})
+	require.Error(t, err)
+}
+
+func TestJWTValidatorAllowedSubjects(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	privKey := newTestSigningKey(t, priv, "k1")
+	pubKey, err := privKey.PublicKey()
+	require.NoError(t, err)
+
+	set := jwk.NewSet()
+	err = set.AddKey(pubKey)
+	require.NoError(t, err)
+	jwksJSON, err := json.Marshal(set)
+	require.NoError(t, err)
+
+	v, err := NewJWTValidator(context.Background(), JWTConfig{
+		Issuer:     "https://issuer.example",
+		Audience:   "francis",
+		StaticJWKS: jwksJSON,
+		AllowedSubjects: []string{
+			"system:serviceaccount:payments:*",
+			"spiffe://cluster.local/ns/core/sa/worker",
+		},
+	})
+	require.NoError(t, err)
+
+	mint := func(sub string) string {
+		b := jwt.NewBuilder().
+			Issuer("https://issuer.example").
+			Audience([]string{"francis"}).
+			Expiration(time.Now().Add(5 * time.Minute))
+		if sub != "" {
+			b = b.Subject(sub)
+		}
+		return signTestToken(t, b, jwa.EdDSA(), privKey)
+	}
+
+	// Wildcard match in Kubernetes service account namespace
+	gotSub, _, _, err := v.Validate(mint("system:serviceaccount:payments:worker-1"))
+	require.NoError(t, err)
+	assert.Equal(t, "system:serviceaccount:payments:worker-1", gotSub)
+
+	// Exact SPIFFE URI match
+	gotSub, _, _, err = v.Validate(mint("spiffe://cluster.local/ns/core/sa/worker"))
+	require.NoError(t, err)
+	assert.Equal(t, "spiffe://cluster.local/ns/core/sa/worker", gotSub)
+
+	// Different namespace is rejected
+	_, _, _, err = v.Validate(mint("system:serviceaccount:other:worker-1"))
+	require.Error(t, err)
+
+	// Missing sub is rejected when AllowedSubjects is set
+	_, _, _, err = v.Validate(mint(""))
+	require.Error(t, err)
+}
+
+func TestJWTChannelBindingProof(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	cb := []byte("exporter-francis-bootstrap-v1-session-a")
+	sampleJWT := "header.payload.signature"
+
+	proof := SignJWTChannelBinding(priv, cb, sampleJWT)
+	assert.True(t, VerifyJWTChannelBinding(pub, cb, sampleJWT, proof))
+
+	// Replaying the proof onto another TLS session, with another token, or under another public key fails
+	assert.False(t, VerifyJWTChannelBinding(pub, []byte("exporter-francis-bootstrap-v1-session-b"), sampleJWT, proof))
+	assert.False(t, VerifyJWTChannelBinding(pub, cb, sampleJWT+"x", proof))
+
+	otherPub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	assert.False(t, VerifyJWTChannelBinding(otherPub, cb, sampleJWT, proof))
+	assert.False(t, VerifyJWTChannelBinding(pub, nil, sampleJWT, proof))
+	assert.False(t, VerifyJWTChannelBinding(pub[:10], cb, sampleJWT, proof))
+	assert.False(t, VerifyJWTChannelBinding(pub, cb, sampleJWT, proof[:10]))
 }
 
 // newTestSigningKey wraps a raw key as a jwk.Key carrying the given key ID

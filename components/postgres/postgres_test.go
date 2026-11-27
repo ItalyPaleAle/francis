@@ -316,7 +316,7 @@ func (p *PostgresProvider) Seed(ctx context.Context, spec comptesting.Spec) erro
 		now := p.clock.Now().UTC()
 
 		// Truncate all data
-		for _, tbl := range []string{"active_actors", "host_actor_types", "hosts", "actor_state", "alarms"} {
+		for _, tbl := range []string{"active_actors", "host_actor_types", "hosts", "consumed_join_tokens", "actor_state", "alarms"} {
 			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 			_, err = tx.Exec(ctx, "DELETE FROM "+p.tablePrefix+tbl)
 			if err != nil {

@@ -90,7 +90,7 @@ bootstrap:
 
   # Validation settings for the JWTs workers present with the default "jwt" method
   # In Kubernetes these are typically projected service account tokens validated against the cluster's OIDC issuer, whose issuer and key source must be supplied
-  # The runtime checks the issuer, audience, signature, and expiry, but not the subject, so any token from this issuer with this audience is accepted: see the chart's README before using this on a shared cluster
+  # Set allowedSubjects on shared clusters, or any token from this issuer with this audience is accepted: see the chart's README
   jwt:
     # Find these with: kubectl get --raw /.well-known/openid-configuration
     issuer: ""
@@ -99,6 +99,8 @@ bootstrap:
     # Inline JWKS document, used instead of fetching jwksURL
     # Useful when the issuer is the in-cluster one, whose discovery endpoint is neither publicly reachable nor served with a publicly trusted certificate
     staticJWKS: ""
+    # Allowed sub values or '*' patterns, e.g. ["system:serviceaccount:my-namespace:*"]
+    allowedSubjects: []
 
 # Runtime behavior, left empty to use the runtime's own defaults
 tuning:

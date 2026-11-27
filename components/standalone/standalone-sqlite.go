@@ -292,6 +292,12 @@ func (s *StandaloneSQLiteBacked) loadFromDB(ctx context.Context) error {
 		return fmt.Errorf("failed to load workflow events: %w", err)
 	}
 
+	// Load consumed join tokens
+	err = s.loadConsumedJoinTokens(queryCtx)
+	if err != nil {
+		return fmt.Errorf("failed to load consumed join tokens: %w", err)
+	}
+
 	return nil
 }
 
@@ -674,6 +680,12 @@ func (s *StandaloneSQLiteBacked) PersistChanges(ctx context.Context, changes *in
 		return err
 	}
 
+	// Process consumed join token changes
+	err = s.persistConsumedJoinTokenChanges(queryCtx, tx, changes)
+	if err != nil {
+		return err
+	}
+
 	err = tx.Commit()
 	if err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
@@ -681,6 +693,53 @@ func (s *StandaloneSQLiteBacked) PersistChanges(ctx context.Context, changes *in
 
 	// Set committed to true to prevent a rollback
 	committed = true
+
+	return nil
+}
+
+func (s *StandaloneSQLiteBacked) loadConsumedJoinTokens(ctx context.Context) error {
+	nowMs := s.Clock.Now().UnixMilli()
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	rows, err := s.db.QueryContext(ctx, "SELECT join_token, expires_at FROM "+s.tablePrefix+"consumed_join_tokens WHERE expires_at >= ?", nowMs)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			token     string
+			expiresMs int64
+		)
+		err = rows.Scan(&token, &expiresMs)
+		if err != nil {
+			return err
+		}
+		s.ConsumedJoinTokens[token] = time.UnixMilli(expiresMs).UTC()
+	}
+
+	return rows.Err()
+}
+
+func (s *StandaloneSQLiteBacked) persistConsumedJoinTokenChanges(ctx context.Context, tx *sql.Tx, changes *internal.Changes) error {
+	for _, token := range changes.ConsumedJoinTokens.Delete {
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		_, err := tx.ExecContext(ctx, "DELETE FROM "+s.tablePrefix+"consumed_join_tokens WHERE join_token = ?", token)
+		if err != nil {
+			return fmt.Errorf("failed to delete consumed join token: %w", err)
+		}
+	}
+
+	for _, jtc := range changes.ConsumedJoinTokens.Set {
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		_, err := tx.ExecContext(ctx,
+			`REPLACE INTO `+s.tablePrefix+`consumed_join_tokens (join_token, expires_at) VALUES (?, ?)`,
+			jtc.Token, jtc.ExpiresAt.UnixMilli(),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to persist consumed join token: %w", err)
+		}
+	}
 
 	return nil
 }

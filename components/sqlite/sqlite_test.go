@@ -164,7 +164,7 @@ func (s *SQLiteProvider) Seed(ctx context.Context, spec comptesting.Spec) error 
 		now := s.clock.Now()
 
 		// Truncate all data
-		for _, tbl := range []string{"active_actors", "host_actor_types", "hosts", "actor_state", "alarms"} {
+		for _, tbl := range []string{"active_actors", "host_actor_types", "hosts", "consumed_join_tokens", "actor_state", "alarms"} {
 			// Disable the "G202: SQL string concatenation" gosec warning, since there's no risk of SQL injection here
 			// #nosec G202
 			_, err = tx.ExecContext(ctx, "DELETE FROM "+s.tablePrefix+tbl)

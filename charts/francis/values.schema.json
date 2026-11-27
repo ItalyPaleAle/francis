@@ -92,7 +92,11 @@
             "issuer": { "type": "string" },
             "audience": { "type": "string" },
             "jwksURL": { "type": "string" },
-            "staticJWKS": { "type": "string" }
+            "staticJWKS": { "type": "string" },
+            "allowedSubjects": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            }
           }
         }
       }

@@ -184,7 +184,8 @@ Subcommands (including `print-ca`, `healthcheck`, `backup`, and `restore`) resol
 | `runtimePSKs` | List of runtime pre-shared keys from which the cluster CA is derived. **Required.** |
 | `bootstrap.method` | How hosts authenticate when joining: `psk` or `jwt`. **Required.** |
 | `bootstrap.hostPSK` | The shared host bootstrap secret, for `method: psk`. Must be at least 32 bytes long. |
-| `bootstrap.jwt.issuer` / `audience` / `jwksURL` / `staticJWKS` | JWT validation settings, for `method: jwt`. |
+| `bootstrap.jwt.issuer` / `audience` / `jwksURL` / `staticJWKS` | JWT validation settings, for `method: jwt`. Tokens must include `exp` at most `1h` in the future. |
+| `bootstrap.jwt.allowedSubjects` | Optional list of allowed `sub` values or `*` patterns (e.g. `"system:serviceaccount:my-namespace:*"`) for `method: jwt`. |
 | `provider.connectionString` | Connection string for the data store; the backend is inferred from its scheme. `postgres://…` or `postgresql://…` selects the standard PostgreSQL provider, `memory` selects the non-durable in-memory provider, and anything else selects the standard SQLite provider. Prefix the same values with `standalone:` to use the single-runtime provider with in-memory reads and optional PostgreSQL or SQLite persistence. **Required.** |
 | `provider.queryLog.enabled` | Log every SQL statement at Debug level with its duration when the provider opens the connection. Default `false`. |
 | `provider.queryLog.includeParameters` | Include parameter values as `db.query.parameter.<name-or-position>` attributes in traces and in SQL logs that include query text. This may expose sensitive data. Default `false`. |
@@ -236,6 +237,8 @@ bootstrap:
     issuer: "https://issuer.example.com"
     audience: "francis-runtime"
     jwksURL: "https://issuer.example.com/.well-known/jwks.json"
+    allowedSubjects:
+      - "system:serviceaccount:my-namespace:*"
 ```
 
 The worker provides the token with `remote.WithHostBootstrapJWTFile("/path/to/token")` (re-read on each bootstrap, so rotated tokens are picked up) or `remote.WithHostBootstrapJWT(token)` for a static token.

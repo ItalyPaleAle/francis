@@ -78,7 +78,7 @@ func (rt *Runtime) handleRegistration(ctx context.Context, c *hostConn) bool {
 		return false
 	}
 
-	resp := rt.handleRegister(ctx, c, req, pskServerProof)
+	resp := rt.handleRegister(ctx, c, req, cb, pskServerProof)
 	if resp.Kind == protocol.KindError {
 		writeRegistrationError(ctx, stream, resp)
 		return false
@@ -248,8 +248,8 @@ func (rt *Runtime) route(ctx context.Context, c *hostConn, req *protocol.Envelop
 }
 
 // handleRegister authenticates, registers or reattaches a host with the provider, tracks its session, and issues a workload certificate when needed
-// pskServerProof is non-empty when a PSK challenge-response already authenticated the session on this stream
-func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protocol.Envelope, pskServerProof []byte) *protocol.Envelope {
+// cb is the TLS session's channel-binding material, and pskServerProof is non-empty when a PSK challenge-response already authenticated the session on this stream
+func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protocol.Envelope, cb []byte, pskServerProof []byte) *protocol.Envelope {
 	var payload protocol.RegisterHostRequest
 	err := req.DecodePayload(&payload)
 	if err != nil {
@@ -277,6 +277,11 @@ func (rt *Runtime) handleRegister(ctx context.Context, c *hostConn, req *protoco
 	if !preAuthed {
 		switch payload.Auth.Method {
 		case bootstrapauth.MethodJWT:
+			if !bootstrapauth.VerifyJWTChannelBinding(payload.WorkloadPubKey, cb, payload.Auth.Token, payload.Auth.Proof) {
+				rt.log.WarnContext(ctx, "JWT channel-binding proof failed")
+				return req.ErrorReply(protocol.NewError(protocol.ErrCodeUnauthorized, "JWT authentication failed"))
+			}
+
 			var authErr error
 			joinToken, joinTokenExpiresAt, authErr = rt.authenticateJWT(ctx, payload.Auth.Token)
 			if authErr != nil {

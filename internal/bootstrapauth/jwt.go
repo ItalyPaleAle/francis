@@ -2,9 +2,11 @@ package bootstrapauth
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/jwx-go/jwkfetch/v4"
@@ -24,6 +26,9 @@ const jwksInitialFetchTimeout = 10 * time.Second
 // jwksShutdownTimeout bounds how long we wait for the background JWKS refresh workers to drain once the validator's context is done
 const jwksShutdownTimeout = 10 * time.Second
 
+// jwtChannelBindDomain domain-separates the Ed25519 proof-of-possession signature that binds a JWT bootstrap registration to its TLS session
+var jwtChannelBindDomain = []byte("francis-bootstrap-jwt-v1")
+
 // JWTConfig configures validation of host bootstrap tokens
 // Exactly one of JWKSURL or StaticJWKS must be set, which is how the pluggable key source is selected
 type JWTConfig struct {
@@ -35,11 +40,15 @@ type JWTConfig struct {
 	JWKSURL string
 	// StaticJWKS is an inline JWKS document (JSON-encoded), used for tests or air-gapped clusters
 	StaticJWKS json.RawMessage
+	// AllowedSubjects restricts which sub claims are accepted, supporting exact matches and '*' wildcards (such as "system:serviceaccount:my-ns:*")
+	// When empty, any subject is accepted
+	AllowedSubjects []string
 }
 
 // JWTValidator validates host bootstrap tokens against a configured key source
 type JWTValidator struct {
-	parseOpts []jwt.ParseOption
+	parseOpts       []jwt.ParseOption
+	allowedSubjects []string
 }
 
 // NewJWTValidator builds a validator from the given config
@@ -50,6 +59,9 @@ func NewJWTValidator(ctx context.Context, cfg JWTConfig) (*JWTValidator, error) 
 	}
 	if cfg.Audience == "" {
 		return nil, errors.New("JWT audience is required")
+	}
+	if slices.Contains(cfg.AllowedSubjects, "") {
+		return nil, errors.New("JWT allowed subjects must not contain empty entries")
 	}
 
 	// Build the key source from either a remote JWKS URL or a static, inline JWKS document
@@ -71,9 +83,7 @@ func NewJWTValidator(ctx context.Context, cfg JWTConfig) (*JWTValidator, error) 
 		return nil, fmt.Errorf("failed to build JWT key source: %w", err)
 	}
 
-	// Validate the standard claims as part of parsing so a malformed issuer, audience, or expiry is rejected centrally
-	// Note: Expiration is validated when present but not required
-	// Tokens without exp are accepted and not eligible for join token tracking
+	// Validate the standard claims as part of parsing so a malformed issuer, audience, or missing expiry is rejected centrally
 	parseOpts := []jwt.ParseOption{
 		// Publishing a JWKS whose keys carry no "alg" is common, so the algorithm is inferred from the key type instead of the key being skipped
 		// Falling back to the only key in the set keeps tokens that carry no "kid" working, which is what a single-key JWKS relies on
@@ -83,16 +93,18 @@ func NewJWTValidator(ctx context.Context, cfg JWTConfig) (*JWTValidator, error) 
 		),
 		jwt.WithIssuer(cfg.Issuer),
 		jwt.WithAudience(cfg.Audience),
+		jwt.WithRequiredClaim(jwt.ExpirationKey),
 		jwt.WithAcceptableSkew(time.Minute),
 	}
 
 	return &JWTValidator{
-		parseOpts: parseOpts,
+		parseOpts:       parseOpts,
+		allowedSubjects: slices.Clone(cfg.AllowedSubjects),
 	}, nil
 }
 
 // Validate checks the token's signature and standard claims and returns the subject and, when present, the join token (jti) and its expiry
-// The join token is empty and the expiry is zero when the token carries no jti or no expiry
+// The join token is empty when the token carries no jti
 func (v *JWTValidator) Validate(token string) (subject, joinToken string, expiresAt time.Time, err error) {
 	raw := []byte(token)
 
@@ -107,8 +119,20 @@ func (v *JWTValidator) Validate(token string) (subject, joinToken string, expire
 		return "", "", time.Time{}, fmt.Errorf("token validation failed: %w", err)
 	}
 
-	// The subject is the host's platform identity, and a token that carries none yields an empty identity
+	// Require an exp of at most maxJWTLifetime on every token
+	exp, ok := parsed.Expiration()
+	if !ok {
+		return "", "", time.Time{}, errors.New("token validation failed: missing exp claim")
+	}
+	if time.Until(exp) > maxJWTLifetime {
+		return "", "", time.Time{}, fmt.Errorf("token lifetime exceeds maximum of %v", maxJWTLifetime)
+	}
+
+	// The subject is the host's platform identity, checked against the allowlist when one is configured
 	subject, _ = parsed.Subject()
+	if len(v.allowedSubjects) > 0 && !matchesAllowedSubject(v.allowedSubjects, subject) {
+		return "", "", time.Time{}, errors.New("token subject is not allowed")
+	}
 
 	// A missing jti means there is nothing to track for replay protection
 	jti, ok := parsed.JwtID()
@@ -116,18 +140,74 @@ func (v *JWTValidator) Validate(token string) (subject, joinToken string, expire
 		return subject, "", time.Time{}, nil
 	}
 
-	// A missing exp means we cannot bound the replay window, so we skip tracking this token
-	exp, ok := parsed.Expiration()
-	if !ok {
-		return subject, "", time.Time{}, nil
-	}
-
-	// Reject tokens whose remaining lifetime exceeds the maximum to limit how long a captured token can be replayed
-	if time.Until(exp) > maxJWTLifetime {
-		return "", "", time.Time{}, fmt.Errorf("token lifetime exceeds maximum of %v", maxJWTLifetime)
-	}
-
 	return subject, jti, exp, nil
+}
+
+// SignJWTChannelBinding signs the TLS channel-binding value and bootstrap token with the host's workload private key
+// This binds the registration request and workload public key to one specific TLS session
+func SignJWTChannelBinding(priv ed25519.PrivateKey, cb []byte, token string) []byte {
+	return ed25519.Sign(priv, jwtChannelBindTranscript(cb, token))
+}
+
+// VerifyJWTChannelBinding verifies that proof was signed by pub over the given TLS channel-binding value and bootstrap token
+func VerifyJWTChannelBinding(pub []byte, cb []byte, token string, proof []byte) bool {
+	if len(pub) != ed25519.PublicKeySize || len(proof) != ed25519.SignatureSize || len(cb) == 0 {
+		return false
+	}
+
+	return ed25519.Verify(ed25519.PublicKey(pub), jwtChannelBindTranscript(cb, token), proof)
+}
+
+func jwtChannelBindTranscript(cb []byte, token string) []byte {
+	out := make([]byte, 0, 12+len(jwtChannelBindDomain)+len(cb)+len(token))
+	out = appendField(out, jwtChannelBindDomain)
+	out = appendField(out, cb)
+	out = appendField(out, []byte(token))
+	return out
+}
+
+// matchesAllowedSubject reports whether subject is non-empty and matches at least one configured pattern
+func matchesAllowedSubject(patterns []string, subject string) bool {
+	if subject == "" {
+		return false
+	}
+
+	for _, pattern := range patterns {
+		if matchWildcard(pattern, subject) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// matchWildcard matches value against pattern in linear time, where '*' matches any sequence of characters (including '/' and ':')
+func matchWildcard(pattern string, value string) bool {
+	var pi, vi, matchIdx int
+	starIdx := -1
+	for vi < len(value) {
+		switch {
+		case pi < len(pattern) && pattern[pi] == '*':
+			starIdx = pi
+			matchIdx = vi
+			pi++
+		case pi < len(pattern) && pattern[pi] == value[vi]:
+			pi++
+			vi++
+		case starIdx != -1:
+			pi = starIdx + 1
+			matchIdx++
+			vi = matchIdx
+		default:
+			return false
+		}
+	}
+
+	for pi < len(pattern) && pattern[pi] == '*' {
+		pi++
+	}
+
+	return pi == len(pattern)
 }
 
 // checkSigningAlgorithm rejects tokens signed with an algorithm we do not accept

@@ -117,10 +117,11 @@ func (cfg managementConfig) managementServerConfig() (management.Config, error) 
 }
 
 type jwtConfig struct {
-	Issuer     string `yaml:"issuer"`
-	Audience   string `yaml:"audience"`
-	JWKSURL    string `yaml:"jwksURL"`
-	StaticJWKS string `yaml:"staticJWKS"`
+	Issuer          string   `yaml:"issuer"`
+	Audience        string   `yaml:"audience"`
+	JWKSURL         string   `yaml:"jwksURL"`
+	StaticJWKS      string   `yaml:"staticJWKS"`
+	AllowedSubjects []string `yaml:"allowedSubjects"`
 }
 
 type providerConfig struct {

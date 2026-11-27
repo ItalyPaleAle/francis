@@ -29,6 +29,7 @@ func NewSuite(p ActorProviderTesting) *Suite {
 
 func (s Suite) RunTests(t *testing.T) {
 	t.Run("register host", s.TestRegisterHost)
+	t.Run("join tokens", s.TestJoinTokens)
 	t.Run("update actor host", s.TestUpdateActorHost)
 	t.Run("unregister host", s.TestUnregisterHost)
 	t.Run("draining host", s.TestDrainingHost)
@@ -6876,5 +6877,53 @@ func (s Suite) TestBackupRestore(t *testing.T) {
 		// Restore would corrupt running actors, so it refuses while a host is connected
 		err = s.p.Restore(ctx, bytes.NewReader(buf.Bytes()))
 		require.ErrorIs(t, err, components.ErrHostsConnected)
+	})
+}
+
+func (s Suite) TestJoinTokens(t *testing.T) {
+	t.Run("consumed join token rejects replay even after host unregisters until token expires", func(t *testing.T) {
+		ctx := t.Context()
+
+		err := s.p.Seed(ctx, Spec{})
+		require.NoError(t, err)
+
+		exp := s.p.Now().Add(10 * time.Minute)
+		regRes, err := s.p.RegisterHost(ctx, components.RegisterHostReq{
+			Address:            "127.0.0.1:4101",
+			JoinToken:          "jti-replay-check",
+			JoinTokenExpiresAt: exp,
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, regRes.HostID)
+
+		// Replaying the same join token while the first host is live fails
+		_, err = s.p.RegisterHost(ctx, components.RegisterHostReq{
+			Address:            "127.0.0.1:4102",
+			JoinToken:          "jti-replay-check",
+			JoinTokenExpiresAt: exp,
+		})
+		require.ErrorIs(t, err, components.ErrJoinTokenAlreadyConsumed)
+
+		// Unregistering the original host must NOT release the consumed join token before its expiry
+		err = s.p.UnregisterHost(ctx, regRes.HostID, components.UnregisterHostOpts{})
+		require.NoError(t, err)
+
+		_, err = s.p.RegisterHost(ctx, components.RegisterHostReq{
+			Address:            "127.0.0.1:4103",
+			JoinToken:          "jti-replay-check",
+			JoinTokenExpiresAt: exp,
+		})
+		require.ErrorIs(t, err, components.ErrJoinTokenAlreadyConsumed)
+
+		// Once the join token's own expiry passes, lazy pruning drops it
+		_ = s.p.AdvanceClock(11 * time.Minute) //nolint:errcheck
+
+		regAfterExp, err := s.p.RegisterHost(ctx, components.RegisterHostReq{
+			Address:            "127.0.0.1:4104",
+			JoinToken:          "jti-replay-check",
+			JoinTokenExpiresAt: s.p.Now().Add(10 * time.Minute),
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, regAfterExp.HostID)
 	})
 }

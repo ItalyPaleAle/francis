@@ -71,7 +71,7 @@ func (p *PostgresProvider) RegisterHost(ctx context.Context, req components.Regi
 
 		// Consume the join token inside the same transaction too
 		if req.JoinToken != "" {
-			err = p.consumeJoinToken(ctx, tx, req.JoinToken, hostID, req.JoinTokenExpiresAt)
+			err = p.consumeJoinToken(ctx, tx, req.JoinToken, req.JoinTokenExpiresAt)
 			if err != nil {
 				return zero, err
 			}
@@ -173,7 +173,7 @@ func (p *PostgresProvider) reattachHost(ctx context.Context, req components.Regi
 
 		// Consume the join token inside the same transaction too
 		if req.JoinToken != "" {
-			err = p.consumeJoinToken(ctx, tx, req.JoinToken, activeHostID, req.JoinTokenExpiresAt)
+			err = p.consumeJoinToken(ctx, tx, req.JoinToken, req.JoinTokenExpiresAt)
 			if err != nil {
 				return zero, err
 			}
@@ -550,7 +550,7 @@ func (p *PostgresProvider) RemoveActor(ctx context.Context, ref ref.ActorRef) er
 }
 
 // consumeJoinToken records a join token as consumed to prevent replay, pruning expired rows first
-func (p *PostgresProvider) consumeJoinToken(ctx context.Context, tx pgx.Tx, joinToken, hostID string, expiresAt time.Time) error {
+func (p *PostgresProvider) consumeJoinToken(ctx context.Context, tx pgx.Tx, joinToken string, expiresAt time.Time) error {
 	// Lazily delete expired join tokens
 	queryCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
@@ -565,10 +565,10 @@ func (p *PostgresProvider) consumeJoinToken(ctx context.Context, tx pgx.Tx, join
 	defer cancel()
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	_, err = tx.Exec(queryCtx,
-		`INSERT INTO `+p.tablePrefix+`consumed_join_tokens (join_token, host_id, expires_at)
-		VALUES ($1, $2, $3)`,
+		`INSERT INTO `+p.tablePrefix+`consumed_join_tokens (join_token, expires_at)
+		VALUES ($1, $2)`,
 		// expires_at is stored as UTC
-		joinToken, hostID, expiresAt.UTC(),
+		joinToken, expiresAt.UTC(),
 	)
 	if isConstraintError(err) {
 		// A unique-constraint violation means the same token was already used

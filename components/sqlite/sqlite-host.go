@@ -74,7 +74,7 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 
 		// Consume the join token inside the same transaction so a failed host insertion rolls back the token consumption atomically
 		if req.JoinToken != "" {
-			err = s.consumeJoinToken(ctx, tx, req.JoinToken, hostID, req.JoinTokenExpiresAt)
+			err = s.consumeJoinToken(ctx, tx, req.JoinToken, req.JoinTokenExpiresAt)
 			if err != nil {
 				return zero, err
 			}
@@ -181,7 +181,7 @@ func (s *SQLiteProvider) reattachHost(ctx context.Context, req components.Regist
 
 		// Consume the join token inside the same transaction too
 		if req.JoinToken != "" {
-			err = s.consumeJoinToken(ctx, tx, req.JoinToken, activeHostID, req.JoinTokenExpiresAt)
+			err = s.consumeJoinToken(ctx, tx, req.JoinToken, req.JoinTokenExpiresAt)
 			if err != nil {
 				return zero, err
 			}
@@ -792,7 +792,7 @@ func buildLookupActorHostClause(hosts []string, params []any) (string, []any) {
 }
 
 // consumeJoinToken records a join token as consumed to prevent replay, pruning expired rows first
-func (s *SQLiteProvider) consumeJoinToken(ctx context.Context, tx *sql.Tx, joinToken, hostID string, expiresAt time.Time) error {
+func (s *SQLiteProvider) consumeJoinToken(ctx context.Context, tx *sql.Tx, joinToken string, expiresAt time.Time) error {
 	now := s.clock.Now().UnixMilli()
 
 	// Lazily delete expired join tokens to keep the table tidy without a background job
@@ -809,9 +809,9 @@ func (s *SQLiteProvider) consumeJoinToken(ctx context.Context, tx *sql.Tx, joinT
 	defer cancel()
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 	_, err = tx.ExecContext(queryCtx,
-		`INSERT INTO `+s.tablePrefix+`consumed_join_tokens (join_token, host_id, expires_at)
-		VALUES (?, ?, ?)`,
-		joinToken, hostID, expiresAt.UnixMilli(),
+		`INSERT INTO `+s.tablePrefix+`consumed_join_tokens (join_token, expires_at)
+		VALUES (?, ?)`,
+		joinToken, expiresAt.UnixMilli(),
 	)
 	if isConstraintError(err) {
 		// A unique-constraint violation means the same token was already used

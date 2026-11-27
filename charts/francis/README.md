@@ -207,11 +207,9 @@ Pin the cluster CA (`remote.WithPinnedCA`) especially here: the token is a beare
 
 #### Who can join with JWT bootstrap
 
-The runtime validates a bootstrap token's **issuer, audience, signature, and expiry**. It reads the `sub` claim and logs it, but it does not check it against an allowlist, so **any token from that issuer with that audience is accepted, whatever service account it belongs to**.
+The runtime validates a bootstrap token's **issuer, audience, signature, and expiry**. By default it does not check `sub`, so any token from that issuer with that audience is accepted, whatever service account it belongs to.
 
-That matters when the issuer is your Kubernetes cluster, because any pod can request a projected token for any audience — there's no RBAC gate on the audience field. On a shared cluster, JWT bootstrap against the cluster's own issuer therefore lets **any workload in the cluster** join as a Francis host, and a host can place actors and read and write state. A `hostPSK` is narrower: only the workloads you hand it to can join.
-
-Pick JWT when the cluster is dedicated to this system, or when your issuer mints identities scoped to these workers. Pick `psk` on a shared cluster, and keep the key in a Secret that only your worker pods can mount.
+That matters when the issuer is your Kubernetes cluster, because any pod can request a projected token for any audience: there's no RBAC gate on the audience field. On a shared cluster, set `bootstrap.jwt.allowedSubjects` to restrict which service accounts may join (for example `["system:serviceaccount:my-namespace:*"]`). As a fallback, use `psk` and keep the key in a Secret that only your worker pods can mount.
 
 ## Secrets
 
@@ -345,6 +343,7 @@ The test runs the image's own `francis healthcheck` against the first replica, w
 | `bootstrap.jwt.audience` | string | `""` | Expected JWT audience, required with `method: jwt`. |
 | `bootstrap.jwt.jwksURL` | string | `""` | JWKS endpoint used to validate tokens. |
 | `bootstrap.jwt.staticJWKS` | string | `""` | Inline JWKS document, used instead of `jwksURL`. |
+| `bootstrap.jwt.allowedSubjects` | list | `[]` | Allowed JWT `sub` values or `*` patterns (e.g. `"system:serviceaccount:my-namespace:*"`). |
 | `existingConfigSecret` | string | `""` | Mount a Secret holding a complete config file instead of rendering one. |
 | `existingConfigSecretKey` | string | `config.yaml` | Key inside that Secret. |
 

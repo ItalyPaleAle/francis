@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"sync"
+	"time"
 
 	"github.com/italypaleale/francis/components"
 )
@@ -51,6 +52,12 @@ type WorkflowEventChange struct {
 	Events []components.WorkflowEvent
 }
 
+// ConsumedJoinTokenChange records a consumed JWT join token and its expiry
+type ConsumedJoinTokenChange struct {
+	Token     string
+	ExpiresAt time.Time
+}
+
 // Changes represents all changes made during a single operation.
 // This is passed to the PersistHook to persist changes to the backing store.
 // Set operations perform upserts (insert or update).
@@ -86,6 +93,10 @@ type Changes struct {
 		// Insert adds workflow events, ignoring any whose sequence number the actor already has
 		Insert []WorkflowEventChange
 	}
+	ConsumedJoinTokens struct {
+		Set    []ConsumedJoinTokenChange
+		Delete []string
+	}
 }
 
 // NewChanges returns a Changes instance from the pool.
@@ -113,6 +124,8 @@ func (c *Changes) Release() {
 	c.ActorState.Delete = c.ActorState.Delete[:0]
 	c.WorkflowEvents.Reset = c.WorkflowEvents.Reset[:0]
 	c.WorkflowEvents.Insert = c.WorkflowEvents.Insert[:0]
+	c.ConsumedJoinTokens.Set = c.ConsumedJoinTokens.Set[:0]
+	c.ConsumedJoinTokens.Delete = c.ConsumedJoinTokens.Delete[:0]
 
 	changesPool.Put(c)
 }
@@ -132,7 +145,9 @@ func (c *Changes) IsEmpty() bool {
 		len(c.ActorState.Set) == 0 &&
 		len(c.ActorState.Delete) == 0 &&
 		len(c.WorkflowEvents.Reset) == 0 &&
-		len(c.WorkflowEvents.Insert) == 0
+		len(c.WorkflowEvents.Insert) == 0 &&
+		len(c.ConsumedJoinTokens.Set) == 0 &&
+		len(c.ConsumedJoinTokens.Delete) == 0
 }
 
 // Clone creates a deep clone of the Changes struct.
@@ -226,6 +241,16 @@ func (c *Changes) Clone() *Changes {
 			}
 			clone.WorkflowEvents.Insert[i] = WorkflowEventChange{Key: wc.Key, Events: events}
 		}
+	}
+
+	// Clone ConsumedJoinTokens
+	if len(c.ConsumedJoinTokens.Set) > 0 {
+		clone.ConsumedJoinTokens.Set = make([]ConsumedJoinTokenChange, len(c.ConsumedJoinTokens.Set))
+		copy(clone.ConsumedJoinTokens.Set, c.ConsumedJoinTokens.Set)
+	}
+	if len(c.ConsumedJoinTokens.Delete) > 0 {
+		clone.ConsumedJoinTokens.Delete = make([]string, len(c.ConsumedJoinTokens.Delete))
+		copy(clone.ConsumedJoinTokens.Delete, c.ConsumedJoinTokens.Delete)
 	}
 
 	return clone

@@ -157,6 +157,12 @@ bootstrap:
     {{- with .Values.bootstrap.jwt.staticJWKS }}
     staticJWKS: {{ . | quote }}
     {{- end }}
+    {{- with .Values.bootstrap.jwt.allowedSubjects }}
+    allowedSubjects:
+    {{- range . }}
+      - {{ . | quote }}
+    {{- end }}
+    {{- end }}
 {{- end }}
 
 provider:
@@ -344,6 +350,11 @@ Every template includes this so the error surfaces no matter which resource rend
 {{- end -}}
 {{- if and (not .Values.bootstrap.jwt.jwksURL) (not .Values.bootstrap.jwt.staticJWKS) -}}
 {{- fail "\nfrancis: bootstrap.jwt requires either jwksURL or staticJWKS when bootstrap.method is \"jwt\"" -}}
+{{- end -}}
+{{- range $i, $sub := .Values.bootstrap.jwt.allowedSubjects -}}
+{{- if not (toString $sub) -}}
+{{- fail (printf "\nfrancis: bootstrap.jwt.allowedSubjects[%d] is empty" $i) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 

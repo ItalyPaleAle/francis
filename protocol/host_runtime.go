@@ -64,7 +64,7 @@ type ActorHostType struct {
 type RegisterAuth struct {
 	// Method is the bootstrap method, either "psk" or "jwt"
 	Method string `msgpack:"method"`
-	// Proof is the host's channel-bound HMAC proof for the PSK method
+	// Proof is the host's channel-bound proof: an HMAC proof for PSK, or an Ed25519 signature by WorkloadPubKey over the TLS channel binding and token for JWT
 	Proof []byte `msgpack:"proof,omitempty"`
 	// Token is the bearer token for the JWT method
 	Token string `msgpack:"token,omitempty"`

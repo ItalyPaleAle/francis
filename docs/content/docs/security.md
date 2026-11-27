@@ -25,7 +25,7 @@ In the **remote** topology, the runtime holds the PSKs (`runtimePSKs` in its con
 Before the runtime issues a worker a certificate, the worker must prove it's allowed to join. This is the **bootstrap** step, and it supports two methods:
 
 - **Pre-shared key (PSK)** — the worker proves knowledge of a shared `hostPSK` via a channel-bound challenge-response.
-- **JWT** — the worker presents a JWT that the runtime validates against a JWKS (issuer, audience, signing keys). This fits environments that already issue workload identities, like Kubernetes projected service-account tokens.
+- **JWT** — the worker presents a JWT that the runtime validates against a JWKS (issuer, audience, expiry, optional `allowedSubjects`, and signing keys). This fits environments that already issue workload identities, like Kubernetes projected service-account tokens.
 
 After a successful bootstrap, the runtime issues a **short-lived workload certificate**, and every subsequent connection — to the runtime and between peer hosts — uses mTLS with that certificate. Short lifetimes (default one hour) bound how long a compromised or revoked host stays trusted. See [Deploying the runtime](/docs/deploying-the-runtime#host-bootstrap) for configuration.
 

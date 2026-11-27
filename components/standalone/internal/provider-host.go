@@ -23,34 +23,48 @@ func (p *Provider) RegisterHost(ctx context.Context, req components.RegisterHost
 	changes := NewChanges()
 	defer changes.Release()
 
-	nowMs := p.Clock.Now().UnixMilli()
+	now := p.Clock.Now()
+	nowMs := now.UnixMilli()
 
 	p.Mu.RLock()
-	// Clean up unhealthy hosts first
-	// The deletions are applied together with the new host
-	cleanupApply := p.CleanupUnhealthyHosts(changes)
+	// Check if there's already a healthy host at this address before staging writes
+	// Unhealthy hosts at the same address are cleaned up below, so they don't block registration
+	alreadyRegistered := false
+	existingHostID, ok := p.HostsByAddress[req.Address]
+	if ok {
+		existingHost, ok2 := p.Hosts[existingHostID]
+		if ok2 && p.IsHostHealthy(existingHost) {
+			alreadyRegistered = true
+		}
+	}
 
 	// Enforce cluster admission (exclusive-access lease, host limit, and limit agreement) before adding the host
 	// This reads the cluster state atomically with the host count under the same lock
 	clusterClaim, admissionErr := p.checkClusterAdmission(nowMs)
 
-	// Check if there's already a healthy host at this address
-	// Unhealthy hosts at the same address are cleaned up above, so they don't block registration
-	alreadyRegistered := false
-	if existingHostID, ok := p.HostsByAddress[req.Address]; ok {
-		existingHost, ok := p.Hosts[existingHostID]
-		if ok && p.IsHostHealthy(existingHost) {
-			alreadyRegistered = true
+	var (
+		cleanupApply   func()
+		joinTokenApply func()
+		joinTokenErr   error
+	)
+	if admissionErr == nil && !alreadyRegistered {
+		joinTokenApply, joinTokenErr = p.stageConsumeJoinToken(req.JoinToken, req.JoinTokenExpiresAt, now, changes)
+		if joinTokenErr == nil {
+			// Clean up unhealthy hosts only once admission and token checks pass
+			cleanupApply = p.CleanupUnhealthyHosts(changes)
 		}
 	}
 	p.Mu.RUnlock()
 
-	// A failed admission (or address conflict) returns before anything is applied, so a rejected registration leaves the cluster state untouched
+	// A failed admission, address conflict, or replayed join token returns before anything is applied
 	if admissionErr != nil {
 		return components.RegisterHostRes{}, admissionErr
 	}
 	if alreadyRegistered {
 		return components.RegisterHostRes{}, components.ErrHostAlreadyRegistered
+	}
+	if joinTokenErr != nil {
+		return components.RegisterHostRes{}, joinTokenErr
 	}
 
 	// Generate a new host ID
@@ -60,7 +74,7 @@ func (p *Provider) RegisterHost(ctx context.Context, req components.RegisterHost
 	h := &Host{
 		ID:              hostID,
 		Address:         req.Address,
-		LastHealthCheck: p.Clock.Now(),
+		LastHealthCheck: now,
 		SessionID:       req.SessionID,
 		RuntimeID:       req.RuntimeID,
 	}
@@ -71,6 +85,7 @@ func (p *Provider) RegisterHost(ctx context.Context, req components.RegisterHost
 
 	err := p.persistThenApply(ctx, &p.Mu, changes, func() {
 		cleanupApply()
+		joinTokenApply()
 		p.Hosts[hostID] = h
 		p.HostsByAddress[req.Address] = hostID
 		if hats != nil {
@@ -98,7 +113,8 @@ func (p *Provider) reattachHost(ctx context.Context, req components.RegisterHost
 	changes := NewChanges()
 	defer changes.Release()
 
-	nowMs := p.Clock.Now().UnixMilli()
+	now := p.Clock.Now()
+	nowMs := now.UnixMilli()
 
 	p.Mu.RLock()
 	existing, exists := p.Hosts[req.ExistingHostID]
@@ -125,66 +141,75 @@ func (p *Provider) reattachHost(ctx context.Context, req components.RegisterHost
 		}
 	}
 
-	// Plan cleanup of unhealthy hosts, including the registration being reattached to when it has gone stale
 	var (
-		cleanupHostIDs   []string
-		cleanupAddresses []string
-		cleanupActors    []ActorKey
+		joinTokenApply func()
+		joinTokenErr   error
 	)
-	for id, h := range p.Hosts {
-		if (exists && id == req.ExistingHostID) || p.IsHostHealthy(h) {
-			continue
-		}
-
-		cleanupHostIDs = append(cleanupHostIDs, id)
-		cleanupAddresses = append(cleanupAddresses, h.Address)
-		changes.Hosts.Delete = append(changes.Hosts.Delete, id)
-
-		for _, hat := range p.HostActorTypes[id] {
-			changes.HostActorTypes.Delete = append(changes.HostActorTypes.Delete, HostActorTypeKey{
-				HostID:    hat.HostID,
-				ActorType: hat.ActorType,
-			})
-		}
-
-		for key, actor := range p.ActiveActors {
-			if actor.HostID != id {
-				continue
-			}
-			cleanupActors = append(cleanupActors, key)
-			changes.ActiveActors.Delete = append(changes.ActiveActors.Delete, key)
-		}
+	if !leaseLive && !conflict {
+		joinTokenApply, joinTokenErr = p.stageConsumeJoinToken(req.JoinToken, req.JoinTokenExpiresAt, now, changes)
 	}
 
-	clearCleanupLeases := p.stageClearActorAlarmLeases(cleanupActors, nil, changes)
-
-	// Build the reattach changes while still holding the read lock
+	// Plan cleanup of unhealthy hosts, including the registration being reattached to when it has gone stale
 	var (
-		updatedHost *Host
-		oldAddress  string
-		newHats     []*HostActorType
+		cleanupHostIDs     []string
+		cleanupAddresses   []string
+		cleanupActors      []ActorKey
+		clearCleanupLeases = func() {}
+		updatedHost        *Host
+		oldAddress         string
+		newHats            []*HostActorType
 	)
-	if exists {
-		oldAddress = existing.Address
-		updatedHost = existing.Clone()
-		updatedHost.Address = req.Address
-		updatedHost.LastHealthCheck = p.Clock.Now()
+	if !leaseLive && !conflict && joinTokenErr == nil {
+		for id, h := range p.Hosts {
+			if (exists && id == req.ExistingHostID) || p.IsHostHealthy(h) {
+				continue
+			}
 
-		// Hand the registration to the new session, which starts out not draining like a brand-new registration
-		updatedHost.SessionID = req.SessionID
-		updatedHost.RuntimeID = req.RuntimeID
-		updatedHost.Draining = false
-		updatedHost.DrainToken = ""
-		changes.Hosts.Set = append(changes.Hosts.Set, HostChange{Key: req.ExistingHostID, Value: updatedHost})
+			cleanupHostIDs = append(cleanupHostIDs, id)
+			cleanupAddresses = append(cleanupAddresses, h.Address)
+			changes.Hosts.Delete = append(changes.Hosts.Delete, id)
 
-		// Replace the supported actor types
-		for _, hat := range p.HostActorTypes[req.ExistingHostID] {
-			changes.HostActorTypes.Delete = append(changes.HostActorTypes.Delete, HostActorTypeKey{
-				HostID:    hat.HostID,
-				ActorType: hat.ActorType,
-			})
+			for _, hat := range p.HostActorTypes[id] {
+				changes.HostActorTypes.Delete = append(changes.HostActorTypes.Delete, HostActorTypeKey{
+					HostID:    hat.HostID,
+					ActorType: hat.ActorType,
+				})
+			}
+
+			for key, actor := range p.ActiveActors {
+				if actor.HostID != id {
+					continue
+				}
+				cleanupActors = append(cleanupActors, key)
+				changes.ActiveActors.Delete = append(changes.ActiveActors.Delete, key)
+			}
 		}
-		newHats = buildHostActorTypes(req.ExistingHostID, req.ActorTypes, changes)
+
+		clearCleanupLeases = p.stageClearActorAlarmLeases(cleanupActors, nil, changes)
+
+		// Build the reattach changes while still holding the read lock
+		if exists {
+			oldAddress = existing.Address
+			updatedHost = existing.Clone()
+			updatedHost.Address = req.Address
+			updatedHost.LastHealthCheck = now
+
+			// Hand the registration to the new session, which starts out not draining like a brand-new registration
+			updatedHost.SessionID = req.SessionID
+			updatedHost.RuntimeID = req.RuntimeID
+			updatedHost.Draining = false
+			updatedHost.DrainToken = ""
+			changes.Hosts.Set = append(changes.Hosts.Set, HostChange{Key: req.ExistingHostID, Value: updatedHost})
+
+			// Replace the supported actor types
+			for _, hat := range p.HostActorTypes[req.ExistingHostID] {
+				changes.HostActorTypes.Delete = append(changes.HostActorTypes.Delete, HostActorTypeKey{
+					HostID:    hat.HostID,
+					ActorType: hat.ActorType,
+				})
+			}
+			newHats = buildHostActorTypes(req.ExistingHostID, req.ActorTypes, changes)
+		}
 	}
 	p.Mu.RUnlock()
 
@@ -194,6 +219,10 @@ func (p *Provider) reattachHost(ctx context.Context, req components.RegisterHost
 
 	if conflict {
 		return components.RegisterHostRes{}, components.ErrHostAlreadyRegistered
+	}
+
+	if joinTokenErr != nil {
+		return components.RegisterHostRes{}, joinTokenErr
 	}
 
 	applyCleanup := func() {
@@ -207,6 +236,7 @@ func (p *Provider) reattachHost(ctx context.Context, req components.RegisterHost
 			delete(p.ActiveActors, key)
 		}
 		clearCleanupLeases()
+		joinTokenApply()
 	}
 
 	// Reattach to the existing registration
@@ -261,6 +291,45 @@ func (p *Provider) reattachHost(ctx context.Context, req components.RegisterHost
 	}
 
 	return components.RegisterHostRes{HostID: hostID, Reattached: false}, nil
+}
+
+// stageConsumeJoinToken prunes expired join tokens and stages consumption of joinToken when non-empty
+// Must be called while holding at least a read lock on Mu, and the returned apply function must run under the Mu write lock
+func (p *Provider) stageConsumeJoinToken(joinToken string, expiresAt, now time.Time, changes *Changes) (func(), error) {
+	if joinToken == "" {
+		return func() {}, nil
+	}
+
+	nowUTC := now.UTC()
+	var expiredTokens []string
+	for tok, exp := range p.ConsumedJoinTokens {
+		if exp.Before(nowUTC) {
+			expiredTokens = append(expiredTokens, tok)
+		}
+	}
+
+	existingExp, exists := p.ConsumedJoinTokens[joinToken]
+	if exists && !existingExp.Before(nowUTC) {
+		return nil, components.ErrJoinTokenAlreadyConsumed
+	}
+
+	expUTC := expiresAt.UTC()
+	for _, tok := range expiredTokens {
+		if tok != joinToken {
+			changes.ConsumedJoinTokens.Delete = append(changes.ConsumedJoinTokens.Delete, tok)
+		}
+	}
+	changes.ConsumedJoinTokens.Set = append(changes.ConsumedJoinTokens.Set, ConsumedJoinTokenChange{
+		Token:     joinToken,
+		ExpiresAt: expUTC,
+	})
+
+	return func() {
+		for _, tok := range expiredTokens {
+			delete(p.ConsumedJoinTokens, tok)
+		}
+		p.ConsumedJoinTokens[joinToken] = expUTC
+	}, nil
 }
 
 // buildHostActorTypes constructs HostActorType entries for the given host and records them as upserts in changes

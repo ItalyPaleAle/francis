@@ -531,6 +531,7 @@ func (p *StandaloneMemory) clearData() {
 	p.ActiveActors = make(map[internal.ActorKey]*internal.ActiveActor)
 	p.Alarms = make(map[internal.AlarmKey]*internal.Alarm)
 	p.AlarmsByID = make(map[string]*internal.Alarm)
+	p.ConsumedJoinTokens = make(map[string]time.Time)
 	p.ActorState = make(map[internal.ActorKey]*internal.StateEntry)
 }
 
@@ -730,11 +731,12 @@ func (p *StandaloneSQLiteBacked) clearData() {
 	p.ActiveActors = make(map[internal.ActorKey]*internal.ActiveActor)
 	p.Alarms = make(map[internal.AlarmKey]*internal.Alarm)
 	p.AlarmsByID = make(map[string]*internal.Alarm)
+	p.ConsumedJoinTokens = make(map[string]time.Time)
 	p.ActorState = make(map[internal.ActorKey]*internal.StateEntry)
 }
 
 func (p *StandaloneSQLiteBacked) clearDatabase(ctx context.Context) error {
-	tables := []string{"alarms", "active_actors", "host_actor_types", "hosts", "actor_state"}
+	tables := []string{"alarms", "active_actors", "host_actor_types", "hosts", "consumed_join_tokens", "actor_state"}
 	for _, table := range tables {
 		//nolint:gosec
 		_, err := p.db.ExecContext(ctx, "DELETE FROM "+p.tablePrefix+table)
@@ -947,11 +949,12 @@ func (p *StandalonePostgresBacked) clearData() {
 	p.ActiveActors = make(map[internal.ActorKey]*internal.ActiveActor)
 	p.Alarms = make(map[internal.AlarmKey]*internal.Alarm)
 	p.AlarmsByID = make(map[string]*internal.Alarm)
+	p.ConsumedJoinTokens = make(map[string]time.Time)
 	p.ActorState = make(map[internal.ActorKey]*internal.StateEntry)
 }
 
 func (p *StandalonePostgresBacked) clearDatabase(ctx context.Context) error {
-	tables := []string{"alarms", "active_actors", "host_actor_types", "hosts", "actor_state"}
+	tables := []string{"alarms", "active_actors", "host_actor_types", "hosts", "consumed_join_tokens", "actor_state"}
 	for _, table := range tables {
 		//nolint:gosec
 		_, err := p.db.Exec(ctx, "DELETE FROM "+p.tablePrefix+table)

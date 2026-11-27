@@ -432,7 +432,16 @@ func (rc *runtimeClient) bootstrap(ctx context.Context, session *webtransport.Se
 		if tokErr != nil {
 			return protocol.RegisterHostResponse{}, fmt.Errorf("failed to obtain bootstrap token: %w", tokErr)
 		}
-		reg.Auth = protocol.RegisterAuth{Method: bootstrapauth.MethodJWT, Token: token}
+		cb, tokenErr := channelbind.Export(session)
+		if tokenErr != nil {
+			return protocol.RegisterHostResponse{}, fmt.Errorf("failed to compute channel binding: %w", tokenErr)
+		}
+		proof := bootstrapauth.SignJWTChannelBinding(priv, cb, token)
+		reg.Auth = protocol.RegisterAuth{
+			Method: bootstrapauth.MethodJWT,
+			Token:  token,
+			Proof:  proof,
+		}
 	default:
 		return protocol.RegisterHostResponse{}, errors.New("no bootstrap method configured")
 	}

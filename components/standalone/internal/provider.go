@@ -37,14 +37,15 @@ type Provider struct {
 	PersistHook PersistHook
 
 	// In-memory data
-	Hosts          map[string]*Host            // host_id -> host
-	HostsByAddress map[string]string           // address -> host_id
-	HostActorTypes map[string][]*HostActorType // host_id -> actor types
-	ActiveActors   map[ActorKey]*ActiveActor   // actor_type/actor_id -> active actor
-	Alarms         map[AlarmKey]*Alarm         // actor_type/actor_id/alarm_name -> alarm
-	AlarmsByID     map[string]*Alarm           // alarm_id -> alarm
-	TerminalJobs   map[string]*TerminalJob     // job_id -> dead job
-	ActorState     map[ActorKey]*StateEntry    // actor_type/actor_id -> state
+	Hosts              map[string]*Host            // host_id -> host
+	HostsByAddress     map[string]string           // address -> host_id
+	HostActorTypes     map[string][]*HostActorType // host_id -> actor types
+	ActiveActors       map[ActorKey]*ActiveActor   // actor_type/actor_id -> active actor
+	Alarms             map[AlarmKey]*Alarm         // actor_type/actor_id/alarm_name -> alarm
+	AlarmsByID         map[string]*Alarm           // alarm_id -> alarm
+	TerminalJobs       map[string]*TerminalJob     // job_id -> dead job
+	ConsumedJoinTokens map[string]time.Time        // join_token -> expires_at
+	ActorState         map[ActorKey]*StateEntry    // actor_type/actor_id -> state
 	// WorkflowEvents holds each actor's workflow events sorted by sequence number, and belongs to the StateMu domain because it lives and dies with the actor's state
 	// A slice stored here is never modified within its length: an append writes past it or into a new slice, so a snapshot taken under the read lock stays valid after the lock is released
 	WorkflowEvents map[ActorKey][]components.WorkflowEvent
@@ -105,16 +106,17 @@ func NewProvider(log *slog.Logger, opts ProviderOptions, providerConfig componen
 		CleanupInterval: cleanupInterval,
 		PersistHook:     persistHook,
 
-		Hosts:          make(map[string]*Host),
-		HostsByAddress: make(map[string]string),
-		HostActorTypes: make(map[string][]*HostActorType),
-		ActiveActors:   make(map[ActorKey]*ActiveActor),
-		Alarms:         make(map[AlarmKey]*Alarm),
-		AlarmsByID:     make(map[string]*Alarm),
-		TerminalJobs:   make(map[string]*TerminalJob),
-		ActorState:     make(map[ActorKey]*StateEntry),
-		WorkflowEvents: make(map[ActorKey][]components.WorkflowEvent),
-		runtimes:       make(map[string]components.RuntimeInfo),
+		Hosts:              make(map[string]*Host),
+		HostsByAddress:     make(map[string]string),
+		HostActorTypes:     make(map[string][]*HostActorType),
+		ActiveActors:       make(map[ActorKey]*ActiveActor),
+		Alarms:             make(map[AlarmKey]*Alarm),
+		AlarmsByID:         make(map[string]*Alarm),
+		TerminalJobs:       make(map[string]*TerminalJob),
+		ConsumedJoinTokens: make(map[string]time.Time),
+		ActorState:         make(map[ActorKey]*StateEntry),
+		WorkflowEvents:     make(map[ActorKey][]components.WorkflowEvent),
+		runtimes:           make(map[string]components.RuntimeInfo),
 	}
 
 	if p.Clock == nil {
@@ -192,6 +194,12 @@ func (p *Provider) CleanupExpired(ctx context.Context) error {
 	err = p.cleanupDomain(ctx, &p.writeMu, &p.Mu, p.CleanupExpiredTerminalJobs)
 	if err != nil {
 		return fmt.Errorf("failed to clean up expired terminal jobs: %w", err)
+	}
+
+	// Clean up expired consumed join tokens (Mu domain)
+	err = p.cleanupDomain(ctx, &p.writeMu, &p.Mu, p.CleanupExpiredJoinTokens)
+	if err != nil {
+		return fmt.Errorf("failed to clean up expired join tokens: %w", err)
 	}
 
 	// Clean up expired state (StateMu domain)
@@ -338,13 +346,15 @@ func (p *Provider) CleanupUnhealthyHosts(changes *Changes) (apply func()) {
 	}
 }
 
-// stageClearActorAlarmLeases stages lease removals for every leased alarm belonging to actors, skipping any alarm IDs in skipAlarmIDs
+// stageClearActorAlarmLeases stages lease removals for every live leased alarm belonging to actors, skipping any alarm IDs in skipAlarmIDs
+// Expired leases keep their lease ID so a stale execution cannot finalize an occurrence whose lease already expired
 // Must be called while holding at least a read lock on Mu, and the returned apply function must run under the Mu write lock
 func (p *Provider) stageClearActorAlarmLeases(actors []ActorKey, skipAlarmIDs map[string]struct{}, changes *Changes) func() {
 	if len(actors) == 0 {
 		return func() {}
 	}
 
+	now := p.Clock.Now()
 	actorSet := make(map[ActorKey]struct{}, len(actors))
 	for _, key := range actors {
 		actorSet[key] = struct{}{}
@@ -357,13 +367,15 @@ func (p *Provider) stageClearActorAlarmLeases(actors []ActorKey, skipAlarmIDs ma
 	var updates []alarmUpdate
 
 	for k, a := range p.Alarms {
-		if a.LeaseID == nil {
+		if !a.LeaseValid(now) {
 			continue
 		}
+
 		_, match := actorSet[a.GetActorKey()]
 		if !match {
 			continue
 		}
+
 		if skipAlarmIDs != nil {
 			_, skip := skipAlarmIDs[a.ID]
 			if skip {
@@ -438,6 +450,26 @@ func (p *Provider) CleanupExpiredTerminalJobs(changes *Changes) (apply func()) {
 	return func() {
 		for _, jobID := range deleteIDs {
 			delete(p.TerminalJobs, jobID)
+		}
+	}
+}
+
+// CleanupExpiredJoinTokens removes consumed join tokens whose expiry has elapsed
+// Must be called while holding the Mu write lock
+func (p *Provider) CleanupExpiredJoinTokens(changes *Changes) (apply func()) {
+	nowUTC := p.Clock.Now().UTC()
+
+	var deleteTokens []string
+	for token, exp := range p.ConsumedJoinTokens {
+		if exp.Before(nowUTC) {
+			deleteTokens = append(deleteTokens, token)
+			changes.ConsumedJoinTokens.Delete = append(changes.ConsumedJoinTokens.Delete, token)
+		}
+	}
+
+	return func() {
+		for _, token := range deleteTokens {
+			delete(p.ConsumedJoinTokens, token)
 		}
 	}
 }

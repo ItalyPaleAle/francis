@@ -176,9 +176,10 @@ func bootstrapOption(cfg bootstrapConfig) (runtime.RuntimeOption, error) {
 		return runtime.WithHostBootstrapPSK([]byte(cfg.HostPSK)), nil
 	case "jwt":
 		jcfg := bootstrapauth.JWTConfig{
-			Issuer:   cfg.JWT.Issuer,
-			Audience: cfg.JWT.Audience,
-			JWKSURL:  cfg.JWT.JWKSURL,
+			Issuer:          cfg.JWT.Issuer,
+			Audience:        cfg.JWT.Audience,
+			JWKSURL:         cfg.JWT.JWKSURL,
+			AllowedSubjects: cfg.JWT.AllowedSubjects,
 		}
 
 		if cfg.JWT.StaticJWKS != "" {
