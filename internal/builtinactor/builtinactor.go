@@ -142,7 +142,7 @@ func FullActorType(bareActorType string) string {
 // NewClient returns a privileged client bound to a built-in actor's singleton-or-other instance, resolving the reserved type from the bare one
 // Built-in actor implementations use it so they never have to construct the reserved actor type themselves
 func NewClient[T any](bareActorType string, actorID string, svc *actor.Service) actor.Client[T] {
-	return actor.NewBuiltInActorClient[T](builtinkey.Key{}, FullActorType(bareActorType), actorID, svc)
+	return actor.NewBuiltInActorClient[T](builtinkey.New(), FullActorType(bareActorType), actorID, svc)
 }
 
 // Invoke invokes a method on a built-in actor's cluster-wide singleton through the privileged client, returning the response envelope
@@ -157,7 +157,7 @@ func Invoke(ctx context.Context, svc *actor.Service, bareActorType string, metho
 // bareActorType is the actor's bare type (without the reserved prefix), and payload is optional: pass nil when the method carries no request data
 func InvokeActor(ctx context.Context, svc *actor.Service, bareActorType string, actorID string, method string, payload any) (actor.Envelope, error) {
 	fullType := FullActorType(bareActorType)
-	client := actor.NewBuiltInActorClient[any](builtinkey.Key{}, fullType, actorID, svc)
+	client := actor.NewBuiltInActorClient[any](builtinkey.New(), fullType, actorID, svc)
 	return client.Invoke(ctx, fullType, actorID, method, payload)
 }
 
@@ -166,6 +166,6 @@ func InvokeActor(ctx context.Context, svc *actor.Service, bareActorType string, 
 // bareActorType is the actor's bare type, without the reserved prefix
 func Peek(ctx context.Context, svc *actor.Service, bareActorType string, actorID string, method string, payload any) (actor.Envelope, error) {
 	fullType := FullActorType(bareActorType)
-	client := actor.NewBuiltInActorClient[any](builtinkey.Key{}, fullType, actorID, svc)
+	client := actor.NewBuiltInActorClient[any](builtinkey.New(), fullType, actorID, svc)
 	return client.Peek(ctx, fullType, actorID, method, payload)
 }

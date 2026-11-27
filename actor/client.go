@@ -79,7 +79,9 @@ func NewActorClient[T any](actorType string, actorID string, service *Service) C
 
 // NewBuiltInActorClient returns a privileged client that is allowed to operate on built-in actor types, which the public client rejects.
 // It is reserved for the framework's built-in actor machinery: the builtinkey.Key argument can only be supplied by francis-internal packages, since that package cannot be imported externally.
-func NewBuiltInActorClient[T any](_ builtinkey.Key, actorType string, actorID string, service *Service) Client[T] {
+func NewBuiltInActorClient[T any](key builtinkey.Key, actorType string, actorID string, service *Service) Client[T] {
+	key.MustBeValid()
+
 	return &client[T]{
 		actorType:  actorType,
 		actorID:    actorID,

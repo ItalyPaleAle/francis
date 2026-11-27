@@ -586,7 +586,7 @@ func (o *orchestrator) persist(ctx context.Context, st *instanceState, now time.
 
 	// The history this write adds is numbered before the size check, since its sequence counter is part of the journal
 	opts := &actor.SetStateOpts{}
-	opts.SetWorkflowLabels(builtinkey.Key{}, o.labels(st))
+	opts.SetWorkflowLabels(builtinkey.New(), o.labels(st))
 	opts.TTL = o.terminalStateTTL(st)
 
 	err := o.attachHistory(ctx, opts, st, now)
@@ -610,7 +610,7 @@ func (o *orchestrator) persist(ctx context.Context, st *instanceState, now time.
 			o.history = nil
 			return err
 		}
-		opts.SetWorkflowLabels(builtinkey.Key{}, o.labels(st))
+		opts.SetWorkflowLabels(builtinkey.New(), o.labels(st))
 		opts.TTL = o.terminalStateTTL(st)
 
 		err = o.attachHistory(ctx, opts, st, now)
@@ -943,7 +943,7 @@ func (o *orchestrator) startChild(ctx context.Context, st *instanceState, sr *st
 	client := builtinactor.NewClient[struct{}](child.baseType, tr.ChildID, o.svc)
 	_, _, err = client.Dispatch(ctx, methodStart, payload,
 		actor.WithIdempotencyKey(methodStart),
-		actor.WithInitialState(builtinkey.Key{}, placeholder, labels),
+		actor.WithInitialState(builtinkey.New(), placeholder, labels),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to start child %s for %s[%d]: %w", child.name, sr.Name, tr.Index, err)

@@ -57,7 +57,8 @@ type SetStateOpts struct {
 
 // SetWorkflowLabels attaches the workflow engine's labels to this write, replacing whatever the row had.
 // It is reserved for Francis' own built-in actors (the key argument is a private type)
-func (o *SetStateOpts) SetWorkflowLabels(_ builtinkey.Key, labels components.WorkflowLabels) {
+func (o *SetStateOpts) SetWorkflowLabels(key builtinkey.Key, labels components.WorkflowLabels) {
+	key.MustBeValid()
 	o.workflowLabels = &labels
 }
 
@@ -71,7 +72,8 @@ func (o *SetStateOpts) WorkflowLabels() *components.WorkflowLabels {
 
 // SetAppendEvents attaches workflow events that are written in the same operation as the state
 // It is reserved for Francis' own built-in actors (the key argument is a private type)
-func (o *SetStateOpts) SetAppendEvents(_ builtinkey.Key, events []components.WorkflowEvent) {
+func (o *SetStateOpts) SetAppendEvents(key builtinkey.Key, events []components.WorkflowEvent) {
+	key.MustBeValid()
 	o.appendEvents = events
 }
 
@@ -99,8 +101,9 @@ type ListStatesOpts struct {
 }
 
 // SetWorkflowLabels restricts the listing to rows whose workflow labels match every field of labels that is set.
-// It is reserved for Francis' own built-in actors.
-func (o *ListStatesOpts) SetWorkflowLabels(_ builtinkey.Key, labels components.WorkflowLabels) {
+// It is reserved for Francis' own built-in actors (the key argument is a private type).
+func (o *ListStatesOpts) SetWorkflowLabels(key builtinkey.Key, labels components.WorkflowLabels) {
+	key.MustBeValid()
 	o.workflowLabels = &labels
 }
 

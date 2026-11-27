@@ -57,7 +57,7 @@ func (m *Manager) BootstrapSingletons(ctx context.Context) {
 		at := reg.actorType
 
 		// The privileged client is allowed to target reserved built-in types and to send the reserved bootstrap method, both of which the public client rejects
-		client := actor.NewBuiltInActorClient[any](builtinkey.Key{}, at, actor.SingletonActorID, m.service)
+		client := actor.NewBuiltInActorClient[any](builtinkey.New(), at, actor.SingletonActorID, m.service)
 		for i := 1; ; i++ {
 			invokeCtx, cancel := context.WithTimeout(ctx, m.providerRequestTimeout)
 			_, err := client.Invoke(invokeCtx, at, actor.SingletonActorID, ref.MethodBootstrap, reg.bootstrapData)

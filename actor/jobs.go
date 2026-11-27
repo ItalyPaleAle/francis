@@ -158,9 +158,11 @@ func WithIdempotencyKey(key string) JobOption {
 }
 
 // WithInitialState stores state and workflow labels for the target actor in the same atomic operation that stores the job.
-// The state is written only when the actor has no state yet,
-// It is reserved for Francis' own built-in actors: the builtinkey.Key argument can only be supplied by francis-internal packages.
-func WithInitialState(_ builtinkey.Key, state any, labels components.WorkflowLabels) JobOption {
+// The state is written only when the actor has no state yet.
+// It is reserved for Francis' own built-in actors (the key argument is a private type)
+func WithInitialState(key builtinkey.Key, state any, labels components.WorkflowLabels) JobOption {
+	key.MustBeValid()
+
 	return func(p *JobProperties) {
 		p.initialState = &jobInitialState{state: state, labels: labels}
 	}

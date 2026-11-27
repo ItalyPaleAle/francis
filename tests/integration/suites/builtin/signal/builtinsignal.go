@@ -213,7 +213,7 @@ func (s *builtinSignal) Run(t *testing.T) {
 	t.Run("rejects a Peek", func(t *testing.T) {
 		for i := range s.cluster.Len() {
 			// The privileged client is how the framework reaches a built-in actor, and it is the only way to aim a Peek at one
-			client := actor.NewBuiltInActorClient[any](builtinkey.Key{}, s.signalType, "peek-1", s.cluster.Service(i))
+			client := actor.NewBuiltInActorClient[any](builtinkey.New(), s.signalType, "peek-1", s.cluster.Service(i))
 
 			_, err := client.Peek(ctx, s.signalType, "peek-1", "check", nil)
 			require.Error(t, err, "host %d", i)

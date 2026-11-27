@@ -116,7 +116,7 @@ func (s *WorkflowService) Start(ctx context.Context, input any, opts ...StartOpt
 	placeholder, labels := newPendingPlaceholder(s.wf.def, &payload)
 	_, created, err = client.Dispatch(ctx, methodStart, payload,
 		actor.WithIdempotencyKey(methodStart),
-		actor.WithInitialState(builtinkey.Key{}, placeholder, labels),
+		actor.WithInitialState(builtinkey.New(), placeholder, labels),
 	)
 	if err != nil {
 		return "", false, fmt.Errorf("failed to start the workflow instance: %w", err)
@@ -344,7 +344,7 @@ func (s *WorkflowService) List(ctx context.Context, opts *ListOptions) (Instance
 		After:       o.After,
 		Limit:       o.Limit,
 	}
-	listOpts.SetWorkflowLabels(builtinkey.Key{}, components.WorkflowLabels{
+	listOpts.SetWorkflowLabels(builtinkey.New(), components.WorkflowLabels{
 		Status:  string(o.Status),
 		Version: o.Version,
 		Parent:  o.Parent,

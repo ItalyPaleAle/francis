@@ -313,7 +313,7 @@ func TestJobPropertiesToSetAlarmReq(t *testing.T) {
 
 	t.Run("encodes the initial state with its labels", func(t *testing.T) {
 		var props actor.JobProperties
-		actor.WithInitialState(builtinkey.Key{}, map[string]string{"k": "v"}, components.WorkflowLabels{Status: "pending", Version: 2})(&props)
+		actor.WithInitialState(builtinkey.New(), map[string]string{"k": "v"}, components.WorkflowLabels{Status: "pending", Version: 2})(&props)
 
 		req, err := jobPropertiesToSetAlarmReq(props, "start", nil, now)
 		require.NoError(t, err)

@@ -251,7 +251,7 @@ func versionHasJournals(ctx context.Context, svc *actor.Service, workflowType st
 		IncludeData: true,
 		Limit:       versionCheckPageSize,
 	}
-	opts.SetWorkflowLabels(builtinkey.Key{}, components.WorkflowLabels{Version: version})
+	opts.SetWorkflowLabels(builtinkey.New(), components.WorkflowLabels{Version: version})
 
 	for {
 		page, err := instances.ListStates(ctx, opts)

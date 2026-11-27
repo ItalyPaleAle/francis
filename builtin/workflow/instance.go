@@ -508,7 +508,7 @@ func (o *orchestrator) markReported(ctx context.Context, st *instanceState) erro
 	opts := &actor.SetStateOpts{
 		TTL: o.terminalStateTTL(st),
 	}
-	opts.SetWorkflowLabels(builtinkey.Key{}, o.labels(st))
+	opts.SetWorkflowLabels(builtinkey.New(), o.labels(st))
 
 	// The report is recorded in the history together with the flag that says it was sent
 	now := time.Now()

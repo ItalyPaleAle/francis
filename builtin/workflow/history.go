@@ -156,7 +156,7 @@ func (h *turnHistory) addWorker(key taskKey, attempt int, startedAt time.Time, f
 // The sequence continues from the committed journal rather than from st, so recomputing the events for the same write numbers them the same way
 func (o *orchestrator) attachHistory(ctx context.Context, opts *actor.SetStateOpts, st *instanceState, now time.Time, extra ...historyEntry) error {
 	if st.NoEventHistory {
-		opts.SetAppendEvents(builtinkey.Key{}, nil)
+		opts.SetAppendEvents(builtinkey.New(), nil)
 		return nil
 	}
 
@@ -189,7 +189,7 @@ func (o *orchestrator) attachHistory(ctx context.Context, opts *actor.SetStateOp
 	}
 
 	st.LastEventSeq = seq
-	opts.SetAppendEvents(builtinkey.Key{}, events)
+	opts.SetAppendEvents(builtinkey.New(), events)
 	return nil
 }
 

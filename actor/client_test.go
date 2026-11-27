@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	msgpack "github.com/vmihailenco/msgpack/v5"
 
+	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/builtinkey"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/types"
@@ -303,11 +304,39 @@ func TestClientPeek(t *testing.T) {
 func TestNewBuiltInActorClientIsPrivileged(t *testing.T) {
 	builtInType := ref.BuiltInActorTypePrefix + "cronjob.test"
 
-	c := NewBuiltInActorClient[map[string]any](builtinkey.Key{}, builtInType, "singleton", &Service{})
+	c := NewBuiltInActorClient[map[string]any](builtinkey.New(), builtInType, "singleton", &Service{})
 	cc, ok := c.(*client[map[string]any])
 	require.True(t, ok)
 	assert.True(t, cc.privileged)
 	assert.True(t, cc.canTarget(builtInType))
+}
+
+// TestBuiltInKeyGatesRejectZeroKey verifies every builtinkey-gated entrypoint rejects a zero-value or reflect-forged Key
+func TestBuiltInKeyGatesRejectZeroKey(t *testing.T) {
+	var zero builtinkey.Key
+
+	assert.Panics(t, func() {
+		_ = NewBuiltInActorClient[any](zero, "widget", "w1", &Service{})
+	})
+
+	assert.Panics(t, func() {
+		_ = WithInitialState(zero, "state", components.WorkflowLabels{Status: "pending"})
+	})
+
+	assert.Panics(t, func() {
+		var setOpts SetStateOpts
+		setOpts.SetWorkflowLabels(zero, components.WorkflowLabels{Status: "running"})
+	})
+
+	assert.Panics(t, func() {
+		var setOpts SetStateOpts
+		setOpts.SetAppendEvents(zero, nil)
+	})
+
+	assert.Panics(t, func() {
+		var listOpts ListStatesOpts
+		listOpts.SetWorkflowLabels(zero, components.WorkflowLabels{Status: "running"})
+	})
 }
 
 // TestClientRejectsReservedMethod verifies the public client refuses to invoke a reserved framework lifecycle method (such as bootstrap), while the privileged built-in client is allowed to drive it
@@ -322,7 +351,7 @@ func TestClientRejectsReservedMethod(t *testing.T) {
 	require.ErrorIs(t, err, ErrMethodReserved)
 
 	// The privileged built-in client may drive the reserved lifecycle, so it reaches the host instead of being rejected
-	priv := NewBuiltInActorClient[any](builtinkey.Key{}, "widget", SingletonActorID, NewService(&fakeHost{}))
+	priv := NewBuiltInActorClient[any](builtinkey.New(), "widget", SingletonActorID, NewService(&fakeHost{}))
 	_, err = priv.Invoke(ctx, "other", "id", ref.MethodBootstrap, nil)
 	require.NoError(t, err)
 }
