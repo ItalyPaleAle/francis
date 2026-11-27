@@ -1821,7 +1821,7 @@ func TestPersistHook_RemoveActor(t *testing.T) {
 	mock.Reset()
 
 	// Remove the actor
-	err = p.RemoveActor(t.Context(), actorRef)
+	err = p.RemoveActor(t.Context(), actorRef, components.RemoveActorOpts{})
 	require.NoError(t, err)
 
 	// Verify PersistChanges was called

@@ -2413,7 +2413,7 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 
 		// Remove the actor
 		ref := ref.ActorRef{ActorType: "B", ActorID: "B-1"}
-		err = s.p.RemoveActor(ctx, ref)
+		err = s.p.RemoveActor(ctx, ref, components.RemoveActorOpts{})
 		require.NoError(t, err)
 
 		// Verify actor is no longer active
@@ -2436,7 +2436,7 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 
 		// Try to remove a non-existent actor
 		ref := ref.ActorRef{ActorType: "B", ActorID: "NonExistent"}
-		err := s.p.RemoveActor(ctx, ref)
+		err := s.p.RemoveActor(ctx, ref, components.RemoveActorOpts{})
 		require.Error(t, err)
 		require.ErrorIs(t, err, components.ErrNoActor)
 	})
@@ -2449,7 +2449,7 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 
 		// Try to remove an actor with non-existent type
 		ref := ref.ActorRef{ActorType: "NonExistentType", ActorID: "SomeID"}
-		err := s.p.RemoveActor(ctx, ref)
+		err := s.p.RemoveActor(ctx, ref, components.RemoveActorOpts{})
 		require.Error(t, err)
 		require.ErrorIs(t, err, components.ErrNoActor)
 	})
@@ -2468,7 +2468,7 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 
 		// Remove one of the existing A actors (A-1 is on H1)
 		aRef := ref.ActorRef{ActorType: "A", ActorID: "A-1"}
-		err = s.p.RemoveActor(ctx, aRef)
+		err = s.p.RemoveActor(ctx, aRef, components.RemoveActorOpts{})
 		require.NoError(t, err)
 
 		// Now we should be able to create a new A actor
@@ -2534,7 +2534,7 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 		}
 
 		for _, ref := range actors {
-			err = s.p.RemoveActor(ctx, ref)
+			err = s.p.RemoveActor(ctx, ref, components.RemoveActorOpts{})
 			require.NoError(t, err, "should successfully remove actor %s", ref.String())
 		}
 
@@ -2563,12 +2563,64 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 		ref := ref.ActorRef{ActorType: "B", ActorID: "B-1"}
 
 		// Remove the actor first time - should succeed
-		err := s.p.RemoveActor(ctx, ref)
+		err := s.p.RemoveActor(ctx, ref, components.RemoveActorOpts{})
 		require.NoError(t, err)
 
 		// Remove the same actor second time - should return ErrNoActor
-		err = s.p.RemoveActor(ctx, ref)
+		err = s.p.RemoveActor(ctx, ref, components.RemoveActorOpts{})
 		require.Error(t, err)
+		require.ErrorIs(t, err, components.ErrNoActor)
+	})
+
+	t.Run("HostID filter leaves placement and alarm lease intact when actor moved to another host", func(t *testing.T) {
+		ctx := t.Context()
+
+		err := s.p.Seed(ctx, GetSpec())
+		require.NoError(t, err)
+
+		// Place X on H7 and lease an overdue alarm on it
+		aRef := ref.ActorRef{ActorType: "X", ActorID: "X-owner-check"}
+		lookupRes, err := s.p.LookupActor(ctx, aRef, components.LookupActorOpts{
+			Hosts: []string{SpecHostH7},
+		})
+		require.NoError(t, err)
+		require.Equal(t, SpecHostH7, lookupRes.HostID)
+
+		alarmRef := ref.AlarmRef{ActorType: aRef.ActorType, ActorID: aRef.ActorID, Name: "owner-alarm"}
+		_, err = s.p.SetAlarm(ctx, alarmRef, components.SetAlarmReq{
+			DueTime: s.p.Now().Add(-time.Second),
+		})
+		require.NoError(t, err)
+
+		leases, err := s.p.FetchAndLeaseUpcomingAlarms(ctx, components.FetchAndLeaseUpcomingAlarmsReq{
+			Hosts: []string{SpecHostH7},
+		})
+		require.NoError(t, err)
+		var targetLease *ref.AlarmLease
+		for _, l := range leases {
+			if l.ActorRef() == aRef {
+				targetLease = l
+				break
+			}
+		}
+		require.NotNil(t, targetLease)
+
+		// A stale RemoveActor from H8 must return ErrNoActor without touching H7's placement or alarm lease
+		err = s.p.RemoveActor(ctx, aRef, components.RemoveActorOpts{HostID: SpecHostH8})
+		require.ErrorIs(t, err, components.ErrNoActor)
+
+		activeRes, err := s.p.LookupActor(ctx, aRef, components.LookupActorOpts{ActiveOnly: true})
+		require.NoError(t, err)
+		assert.Equal(t, SpecHostH7, activeRes.HostID)
+
+		_, err = s.p.GetLeasedAlarm(ctx, targetLease)
+		require.NoError(t, err)
+
+		// Removing with the actual owning HostID (H7) succeeds and releases the lease
+		err = s.p.RemoveActor(ctx, aRef, components.RemoveActorOpts{HostID: SpecHostH7})
+		require.NoError(t, err)
+
+		_, err = s.p.LookupActor(ctx, aRef, components.LookupActorOpts{ActiveOnly: true})
 		require.ErrorIs(t, err, components.ErrNoActor)
 	})
 
@@ -2623,7 +2675,7 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 		require.NoError(t, err, "alarm should be properly leased before actor removal")
 
 		// Remove the actor: this should automatically cancel any alarm leases via the database trigger
-		err = s.p.RemoveActor(ctx, aRef)
+		err = s.p.RemoveActor(ctx, aRef, components.RemoveActorOpts{})
 		require.NoError(t, err)
 
 		// Verify the alarm lease has been automatically canceled
@@ -6624,7 +6676,7 @@ func (s Suite) TestJobs(t *testing.T) {
 				lease := leaseFor(t, ctx, jobID)
 
 				// The actor halting itself from its own handler is what releases the lease
-				err := s.p.RemoveActor(ctx, ref.NewActorRef("JOB", actorID))
+				err := s.p.RemoveActor(ctx, ref.NewActorRef("JOB", actorID), components.RemoveActorOpts{})
 				require.NoError(t, err)
 
 				tc.finalize(t, ctx, lease)

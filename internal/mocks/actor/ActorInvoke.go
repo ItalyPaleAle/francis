@@ -19,10 +19,19 @@ func NewMockActorInvoke(t interface {
 	mock.TestingT
 	Cleanup(func())
 }) *MockActorInvoke {
+	if helper, ok := t.(interface{ Helper() }); ok {
+		helper.Helper()
+	}
+
 	mock := &MockActorInvoke{}
 	mock.Mock.Test(t)
 
-	t.Cleanup(func() { mock.AssertExpectations(t) })
+	t.Cleanup(func() {
+		if helper, ok := t.(interface{ Helper() }); ok {
+			helper.Helper()
+		}
+		mock.AssertExpectations(t)
+	})
 
 	return mock
 }
@@ -104,8 +113,8 @@ func (_c *MockActorInvoke_Invoke_Call) Run(run func(ctx context.Context, method 
 	return _c
 }
 
-func (_c *MockActorInvoke_Invoke_Call) Return(v any, err error) *MockActorInvoke_Invoke_Call {
-	_c.Call.Return(v, err)
+func (_c *MockActorInvoke_Invoke_Call) Return(anyMoqParam any, err error) *MockActorInvoke_Invoke_Call {
+	_c.Call.Return(anyMoqParam, err)
 	return _c
 }
 

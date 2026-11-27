@@ -256,10 +256,13 @@ func (s *Server) handleStream(ctx context.Context, stream *webtransport.Stream, 
 		return
 	}
 
-	// Reject invocations meant for a different host, which indicate the caller's placement is stale
-	if payload.TargetHostID != "" && payload.TargetHostID != s.cfg.HostID() {
-		_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeHostMismatch, "invocation is for a different host")))
-		return
+	// Reject invocations meant for a different host or arriving when this host holds no live registration
+	if s.cfg.HostID != nil {
+		hostID := s.cfg.HostID()
+		if hostID == "" || (payload.TargetHostID != "" && payload.TargetHostID != hostID) {
+			_ = protocol.WriteMessage(stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeHostMismatch, "invocation is for a different host")))
+			return
+		}
 	}
 
 	// Reject a new invocation while the host is draining, so the caller re-resolves to the actor's next placement

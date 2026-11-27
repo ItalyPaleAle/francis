@@ -24,7 +24,14 @@ import (
 	components_mocks "github.com/italypaleale/francis/internal/mocks/components"
 	"github.com/italypaleale/francis/internal/ref"
 	"github.com/italypaleale/francis/internal/testutil"
+	"github.com/italypaleale/francis/internal/types"
 )
+
+func removeUnscoped(p components.ActorProvider) RemoveActorFunc {
+	return func(ctx context.Context, r ref.ActorRef) error {
+		return p.RemoveActor(ctx, r, components.RemoveActorOpts{})
+	}
+}
 
 func TestHostHalt(t *testing.T) {
 	clock := clocktesting.NewFakeClock(time.Now())
@@ -41,7 +48,7 @@ func TestHostHalt(t *testing.T) {
 
 	// Create a minimal host for testing
 	host := &Manager{
-		removeActor: provider.RemoveActor,
+		removeActor: removeUnscoped(provider),
 		Actors:      haxmap.New[string, *ActiveActor](8),
 		log:         log,
 		clock:       clock,
@@ -74,7 +81,7 @@ func TestHostHalt(t *testing.T) {
 
 		// Set expected method calls on provider
 		provider.
-			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef).
+			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.RemoveActorOpts{}).
 			Run(func(mock.Arguments) {
 				registered, ok := host.Actors.Get(actorRef.String())
 				assert.True(t, ok, "Actor should remain registered until its placement is removed")
@@ -135,7 +142,7 @@ func TestHostHalt(t *testing.T) {
 
 		// Set expected method calls on provider
 		provider.
-			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef).
+			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.RemoveActorOpts{}).
 			Return(components.ErrNoActor).
 			Once()
 
@@ -168,7 +175,7 @@ func TestHostHalt(t *testing.T) {
 
 		// Set expected method calls on provider
 		provider.
-			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef).
+			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.RemoveActorOpts{}).
 			Return(nil).
 			Once()
 
@@ -231,7 +238,7 @@ func TestHostHalt(t *testing.T) {
 
 		// Set expected method calls on provider
 		provider.
-			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef).
+			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.RemoveActorOpts{}).
 			Return(components.ErrNoActor).
 			Once()
 
@@ -301,7 +308,7 @@ func TestHostHalt(t *testing.T) {
 
 		// Set expected method calls on provider
 		provider.
-			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef).
+			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.RemoveActorOpts{}).
 			Return(components.ErrNoActor).
 			Once()
 
@@ -397,7 +404,7 @@ func TestHostHalt(t *testing.T) {
 
 		// Set expected method calls on provider
 		provider.
-			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef).
+			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.RemoveActorOpts{}).
 			Return(nil).
 			Once()
 
@@ -428,7 +435,7 @@ func TestHostHalt(t *testing.T) {
 
 		// Set expected method calls on provider
 		provider.
-			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef).
+			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.RemoveActorOpts{}).
 			Return(nil).
 			Once()
 
@@ -463,7 +470,7 @@ func TestHostHalt(t *testing.T) {
 
 		// Set expected method calls on provider
 		provider.
-			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef).
+			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.RemoveActorOpts{}).
 			Return(nil).
 			Once()
 
@@ -505,7 +512,7 @@ func TestHostHalt(t *testing.T) {
 		// Set expected method calls on provider to return an error
 		providerErr := errors.New("provider failed")
 		provider.
-			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef).
+			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.RemoveActorOpts{}).
 			Return(providerErr).
 			Once()
 
@@ -586,7 +593,7 @@ func TestHostHalt(t *testing.T) {
 
 		// Create a host with very short deactivation timeout
 		shortTimeoutHost := &Manager{
-			removeActor: timeoutProvider.RemoveActor,
+			removeActor: removeUnscoped(timeoutProvider),
 			Actors:      haxmap.New[string, *ActiveActor](8),
 			log:         log,
 			clock:       clock,
@@ -622,7 +629,7 @@ func TestHostHalt(t *testing.T) {
 
 		// Set expected method calls on provider
 		timeoutProvider.
-			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef).
+			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.RemoveActorOpts{}).
 			Return(nil).
 			Once()
 
@@ -666,7 +673,7 @@ func TestHostHaltAll(t *testing.T) {
 
 		// Create a minimal host for testing
 		host := &Manager{
-			removeActor: provider.RemoveActor,
+			removeActor: removeUnscoped(provider),
 			Actors:      haxmap.New[string, *ActiveActor](8),
 			log:         log,
 			clock:       clock,
@@ -698,7 +705,7 @@ func TestHostHaltAll(t *testing.T) {
 
 		// Create a minimal host for testing
 		host := &Manager{
-			removeActor: provider.RemoveActor,
+			removeActor: removeUnscoped(provider),
 			Actors:      haxmap.New[string, *ActiveActor](8),
 			log:         log,
 			clock:       clock,
@@ -727,7 +734,7 @@ func TestHostHaltAll(t *testing.T) {
 
 		// Set expected method calls on provider
 		provider.
-			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef).
+			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.RemoveActorOpts{}).
 			Return(nil).
 			Once()
 
@@ -754,7 +761,7 @@ func TestHostHaltAll(t *testing.T) {
 
 		// Create a minimal host for testing
 		host := &Manager{
-			removeActor: provider.RemoveActor,
+			removeActor: removeUnscoped(provider),
 			Actors:      haxmap.New[string, *ActiveActor](8),
 			log:         log,
 			clock:       clock,
@@ -791,7 +798,7 @@ func TestHostHaltAll(t *testing.T) {
 
 			// Set expected method calls on provider
 			provider.
-				On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef).
+				On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.RemoveActorOpts{}).
 				Return(nil).
 				Once()
 		}
@@ -826,7 +833,7 @@ func TestHostHaltAll(t *testing.T) {
 
 		// Create a minimal host for testing
 		host := &Manager{
-			removeActor: provider.RemoveActor,
+			removeActor: removeUnscoped(provider),
 			Actors:      haxmap.New[string, *ActiveActor](8),
 			log:         log,
 			clock:       clock,
@@ -855,7 +862,7 @@ func TestHostHaltAll(t *testing.T) {
 		activeAct0 := NewActiveActor(actorRef0, instance0, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef0.String(), activeAct0)
 		provider.
-			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef0).
+			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef0, components.RemoveActorOpts{}).
 			Return(nil).
 			Once()
 
@@ -869,7 +876,7 @@ func TestHostHaltAll(t *testing.T) {
 		activeAct1 := NewActiveActor(actorRef1, instance1, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef1.String(), activeAct1)
 		provider.
-			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef1).
+			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef1, components.RemoveActorOpts{}).
 			Return(nil).
 			Once()
 
@@ -883,7 +890,7 @@ func TestHostHaltAll(t *testing.T) {
 		activeAct2 := NewActiveActor(actorRef2, instance2, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef2.String(), activeAct2)
 		provider.
-			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef2).
+			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef2, components.RemoveActorOpts{}).
 			Return(errors.New("provider failed")).
 			Once()
 
@@ -897,7 +904,7 @@ func TestHostHaltAll(t *testing.T) {
 		activeAct3 := NewActiveActor(actorRef3, instance3, 5*time.Minute, LockModeExclusive, host.IdleProcessor, clock)
 		host.Actors.Set(actorRef3.String(), activeAct3)
 		provider.
-			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef3).
+			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef3, components.RemoveActorOpts{}).
 			Return(nil).
 			Once()
 
@@ -941,7 +948,7 @@ func TestHostHaltAll(t *testing.T) {
 
 		// Create a minimal host for testing
 		host := &Manager{
-			removeActor: provider.RemoveActor,
+			removeActor: removeUnscoped(provider),
 			Actors:      haxmap.New[string, *ActiveActor](8),
 			log:         log,
 			clock:       clock,
@@ -999,7 +1006,7 @@ func TestHostHaltAll(t *testing.T) {
 
 		// Create a minimal host for testing
 		host := &Manager{
-			removeActor: provider.RemoveActor,
+			removeActor: removeUnscoped(provider),
 			Actors:      haxmap.New[string, *ActiveActor](8),
 			log:         log,
 			clock:       clock,
@@ -1033,7 +1040,7 @@ func TestHostHaltAll(t *testing.T) {
 
 			// Set expected method calls on provider
 			provider.
-				On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef).
+				On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.RemoveActorOpts{}).
 				Return(nil).
 				Once()
 		}
@@ -1116,7 +1123,7 @@ func TestIdleActorHandling(t *testing.T) {
 
 		// Create a minimal host for testing
 		host := &Manager{
-			removeActor: provider.RemoveActor,
+			removeActor: removeUnscoped(provider),
 			Actors:      haxmap.New[string, *ActiveActor](8),
 			log:         log,
 			clock:       clock,
@@ -1156,7 +1163,7 @@ func TestIdleActorHandling(t *testing.T) {
 
 		// Set expected method calls on provider
 		provider.
-			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef).
+			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.RemoveActorOpts{}).
 			Return(nil).
 			Once()
 
@@ -1221,7 +1228,7 @@ func TestIdleActorHandling(t *testing.T) {
 			Return(nil).
 			Once()
 		provider.
-			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef).
+			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.RemoveActorOpts{}).
 			Return(nil).
 			Once()
 
@@ -1331,7 +1338,7 @@ func TestIdleActorHandling(t *testing.T) {
 		// Set up provider to return an error
 		haltErr := errors.New("provider halt error")
 		provider.
-			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef).
+			On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.RemoveActorOpts{}).
 			Return(haltErr).
 			Once()
 
@@ -1408,7 +1415,7 @@ func TestIdleActorHandling(t *testing.T) {
 			// Set expected method calls on provider
 			// Signal completion so the assertions can wait for RemoveActor, which runs after the actor leaves the host map
 			provider.
-				On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef).
+				On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), actorRef, components.RemoveActorOpts{}).
 				Run(func(_ mock.Arguments) {
 					removeActorCompleted <- struct{}{}
 				}).
@@ -1490,4 +1497,72 @@ func TestIdleActorHandling(t *testing.T) {
 			t.Logf("Instance %d expectations met", i)
 		}
 	})
+}
+
+func TestAbandonAllUpgradesInFlightDeactivationAndCancelsTurn(t *testing.T) {
+	var removeCalled atomic.Bool
+	m := NewManager(Options{
+		RemoveActor: func(context.Context, ref.ActorRef) error {
+			removeCalled.Store(true)
+			return nil
+		},
+		ShutdownGracePeriod: 30 * time.Second,
+	})
+	err := m.RegisterActor("testactor", func(string, *actor.Service) actor.Actor {
+		return &actor_mocks.MockActorDeactivate{}
+	}, RegisterActorOptions{DeactivationTimeout: 5 * time.Second})
+	require.NoError(t, err)
+	m.Start()
+	defer m.Close()
+
+	aRef := ref.NewActorRef("testactor", "in-flight")
+	var deactivateReadOnly atomic.Bool
+	instance := &actor_mocks.MockActorDeactivate{}
+	instance.
+		On("Deactivate", mock.MatchedBy(testutil.MatchContextInterface)).
+		Run(func(args mock.Arguments) {
+			//nolint:forcetypeassert
+			dCtx := args.Get(0).(context.Context)
+			deactivateReadOnly.Store(types.IsReadOnly(dCtx))
+		}).
+		Return(nil).
+		Once()
+
+	act := NewActiveActor(aRef, instance, 5*time.Minute, LockModeExclusive, m.IdleProcessor, m.clock)
+	m.Actors.Set(aRef.String(), act)
+
+	// Start a long-running turn that only exits when its context is canceled
+	turnStarted := make(chan struct{})
+	turnDone := make(chan error, 1)
+	go func() {
+		_, invokeErr := m.LockAndInvokeActive(t.Context(), aRef, func(ctx context.Context, _ *ActiveActor) (any, error) {
+			close(turnStarted)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		})
+		turnDone <- invokeErr
+	}()
+	<-turnStarted
+
+	// Begin a normal (non-abandoned) Halt first, so deactivationStarted is already claimed before AbandonAll runs
+	haltDone := make(chan error, 1)
+	go func() {
+		haltDone <- m.Halt("testactor", "in-flight")
+	}()
+	require.Eventually(t, func() bool {
+		return act.deactivationStarted.Load()
+	}, time.Second, 5*time.Millisecond)
+
+	// AbandonAll must cancel the turn immediately, upgrade the in-flight deactivation to read-only, and skip RemoveActor
+	err = m.AbandonAll()
+	require.NoError(t, err)
+
+	haltErr := <-haltDone
+	require.NoError(t, haltErr)
+	invokeErr := <-turnDone
+	require.ErrorIs(t, invokeErr, context.Canceled)
+
+	assert.True(t, deactivateReadOnly.Load())
+	assert.False(t, removeCalled.Load())
+	assert.Zero(t, m.Actors.Len())
 }

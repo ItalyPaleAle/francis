@@ -436,7 +436,7 @@ func (rt *Runtime) executeActiveAlarm(lease *ref.AlarmLease) {
 		// The owning host declined this occurrence (capacity group full, or the handler returned ErrJobRejected)
 		// Hand it back so another host runs it, without counting an attempt or dead-lettering
 		log.Debug("Job occurrence released for re-routing", slog.Any("error", err))
-		rt.releaseForReroute(ctx, lease, log)
+		rt.releaseForReroute(ctx, lease, jobInfo.hostID, log)
 		return
 
 	case executeAlarmStatusCompleted:
@@ -459,6 +459,7 @@ type jobExecInfo struct {
 	method string
 	data   []byte
 	props  ref.AlarmProperties
+	hostID string
 	// recordCompleted says the actor type asked for a record of a successful run, and completedRetention is how long that record is kept, where zero never expires
 	recordCompleted    bool
 	completedRetention time.Duration
@@ -491,6 +492,7 @@ func (rt *Runtime) dispatchAlarm(parentCtx context.Context, lease *ref.AlarmLeas
 		releaseCancel()
 		return executeAlarmStatusAbandoned, nil
 	}
+	jobInfo.hostID = conn.hostID
 
 	// Recheck the leased alarm before dispatch, both to validate the lease and to read the current data
 	ctx, cancel = context.WithTimeout(parentCtx, rt.providerRequestTimeout)
@@ -627,13 +629,13 @@ func (rt *Runtime) deadLetterJob(parentCtx context.Context, lease *ref.AlarmLeas
 // releaseForReroute hands a declined job occurrence back to the pool so another host can run it
 // It clears the actor's placement so the re-fetch reroutes instead of returning to the same host, then drops the lease with a short backoff so a cluster with no free capacity does not spin re-leasing it
 // It never counts an attempt or dead-letters, since a reject is not a failure
-func (rt *Runtime) releaseForReroute(parentCtx context.Context, lease *ref.AlarmLease, log *slog.Logger) {
+func (rt *Runtime) releaseForReroute(parentCtx context.Context, lease *ref.AlarmLease, hostID string, log *slog.Logger) {
 	aRef := lease.ActorRef()
 
-	// Clear the actor's placement so the occurrence is re-allocated to a host with free capacity rather than back to the one that declined it
-	// The declining host also halts the actor, which removes it too, so this is idempotent belt-and-suspenders against the two racing
+	// Clear the actor's placement on the declining host so the occurrence is re-allocated to a host with free capacity rather than back to the one that declined it
+	rt.deletePlacement(aRef.String())
 	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
-	err := rt.provider.RemoveActor(ctx, aRef)
+	err := rt.provider.RemoveActor(ctx, aRef, components.RemoveActorOpts{HostID: hostID})
 	cancel()
 	if err != nil && !errors.Is(err, components.ErrNoActor) {
 		log.Warn("Failed to clear actor placement while releasing job for re-route", slog.Any("error", err))

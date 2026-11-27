@@ -268,9 +268,9 @@ func (w *providerWrapper) LookupActor(ctx context.Context, actorRef ref.ActorRef
 }
 
 // RemoveActor implements components.ActorProvider
-func (w *providerWrapper) RemoveActor(ctx context.Context, actorRef ref.ActorRef) (err error) {
+func (w *providerWrapper) RemoveActor(ctx context.Context, actorRef ref.ActorRef, opts components.RemoveActorOpts) (err error) {
 	spanCtx, span, start := w.beginOp(ctx, "RemoveActor")
-	err = w.base.RemoveActor(spanCtx, actorRef)
+	err = w.base.RemoveActor(spanCtx, actorRef, opts)
 	w.finishOp(spanCtx, span, "RemoveActor", start, err)
 
 	return err

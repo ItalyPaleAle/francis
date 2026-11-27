@@ -24,6 +24,35 @@ func (o *orchestrator) purge(ctx context.Context, req purgePayload) (any, error)
 		return nil, fmt.Errorf("failed to read the workflow journal: %w", err)
 	}
 	if st.Status == "" {
+		jobs, err := o.client.ListJobs(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to inspect workflow deliveries: %w", err)
+		}
+
+		if st.PendingStart != nil && hasStartDelivery(jobs) {
+			return purgeResult{Found: true, Active: true}, nil
+		}
+
+		if len(jobs) > 0 {
+			err = deleteActorJobs(ctx, o.client)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		if st.PendingStart != nil {
+			err = o.client.DeleteState(ctx)
+			if err != nil && !errors.Is(err, actor.ErrStateNotFound) {
+				return nil, fmt.Errorf("failed to remove abandoned workflow placeholder: %w", err)
+			}
+		}
+
+		err = o.dropDeadline(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		o.client.Halt()
 		return purgeResult{}, nil
 	}
 	if !st.Status.IsTerminal() {

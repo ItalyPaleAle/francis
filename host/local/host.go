@@ -82,10 +82,11 @@ type Host struct {
 	hostIDLock sync.RWMutex
 	hostID     string
 
-	running        atomic.Bool
-	draining       atomic.Bool
-	drainPersisted atomic.Bool
-	adminDrain     actorcore.AdminDrain
+	running          atomic.Bool
+	draining         atomic.Bool
+	drainPersisted   atomic.Bool
+	registrationLost atomic.Bool
+	adminDrain       actorcore.AdminDrain
 
 	actorProvider components.ActorProvider
 	service       *actor.Service
@@ -249,7 +250,7 @@ func newHost(options *newHostOptions) (h *Host, err error) {
 	// On deactivation it removes the actor from the provider
 	h.core = actorcore.NewManager(actorcore.Options{
 		Service:                h.service,
-		RemoveActor:            actorProvider.RemoveActor,
+		RemoveActor:            h.removeActor,
 		Logger:                 options.Logger,
 		Clock:                  options.clock,
 		ProviderRequestTimeout: options.ProviderRequestTimeout,
@@ -362,6 +363,7 @@ func (h *Host) Run(parentCtx context.Context) error {
 		return fmt.Errorf("failed to register actor host: %w", err)
 	}
 
+	h.registrationLost.Store(false)
 	h.setHostID(res.HostID)
 	h.log = h.logSource.With(slog.String("hostId", res.HostID))
 	h.core.SetLogger(h.log)
@@ -401,6 +403,11 @@ func (h *Host) Run(parentCtx context.Context) error {
 	// If the application crashes and this code isn't executed, eventually the host will be removed for not sending health checks periodically
 	// Registered before the health check and halt defers, so it runs after both (LIFO): actors must be halted before the host registration is removed
 	defer func() {
+		defer h.setHostID("")
+		if h.registrationLost.Load() {
+			return
+		}
+
 		// Use a background context here as the parent one is likely canceled at this point
 		unregisterCtx, unregisterCancel := context.WithTimeout(context.Background(), h.providerRequestTimeout)
 		defer unregisterCancel()
@@ -412,7 +419,6 @@ func (h *Host) Run(parentCtx context.Context) error {
 		}
 
 		h.log.InfoContext(ctx, "Unregistered actor host")
-		h.setHostID("")
 	}()
 
 	// Health checks run under their own context too, and stop only once the actors have halted
@@ -428,8 +434,17 @@ func (h *Host) Run(parentCtx context.Context) error {
 			_, timeout := h.adminDrain.BeginStopping()
 			h.draining.Store(true)
 			h.stopAlarmProcessor()
-			h.persistDraining()
-			h.core.DrainAll(timeout)
+			if h.registrationLost.Load() {
+				// Registration expired in the provider, so cancel in-flight calls and drop actors read-only without touching placements
+				h.core.BarActivations()
+				abandonErr := h.core.AbandonAll()
+				if abandonErr != nil {
+					h.log.Warn("Error abandoning actors after registration loss", slog.Any("error", abandonErr))
+				}
+			} else {
+				h.persistDraining()
+				h.core.DrainAll(timeout)
+			}
 			h.alarmWg.Wait()
 			return nil
 		},
@@ -571,6 +586,18 @@ func (h *Host) setHostID(hostID string) {
 	h.hostIDLock.Unlock()
 }
 
+// removeActor removes an actor placement from the provider only if it is still placed on this host
+func (h *Host) removeActor(ctx context.Context, r ref.ActorRef) error {
+	hostID := h.HostID()
+	if hostID == "" {
+		return components.ErrNoActor
+	}
+
+	return h.actorProvider.RemoveActor(ctx, r, components.RemoveActorOpts{
+		HostID: hostID,
+	})
+}
+
 // Halt gracefully halts an actor that is hosted on the current host
 func (h *Host) Halt(actorType string, actorID string) error {
 	err := ref.ValidateComponents(actorType, actorID)
@@ -631,6 +658,8 @@ func (h *Host) runHealthChecks(parentCtx context.Context) error {
 				}
 			}, retryOpts...)
 			if err != nil {
+				h.registrationLost.Store(true)
+				h.setHostID("")
 				h.log.ErrorContext(parentCtx, "Health check failed", slog.Any("error", err))
 				return fmt.Errorf("failed to perform health check: %w", err)
 			}

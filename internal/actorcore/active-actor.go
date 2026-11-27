@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -53,6 +54,11 @@ type ActiveActor struct {
 	deactivationStarted atomic.Bool
 	deactivationDone    chan struct{}
 
+	// abandoned marks an actor whose host lost ownership, upgrading in-flight deactivations to read-only and cutting in-flight calls short via forceCancelCh
+	abandoned       atomic.Bool
+	forceCancelCh   chan struct{}
+	forceCancelOnce sync.Once
+
 	// Channel that is closed when the actor is halted
 	// This is used by callers who currently have a lock to understand if they need to cancel in-flight requests
 	haltCh chan struct{}
@@ -71,6 +77,7 @@ func NewActiveActor(ref ref.ActorRef, instance actor.Actor, idleTimeout time.Dur
 
 	a := &ActiveActor{
 		deactivationDone: make(chan struct{}),
+		forceCancelCh:    make(chan struct{}),
 		Instance:         instance,
 		ref:              ref,
 		idleTimeout:      idleTimeout,
@@ -84,6 +91,14 @@ func NewActiveActor(ref ref.ActorRef, instance actor.Actor, idleTimeout time.Dur
 	a.UpdateIdleAt(0)
 
 	return a
+}
+
+// markAbandoned marks the actor as no longer owned by this host and cancels any in-flight turns without waiting out the grace period
+func (a *ActiveActor) markAbandoned() {
+	a.abandoned.Store(true)
+	a.forceCancelOnce.Do(func() {
+		close(a.forceCancelCh)
+	})
 }
 
 // UpdateIdleAt updates the idle timeout property (i.e. the time the actor becomes idle at)

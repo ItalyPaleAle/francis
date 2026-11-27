@@ -746,19 +746,33 @@ func (s *SQLiteProvider) lookupActorInTransaction(ctx context.Context, tx *sql.T
 	}
 }
 
-func (s *SQLiteProvider) RemoveActor(ctx context.Context, ref ref.ActorRef) error {
+func (s *SQLiteProvider) RemoveActor(ctx context.Context, ref ref.ActorRef, opts components.RemoveActorOpts) error {
 	queryCtx, queryCancel := context.WithTimeout(ctx, s.timeout)
 	defer queryCancel()
-	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	res, err := s.db.
-		ExecContext(queryCtx,
+
+	var (
+		res sql.Result
+		err error
+	)
+	if opts.HostID != "" {
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		res, err = s.db.ExecContext(queryCtx,
+			`DELETE FROM `+s.tablePrefix+`active_actors
+			WHERE actor_type = ? AND actor_id = ? AND host_id = ?`,
+			ref.ActorType, ref.ActorID, opts.HostID,
+		)
+	} else {
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		res, err = s.db.ExecContext(queryCtx,
 			`DELETE FROM `+s.tablePrefix+`active_actors
 			WHERE actor_type = ? AND actor_id = ?`,
 			ref.ActorType, ref.ActorID,
 		)
+	}
 	if err != nil {
 		return fmt.Errorf("error removing actor: %w", err)
 	}
+
 	count, err := res.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("error counting affected rows: %w", err)

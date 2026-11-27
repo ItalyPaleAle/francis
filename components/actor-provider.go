@@ -62,9 +62,9 @@ type ActorProvider interface {
 	// If it's not possible to find an instance capable of hosting the given actor, ErrNoHost is returned instead.
 	LookupActor(ctx context.Context, ref ref.ActorRef, opts LookupActorOpts) (LookupActorRes, error)
 
-	// RemoveActor removes an actor from the collection of active actors.
-	// If the actor doesn't exist, returns ErrNoActor.
-	RemoveActor(ctx context.Context, ref ref.ActorRef) error
+	// RemoveActor removes an actor from the collection of active actors
+	// If the actor doesn't exist, returns ErrNoActor
+	RemoveActor(ctx context.Context, ref ref.ActorRef, opts RemoveActorOpts) error
 
 	// GetAlarm returns an alarm.
 	// It returns ErrNoAlarm if it doesn't exist.
@@ -320,6 +320,13 @@ type LookupActorRes struct {
 	// Actor idle timeout
 	// Note: this is the absolute idle timeout, and not the remaining lifetime of the actor
 	IdleTimeout time.Duration
+}
+
+// RemoveActorOpts contains options for RemoveActor
+type RemoveActorOpts struct {
+	// HostID restricts the removal to an actor currently placed on this host
+	// When set and the actor is placed on a different host, the placement is left intact and ErrNoActor is returned
+	HostID string
 }
 
 // AlarmKind discriminates a row in the alarms table as a plain alarm or a dispatched job.

@@ -45,7 +45,7 @@ func TestLookupActor(t *testing.T) {
 		// The actor core owns the active actors map and idle processor
 		host.core = actorcore.NewManager(actorcore.Options{
 			Service:     host.service,
-			RemoveActor: provider.RemoveActor,
+			RemoveActor: host.removeActor,
 			Logger:      log,
 			Clock:       clock,
 		})

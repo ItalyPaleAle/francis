@@ -281,7 +281,10 @@ func TestControlJobMatchesTheServiceDispatch(t *testing.T) {
 	} {
 		t.Run(string(tc.action), func(t *testing.T) {
 			host := newFakeHost()
-			err = tc.dispatch(wf.Service(actor.NewService(host)), "instance")
+			svc := wf.Service(actor.NewService(host))
+			_, _, err = svc.Start(t.Context(), nil, WithInstanceID("instance"))
+			require.NoError(t, err)
+			err = tc.dispatch(svc, "instance")
 			require.NoError(t, err)
 
 			method, idemKey, data, err := ControlJob(tc.action, tc.reason)

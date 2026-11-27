@@ -223,7 +223,8 @@ func TestDispatchAlarmAbandonedWhenActorNotActive(t *testing.T) {
 	lease := leaseTestAlarm(t, prov, c.hostID, aref, ref.AlarmProperties{DueTime: time.Now().Add(-time.Second)})
 
 	// The actor is no longer active, so an active-only lookup finds nothing
-	require.NoError(t, prov.RemoveActor(t.Context(), ref.NewActorRef("T", "a1")))
+	err := prov.RemoveActor(t.Context(), ref.NewActorRef("T", "a1"), components.RemoveActorOpts{})
+	require.NoError(t, err)
 
 	status, err := rt.dispatchAlarm(t.Context(), lease, &jobExecInfo{})
 	require.NoError(t, err)

@@ -504,7 +504,7 @@ func (s Suite) TestHostDetails(t *testing.T) {
 		lookup, err := s.p.LookupActor(ctx, ref.NewActorRef("HD-C", "c1"), components.LookupActorOpts{Hosts: []string{SpecHostH1}})
 		require.NoError(t, err)
 		require.Equal(t, SpecHostH1, lookup.HostID)
-		err = s.p.RemoveActor(ctx, ref.NewActorRef("HD-A", "a1"))
+		err = s.p.RemoveActor(ctx, ref.NewActorRef("HD-A", "a1"), components.RemoveActorOpts{})
 		require.NoError(t, err)
 
 		assert.Equal(t, map[string]int{"HD-A": 1, "HD-B": 1, "HD-C": 1}, activeCounts(t, SpecHostH1))

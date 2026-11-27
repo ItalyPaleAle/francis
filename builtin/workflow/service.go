@@ -155,13 +155,19 @@ func (s *WorkflowService) RaiseEvent(ctx context.Context, instanceID string, nam
 	if err != nil {
 		return fmt.Errorf("failed to read the workflow event contract: %w", err)
 	}
+
 	limit, err := s.eventLimit(&st, name)
 	if err != nil {
 		return err
 	}
+
 	encoded, err := encodeInput(payload, limit)
 	if err != nil {
 		return err
+	}
+
+	if st.Status == "" && st.PendingStart == nil {
+		return ErrInstanceNotFound
 	}
 
 	// The compatible orchestrator receives the durable event and records it against the open wait
@@ -215,7 +221,16 @@ func (s *WorkflowService) dispatchControl(ctx context.Context, instanceID string
 		return err
 	}
 
-	client := builtinactor.NewClient[struct{}](s.wf.baseType, instanceID, s.svc)
+	client := builtinactor.NewClient[instanceState](s.wf.baseType, instanceID, s.svc)
+	st, err := client.GetState(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to read the workflow journal: %w", err)
+	}
+
+	if st.Status == "" && st.PendingStart == nil {
+		return ErrInstanceNotFound
+	}
+
 	_, _, err = client.Dispatch(ctx, method, payload, actor.WithIdempotencyKey(method))
 	if err != nil {
 		return fmt.Errorf("failed to %s the workflow instance: %w", method, err)

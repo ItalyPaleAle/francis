@@ -694,7 +694,7 @@ func (p *Provider) findHostWithCapacity(actorType string, allowedHosts []string)
 	return candidates[idx].host, candidates[idx].idleTimeout
 }
 
-func (p *Provider) RemoveActor(ctx context.Context, r ref.ActorRef) error {
+func (p *Provider) RemoveActor(ctx context.Context, r ref.ActorRef, opts components.RemoveActorOpts) error {
 	key := NewActorKey(r.ActorType, r.ActorID)
 
 	p.writeMu.Lock()
@@ -704,7 +704,12 @@ func (p *Provider) RemoveActor(ctx context.Context, r ref.ActorRef) error {
 	defer changes.Release()
 
 	p.Mu.RLock()
-	_, ok := p.ActiveActors[key]
+
+	act, ok := p.ActiveActors[key]
+	if ok && opts.HostID != "" && act.HostID != opts.HostID {
+		ok = false
+	}
+
 	var clearLeasesApply func()
 	if ok {
 		changes.ActiveActors.Delete = append(changes.ActiveActors.Delete, key)

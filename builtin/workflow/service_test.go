@@ -50,6 +50,18 @@ func TestServiceRefusesWhatItCannotDo(t *testing.T) {
 
 		err = svc.Purge(t.Context(), "never-started")
 		require.ErrorIs(t, err, workflow.ErrInstanceNotFound)
+
+		err = svc.Cancel(t.Context(), "never-started", "no such instance")
+		require.ErrorIs(t, err, workflow.ErrInstanceNotFound)
+
+		err = svc.Suspend(t.Context(), "never-started", "no such instance")
+		require.ErrorIs(t, err, workflow.ErrInstanceNotFound)
+
+		err = svc.Resume(t.Context(), "never-started")
+		require.ErrorIs(t, err, workflow.ErrInstanceNotFound)
+
+		err = svc.RaiseEvent(t.Context(), "never-started", "approval", "ok")
+		require.ErrorIs(t, err, workflow.ErrInstanceNotFound)
 	})
 
 	t.Run("an event nothing waits for", func(t *testing.T) {

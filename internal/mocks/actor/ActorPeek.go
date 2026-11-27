@@ -19,10 +19,19 @@ func NewMockActorPeek(t interface {
 	mock.TestingT
 	Cleanup(func())
 }) *MockActorPeek {
+	if helper, ok := t.(interface{ Helper() }); ok {
+		helper.Helper()
+	}
+
 	mock := &MockActorPeek{}
 	mock.Mock.Test(t)
 
-	t.Cleanup(func() { mock.AssertExpectations(t) })
+	t.Cleanup(func() {
+		if helper, ok := t.(interface{ Helper() }); ok {
+			helper.Helper()
+		}
+		mock.AssertExpectations(t)
+	})
 
 	return mock
 }
@@ -104,8 +113,8 @@ func (_c *MockActorPeek_Peek_Call) Run(run func(ctx context.Context, method stri
 	return _c
 }
 
-func (_c *MockActorPeek_Peek_Call) Return(v any, err error) *MockActorPeek_Peek_Call {
-	_c.Call.Return(v, err)
+func (_c *MockActorPeek_Peek_Call) Return(anyMoqParam any, err error) *MockActorPeek_Peek_Call {
+	_c.Call.Return(anyMoqParam, err)
 	return _c
 }
 

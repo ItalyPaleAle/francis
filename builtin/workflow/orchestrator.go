@@ -161,50 +161,69 @@ func (o *orchestrator) Alarm(ctx context.Context, name string, data actor.Envelo
 
 // runDeadline repairs durable event delivery before evaluating timeouts so recovery retains the original request payloads
 func (o *orchestrator) runDeadline(ctx context.Context) error {
-	// The dead-letter store survives a failed best-effort callback, including a start that has not created its journal yet
+	// Read both the deliveries and the journal so orphaned deliveries for a missing or purged instance are not replayed forever
 	jobs, err := o.client.ListJobs(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to inspect workflow deliveries: %w", err)
 	}
-	var recovered, pendingStart bool
+
+	st, err := o.client.GetState(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to read the workflow journal: %w", err)
+	}
+
+	if st.Status == "" && !hasStartDelivery(jobs) {
+		// Remove orphaned non-start dead-lettered deliveries that arrived after purge or without a start job
+		for _, job := range jobs {
+			if job.Method != methodStart && job.Status == actor.JobStatusDeadLettered {
+				err = o.client.DeleteJob(ctx, job.JobID)
+				if err != nil && !errors.Is(err, actor.ErrJobNotFound) {
+					return fmt.Errorf("failed to remove orphaned workflow delivery %s: %w", job.JobID, err)
+				}
+			}
+		}
+
+		// A placeholder whose start job ended without running, such as one that failed permanently or was deleted, would otherwise stay listed as pending
+		if st.PendingStart != nil {
+			err = o.client.DeleteState(ctx)
+			if err != nil && !errors.Is(err, actor.ErrStateNotFound) {
+				return fmt.Errorf("failed to remove the placeholder of an abandoned start: %w", err)
+			}
+		}
+
+		err = o.dropDeadline(ctx)
+		if err != nil {
+			return err
+		}
+
+		o.client.Halt()
+		return nil
+	}
+
+	// The dead-letter store survives a failed best-effort callback, including a start that has not created its journal yet
+	var recovered bool
 	for _, job := range jobs {
-		pendingStart = pendingStart || (job.Method == methodStart && !job.Status.IsTerminal())
 		if job.Status != actor.JobStatusDeadLettered || !retryWorkflowDelivery(job.Method, job.LastError) {
 			continue
 		}
+
 		_, err = o.client.RetryJob(ctx, job.JobID)
 		if errors.Is(err, actor.ErrJobNotFound) {
 			continue
-		}
-		if err != nil {
+		} else if err != nil {
 			return fmt.Errorf("failed to recover workflow delivery %s: %w", job.JobID, err)
 		}
+
 		recovered = true
 	}
 	if recovered {
 		return o.client.SetAlarm(ctx, alarmDeadline, deadlineAlarmProperties(time.Now().Add(orchestratorRetryDelay)))
 	}
 
-	// Completed, missing, and suspended journals must explicitly stop the fallback recurrence
-	st, err := o.client.GetState(ctx)
+	// Completed, pending, and suspended journals do not evaluate running deadlines
 	switch {
-	case err != nil:
-		return fmt.Errorf("failed to read the workflow journal: %w", err)
-
 	case st.Status == "":
-		if pendingStart {
-			return nil
-		}
-
-		// A placeholder whose start job ended without running, such as one that failed permanently or was deleted, would otherwise stay listed as pending
-		if st.PendingStart != nil {
-			err = o.client.DeleteState(ctx)
-			if err != nil {
-				return fmt.Errorf("failed to remove the placeholder of an abandoned start: %w", err)
-			}
-		}
-
-		return o.dropDeadline(ctx)
+		return nil
 
 	case st.Status.IsTerminal():
 		st = st.clone()
@@ -270,6 +289,18 @@ func (o *orchestrator) JobFailed(ctx context.Context, jobID string, method strin
 		o.log.WarnContext(ctx, "Workflow job was dead-lettered", slog.String("jobID", jobID), slog.String("method", method), slog.Any("error", jobErr))
 	}
 
+	// Drop orphaned non-start deliveries when the instance has neither a journal nor a live or recoverable start job, instead of replaying them forever
+	if method != methodStart {
+		st, err := o.client.GetState(ctx)
+		jobs, jobsErr := o.client.ListJobs(ctx)
+		if err == nil && jobsErr == nil && st.Status == "" && !hasStartDelivery(jobs) {
+			_ = o.client.DeleteJob(ctx, jobID)
+			_ = o.dropDeadline(ctx)
+			o.client.Halt()
+			return nil
+		}
+	}
+
 	// Preserve a recurring repair path before trying the best-effort replay itself
 	err := o.client.SetAlarm(ctx, alarmDeadline, deadlineAlarmProperties(time.Now()))
 	if err != nil {
@@ -285,11 +316,32 @@ func (o *orchestrator) JobFailed(ctx context.Context, jobID string, method strin
 	if !retryWorkflowDelivery(method, lastError) {
 		return nil
 	}
+
 	_, err = o.client.RetryJob(ctx, jobID)
 	if err != nil && !errors.Is(err, actor.ErrJobNotFound) {
 		return fmt.Errorf("failed to recover workflow delivery %s: %w", jobID, err)
 	}
+
 	return nil
+}
+
+// hasStartDelivery reports whether the actor has a live or recoverable start job
+func hasStartDelivery(jobs []actor.JobInfo) bool {
+	for _, job := range jobs {
+		if job.Method != methodStart {
+			continue
+		}
+
+		if !job.Status.IsTerminal() {
+			return true
+		}
+
+		if job.Status == actor.JobStatusDeadLettered && retryWorkflowDelivery(job.Method, job.LastError) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // retryWorkflowDelivery excludes malformed or unknown requests while preserving engine-owned transient failures

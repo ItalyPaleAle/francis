@@ -22,10 +22,19 @@ func NewMockActorProvider(t interface {
 	mock.TestingT
 	Cleanup(func())
 }) *MockActorProvider {
+	if helper, ok := t.(interface{ Helper() }); ok {
+		helper.Helper()
+	}
+
 	mock := &MockActorProvider{}
 	mock.Mock.Test(t)
 
-	t.Cleanup(func() { mock.AssertExpectations(t) })
+	t.Cleanup(func() {
+		if helper, ok := t.(interface{ Helper() }); ok {
+			helper.Helper()
+		}
+		mock.AssertExpectations(t)
+	})
 
 	return mock
 }
@@ -2539,16 +2548,16 @@ func (_c *MockActorProvider_ReleaseExclusiveLease_Call) RunAndReturn(run func(ct
 }
 
 // RemoveActor provides a mock function for the type MockActorProvider
-func (_mock *MockActorProvider) RemoveActor(ctx context.Context, ref1 ref.ActorRef) error {
-	ret := _mock.Called(ctx, ref1)
+func (_mock *MockActorProvider) RemoveActor(ctx context.Context, ref1 ref.ActorRef, opts components.RemoveActorOpts) error {
+	ret := _mock.Called(ctx, ref1, opts)
 
 	if len(ret) == 0 {
 		panic("no return value specified for RemoveActor")
 	}
 
 	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, ref.ActorRef) error); ok {
-		r0 = returnFunc(ctx, ref1)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, ref.ActorRef, components.RemoveActorOpts) error); ok {
+		r0 = returnFunc(ctx, ref1, opts)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -2563,11 +2572,12 @@ type MockActorProvider_RemoveActor_Call struct {
 // RemoveActor is a helper method to define mock.On call
 //   - ctx context.Context
 //   - ref1 ref.ActorRef
-func (_e *MockActorProvider_Expecter) RemoveActor(ctx any, ref1 any) *MockActorProvider_RemoveActor_Call {
-	return &MockActorProvider_RemoveActor_Call{Call: _e.mock.On("RemoveActor", ctx, ref1)}
+//   - opts components.RemoveActorOpts
+func (_e *MockActorProvider_Expecter) RemoveActor(ctx any, ref1 any, opts any) *MockActorProvider_RemoveActor_Call {
+	return &MockActorProvider_RemoveActor_Call{Call: _e.mock.On("RemoveActor", ctx, ref1, opts)}
 }
 
-func (_c *MockActorProvider_RemoveActor_Call) Run(run func(ctx context.Context, ref1 ref.ActorRef)) *MockActorProvider_RemoveActor_Call {
+func (_c *MockActorProvider_RemoveActor_Call) Run(run func(ctx context.Context, ref1 ref.ActorRef, opts components.RemoveActorOpts)) *MockActorProvider_RemoveActor_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -2577,9 +2587,14 @@ func (_c *MockActorProvider_RemoveActor_Call) Run(run func(ctx context.Context, 
 		if args[1] != nil {
 			arg1 = args[1].(ref.ActorRef)
 		}
+		var arg2 components.RemoveActorOpts
+		if args[2] != nil {
+			arg2 = args[2].(components.RemoveActorOpts)
+		}
 		run(
 			arg0,
 			arg1,
+			arg2,
 		)
 	})
 	return _c
@@ -2590,7 +2605,7 @@ func (_c *MockActorProvider_RemoveActor_Call) Return(err error) *MockActorProvid
 	return _c
 }
 
-func (_c *MockActorProvider_RemoveActor_Call) RunAndReturn(run func(ctx context.Context, ref1 ref.ActorRef) error) *MockActorProvider_RemoveActor_Call {
+func (_c *MockActorProvider_RemoveActor_Call) RunAndReturn(run func(ctx context.Context, ref1 ref.ActorRef, opts components.RemoveActorOpts) error) *MockActorProvider_RemoveActor_Call {
 	_c.Call.Return(run)
 	return _c
 }

@@ -65,8 +65,9 @@ type Manager struct {
 	providerRequestTimeout time.Duration
 	shutdownGracePeriod    time.Duration
 
-	started  atomic.Bool
-	draining atomic.Bool
+	started    atomic.Bool
+	draining   atomic.Bool
+	abandoning atomic.Int32
 
 	// ActorFactories holds the factory for each registered actor type, keyed by actor type
 	ActorFactories map[string]actor.Factory
@@ -310,8 +311,8 @@ func (m *Manager) LockAndPeekActive(parentCtx context.Context, r ref.ActorRef, f
 // lockAndInvokeActor acquires the actor's turn-based lock and runs fn, canceling the call if the actor is halted mid-flight
 // readOnly selects the shared (read) lock used by Peek
 func (m *Manager) lockAndInvokeActor(parentCtx context.Context, act *ActiveActor, readOnly bool, fn func(ctx context.Context, act *ActiveActor) (any, error)) (any, error) {
-	// Refuse a new turn once the host's shutdown barrier is established
-	if m.draining.Load() {
+	// Refuse a new turn once the host's shutdown or abandon barrier is established
+	if m.draining.Load() || m.abandoning.Load() > 0 || act.abandoned.Load() {
 		return nil, actor.ErrActorHalted
 	}
 
@@ -365,6 +366,11 @@ func (m *Manager) lockAndInvokeActor(parentCtx context.Context, act *ActiveActor
 				t.Stop()
 				cancel(actor.ErrActorHalted)
 				return
+			case <-act.forceCancelCh:
+				// Ownership was lost, so cancel immediately without waiting out the grace period
+				t.Stop()
+				cancel(actor.ErrActorHalted)
+				return
 			case <-ctx.Done():
 				// The method is returning (either fn() is done, or context was canceled)
 				if !t.Stop() {
@@ -372,6 +378,10 @@ func (m *Manager) lockAndInvokeActor(parentCtx context.Context, act *ActiveActor
 				}
 				return
 			}
+		case <-act.forceCancelCh:
+			// Ownership was lost before or concurrently with Halt
+			cancel(actor.ErrActorHalted)
+			return
 		case <-ctx.Done():
 			// The method is returning (either fn() is done, or context was canceled)
 			return
@@ -415,8 +425,8 @@ func (m *Manager) getOrCreateActor(parentCtx context.Context, r ref.ActorRef) (*
 	m.createLock.Lock()
 	defer m.createLock.Unlock()
 
-	// Draining holds this lock while barring activation, so its snapshot cannot miss a late actor
-	if m.draining.Load() {
+	// Draining or abandoning holds this lock while barring activation, so its snapshot cannot miss a late actor
+	if m.draining.Load() || m.abandoning.Load() > 0 {
 		return nil, actor.ErrActorHalted
 	}
 
@@ -457,18 +467,54 @@ func (m *Manager) HaltAll() error {
 	return m.haltAll(false)
 }
 
+// BarActivations establishes the permanent shutdown barrier that refuses new actor activations and turns
+func (m *Manager) BarActivations() {
+	m.createLock.Lock()
+	m.draining.Store(true)
+	m.createLock.Unlock()
+}
+
 // AbandonAll drops every actor active on the host without clearing any placement record
-// It is meant for a host that has learned it no longer owns what it is holding
+// It cancels in-flight turns immediately, upgrades already-deactivating actors to read-only, and blocks concurrent cold activations until teardown finishes
 func (m *Manager) AbandonAll() error {
-	return m.haltAll(true)
+	m.createLock.Lock()
+	m.abandoning.Add(1)
+	var snapshot []*ActiveActor
+	for _, act := range m.Actors.Iterator() {
+		if act == nil {
+			continue
+		}
+
+		act.markAbandoned()
+		snapshot = append(snapshot, act)
+	}
+
+	m.createLock.Unlock()
+	defer m.abandoning.Add(-1)
+
+	return m.haltSnapshot(snapshot, true)
 }
 
 func (m *Manager) haltAll(abandon bool) error {
-	// Deactivate all actors, each in its own goroutine
-	errCh := make(chan error)
-	var count int
+	var snapshot []*ActiveActor
 	for _, act := range m.Actors.Iterator() {
-		count++
+		if act == nil {
+			continue
+		}
+
+		if abandon {
+			act.markAbandoned()
+		}
+		snapshot = append(snapshot, act)
+	}
+
+	return m.haltSnapshot(snapshot, abandon)
+}
+
+func (m *Manager) haltSnapshot(snapshot []*ActiveActor, abandon bool) error {
+	// Deactivate all actors, each in its own goroutine
+	errCh := make(chan error, len(snapshot))
+	for _, act := range snapshot {
 		go func(act *ActiveActor) {
 			haltErr := m.haltActiveActor(act, true, abandon)
 			// A previously started halt must finish too, so the host's timeout remains active for its running calls
@@ -482,7 +528,7 @@ func (m *Manager) haltAll(abandon bool) error {
 
 	// Collect all errors
 	errs := make([]error, 0)
-	for range count {
+	for range snapshot {
 		err := <-errCh
 		if err != nil {
 			errs = append(errs, err)
@@ -576,6 +622,10 @@ func (m *Manager) HaltActiveActor(act *ActiveActor, drain bool) (err error) {
 // haltActiveActor gracefully halts an actor's instance, and unless abandon is set also removes it from the placement store
 // An abandoned actor is one this host no longer owns, so its placement record is left alone and its Deactivate hook runs read-only
 func (m *Manager) haltActiveActor(act *ActiveActor, drain bool, abandon bool) (err error) {
+	if abandon {
+		act.markAbandoned()
+	}
+
 	// Only one caller owns deactivation, while halt-all waits on its completion before the host unregisters
 	if !act.deactivationStarted.CompareAndSwap(false, true) {
 		return nil
@@ -610,7 +660,8 @@ func (m *Manager) finishHaltActiveActor(act *ActiveActor, drain bool, abandon bo
 	}
 
 	// Send the actor a message it has been deactivated
-	err = m.deactivateActor(act, abandon)
+	// Re-read act.abandoned so an idle or caller-initiated halt upgraded mid-flight by AbandonAll still runs read-only and leaves placement intact
+	err = m.deactivateActor(act, abandon || act.abandoned.Load())
 	if err != nil {
 		// Even though the call to the actor's Deactivate method failed, we still need to continue with the deactivation process
 		// Otherwise, we are in a state where the object is still in-memory and that will cause many issues
@@ -625,7 +676,7 @@ func (m *Manager) finishHaltActiveActor(act *ActiveActor, drain bool, abandon bo
 	}
 
 	// An abandoned actor only leaves the local table because its placement may already name the host that took it over
-	if abandon {
+	if abandon || act.abandoned.Load() {
 		m.Actors.GetAndDel(key)
 		return nil
 	}

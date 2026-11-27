@@ -579,7 +579,7 @@ func (rt *Runtime) handleLookupActor(parentCtx context.Context, _ *hostConn, req
 
 // handleRemoveActor clears the placement of an actor that the host has deactivated
 // The host owns the actor lifecycle and tells the runtime once an actor is gone so callers stop being routed to it
-func (rt *Runtime) handleRemoveActor(parentCtx context.Context, _ *hostConn, req *protocol.Envelope) *protocol.Envelope {
+func (rt *Runtime) handleRemoveActor(parentCtx context.Context, c *hostConn, req *protocol.Envelope) *protocol.Envelope {
 	var payload protocol.RemoveActorRequest
 	err := req.DecodePayload(&payload)
 	if err != nil {
@@ -600,10 +600,10 @@ func (rt *Runtime) handleRemoveActor(parentCtx context.Context, _ *hostConn, req
 	// Drop any cached placement so callers are no longer routed to the deactivated actor
 	rt.deletePlacement(aRef.String())
 
-	// Remove the actor from the provider's set of active placements
+	// Remove the actor from the provider's set of active placements only if it is still placed on the calling host
 	ctx, cancel := context.WithTimeout(parentCtx, rt.providerRequestTimeout)
 	defer cancel()
-	err = rt.provider.RemoveActor(ctx, aRef)
+	err = rt.provider.RemoveActor(ctx, aRef, components.RemoveActorOpts{HostID: c.hostID})
 	if errors.Is(err, components.ErrNoActor) {
 		// The actor was already gone, which is the desired end state, so report it without treating it as a hard failure
 		return req.ErrorReply(protocol.NewError(protocol.ErrCodeActorNotActive, "actor is not currently active"))

@@ -803,6 +803,34 @@ func TestAControlJobWaitsForTheStartJob(t *testing.T) {
 	assert.Equal(t, StatusSuspended, st.Status)
 }
 
+func TestOrphanedControlJobOnMissingInstanceIsDropped(t *testing.T) {
+	host := newFakeHost()
+
+	wf, err := New("orphan-control", WithSteps(Step("a", WithRun(noopRun))))
+	require.NoError(t, err)
+
+	instanceType := ref.BuiltInActorTypePrefix + wf.baseType
+	host.jobs["orphan-job"] = actor.JobInfo{
+		JobID:     "orphan-job",
+		ActorType: instanceType,
+		ActorID:   "missing",
+		Method:    methodSuspend,
+		Status:    actor.JobStatusDeadLettered,
+		LastError: errWaitingForStart.Error(),
+	}
+
+	o := newTestOrchestrator(t, wf, host, "missing")
+	err = o.JobFailed(t.Context(), "orphan-job", methodSuspend, &payloadEnvelope{}, errWaitingForStart)
+	require.NoError(t, err)
+
+	host.mu.Lock()
+	_, jobExists := host.jobs["orphan-job"]
+	_, alarmArmed := host.alarms[key(instanceType, "missing", alarmDeadline)]
+	host.mu.Unlock()
+	assert.False(t, jobExists)
+	assert.False(t, alarmArmed)
+}
+
 // TestTerminationDropsTheTimers verifies a terminated instance stops holding its deadline
 func TestTerminationDropsTheTimers(t *testing.T) {
 	host := newFakeHost()

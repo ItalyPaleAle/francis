@@ -108,10 +108,17 @@ type runtimeClient struct {
 	// Only the goroutine running Run dials, so only it reads and writes the field
 	dialedConn *quic.Conn
 
-	mu        sync.RWMutex
-	session   *webtransport.Session
-	hostID    string
-	sessionID string
+	identityMu sync.Mutex
+
+	mu                  sync.RWMutex
+	session             *webtransport.Session
+	hostID              string
+	sessionID           string
+	sessionGen          uint64
+	lastHealthCheck     time.Time
+	healthDeadline      time.Duration
+	registrationExpired bool
+	disconnectStop      chan struct{}
 
 	readyOnce sync.Once
 	ready     chan struct{}
@@ -166,6 +173,7 @@ func (rc *runtimeClient) Run(ctx context.Context) error {
 		return host.ErrAdministrativeDrain
 	}
 	defer rc.drain.Stopped()
+	defer rc.stopDisconnectWatcher()
 
 	// Only a transport that dialed can be closed, for the reason on transportDialed
 	// Run returns below without dialing whenever its context is already canceled, which is what a host that is shut down as soon as it starts does
@@ -279,15 +287,22 @@ func (rc *runtimeClient) connectAndServe(ctx context.Context, addr string) (bool
 		return false, fmt.Errorf("failed to register with runtime: %w", err)
 	}
 
+	// Normalize the health check deadline advertised by the runtime
+	healthDeadline := time.Duration(resp.HealthCheckDeadlineMs) * time.Millisecond
+	if healthDeadline <= time.Second {
+		healthDeadline = components.DefaultHostHealthCheckDeadline
+	}
+
 	// A registration that did not reattach means the runtime issued us a fresh identity, so whatever we still hold from our previous one is no longer ours
 	// This happens when our old registration expired while we were away, in which case the cluster has already been free to place those actors on other hosts
-	// The actors are dropped before the session is published, so no invocation can land on one in the window between registering and cleaning up
+	// Serialize against disconnect-expiry teardown so actors are dropped before the session is published
+	rc.identityMu.Lock()
+	rc.stopDisconnectWatcher()
 	if !resp.Reattached && rc.cfg.onIdentityReset != nil {
 		rc.cfg.onIdentityReset()
 	}
-
-	// Publish the live session so host-to-runtime requests can use it, and clear it again on the way out
-	rc.setSession(session, resp.HostID, resp.SessionID)
+	rc.setSession(session, resp.HostID, resp.SessionID, healthDeadline)
+	rc.identityMu.Unlock()
 	defer rc.clearSession()
 
 	// Signal first-time readiness so callers waiting on Ready can proceed
@@ -309,7 +324,6 @@ func (rc *runtimeClient) connectAndServe(ctx context.Context, addr string) (bool
 	// Halting can take longer than the health check deadline, and a registration that expired meanwhile would let other hosts activate actors that are still halting here
 	healthCtx, stopHealthChecks := context.WithCancel(session.Context())
 	defer stopHealthChecks()
-	healthDeadline := time.Duration(resp.HealthCheckDeadlineMs) * time.Millisecond
 	go rc.runHealthChecks(healthCtx, session, healthDeadline)
 
 	// Renew the workload certificate before it expires, while the session is alive
@@ -732,14 +746,26 @@ func (rc *runtimeClient) runHealthChecks(ctx context.Context, session *webtransp
 				reqCtx, cancel := context.WithTimeout(ctx, policy.AttemptTimeout())
 				defer cancel()
 
-				reqErr := rc.doRequest(reqCtx, protocol.KindHealthCheck, protocol.HealthCheckRequest{
+				rErr := rc.doRequest(reqCtx, protocol.KindHealthCheck, protocol.HealthCheckRequest{
 					Retry: policy.Attempts() > 0,
 				}, nil)
-				return struct{}{}, reqErr
+				if isProtocolErrorCode(rErr, protocol.ErrCodeHostUnregistered) || isProtocolErrorCode(rErr, protocol.ErrCodeSessionSuperseded) {
+					return struct{}{}, backoff.Permanent(rErr)
+				}
+				return struct{}{}, rErr
 			}, retryOpts...)
 
+			if err == nil {
+				rc.noteHealthCheck()
+				continue
+			}
+
 			// Exhausting the policy means this session cannot be trusted to remain registered
-			if err != nil && ctx.Err() == nil {
+			if ctx.Err() == nil {
+				if isProtocolErrorCode(err, protocol.ErrCodeHostUnregistered) {
+					rc.markRegistrationExpired()
+				}
+
 				rc.cfg.log.WarnContext(ctx, "Health check failed; closing session to reconnect", slog.Any("error", err))
 				_ = session.CloseWithError(0, "health check failed")
 				return
@@ -1273,20 +1299,109 @@ func (rc *runtimeClient) DeleteJob(ctx context.Context, req protocol.DeleteJobRe
 }
 
 // setSession records the active session and its negotiated identity
-func (rc *runtimeClient) setSession(session *webtransport.Session, hostID string, sessionID string) {
+func (rc *runtimeClient) setSession(session *webtransport.Session, hostID string, sessionID string, healthDeadline time.Duration) {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
+	rc.stopDisconnectWatcherLocked()
 	rc.session = session
 	rc.hostID = hostID
 	rc.sessionID = sessionID
+	rc.sessionGen++
+	rc.lastHealthCheck = rc.cfg.clock.Now()
+	rc.healthDeadline = healthDeadline
+	rc.registrationExpired = false
 }
 
-// clearSession clears the active session but keeps the host ID so the next connection can reattach
-func (rc *runtimeClient) clearSession() {
+func (rc *runtimeClient) noteHealthCheck() {
 	rc.mu.Lock()
-	defer rc.mu.Unlock()
+	rc.lastHealthCheck = rc.cfg.clock.Now()
+	rc.mu.Unlock()
+}
+
+func (rc *runtimeClient) markRegistrationExpired() {
+	rc.mu.Lock()
+	rc.registrationExpired = true
+	rc.mu.Unlock()
+}
+
+func (rc *runtimeClient) stopDisconnectWatcher() {
+	rc.mu.Lock()
+	rc.stopDisconnectWatcherLocked()
+	rc.mu.Unlock()
+}
+
+func (rc *runtimeClient) stopDisconnectWatcherLocked() {
+	if rc.disconnectStop != nil {
+		close(rc.disconnectStop)
+		rc.disconnectStop = nil
+	}
+}
+
+// clearSession clears the active session and starts a timer so actors are abandoned if the registration expires before reconnecting
+func (rc *runtimeClient) clearSession() {
+	rc.identityMu.Lock()
+	defer rc.identityMu.Unlock()
+
+	rc.mu.Lock()
+	rc.stopDisconnectWatcherLocked()
 	rc.session = nil
 	rc.sessionID = ""
+	if rc.hostID == "" || rc.drain.Accepted() {
+		rc.registrationExpired = false
+		rc.mu.Unlock()
+		return
+	}
+
+	if rc.registrationExpired {
+		rc.registrationExpired = false
+		rc.hostID = ""
+		rc.mu.Unlock()
+		if rc.cfg.onIdentityReset != nil {
+			rc.cfg.onIdentityReset()
+		}
+		return
+	}
+
+	deadline := rc.healthDeadline
+	if deadline <= time.Second {
+		deadline = components.DefaultHostHealthCheckDeadline
+	}
+	remaining := max(time.Duration(0), deadline-rc.cfg.clock.Since(rc.lastHealthCheck))
+	gen := rc.sessionGen
+	stopCh := make(chan struct{})
+	rc.disconnectStop = stopCh
+	rc.mu.Unlock()
+
+	t := rc.cfg.clock.NewTimer(remaining)
+	go func() {
+		select {
+		case <-t.C():
+			rc.expireDisconnected(gen)
+		case <-stopCh:
+			t.Stop()
+		}
+	}()
+}
+
+// expireDisconnected drops local actors and clears the host ID once the disconnected host's provider registration has expired
+func (rc *runtimeClient) expireDisconnected(gen uint64) {
+	rc.identityMu.Lock()
+	defer rc.identityMu.Unlock()
+
+	rc.mu.Lock()
+	if rc.session != nil || rc.sessionGen != gen || rc.hostID == "" {
+		rc.mu.Unlock()
+		return
+	}
+
+	rc.hostID = ""
+	rc.disconnectStop = nil
+	rc.mu.Unlock()
+
+	rc.cfg.log.Warn("Disconnected longer than health check deadline; abandoning local actors")
+	if rc.cfg.onIdentityReset != nil {
+		rc.cfg.onIdentityReset()
+	}
 }
 
 // snapshot returns the current session and identity under the lock

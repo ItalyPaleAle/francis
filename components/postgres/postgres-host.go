@@ -529,16 +529,29 @@ func (p *PostgresProvider) LookupActor(ctx context.Context, ref ref.ActorRef, op
 	return res, nil
 }
 
-func (p *PostgresProvider) RemoveActor(ctx context.Context, ref ref.ActorRef) error {
+func (p *PostgresProvider) RemoveActor(ctx context.Context, ref ref.ActorRef, opts components.RemoveActorOpts) error {
 	queryCtx, queryCancel := context.WithTimeout(ctx, p.timeout)
 	defer queryCancel()
-	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	res, err := p.db.
-		Exec(queryCtx,
+
+	var (
+		res pgconn.CommandTag
+		err error
+	)
+	if opts.HostID != "" {
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		res, err = p.db.Exec(queryCtx,
+			`DELETE FROM `+p.tablePrefix+`active_actors
+			WHERE actor_type = $1 AND actor_id = $2 AND host_id = $3`,
+			ref.ActorType, ref.ActorID, opts.HostID,
+		)
+	} else {
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		res, err = p.db.Exec(queryCtx,
 			`DELETE FROM `+p.tablePrefix+`active_actors
 			WHERE actor_type = $1 AND actor_id = $2`,
 			ref.ActorType, ref.ActorID,
 		)
+	}
 	if err != nil {
 		return fmt.Errorf("error removing actor: %w", err)
 	}

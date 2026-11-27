@@ -310,109 +310,75 @@ func (p *PostgresProvider) endJob(ctx context.Context, lease *ref.AlarmLease, re
 		return nil
 	}
 
-	// A repeating job records the ended occurrence and re-creates the recurrence
-	// The recurrence reuses the alarm name and the job ID, so its INSERT into alarms cannot share the statement as the DELETE without conflicting on either
-	// It runs as a second statement in the transaction, after the DELETE has cleared them
+	// A repeating job keeps one identity for the life of its schedule, so the occurrence that just ended is recorded in terminal_jobs under a fresh ID of its own while the live row in alarms keeps jobID
+	// Callers hold that jobID for as long as the schedule exists (for example, a cron actor reconciles and cancels its recurrence by it), so re-minting it on every occurrence would orphan the schedule
 	//
-	// A repeating job keeps one identity for the life of its schedule, so the occurrence that just ended is recorded under an ID of its own and the job ID goes back to the recurrence
-	// Callers hold that ID for as long as the schedule exists: a cron actor deletes and reconciles its recurrence by it, and re-minting it on every occurrence would orphan the schedule
+	// Rescheduling updates the live alarms row in place rather than deleting and re-inserting it
+	// Under PostgreSQL READ COMMITTED isolation, a concurrent DeleteJob blocked on a DELETE wakes up to a deleted tuple and affects zero rows, missing any newly inserted replacement row, whereas an in-place UPDATE preserves the CTID update chain so PostgreSQL re-evaluates and deletes the rescheduled row
 	occurrenceID := uuid.NewV7()
 
-	tx, err := p.db.Begin(queryCtx)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() {
-		_ = tx.Rollback(queryCtx)
-	}()
-
-	// Move the ended occurrence to the terminal-job store in one statement, returning the row's fields needed to re-create the recurrence
-	var (
-		actorType, actorID, alarmName string
-		jobMethod                     *string
-		data                          []byte
-		interval, cron                *string
-		ttl                           *time.Time
-	)
-
+	// How this query works:
+	// 1. prior (SELECT ... FOR UPDATE) locks the alarms row up front and captures its pre-update alarm_due_time, since UPDATE ... RETURNING exposes the post-update columns ($9) rather than the original due time that terminal_jobs records
+	// 2. updated advances alarm_due_time to the next occurrence ($9) and clears alarm_lease_id and alarm_lease_expiration_time, matching either a live lease owned by this execution ($2) or an unleased row that still carries the due time this execution leased ($8) when the job's own actor halted mid-turn and released its alarm leases
+	//    A lease that merely expired keeps its old alarm_lease_id, and one taken over by another replica holds a different alarm_lease_id, so neither matches here
+	// 3. The outer INSERT writes the finished occurrence into terminal_jobs under occurrenceID ($7) using prior.alarm_due_time as original_due, retaining alarm_data only when dead-lettered ($3 = 'dead')
+	//    When the lease check in updated matches nothing, updated yields zero rows, the INSERT affects zero rows, and ErrNoAlarm is returned
 	// #nosec G202 -- the only concatenated values are static table prefixes, not user input
-	err = tx.
-		// Notes on the query:
-		// A job handler that halts its own actor is the common case for a worker, and deactivating an actor drops the leases of its alarms so another host can pick them up
-		// For the occurrence being finalized right now that release must not undo the finalization, so a lease this execution owns and a lease that was released both count
-		// A lease that merely expired keeps its id, and one another replica took holds its own id, so neither is matched here
-		// An unleased row is only this execution's occurrence while it still carries the due time this execution leased, which is what stops a stale execution from finalizing the occurrence that replaced it
-		QueryRow(queryCtx, `
-			WITH deleted AS (
-				DELETE FROM `+p.tablePrefix+`alarms
-				WHERE
-					alarm_id = $1
-					AND (
-						(
-							alarm_lease_id = $2
-							AND alarm_lease_expiration_time IS NOT NULL
-							AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')
-						)
-						OR (alarm_lease_id IS NULL AND alarm_due_time = $8)
+	res, err := p.db.Exec(queryCtx, `
+		WITH updated AS (
+			UPDATE `+p.tablePrefix+`alarms AS a
+			SET
+				alarm_due_time = $9,
+				alarm_lease_id = NULL,
+				alarm_lease_expiration_time = NULL
+			FROM (
+				SELECT alarm_id, alarm_due_time
+				FROM `+p.tablePrefix+`alarms
+				WHERE alarm_id = $1
+				FOR UPDATE
+			) AS prior
+			WHERE
+				a.alarm_id = prior.alarm_id
+				AND (
+					(
+						a.alarm_lease_id = $2
+						AND a.alarm_lease_expiration_time IS NOT NULL
+						AND a.alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')
 					)
-				RETURNING actor_type, actor_id, alarm_name, job_method, alarm_data, alarm_due_time, alarm_interval, alarm_cron, alarm_ttl_time
-			),
-			ended AS (
-				INSERT INTO `+p.tablePrefix+`terminal_jobs
-					(job_id, actor_type, actor_id, job_method, job_data,
-					job_status, attempts, last_error, ended_at, original_due, job_interval, job_cron, expiration_time)
-				SELECT $7, actor_type, actor_id, COALESCE(job_method, ''), CASE WHEN $3 = 'dead' THEN alarm_data END, $3, $4, $5, now() AT TIME ZONE 'utc', alarm_due_time, alarm_interval, alarm_cron, (now() AT TIME ZONE 'utc') + $6
-				FROM deleted
-				ON CONFLICT (job_id) DO UPDATE SET
-					job_method = EXCLUDED.job_method,
-					job_data = EXCLUDED.job_data,
-					job_status = EXCLUDED.job_status,
-					attempts = EXCLUDED.attempts,
-					last_error = EXCLUDED.last_error,
-					ended_at = EXCLUDED.ended_at,
-					original_due = EXCLUDED.original_due,
-					job_interval = EXCLUDED.job_interval,
-					job_cron = EXCLUDED.job_cron,
-					expiration_time = EXCLUDED.expiration_time
-			)
-			SELECT actor_type, actor_id, alarm_name, job_method, alarm_data, alarm_interval, alarm_cron, alarm_ttl_time
-			FROM deleted`,
-			jobID, lease.LeaseID(), string(req.status), req.attempts, reason, retention, occurrenceID, lease.DueTime().UTC(),
-		).
-		Scan(&actorType, &actorID, &alarmName, &jobMethod, &data, &interval, &cron, &ttl)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return components.ErrNoAlarm
-	} else if err != nil {
-		return fmt.Errorf("error ending job: %w", err)
-	}
-
-	method := ""
-	if jobMethod != nil {
-		method = *jobMethod
-	}
-
-	// Re-create the recurrence for its next occurrence, under the job ID it has always had, so a repeating job survives one occurrence ending
-	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	_, err = tx.Exec(queryCtx, `
-		INSERT INTO `+p.tablePrefix+`alarms
-			(alarm_id, actor_type, actor_id, alarm_name,
-			alarm_due_time, alarm_interval, alarm_cron, alarm_ttl_time, alarm_data,
-			alarm_kind, job_method,
-			alarm_lease_id, alarm_lease_expiration_time)
-		VALUES
-			($1, $2, $3, $4, $5, $6, $7, $8, $9, 'job', $10, NULL, NULL)`,
-		// alarm_due_time is stored as UTC
-		// ttl already comes from the DB as UTC
-		jobID, actorType, actorID, alarmName,
-		req.nextDueTime.UTC(), interval, cron, ttl, data, method,
+					OR (a.alarm_lease_id IS NULL AND a.alarm_due_time = $8)
+				)
+			RETURNING
+				a.actor_type, a.actor_id, a.job_method, a.alarm_data,
+				prior.alarm_due_time AS original_due,
+				a.alarm_interval, a.alarm_cron
+		)
+		INSERT INTO `+p.tablePrefix+`terminal_jobs
+			(job_id, actor_type, actor_id, job_method, job_data,
+			job_status, attempts, last_error, ended_at, original_due, job_interval, job_cron, expiration_time)
+		SELECT
+			$7, actor_type, actor_id, COALESCE(job_method, ''),
+			CASE WHEN $3 = 'dead' THEN alarm_data END,
+			$3, $4, $5, now() AT TIME ZONE 'utc', original_due,
+			alarm_interval, alarm_cron, (now() AT TIME ZONE 'utc') + $6
+		FROM updated
+		ON CONFLICT (job_id) DO UPDATE SET
+			job_method = EXCLUDED.job_method,
+			job_data = EXCLUDED.job_data,
+			job_status = EXCLUDED.job_status,
+			attempts = EXCLUDED.attempts,
+			last_error = EXCLUDED.last_error,
+			ended_at = EXCLUDED.ended_at,
+			original_due = EXCLUDED.original_due,
+			job_interval = EXCLUDED.job_interval,
+			job_cron = EXCLUDED.job_cron,
+			expiration_time = EXCLUDED.expiration_time`,
+		jobID, lease.LeaseID(), string(req.status), req.attempts, reason, retention, occurrenceID, lease.DueTime().UTC(), req.nextDueTime.UTC(),
 	)
 	if err != nil {
 		return fmt.Errorf("error rescheduling repeating job: %w", err)
 	}
-
-	err = tx.Commit(queryCtx)
-	if err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
+	if res.RowsAffected() == 0 {
+		return components.ErrNoAlarm
 	}
 
 	return nil

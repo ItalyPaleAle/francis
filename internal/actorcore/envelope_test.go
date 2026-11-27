@@ -303,6 +303,64 @@ func TestObjectEnvelope(t *testing.T) {
 		assert.Equal(t, original, target2)
 		assert.Equal(t, target1, target2)
 	})
+
+	t.Run("zero values overwrite non-zero target", func(t *testing.T) {
+		boolTarget := true
+		err := NewObjectEnvelope(false).Decode(&boolTarget)
+		require.NoError(t, err)
+		assert.False(t, boolTarget)
+
+		intTarget := 99
+		err = NewObjectEnvelope(0).Decode(&intTarget)
+		require.NoError(t, err)
+		assert.Zero(t, intTarget)
+
+		strTarget := "non-empty"
+		err = NewObjectEnvelope("").Decode(&strTarget)
+		require.NoError(t, err)
+		assert.Empty(t, strTarget)
+
+		type item struct {
+			Name string
+		}
+		structTarget := item{Name: "prior"}
+		err = NewObjectEnvelope(item{}).Decode(&structTarget)
+		require.NoError(t, err)
+		assert.Equal(t, item{}, structTarget)
+
+		sliceTarget := []string{"prior"}
+		var nilSlice []string
+		err = NewObjectEnvelope(nilSlice).Decode(&sliceTarget)
+		require.NoError(t, err)
+		assert.Nil(t, sliceTarget)
+	})
+
+	t.Run("decoded slices maps and pointers do not alias wrapped object", func(t *testing.T) {
+		type payload struct {
+			Tags   []string
+			Counts map[string]int
+			Note   *string
+		}
+		note := "original"
+		original := payload{
+			Tags:   []string{"a", "b"},
+			Counts: map[string]int{"x": 1},
+			Note:   &note,
+		}
+		envelope := NewObjectEnvelope(original)
+
+		var decoded payload
+		err := envelope.Decode(&decoded)
+		require.NoError(t, err)
+
+		decoded.Tags[0] = "mutated"
+		decoded.Counts["x"] = 999
+		*decoded.Note = "changed"
+
+		assert.Equal(t, []string{"a", "b"}, original.Tags)
+		assert.Equal(t, 1, original.Counts["x"])
+		assert.Equal(t, "original", *original.Note)
+	})
 }
 
 func BenchmarkObjectEnvelope(b *testing.B) {
