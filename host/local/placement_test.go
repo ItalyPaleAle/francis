@@ -830,3 +830,78 @@ func TestIsLocal(t *testing.T) {
 		assert.False(t, host.isLocal(placement))
 	})
 }
+
+func TestRemoveActorInvalidatesCacheAndStaleAlarmDoesNotActivateActor(t *testing.T) {
+	clock := clocktesting.NewFakeClock(time.Now())
+	log := slog.New(slog.DiscardHandler)
+	provider := components_mocks.NewMockActorProvider(t)
+
+	host := &Host{
+		hostID:                 "host-a",
+		address:                "127.0.0.1:8080",
+		actorProvider:          provider,
+		log:                    log,
+		clock:                  clock,
+		providerRequestTimeout: 5 * time.Second,
+		activeAlarms:           map[string]struct{}{},
+		retryingAlarms:         map[string]struct{}{},
+		placementCache: ttlcache.NewCache[string, *actorcore.Placement](&ttlcache.CacheOptions{
+			MaxTTL: placementCacheMaxTTL,
+		}),
+	}
+	defer host.placementCache.Stop()
+	host.service = actor.NewService(host)
+	host.resolver = placementResolver{h: host}
+	host.core = actorcore.NewManager(actorcore.Options{
+		Service:     host.service,
+		RemoveActor: host.removeActor,
+		Logger:      log,
+		Clock:       clock,
+	})
+	host.core.ActorsConfig = map[string]components.ActorHostType{
+		"testactor": {IdleTimeout: 5 * time.Minute},
+	}
+	host.core.ActorFactories = map[string]actor.Factory{
+		"testactor": func(string, *actor.Service) actor.Actor {
+			return &actor_mocks.MockActorDeactivate{}
+		},
+	}
+	host.core.Start()
+	defer host.core.Close()
+
+	aRef := ref.NewActorRef("testactor", "a1")
+	host.placementCache.Set(aRef.String(), &actorcore.Placement{HostID: "host-a", Address: "127.0.0.1:8080"}, time.Minute)
+
+	// Local removal invalidates the placement cache immediately
+	provider.
+		On("RemoveActor", mock.MatchedBy(testutil.MatchContextInterface), aRef, components.RemoveActorOpts{HostID: "host-a"}).
+		Return(nil).
+		Once()
+	err := host.removeActor(t.Context(), aRef)
+	require.NoError(t, err)
+	_, cached := host.placementCache.Get(aRef.String())
+	assert.False(t, cached)
+
+	// Re-seed a stale cache entry pointing at host-a while the provider now reports host-b as the owner
+	host.placementCache.Set(aRef.String(), &actorcore.Placement{HostID: "host-a", Address: "127.0.0.1:8080"}, time.Minute)
+	lease := ref.NewAlarmLease(ref.NewAlarmRef("testactor", "a1", "tick"), "alarm-1", clock.Now(), "lease-1")
+
+	provider.
+		On("GetLeasedAlarm", mock.MatchedBy(testutil.MatchContextInterface), lease).
+		Return(components.GetLeasedAlarmRes{Kind: components.AlarmKindAlarm}, nil).
+		Once()
+	provider.
+		On("LookupActor", mock.MatchedBy(testutil.MatchContextInterface), aRef, components.LookupActorOpts{ActiveOnly: false}).
+		Return(components.LookupActorRes{HostID: "host-b", Address: "127.0.0.1:8081", IdleTimeout: time.Minute}, nil).
+		Once()
+	provider.
+		On("ReleaseAlarmLease", mock.MatchedBy(testutil.MatchContextInterface), lease).
+		Return(nil).
+		Once()
+
+	host.executeAlarm(lease)
+	host.alarmWg.Wait()
+
+	// executeAlarm must release the foreign lease without creating a rogue ActiveActor in memory
+	assert.Zero(t, host.core.Actors.Len())
+}

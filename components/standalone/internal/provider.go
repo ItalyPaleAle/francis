@@ -383,8 +383,8 @@ func (p *Provider) stageClearActorAlarmLeases(actors []ActorKey, skipAlarmIDs ma
 			}
 		}
 
+		// Preserve LeaseID while clearing LeaseExpiration so only the interrupted execution can finalize after a self-halt
 		updated := a.Clone()
-		updated.LeaseID = nil
 		updated.LeaseExpiration = nil
 		updates = append(updates, alarmUpdate{key: k, updated: updated})
 		changes.Alarms.Set = append(changes.Alarms.Set, AlarmChange{Key: updated.ID, Value: updated})

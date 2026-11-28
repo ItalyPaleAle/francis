@@ -286,10 +286,18 @@ func (h *Host) executeActiveAlarm(lease *ref.AlarmLease) {
 
 	aRef := lease.ActorRef()
 
-	// Confirm the actor is still placed on this host before running the occurrence (the lookup has a cache)
-	placement, lookupErr := h.lookupActor(ctx, aRef, false, false)
-	if lookupErr != nil || !h.isLocal(placement) {
-		h.releaseForeignAlarm(ctx, lease, log, lookupErr)
+	// Validate the lease before resolving placement or instantiating the actor in memory so a stale or canceled lease never creates a rogue local activation
+	precheckCtx, precheckCancel := context.WithTimeout(ctx, h.providerRequestTimeout)
+	_, err := h.actorProvider.GetLeasedAlarm(precheckCtx, lease)
+	precheckCancel()
+	if errors.Is(err, components.ErrNoAlarm) {
+		return
+	}
+
+	// Claim local ownership authoritatively (bypassing cache on cold starts) before creating an ActiveActor in memory
+	err = h.core.ClaimLocal(ctx, h.resolver, aRef)
+	if err != nil {
+		h.releaseForeignAlarm(ctx, lease, log, err)
 		return
 	}
 
@@ -497,7 +505,7 @@ func (h *Host) deadLetterJob(ctx context.Context, lease *ref.AlarmLease, props r
 	// Keep a repeating job's recurrence alive by rescheduling its next occurrence as part of the dead-letter move
 	next, err := props.NextExecution(lease.ExecutionTime())
 	if err != nil {
-		log.Error("Failed to compute next execution for repeating job; recurrence will not continue", slog.Any("error", err))
+		log.Error("Failed to compute next execution for repeating job - recurrence will not continue", slog.Any("error", err))
 	} else if !next.IsZero() {
 		req.Reschedule = true
 		req.NextDueTime = next
@@ -522,11 +530,19 @@ func (h *Host) deadLetterJob(ctx context.Context, lease *ref.AlarmLease, props r
 // It is never itself dead-lettered: an error here is only logged, leaving the dead_jobs record in place
 func (h *Host) fireJobFailed(parentCtx context.Context, lease *ref.AlarmLease, method string, data []byte, jobErr error) {
 	jobID := lease.Key()
+	aRef := lease.ActorRef()
+
+	// Confirm the actor is still active on this host so a deactivated or migrated actor is not re-instantiated locally
+	err := h.claimActiveLocal(parentCtx, aRef)
+	if err != nil {
+		h.log.Debug("Skipping JobFailed hook: actor is not active on this host", slog.String("jobId", jobID), slog.Any("error", err))
+		return
+	}
 
 	// The hook is optional, so an actor that does not implement it is a no-op
-	err := h.core.RunJobFailed(parentCtx, lease.ActorRef(), jobID, method, data, jobErr)
+	err = h.core.RunJobFailed(parentCtx, aRef, jobID, method, data, jobErr)
 	if err != nil {
-		h.log.Warn("JobFailed hook returned an error; dead-letter record is kept", slog.String("jobId", jobID), slog.Any("error", err))
+		h.log.Warn("JobFailed hook returned an error - dead-letter record is kept", slog.String("jobId", jobID), slog.Any("error", err))
 	}
 }
 
@@ -556,7 +572,7 @@ func (h *Host) releaseForReroute(parentCtx context.Context, lease *ref.AlarmLeas
 // releaseForeignAlarm hands back the lease on an occurrence whose actor this host could not confirm it still owns
 // Releasing rather than letting the lease lapse lets the actor's current host pick the occurrence up on its next poll, instead of waiting out the remaining lease duration
 func (h *Host) releaseForeignAlarm(parentCtx context.Context, lease *ref.AlarmLease, log *slog.Logger, lookupErr error) {
-	if lookupErr != nil {
+	if lookupErr != nil && !errors.Is(lookupErr, actor.ErrActorNotHosted) {
 		log.WarnContext(parentCtx, "Could not confirm actor placement before executing alarm - skipping execution", slog.Any("error", lookupErr))
 	} else {
 		log.DebugContext(parentCtx, "Actor is no longer placed on this host - releasing alarm lease")
@@ -602,7 +618,7 @@ func (h *Host) completeAlarm(parentCtx context.Context, lease *ref.AlarmLease, l
 	if err != nil {
 		// The stored interval is corrupt
 		// Keep the alarm rather than silently deleting it
-		log.Error("Failed to compute next execution time for alarm; alarm will be kept", slog.Any("error", err))
+		log.Error("Failed to compute next execution time for alarm - alarm will be kept", slog.Any("error", err))
 		return false, nil
 	}
 
@@ -840,7 +856,7 @@ func (h *Host) SetAlarm(ctx context.Context, actorType string, actorID string, n
 	if lease != nil {
 		err = h.enqueueAlarms([]*ref.AlarmLease{lease})
 		if err != nil {
-			h.log.ErrorContext(ctx, "Failed to enqueue newly-created alarm; it will be fetched after the lease expires", slog.Any("error", err))
+			h.log.ErrorContext(ctx, "Failed to enqueue newly-created alarm -  it will be fetched after the lease expires", slog.Any("error", err))
 		}
 	}
 

@@ -114,6 +114,28 @@ func (h *Host) confirmLocal(parentCtx context.Context, aRef ref.ActorRef) error 
 	return nil
 }
 
+// claimActiveLocal verifies that an already-active actor is still owned by this host without allocating a new placement
+func (h *Host) claimActiveLocal(parentCtx context.Context, aRef ref.ActorRef) error {
+	if h.core.IsActiveAndAccepting(aRef) {
+		return nil
+	}
+
+	err := h.core.WaitForDeactivation(parentCtx, aRef)
+	if err != nil {
+		return err
+	}
+
+	ap, err := h.lookupActor(parentCtx, aRef, true, true)
+	if err != nil {
+		return err
+	}
+	if !h.isLocal(ap) {
+		return actor.ErrActorNotHosted
+	}
+
+	return nil
+}
+
 // isLocal reports whether the placement points at the current host
 func (h *Host) isLocal(ap *actorcore.Placement) bool {
 	// If the host ID is different from the current, the invocation is for a remote actor

@@ -2696,8 +2696,8 @@ func (s Suite) TestRemoveActor(t *testing.T) {
 		}
 		require.NotNil(t, foundAlarm, "alarm should still exist in database")
 
-		// But it should not have lease information anymore
-		assert.Nil(t, foundAlarm.LeaseID, "alarm should not have lease ID after actor removal")
+		// Lease expiration must be cleared while preserving the lease ID so only the interrupted execution can finalize
+		assert.NotNil(t, foundAlarm.LeaseID, "alarm should retain its interrupted lease ID after actor removal")
 		assert.Nil(t, foundAlarm.LeaseExp, "alarm should not have lease expiration after actor removal")
 	})
 }
@@ -5505,7 +5505,7 @@ func (s Suite) TestDeleteLeasedAlarm(t *testing.T) {
 		lease := leases[0]
 
 		// The actor halting itself from its own handler is what releases the lease
-		err = s.p.ReleaseAlarmLease(ctx, lease)
+		err = s.p.RemoveActor(ctx, lease.ActorRef(), components.RemoveActorOpts{})
 		require.NoError(t, err)
 
 		err = s.p.DeleteLeasedAlarm(ctx, lease)
@@ -6817,6 +6817,32 @@ func (s Suite) TestJobs(t *testing.T) {
 					return held
 				},
 				stillLive: false,
+			},
+			{
+				name: "an expired lease after a later holder released its lease",
+				lease: func(t *testing.T, ctx context.Context, held *ref.AlarmLease) *ref.AlarmLease {
+					_ = s.p.AdvanceClock(35 * time.Second) //nolint:errcheck
+					err := s.p.UpdateActorHost(ctx, jobHost, components.UpdateActorHostReq{UpdateLastHealthCheck: true})
+					require.NoError(t, err)
+					_ = s.p.AdvanceClock(35 * time.Second) //nolint:errcheck
+					err = s.p.UpdateActorHost(ctx, jobHost, components.UpdateActorHostReq{UpdateLastHealthCheck: true})
+					require.NoError(t, err)
+					nextLease := leaseFor(t, ctx, held.Key())
+					err = s.p.ReleaseAlarmLease(ctx, nextLease)
+					require.NoError(t, err)
+					return held
+				},
+				stillLive: true,
+			},
+			{
+				name: "an expired lease after the actor was removed",
+				lease: func(t *testing.T, ctx context.Context, held *ref.AlarmLease) *ref.AlarmLease {
+					_ = s.p.AdvanceClock(2 * time.Minute) //nolint:errcheck
+					err := s.p.RemoveActor(ctx, held.ActorRef(), components.RemoveActorOpts{})
+					require.NoError(t, err)
+					return held
+				},
+				stillLive: true,
 			},
 		}
 

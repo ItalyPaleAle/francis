@@ -641,11 +641,26 @@ func (m *Manager) lockAndInvokeLocal(ctx context.Context, resolver PlacementReso
 	return res, err
 }
 
+// ClaimLocal authoritatively claims an actor for this host before it is activated
+func (m *Manager) ClaimLocal(ctx context.Context, resolver PlacementResolver, r ref.ActorRef) error {
+	return m.claimLocal(ctx, resolver, r)
+}
+
+// IsActiveAndAccepting reports whether the actor is currently active in memory on this host and has not begun deactivating
+func (m *Manager) IsActiveAndAccepting(r ref.ActorRef) bool {
+	act, active := m.Actors.Get(r.String())
+	return active && act != nil && !act.deactivationStarted.Load() && !act.abandoned.Load()
+}
+
+// WaitForDeactivation blocks until any in-flight deactivation of the actor on this host finishes
+func (m *Manager) WaitForDeactivation(ctx context.Context, r ref.ActorRef) error {
+	return m.waitForDeactivation(ctx, r)
+}
+
 // claimLocal authoritatively claims an actor for this host before it is activated
 // An actor still accepting work here needs no claim, which keeps warm invocations free of a placement lookup
 func (m *Manager) claimLocal(ctx context.Context, resolver PlacementResolver, r ref.ActorRef) error {
-	act, active := m.Actors.Get(r.String())
-	if active && act != nil && !act.deactivationStarted.Load() {
+	if m.IsActiveAndAccepting(r) {
 		return nil
 	}
 

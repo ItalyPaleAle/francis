@@ -588,6 +588,8 @@ func (h *Host) setHostID(hostID string) {
 
 // removeActor removes an actor placement from the provider only if it is still placed on this host
 func (h *Host) removeActor(ctx context.Context, r ref.ActorRef) error {
+	h.invalidatePlacement(r)
+
 	hostID := h.HostID()
 	if hostID == "" {
 		return components.ErrNoActor

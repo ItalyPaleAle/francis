@@ -424,6 +424,8 @@ func (h *Host) HaltDeferred(actorType string, actorID string) {
 // removeActor notifies the runtime that an actor has been deactivated on this host
 // It is the RemoveActor seam the manager calls when an actor is halted or idle-deactivated
 func (h *Host) removeActor(ctx context.Context, r ref.ActorRef) error {
+	h.invalidatePlacement(r)
+
 	err := h.runtimeClient.RemoveActor(ctx, protocol.RemoveActorRequest{
 		ActorType: r.ActorType,
 		ActorID:   r.ActorID,

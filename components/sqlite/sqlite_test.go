@@ -140,7 +140,11 @@ func initTestProviderWithPrefix(t *testing.T, connString string, tablePrefix str
 	return s
 }
 
-func (s *SQLiteProvider) CleanupExpired(_ context.Context) error {
+func (s *SQLiteProvider) CleanupExpired(ctx context.Context) error {
+	err := s.clearExpiredAlarmLeases(ctx, s.db, s.clock.Now().UnixMilli())
+	if err != nil {
+		return err
+	}
 	return s.gc.CleanupExpired()
 }
 

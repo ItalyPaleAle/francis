@@ -1835,9 +1835,9 @@ func TestPersistHook_RemoveActor(t *testing.T) {
 	require.Equal(t, "myactor", changes.ActiveActors.Delete[0].ActorType)
 	require.Equal(t, "actor1", changes.ActiveActors.Delete[0].ActorID)
 
-	// Verify Alarms.Set (lease released)
+	// Verify Alarms.Set (lease expiration cleared while preserving lease ID for self-halt finalization)
 	require.Len(t, changes.Alarms.Set, 1, "Expected 1 alarm lease to be released")
-	require.Nil(t, changes.Alarms.Set[0].Value.LeaseID)
+	require.NotNil(t, changes.Alarms.Set[0].Value.LeaseID)
 	require.Nil(t, changes.Alarms.Set[0].Value.LeaseExpiration)
 }
 

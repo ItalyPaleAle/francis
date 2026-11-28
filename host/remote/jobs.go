@@ -162,7 +162,17 @@ func (h *Host) DeleteJob(ctx context.Context, actorType string, actorID string, 
 // jobFailed runs an actor's optional JobFailed hook at the runtime's request, after the runtime has dead-lettered a job
 // It is best-effort: an actor that does not implement the hook is a no-op, and the dead-letter record is already the source of truth
 func (h *Host) jobFailed(ctx context.Context, req protocol.JobFailedRequest) *protocol.Error {
-	err := h.core.RunJobFailed(ctx, ref.NewActorRef(req.ActorType, req.ActorID), req.JobID, req.Method, req.Data, errors.New(req.ErrorMessage))
+	aRef := ref.NewActorRef(req.ActorType, req.ActorID)
+	if h.runtimeClient != nil {
+		err := h.claimActiveLocal(ctx, aRef)
+		if errors.Is(err, actor.ErrActorNotActive) || errors.Is(err, actor.ErrActorNotHosted) {
+			return nil
+		} else if err != nil {
+			return actorcore.InvokeErrorToProtocol(err)
+		}
+	}
+
+	err := h.core.RunJobFailed(ctx, aRef, req.JobID, req.Method, req.Data, errors.New(req.ErrorMessage))
 	if err != nil {
 		return actorcore.InvokeErrorToProtocol(err)
 	}

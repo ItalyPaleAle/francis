@@ -591,9 +591,9 @@ func (s *SQLiteProvider) ListAlarms(ctx context.Context, req components.ListAlar
 	rows, err := s.db.QueryContext(queryCtx,
 		`SELECT
 			a.alarm_id, a.actor_type, a.actor_id, a.alarm_name, a.alarm_due_time, a.alarm_interval, a.alarm_ttl_time,
-			CASE WHEN a.alarm_lease_id IS NOT NULL AND a.alarm_lease_expiration_time >= ?
+			CASE WHEN a.alarm_lease_id IS NOT NULL AND a.alarm_lease_expiration_time IS NOT NULL AND a.alarm_lease_expiration_time >= ?
 				THEN a.alarm_lease_expiration_time END,
-			CASE WHEN a.alarm_lease_id IS NOT NULL AND a.alarm_lease_expiration_time >= ?
+			CASE WHEN a.alarm_lease_id IS NOT NULL AND a.alarm_lease_expiration_time IS NOT NULL AND a.alarm_lease_expiration_time >= ?
 				THEN h.host_id END
 		FROM `+s.tablePrefix+`alarms AS a
 		LEFT JOIN `+s.tablePrefix+`active_actors AS aa ON

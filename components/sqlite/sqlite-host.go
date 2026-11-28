@@ -29,6 +29,12 @@ func (s *SQLiteProvider) RegisterHost(ctx context.Context, req components.Regist
 	_, oErr := sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
 		now := s.clock.Now().UnixMilli()
 
+		// Clear expired alarm leases before deleting failed hosts so the AFTER DELETE trigger on active_actors only preserves live lease IDs
+		err = s.clearExpiredAlarmLeases(ctx, tx, now)
+		if err != nil {
+			return zero, err
+		}
+
 		// To start, we need to delete any actor host with the same address that has not sent a health check in the maximum allotted time
 		// We need to do this because the hosts table has a unique index on the address, so two apps can't have the same address
 		// If it's the same app that's restarted after a crash, then it will be able to re-register once the health checks have timed out
@@ -112,6 +118,12 @@ func (s *SQLiteProvider) reattachHost(ctx context.Context, req components.Regist
 	_, oErr := sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (zero struct{}, err error) {
 		now := s.clock.Now().UnixMilli()
 		cutoff := now - s.cfg.HostHealthCheckDeadline.Milliseconds()
+
+		// Clear expired alarm leases before deleting failed hosts so the AFTER DELETE trigger on active_actors only preserves live lease IDs
+		err = s.clearExpiredAlarmLeases(ctx, tx, now)
+		if err != nil {
+			return zero, err
+		}
 
 		// Clean up unhealthy hosts
 		queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
@@ -412,34 +424,46 @@ func (s *SQLiteProvider) setActorHostDraining(ctx context.Context, hostID string
 }
 
 func (s *SQLiteProvider) UnregisterHost(ctx context.Context, hostID string, opts components.UnregisterHostOpts) error {
-	// Deleting from the hosts table causes all actors to be deactivate
-	// With a session ID, only the registration that session still owns is deleted
-	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
-	now := s.clock.Now().UnixMilli()
-	var hostActive bool
-	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	err := s.db.
-		QueryRowContext(queryCtx,
-			`DELETE FROM `+s.tablePrefix+`hosts
-			WHERE
-				host_id = ?
-				AND (? = '' OR host_session_id = ?)
-			RETURNING host_last_health_check >= ?`,
-			hostID,
-			opts.SessionID,
-			opts.SessionID,
-			now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
-		).
-		Scan(&hostActive)
-	if errors.Is(err, sql.ErrNoRows) {
-		// Nothing was deleted: tell a registration owned by another session apart from one that doesn't exist
-		if opts.SessionID != "" {
-			return s.unregisterHostMissError(ctx, hostID)
+	// Deleting from the hosts table cascades to active_actors, so clearing expired alarm leases and deleting the host share one transaction
+	// Returning hostActive with a nil error commits the garbage-collection delete of an unhealthy host before surfacing ErrHostUnregistered below
+	hostActive, err := sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (bool, error) {
+		now := s.clock.Now().UnixMilli()
+		rErr := s.clearExpiredAlarmLeases(ctx, tx, now)
+		if rErr != nil {
+			return false, rErr
 		}
-		return components.ErrHostUnregistered
-	} else if err != nil {
-		return fmt.Errorf("error executing query: %w", err)
+
+		queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+		defer cancel()
+		var active bool
+		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+		rErr = tx.
+			QueryRowContext(queryCtx,
+				`DELETE FROM `+s.tablePrefix+`hosts
+				WHERE
+					host_id = ?
+					AND (? = '' OR host_session_id = ?)
+				RETURNING host_last_health_check >= ?`,
+				hostID,
+				opts.SessionID,
+				opts.SessionID,
+				now-s.cfg.HostHealthCheckDeadline.Milliseconds(),
+			).
+			Scan(&active)
+		if errors.Is(rErr, sql.ErrNoRows) {
+			// Nothing was deleted: tell a registration owned by another session apart from one that does not exist
+			if opts.SessionID != "" {
+				return false, s.unregisterHostMissError(ctx, tx, hostID)
+			}
+			return false, components.ErrHostUnregistered
+		} else if rErr != nil {
+			return false, fmt.Errorf("error executing query: %w", rErr)
+		}
+
+		return active, nil
+	})
+	if err != nil {
+		return err
 	}
 
 	// If hostActive is false, there was a host, but it was unhealthy
@@ -453,12 +477,12 @@ func (s *SQLiteProvider) UnregisterHost(ctx context.Context, hostID string, opts
 
 // unregisterHostMissError returns the error for a conditional UnregisterHost that deleted nothing
 // A host that still exists is owned by a different session, while a missing one was already unregistered
-func (s *SQLiteProvider) unregisterHostMissError(ctx context.Context, hostID string) error {
+func (s *SQLiteProvider) unregisterHostMissError(ctx context.Context, db querier, hostID string) error {
 	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	var exists bool
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	err := s.db.
+	err := db.
 		QueryRowContext(queryCtx,
 			`SELECT EXISTS (SELECT 1 FROM `+s.tablePrefix+`hosts WHERE host_id = ?)`,
 			hostID,
@@ -706,6 +730,11 @@ func (s *SQLiteProvider) lookupActorInTransaction(ctx context.Context, tx *sql.T
 	FROM lookup_result
 	WHERE host_id IS NOT NULL;`
 
+	err = s.clearExpiredAlarmLeases(ctx, tx, now)
+	if err != nil {
+		return components.LookupActorRes{}, err
+	}
+
 	// Single atomic query that:
 	// 1. First checks for existing active actor on healthy host
 	// 2. If not found, finds available host and atomically inserts the actor
@@ -747,38 +776,67 @@ func (s *SQLiteProvider) lookupActorInTransaction(ctx context.Context, tx *sql.T
 }
 
 func (s *SQLiteProvider) RemoveActor(ctx context.Context, ref ref.ActorRef, opts components.RemoveActorOpts) error {
-	queryCtx, queryCancel := context.WithTimeout(ctx, s.timeout)
-	defer queryCancel()
+	// Clearing expired alarm leases and deleting the active_actors row run in one transaction so no lease expires between the two statements
+	removed, err := sqltransactions.ExecuteInTransaction(ctx, s.log, s.db, func(ctx context.Context, tx *sql.Tx) (bool, error) {
+		now := s.clock.Now().UnixMilli()
+		rErr := s.clearExpiredAlarmLeases(ctx, tx, now)
+		if rErr != nil {
+			return false, rErr
+		}
 
-	var (
-		res sql.Result
-		err error
-	)
-	if opts.HostID != "" {
-		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-		res, err = s.db.ExecContext(queryCtx,
-			`DELETE FROM `+s.tablePrefix+`active_actors
-			WHERE actor_type = ? AND actor_id = ? AND host_id = ?`,
-			ref.ActorType, ref.ActorID, opts.HostID,
-		)
-	} else {
-		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-		res, err = s.db.ExecContext(queryCtx,
-			`DELETE FROM `+s.tablePrefix+`active_actors
-			WHERE actor_type = ? AND actor_id = ?`,
-			ref.ActorType, ref.ActorID,
-		)
-	}
-	if err != nil {
-		return fmt.Errorf("error removing actor: %w", err)
-	}
+		queryCtx, queryCancel := context.WithTimeout(ctx, s.timeout)
+		defer queryCancel()
 
-	count, err := res.RowsAffected()
+		var res sql.Result
+		if opts.HostID != "" {
+			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+			res, rErr = tx.ExecContext(queryCtx,
+				`DELETE FROM `+s.tablePrefix+`active_actors
+				WHERE actor_type = ? AND actor_id = ? AND host_id = ?`,
+				ref.ActorType, ref.ActorID, opts.HostID,
+			)
+		} else {
+			// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+			res, rErr = tx.ExecContext(queryCtx,
+				`DELETE FROM `+s.tablePrefix+`active_actors
+				WHERE actor_type = ? AND actor_id = ?`,
+				ref.ActorType, ref.ActorID,
+			)
+		}
+		if rErr != nil {
+			return false, fmt.Errorf("error removing actor: %w", rErr)
+		}
+
+		count, rErr := res.RowsAffected()
+		if rErr != nil {
+			return false, fmt.Errorf("error counting affected rows: %w", rErr)
+		}
+
+		return count > 0, nil
+	})
 	if err != nil {
-		return fmt.Errorf("error counting affected rows: %w", err)
+		return err
 	}
-	if count == 0 {
+	if !removed {
 		return components.ErrNoActor
+	}
+
+	return nil
+}
+
+// clearExpiredAlarmLeases drops lease IDs on already-expired alarms before active_actors deletions run, so the AFTER DELETE trigger only retains lease IDs for leases that were live when interrupted
+func (s *SQLiteProvider) clearExpiredAlarmLeases(ctx context.Context, db querier, now int64) error {
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	_, err := db.ExecContext(queryCtx,
+		`UPDATE `+s.tablePrefix+`alarms
+		SET alarm_lease_id = NULL, alarm_lease_expiration_time = NULL
+		WHERE alarm_lease_expiration_time IS NOT NULL AND alarm_lease_expiration_time < ?`,
+		now,
+	)
+	if err != nil {
+		return fmt.Errorf("error clearing expired alarm leases: %w", err)
 	}
 
 	return nil

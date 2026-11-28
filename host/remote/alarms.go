@@ -115,6 +115,15 @@ func (h *Host) executeAlarm(ctx context.Context, req protocol.ExecuteAlarmReques
 
 	aRef := ref.NewActorRef(req.ActorType, req.ActorID)
 
+	// Authoritatively confirm this host still owns the actor before instantiating a cold activation in memory
+	if h.runtimeClient != nil {
+		err := h.core.ClaimLocal(ctx, h.resolver, aRef)
+		if err != nil {
+			tracing.Fail(ctx, err.Error())
+			return protocol.ExecuteAlarmResponse{}, actorcore.InvokeErrorToProtocol(err)
+		}
+	}
+
 	// Track when the alarm executed so the runtime can record it on the lease
 	var executionTime int64
 

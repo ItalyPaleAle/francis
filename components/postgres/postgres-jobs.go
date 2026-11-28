@@ -263,23 +263,21 @@ func (p *PostgresProvider) endJob(ctx context.Context, lease *ref.AlarmLease, re
 	// The insert is an upsert because a repeating job's occurrence can end twice under the same ID
 	if !req.reschedule {
 		// Notes on the query:
-		// A job handler that halts its own actor is the common case for a worker, and deactivating an actor drops the leases of its alarms so another host can pick them up
-		// For the occurrence being finalized right now that release must not undo the finalization, so a lease this execution owns and a lease that was released both count
-		// A lease that merely expired keeps its id, and one another replica took holds its own id, so neither is matched here
-		// An unleased row is only this execution's occurrence while it still carries the due time this execution leased, since a recurrence's next occurrence is always scheduled later
+		// Deactivating an actor clears alarm_lease_expiration_time to NULL while keeping alarm_lease_id intact
+		// Requiring alarm_lease_id = $2 lets a self-halting worker finalize its own occurrence while preventing any stale expired lease holder from matching an unleased row after ReleaseAlarmLease
 		// #nosec G202 -- the only concatenated values are static table prefixes, not user input
 		res, err := p.db.Exec(queryCtx, `
 			WITH deleted AS (
 				DELETE FROM `+p.tablePrefix+`alarms
 				WHERE
 					alarm_id = $1
+					AND alarm_lease_id = $2
 					AND (
 						(
-							alarm_lease_id = $2
-							AND alarm_lease_expiration_time IS NOT NULL
+							alarm_lease_expiration_time IS NOT NULL
 							AND alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')
 						)
-						OR (alarm_lease_id IS NULL AND alarm_due_time = $7)
+						OR (alarm_lease_expiration_time IS NULL AND alarm_due_time = $7)
 					)
 				RETURNING actor_type, actor_id, job_method, alarm_data, alarm_due_time, alarm_interval, alarm_cron
 			)
@@ -319,8 +317,8 @@ func (p *PostgresProvider) endJob(ctx context.Context, lease *ref.AlarmLease, re
 
 	// How this query works:
 	// 1. prior (SELECT ... FOR UPDATE) locks the alarms row up front and captures its pre-update alarm_due_time, since UPDATE ... RETURNING exposes the post-update columns ($9) rather than the original due time that terminal_jobs records
-	// 2. updated advances alarm_due_time to the next occurrence ($9) and clears alarm_lease_id and alarm_lease_expiration_time, matching either a live lease owned by this execution ($2) or an unleased row that still carries the due time this execution leased ($8) when the job's own actor halted mid-turn and released its alarm leases
-	//    A lease that merely expired keeps its old alarm_lease_id, and one taken over by another replica holds a different alarm_lease_id, so neither matches here
+	// 2. updated advances alarm_due_time to the next occurrence ($9) and clears alarm_lease_id and alarm_lease_expiration_time, requiring alarm_lease_id = $2 and matching either a live lease or one whose alarm_lease_expiration_time was cleared to NULL when the job's own actor halted mid-turn while alarm_due_time still equals $8
+	//    Requiring alarm_lease_id = $2 rejects expired leases, leases taken over by another replica, and rows explicitly unleased via ReleaseAlarmLease
 	// 3. The outer INSERT writes the finished occurrence into terminal_jobs under occurrenceID ($7) using prior.alarm_due_time as original_due, retaining alarm_data only when dead-lettered ($3 = 'dead')
 	//    When the lease check in updated matches nothing, updated yields zero rows, the INSERT affects zero rows, and ErrNoAlarm is returned
 	// #nosec G202 -- the only concatenated values are static table prefixes, not user input
@@ -339,13 +337,13 @@ func (p *PostgresProvider) endJob(ctx context.Context, lease *ref.AlarmLease, re
 			) AS prior
 			WHERE
 				a.alarm_id = prior.alarm_id
+				AND a.alarm_lease_id = $2
 				AND (
 					(
-						a.alarm_lease_id = $2
-						AND a.alarm_lease_expiration_time IS NOT NULL
+						a.alarm_lease_expiration_time IS NOT NULL
 						AND a.alarm_lease_expiration_time >= (now() AT TIME ZONE 'utc')
 					)
-					OR (a.alarm_lease_id IS NULL AND a.alarm_due_time = $8)
+					OR (a.alarm_lease_expiration_time IS NULL AND a.alarm_due_time = $8)
 				)
 			RETURNING
 				a.actor_type, a.actor_id, a.job_method, a.alarm_data,

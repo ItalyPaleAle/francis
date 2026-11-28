@@ -285,21 +285,19 @@ func (s *SQLiteProvider) endJob(ctx context.Context, lease *ref.AlarmLease, req 
 		// #nosec G202 -- the only concatenated value is the static table prefix, not user input
 		txErr := tx.
 			// Notes on the query:
-			// A job handler that halts its own actor is the common case for a worker, and deactivating an actor drops the leases of its alarms so another host can pick them up
-			// For the occurrence being finalized right now that release must not undo the finalization, so a lease this execution owns and a lease that was released both count
-			// A lease that merely expired keeps its id, and one another replica took holds its own id, so neither is matched here
-			// An unleased row is only this execution's occurrence while it still carries the due time this execution leased, since a recurrence's next occurrence is always scheduled later
+			// Deactivating an actor clears alarm_lease_expiration_time to NULL while keeping alarm_lease_id intact
+			// Requiring alarm_lease_id = ? lets a self-halting worker finalize its own occurrence while preventing any stale expired lease holder from matching an unleased row after ReleaseAlarmLease
 			QueryRowContext(ctx, `
 				DELETE FROM `+s.tablePrefix+`alarms
 				WHERE
 					alarm_id = ?
+					AND alarm_lease_id = ?
 					AND (
 						(
-							alarm_lease_id = ?
-							AND alarm_lease_expiration_time IS NOT NULL
+							alarm_lease_expiration_time IS NOT NULL
 							AND alarm_lease_expiration_time >= ?
 						)
-						OR (alarm_lease_id IS NULL AND alarm_due_time = ?)
+						OR (alarm_lease_expiration_time IS NULL AND alarm_due_time = ?)
 					)
 				RETURNING
 					actor_type, actor_id, alarm_name, job_method, alarm_data,
