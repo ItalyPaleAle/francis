@@ -267,7 +267,7 @@ func (rt *Runtime) serveRuntimePeerSession(parentCtx context.Context, session *w
 func (rt *Runtime) handleRuntimePeerStream(ctx context.Context, stream *webtransport.Stream) {
 	defer wt.CloseStream(stream)
 
-	req, err := protocol.ReadMessageWithTimeout(stream, requestReadTimeout)
+	req, err := protocol.ReadMessageWithTimeout(stream, requestReadTimeout, protocol.MaxMessageSize)
 	if err != nil {
 		return
 	}

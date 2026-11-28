@@ -202,7 +202,7 @@ func startRejectingRuntime(t *testing.T, code protocol.ErrorCode) string {
 		if sErr != nil {
 			return
 		}
-		req, rErr := protocol.ReadMessageWithTimeout(stream, 5*time.Second)
+		req, rErr := protocol.ReadMessageWithTimeout(stream, 5*time.Second, protocol.MaxMessageSize)
 		if rErr != nil {
 			_ = stream.Close()
 			return

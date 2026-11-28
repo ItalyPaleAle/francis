@@ -96,13 +96,30 @@ func (rt *Runtime) caBundlePEM() [][]byte {
 // verifyHostClientCert validates the client certificate presented on an mTLS reconnect and returns the host ID from its SPIFFE identity
 func (rt *Runtime) verifyHostClientCert(c *hostConn) (string, error) {
 	state := c.session.SessionState().ConnectionState.TLS
+	return rt.verifyHostTLSState(&state)
+}
+
+// hasValidHostTLS reports whether the HTTP/3 connection already presented a valid cluster-CA host client certificate during the TLS handshake
+func (rt *Runtime) hasValidHostTLS(state *tls.ConnectionState) bool {
+	if state == nil {
+		return false
+	}
+
+	_, err := rt.verifyHostTLSState(state)
+	return err == nil
+}
+
+func (rt *Runtime) verifyHostTLSState(state *tls.ConnectionState) (string, error) {
 	if len(state.PeerCertificates) == 0 {
 		return "", errors.New("no client certificate presented")
 	}
 
 	// Verify the leaf chains to one of the trust anchors, which may include the old CA during a root rotation
 	leaf := state.PeerCertificates[0]
-	pool := ca.NewCertPool(rt.cas)
+	pool := rt.caPool
+	if pool == nil {
+		pool = ca.NewCertPool(rt.cas)
+	}
 	_, err := leaf.Verify(x509.VerifyOptions{
 		Roots:     pool,
 		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},

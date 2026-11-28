@@ -6837,8 +6837,12 @@ func (s Suite) TestJobs(t *testing.T) {
 			{
 				name: "an expired lease after the actor was removed",
 				lease: func(t *testing.T, ctx context.Context, held *ref.AlarmLease) *ref.AlarmLease {
-					_ = s.p.AdvanceClock(2 * time.Minute) //nolint:errcheck
-					err := s.p.RemoveActor(ctx, held.ActorRef(), components.RemoveActorOpts{})
+					// Refresh jobHost halfway through so the 1m alarm lease expires at 75s while jobHost stays healthy against background host GC
+					_ = s.p.AdvanceClock(45 * time.Second) //nolint:errcheck
+					err := s.p.UpdateActorHost(ctx, jobHost, components.UpdateActorHostReq{UpdateLastHealthCheck: true})
+					require.NoError(t, err)
+					_ = s.p.AdvanceClock(30 * time.Second) //nolint:errcheck
+					err = s.p.RemoveActor(ctx, held.ActorRef(), components.RemoveActorOpts{})
 					require.NoError(t, err)
 					return held
 				},

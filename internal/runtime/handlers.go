@@ -25,7 +25,7 @@ import (
 // lookupCacheMaxTTL caps how long a placement lookup is cached at the runtime
 const lookupCacheMaxTTL = 5 * time.Second
 
-// registrationReadTimeout bounds the registration handshake read more tightly than a regular request, since a new session must register promptly before it is allowed to do anything else
+// registrationReadTimeout bounds accepting and reading the registration handshake more tightly than a regular request
 const registrationReadTimeout = 10 * time.Second
 
 // registrationErrorAckTimeout bounds how long the runtime waits for a rejected host to read its registration error before closing the session
@@ -38,10 +38,20 @@ type cachedPlacement struct {
 	IdleTimeoutMs int64
 }
 
+func (rt *Runtime) registrationTimeout() time.Duration {
+	if rt.registrationTimeoutOverride > 0 {
+		return rt.registrationTimeoutOverride
+	}
+	return registrationReadTimeout
+}
+
 // handleRegistration performs the registration handshake on the first stream of a session
 // It returns true if the host was successfully registered
 func (rt *Runtime) handleRegistration(ctx context.Context, c *hostConn) bool {
-	stream, err := c.session.AcceptStream(ctx)
+	regTimeout := rt.registrationTimeout()
+	acceptCtx, acceptCancel := context.WithTimeout(ctx, regTimeout)
+	stream, err := c.session.AcceptStream(acceptCtx)
+	acceptCancel()
 	if err != nil {
 		return false
 	}
@@ -54,7 +64,7 @@ func (rt *Runtime) handleRegistration(ctx context.Context, c *hostConn) bool {
 		return false
 	}
 
-	req, err := protocol.ReadMessageWithTimeout(stream, registrationReadTimeout)
+	req, err := protocol.ReadMessageWithTimeout(stream, regTimeout, protocol.MaxHandshakeMessageSize)
 	if err != nil {
 		return false
 	}
@@ -139,13 +149,18 @@ func (rt *Runtime) handleAuthBegin(ctx context.Context, stream *webtransport.Str
 		writeRegistrationError(ctx, stream, req.ErrorReply(protocol.NewError(protocol.ErrCodeInternal, "failed to encode challenge")))
 		return nil, nil, false
 	}
+
+	regTimeout := rt.registrationTimeout()
+	_ = stream.SetWriteDeadline(time.Now().Add(regTimeout))
 	err = protocol.WriteMessage(stream, challenge)
 	if err != nil {
 		return nil, nil, false
 	}
 
+	_ = stream.SetWriteDeadline(time.Time{})
+
 	// Read the follow-up registration carrying the host's proof
-	regReq, err := protocol.ReadMessageWithTimeout(stream, registrationReadTimeout)
+	regReq, err := protocol.ReadMessageWithTimeout(stream, regTimeout, protocol.MaxHandshakeMessageSize)
 	if err != nil {
 		return nil, nil, false
 	}

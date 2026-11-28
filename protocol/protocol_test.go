@@ -103,7 +103,7 @@ func TestReadMessageWithTimeout(t *testing.T) {
 
 		// Nothing is ever written, so the read must be abandoned once the deadline elapses
 		start := time.Now()
-		_, err := ReadMessageWithTimeout(server, 100*time.Millisecond)
+		_, err := ReadMessageWithTimeout(server, 100*time.Millisecond, MaxMessageSize)
 		require.Error(t, err)
 		assert.GreaterOrEqual(t, time.Since(start), 100*time.Millisecond)
 	})
@@ -121,7 +121,7 @@ func TestReadMessageWithTimeout(t *testing.T) {
 		}()
 
 		// The first frame arrives within the short deadline
-		got, err := ReadMessageWithTimeout(server, 100*time.Millisecond)
+		got, err := ReadMessageWithTimeout(server, 100*time.Millisecond, MaxMessageSize)
 		require.NoError(t, err)
 		assert.Equal(t, KindHealthCheck, got.Kind)
 
@@ -129,6 +129,22 @@ func TestReadMessageWithTimeout(t *testing.T) {
 		got2, err := ReadMessage(server)
 		require.NoError(t, err)
 		assert.Equal(t, KindGetState, got2.Kind)
+	})
+
+	t.Run("rejects frame exceeding maxSize", func(t *testing.T) {
+		client, server := net.Pipe()
+		defer client.Close()
+		defer server.Close()
+
+		go func() {
+			var hdr [4]byte
+			binary.BigEndian.PutUint32(hdr[:], 1025)
+			_, _ = client.Write(hdr[:])
+		}()
+
+		_, err := ReadMessageWithTimeout(server, time.Second, 1024)
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "exceeds maximum 1024")
 	})
 }
 

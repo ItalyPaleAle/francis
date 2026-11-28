@@ -24,16 +24,16 @@ type Stream interface {
 	SetDeadline(t time.Time) error
 }
 
-// ReadMessageWithTimeout reads a single inbound envelope from a freshly accepted stream, bounding the read with a deadline
-// This stops a stalled or trickling peer from pinning a goroutine and read buffer on an inbound frame that never completes
+// ReadMessageWithTimeout reads a single inbound envelope up to maxSize bytes from a freshly accepted stream, bounding the read with a deadline
+// Passing zero or a value above MaxMessageSize uses MaxMessageSize
 // The deadline is cleared once the frame is read, so it does not bound handler execution or a trailing streamed body on the same stream
-func ReadMessageWithTimeout(stream Stream, timeout time.Duration) (*Envelope, error) {
+func ReadMessageWithTimeout(stream Stream, timeout time.Duration, maxSize uint32) (*Envelope, error) {
 	err := stream.SetDeadline(time.Now().Add(timeout))
 	if err != nil {
 		return nil, err
 	}
 
-	e, err := ReadMessage(stream)
+	e, err := readMessage(stream, maxSize)
 	if err != nil {
 		return nil, err
 	}

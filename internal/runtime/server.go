@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -38,7 +39,8 @@ type Runtime struct {
 	serverTLSConfig *tls.Config
 
 	// cas is the CA bundle derived from the runtime PSKs, index 0 being the primary used to mint new certificates
-	cas []*ca.CA
+	cas    []*ca.CA
+	caPool *x509.CertPool
 	// runtimeID identifies this runtime in its server certificate
 	runtimeID string
 	// workloadCertTTL is the lifetime of issued host workload certificates
@@ -52,11 +54,15 @@ type Runtime struct {
 	// bootstrapJWT validates host bootstrap tokens, set when bootstrapMethod is "jwt"
 	bootstrapJWT *bootstrapauth.JWTValidator
 
-	hostHealthCheckDeadline time.Duration
-	alarmsPollInterval      time.Duration
-	providerRequestTimeout  time.Duration
-	alarmExecutionTimeout   time.Duration
-	shutdownGracePeriod     time.Duration
+	hostHealthCheckDeadline     time.Duration
+	alarmsPollInterval          time.Duration
+	providerRequestTimeout      time.Duration
+	alarmExecutionTimeout       time.Duration
+	shutdownGracePeriod         time.Duration
+	registrationTimeoutOverride time.Duration
+
+	// unauthLimiter bounds concurrent pre-authentication registration handshakes per IP and globally while allowing mTLS-authenticated reconnects through unimpeded
+	unauthLimiter *unauthHandshakeLimiter
 
 	// placementCache holds short-lived actor placement lookups to reduce provider load
 	// A nil cache disables runtime-side caching
@@ -164,6 +170,7 @@ func NewRuntime(provider components.ActorProvider, opts ...RuntimeOption) (*Runt
 		bind:                    options.bind,
 		serverTLSConfig:         serverTLSConfig,
 		cas:                     cas,
+		caPool:                  ca.NewCertPool(cas),
 		runtimeID:               runtimeID,
 		workloadCertTTL:         options.workloadCertTTL,
 		bootstrapMethod:         bootstrapMethod,
@@ -174,6 +181,7 @@ func NewRuntime(provider components.ActorProvider, opts ...RuntimeOption) (*Runt
 		providerRequestTimeout:  options.providerRequestTimeout,
 		alarmExecutionTimeout:   options.alarmExecutionTimeout,
 		shutdownGracePeriod:     options.shutdownGracePeriod,
+		unauthLimiter:           newUnauthHandshakeLimiter(defaultMaxUnauthHandshakes, defaultMaxUnauthHandshakesPerIP),
 		activeAlarms:            make(map[string]struct{}),
 		retryingAlarms:          make(map[string]struct{}),
 		leasedAlarms:            make(map[string]*ref.AlarmLease),
@@ -288,16 +296,39 @@ func (rt *Runtime) runServer(ctx context.Context) error {
 
 	// WebTransport endpoint for host sessions
 	mux.HandleFunc(protocol.RuntimeConnectPath, func(w http.ResponseWriter, r *http.Request) {
+		// Hosts reconnecting with a valid cluster-CA client certificate are already authenticated at TLS time and bypass the unauthenticated handshake limiter
+		var (
+			attachEvict func(func())
+			releaseSlot func()
+		)
+		if !rt.hasValidHostTLS(r.TLS) && rt.unauthLimiter != nil {
+			var admitted bool
+			attachEvict, releaseSlot, admitted = rt.unauthLimiter.admit(r.RemoteAddr)
+			if !admitted {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+		}
+
 		session, rErr := wtServer.Upgrade(w, r)
 		if rErr != nil {
+			if releaseSlot != nil {
+				releaseSlot()
+			}
+
 			rt.log.WarnContext(r.Context(), "Failed to upgrade WebTransport session", slog.Any("error", rErr))
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		if attachEvict != nil {
+			attachEvict(func() {
+				_ = session.CloseWithError(sessionErrorSuperseded, "registration timed out")
+			})
+		}
 
 		// Track each session so shutdown waits for its stream handlers and provider cleanup
 		handlers.Go(func() {
-			rt.serveSession(ctx, session, &handlers)
+			rt.serveSession(ctx, session, &handlers, releaseSlot)
 		})
 	})
 
@@ -343,7 +374,7 @@ func (rt *Runtime) runServer(ctx context.Context) error {
 // serveSession serves a single host's WebTransport session
 // The first stream must carry the registration handshake, while subsequent streams are dispatched concurrently
 // handlers tracks streams together with their parent session, whose own count keeps further registrations safe until the accept loop ends
-func (rt *Runtime) serveSession(parentCtx context.Context, session *webtransport.Session, handlers *sync.WaitGroup) {
+func (rt *Runtime) serveSession(parentCtx context.Context, session *webtransport.Session, handlers *sync.WaitGroup, releaseRegistration func()) {
 	sessCtx := session.Context()
 
 	// Close the session if the runtime shuts down
@@ -360,9 +391,11 @@ func (rt *Runtime) serveSession(parentCtx context.Context, session *webtransport
 		log:     rt.log,
 	}
 
-	// Perform the registration handshake on the first stream
-	// This sets the host identity on c and registers it in the HostManager before any other stream is handled, so concurrent handlers never observe a half-registered connection
+	// Perform the registration handshake on the first stream and release the pre-auth handshake slot as soon as it finishes
 	ok := rt.handleRegistration(sessCtx, c)
+	if releaseRegistration != nil {
+		releaseRegistration()
+	}
 	if !ok {
 		_ = session.CloseWithError(sessionErrorSuperseded, "registration failed")
 		return
@@ -415,7 +448,7 @@ const requestReadTimeout = 30 * time.Second
 func (rt *Runtime) handleStream(ctx context.Context, c *hostConn, stream *webtransport.Stream) {
 	defer wt.CloseStream(stream)
 
-	req, err := protocol.ReadMessageWithTimeout(stream, requestReadTimeout)
+	req, err := protocol.ReadMessageWithTimeout(stream, requestReadTimeout, protocol.MaxMessageSize)
 	if err != nil {
 		// Nothing we can usefully respond with if we cannot even read the request
 		return

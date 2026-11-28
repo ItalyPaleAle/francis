@@ -69,7 +69,7 @@ func startScriptedRuntime(t *testing.T) *scriptedRuntime {
 		if rErr != nil {
 			return
 		}
-		req, rErr := protocol.ReadMessageWithTimeout(stream, 5*time.Second)
+		req, rErr := protocol.ReadMessageWithTimeout(stream, 5*time.Second, protocol.MaxMessageSize)
 		if rErr != nil {
 			_ = stream.Close()
 			return
@@ -94,7 +94,7 @@ func startScriptedRuntime(t *testing.T) *scriptedRuntime {
 			}
 			go func() {
 				defer s.Close()
-				in, rErr := protocol.ReadMessageWithTimeout(s, 5*time.Second)
+				in, rErr := protocol.ReadMessageWithTimeout(s, 5*time.Second, protocol.MaxMessageSize)
 				if rErr != nil {
 					return
 				}

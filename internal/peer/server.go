@@ -209,7 +209,7 @@ func (s *Server) handleStream(ctx context.Context, stream *webtransport.Stream, 
 
 	// Read the invocation metadata frame
 	// For stream invocation the request body follows it on the same stream
-	req, err := protocol.ReadMessageWithTimeout(stream, requestReadTimeout)
+	req, err := protocol.ReadMessageWithTimeout(stream, requestReadTimeout, protocol.MaxMessageSize)
 	if err != nil {
 		return
 	}

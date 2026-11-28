@@ -6,9 +6,11 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"errors"
 	"log/slog"
 	"net"
+	"net/http"
 	"testing"
 	"time"
 
@@ -696,5 +698,119 @@ func TestPSKBootstrapRejectsInvalidNonceAndWithholdsServerProof(t *testing.T) {
 		perr, isErr := resp.AsError()
 		require.True(t, isErr)
 		assert.Equal(t, protocol.ErrCodeUnauthorized, perr.Code)
+	})
+}
+
+func TestPreAuthRegistrationGuards(t *testing.T) {
+	rt, _, addr := runRuntimeServer(t)
+	rt.registrationTimeoutOverride = 120 * time.Millisecond
+
+	t.Run("evicts idle WebTransport session that never opens a stream", func(t *testing.T) {
+		session := dialRuntime(t, t.Context(), addr)
+
+		select {
+		case <-session.Context().Done():
+		case <-time.After(3 * time.Second):
+			t.Fatal("idle session without stream 0 was not closed after registration timeout")
+		}
+	})
+
+	t.Run("rejects oversized pre-auth frame header without allocating MaxMessageSize", func(t *testing.T) {
+		session := dialRuntime(t, t.Context(), addr)
+		stream, err := session.OpenStreamSync(t.Context())
+		require.NoError(t, err)
+		defer stream.Close()
+
+		var hdr [4]byte
+		binary.BigEndian.PutUint32(hdr[:], protocol.MaxHandshakeMessageSize+1)
+		_, err = stream.Write(hdr[:])
+		require.NoError(t, err)
+
+		select {
+		case <-session.Context().Done():
+		case <-time.After(3 * time.Second):
+			t.Fatal("session sending oversized pre-auth frame header was not closed")
+		}
+	})
+
+	t.Run("per-IP spam sheds unauthenticated floods while allowing mTLS reconnects and evicting oldest stalled slots", func(t *testing.T) {
+		// Bootstrap a legitimate host first so it holds a valid cluster-CA mTLS certificate
+		bootSession := dialRuntime(t, t.Context(), addr)
+		reg, priv := registerOnSessionWithKey(t, t.Context(), bootSession)
+		_ = bootSession.CloseWithError(0, "")
+		leaf, err := x509.ParseCertificate(reg.WorkloadCertDER)
+		require.NoError(t, err)
+		mtlsCert := tls.Certificate{
+			Certificate: [][]byte{reg.WorkloadCertDER},
+			PrivateKey:  priv,
+			Leaf:        leaf,
+		}
+
+		// Saturate 127.0.0.1's per-IP unauthenticated handshake budget
+		releases := make([]func(), 0, defaultMaxUnauthHandshakesPerIP)
+		for range defaultMaxUnauthHandshakesPerIP {
+			_, rel, admitted := rt.unauthLimiter.admit("127.0.0.1:40000")
+			require.True(t, admitted)
+			releases = append(releases, rel)
+		}
+		defer func() {
+			for _, rel := range releases {
+				rel()
+			}
+		}()
+
+		// Another unauthenticated upgrade from the spamming IP is shed with 503
+		dialer := wt.NewDialer(&tls.Config{
+			MinVersion:         tls.VersionTLS13,
+			InsecureSkipVerify: true, //nolint:gosec
+		})
+		defer func() {
+			_ = dialer.Close()
+		}()
+		rsp, _, dialErr := dialer.Dial(t.Context(), "https://"+addr+protocol.RuntimeConnectPath, nil)
+		if rsp != nil && rsp.Body != nil {
+			defer rsp.Body.Close()
+		}
+		require.Error(t, dialErr)
+		if rsp != nil {
+			assert.Equal(t, http.StatusServiceUnavailable, rsp.StatusCode)
+		}
+
+		// A legitimate mTLS-reconnecting host from the exact same IP bypasses the unauthenticated limiter completely
+		mtlsSession := dialRuntimeWithTLS(t, t.Context(), addr, &tls.Config{
+			MinVersion:         tls.VersionTLS13,
+			NextProtos:         []string{http3.NextProtoH3},
+			Certificates:       []tls.Certificate{mtlsCert},
+			InsecureSkipVerify: true, //nolint:gosec
+		})
+		defer func() {
+			_ = mtlsSession.CloseWithError(0, "")
+		}()
+		pub, ok := priv.Public().(ed25519.PublicKey)
+		require.True(t, ok)
+		reconn := reconnectOnSession(t, t.Context(), mtlsSession, reg.HostID, pub)
+		assert.Equal(t, reg.HostID, reconn.HostID)
+		assert.True(t, reconn.Reattached)
+
+		// When distinct source IPs fill the global unauthenticated cap, a new IP evicts the oldest stalled entry instead of starving
+		lim := newUnauthHandshakeLimiter(2, 2)
+		var firstEvicted bool
+		attach1, rel1, ok1 := lim.admit("198.51.100.1:1000")
+		require.True(t, ok1)
+		attach1(func() { firstEvicted = true })
+		defer rel1()
+
+		var secondEvicted bool
+		attach2, rel2, ok2 := lim.admit("198.51.100.2:1000")
+		require.True(t, ok2)
+		attach2(func() { secondEvicted = true })
+		defer rel2()
+
+		_, rel3, ok3 := lim.admit("198.51.100.3:1000")
+		require.True(t, ok3)
+		defer rel3()
+
+		assert.True(t, firstEvicted)
+		assert.False(t, secondEvicted)
 	})
 }

@@ -920,7 +920,7 @@ func (rc *runtimeClient) handleInbound(ctx context.Context, admissionCtx context
 	stopRead := context.AfterFunc(admissionCtx, func() {
 		stream.CancelRead(0)
 	})
-	req, err := protocol.ReadMessageWithTimeout(stream, inboundReadTimeout)
+	req, err := protocol.ReadMessageWithTimeout(stream, inboundReadTimeout, protocol.MaxMessageSize)
 	stopRead()
 	if err != nil {
 		// We cannot respond if we could not even read the request

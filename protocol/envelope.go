@@ -19,6 +19,8 @@ const (
 	// MaxMessageSize is the maximum size of a single framed envelope on a stream
 	// This bounds the in-memory buffer used when reading a message off the wire
 	MaxMessageSize = 16 << 20 // 16 MiB
+	// MaxHandshakeMessageSize bounds pre-authentication registration handshake frames so unauthenticated peers cannot trigger multi-megabyte buffer allocations
+	MaxHandshakeMessageSize = 64 << 10 // 64 KiB
 	// MaxPayloadSize is the maximum size of an envelope payload
 	// It leaves headroom below MaxMessageSize for the envelope metadata itself
 	MaxPayloadSize = MaxMessageSize - (64 << 10)
@@ -262,6 +264,14 @@ func WriteMessage(w io.Writer, e *Envelope) error {
 // ReadMessage reads a single length-prefixed envelope from r
 // It returns io.EOF if the stream is closed cleanly before any byte is read
 func ReadMessage(r io.Reader) (*Envelope, error) {
+	return readMessage(r, MaxMessageSize)
+}
+
+func readMessage(r io.Reader, maxSize uint32) (*Envelope, error) {
+	if maxSize == 0 || maxSize > MaxMessageSize {
+		maxSize = MaxMessageSize
+	}
+
 	var lenBuf [4]byte
 	_, err := io.ReadFull(r, lenBuf[:])
 	if err != nil {
@@ -269,8 +279,8 @@ func ReadMessage(r io.Reader) (*Envelope, error) {
 	}
 
 	n := binary.BigEndian.Uint32(lenBuf[:])
-	if n > MaxMessageSize {
-		return nil, fmt.Errorf("incoming message size %d exceeds maximum %d", n, MaxMessageSize)
+	if n > maxSize {
+		return nil, fmt.Errorf("incoming message size %d exceeds maximum %d", n, maxSize)
 	}
 
 	buf := make([]byte, n)
