@@ -256,12 +256,25 @@ func (c *Changes) Clone() *Changes {
 	return clone
 }
 
-// PersistHook is called after each operation to persist changes to the backing store.
+// PersistHook is called after each operation to persist changes to the backing store
 type PersistHook interface {
-	// PersistChanges persists the given changes to the backing store.
-	// The implementation should use a transaction to ensure atomicity.
-	// Returns an error if persistence fails (caller should rollback in-memory changes).
+	// PersistChanges persists the given changes to the backing store
+	// The implementation should use a transaction to ensure atomicity
+	// Returns an error if persistence fails (caller should rollback in-memory changes)
 	PersistChanges(ctx context.Context, changes *Changes) error
+}
+
+// RestoreTx represents a single rollback-safe database transaction spanning an entire Restore operation
+type RestoreTx interface {
+	PersistBatch(ctx context.Context, changes *Changes) error
+	Commit(ctx context.Context) error
+	Rollback(ctx context.Context)
+}
+
+// RestorePersistHook is an optional extension of PersistHook that executes wipe-and-load atomically inside one transaction
+type RestorePersistHook interface {
+	PersistHook
+	BeginRestore(ctx context.Context) (RestoreTx, error)
 }
 
 // NoopPersistHook is a no-op implementation used by StandaloneMemory.

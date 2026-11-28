@@ -16,6 +16,7 @@ var (
 	ErrNoJob                    = errors.New("job does not exist")
 	ErrNoState                  = errors.New("no state found for the actor")
 	ErrHostsConnected           = errors.New("one or more hosts are currently connected")
+	ErrStandaloneRuntimeActive  = errors.New("a standalone runtime is currently active against this database")
 	ErrClusterFull              = errors.New("the cluster has reached its maximum number of hosts")
 	ErrClusterLocked            = errors.New("the cluster is locked for exclusive access")
 	ErrMaxHostsMismatch         = errors.New("host was configured with a different max hosts value than the rest of the cluster")

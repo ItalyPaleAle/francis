@@ -243,6 +243,11 @@ func (r *Reader) All() iter.Seq2[Record, error] {
 			}
 
 			rec.normalize()
+			err = rec.validate()
+			if err != nil {
+				yield(Record{}, err)
+				return
+			}
 
 			if !yield(rec, nil) {
 				return
@@ -290,4 +295,29 @@ func (rec *Record) normalize() {
 			rec.TerminalJob.Data = nil
 		}
 	}
+}
+
+// validate checks that a decoded record carries the non-nil payload matching its declared type
+func (rec *Record) validate() error {
+	switch rec.Type {
+	case RecordTypeState:
+		if rec.State == nil {
+			return errors.New("backup state record is missing its payload")
+		}
+	case RecordTypeAlarm:
+		if rec.Alarm == nil {
+			return errors.New("backup alarm record is missing its payload")
+		}
+	case RecordTypeTerminalJob:
+		if rec.TerminalJob == nil {
+			return errors.New("backup terminal-job record is missing its payload")
+		}
+	case RecordTypeWorkflowEvent:
+		if rec.WorkflowEvent == nil {
+			return errors.New("backup workflow-event record is missing its payload")
+		}
+	default:
+		return fmt.Errorf("unknown backup record type %q", rec.Type)
+	}
+	return nil
 }

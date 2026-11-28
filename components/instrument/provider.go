@@ -147,7 +147,7 @@ func classifyOperation(method string, err error) operationDisposition {
 			return operationExpected
 		}
 	case "Restore":
-		if errors.Is(err, components.ErrHostsConnected) {
+		if errors.Is(err, components.ErrHostsConnected) || errors.Is(err, components.ErrStandaloneRuntimeActive) {
 			return operationWarning
 		}
 	case "UnregisterHost":

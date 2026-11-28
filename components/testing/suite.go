@@ -6960,6 +6960,38 @@ func (s Suite) TestBackupRestore(t *testing.T) {
 		err = s.p.Restore(ctx, bytes.NewReader(buf.Bytes()))
 		require.ErrorIs(t, err, components.ErrHostsConnected)
 	})
+
+	t.Run("mid-stream corruption rolls back restore without losing existing data", func(t *testing.T) {
+		ctx := t.Context()
+
+		err := s.p.Seed(ctx, Spec{})
+		require.NoError(t, err)
+
+		err = s.p.SetState(ctx, ref.NewActorRef("BK", "survive"), []byte("keep-me"), components.SetStateOpts{})
+		require.NoError(t, err)
+		_, err = s.p.SetAlarm(ctx, ref.NewAlarmRef("BK", "survive", "wake"), components.SetAlarmReq{
+			DueTime: s.p.Now().Add(time.Hour),
+			Data:    []byte("alarm-data"),
+		})
+		require.NoError(t, err)
+
+		// Build a valid backup header + one state record followed by corrupt MessagePack bytes
+		var bad bytes.Buffer
+		err = s.p.Backup(ctx, &bad)
+		require.NoError(t, err)
+		bad.WriteByte(0xc1)
+
+		err = s.p.Restore(ctx, bytes.NewReader(bad.Bytes()))
+		require.Error(t, err)
+
+		gotState, err := s.p.GetState(ctx, ref.NewActorRef("BK", "survive"))
+		require.NoError(t, err)
+		assert.Equal(t, []byte("keep-me"), gotState)
+
+		gotAlarm, err := s.p.GetAlarm(ctx, ref.NewAlarmRef("BK", "survive", "wake"))
+		require.NoError(t, err)
+		assert.Equal(t, []byte("alarm-data"), gotAlarm.Data)
+	})
 }
 
 func (s Suite) TestJoinTokens(t *testing.T) {

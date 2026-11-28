@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sync/atomic"
 	"time"
+	"uuid"
 
 	sqlinstrument "github.com/italypaleale/go-sql-utils/instrument"
 	postgresinstrument "github.com/italypaleale/go-sql-utils/instrument/postgres"
@@ -34,11 +35,12 @@ var postgresMigrations embed.FS
 type StandalonePostgresBacked struct {
 	*internal.Provider
 
-	db      *pgxpool.Pool
-	ownsDB  bool
-	closed  atomic.Bool
-	timeout time.Duration
-	log     *slog.Logger
+	instanceID string
+	db         *pgxpool.Pool
+	ownsDB     bool
+	closed     atomic.Bool
+	timeout    time.Duration
+	log        *slog.Logger
 
 	// Prepended to the name of a table or other schema objects to reference it in a query
 	tablePrefix string
@@ -104,6 +106,7 @@ func NewStandalonePostgresBacked(log *slog.Logger, opts StandalonePostgresOption
 	}
 
 	s := &StandalonePostgresBacked{
+		instanceID: uuid.NewV7().String(),
 		db:         opts.DB,
 		timeout:    timeout,
 		log:        log,
@@ -235,6 +238,62 @@ func (s *StandalonePostgresBacked) runMigrations(ctx context.Context) error {
 	return m.Perform(queryCtx, migrationFns, s.log)
 }
 
+// Run executes the standalone provider while maintaining a database owner lease so external CLI restores refuse to split-brain a running runtime
+func (s *StandalonePostgresBacked) Run(ctx context.Context) error {
+	err := s.writeOwnerLease(ctx)
+	if err != nil {
+		s.log.WarnContext(ctx, "Failed to write standalone owner lease", slog.Any("error", err))
+	}
+	defer s.clearOwnerLease()
+
+	leaseCtx, stopLease := context.WithCancel(ctx)
+	leaseDone := make(chan struct{})
+	go func() {
+		defer close(leaseDone)
+		ticker := s.Clock.NewTicker(standaloneOwnerLeaseRenew)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C():
+				rErr := s.writeOwnerLease(leaseCtx)
+				if rErr != nil && leaseCtx.Err() == nil {
+					s.log.WarnContext(leaseCtx, "Failed to renew standalone owner lease", slog.Any("error", rErr))
+				}
+			case <-leaseCtx.Done():
+				return
+			}
+		}
+	}()
+
+	err = s.Provider.Run(ctx)
+	stopLease()
+	<-leaseDone
+	return err
+}
+
+func (s *StandalonePostgresBacked) writeOwnerLease(ctx context.Context) error {
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	_, err := s.db.Exec(queryCtx,
+		`INSERT INTO `+s.tablePrefix+`metadata (key, value)
+		VALUES ($1, $2 || '|' || ((EXTRACT(EPOCH FROM (now() AT TIME ZONE 'utc')) * 1000)::bigint + $3)::text)
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+		standaloneOwnerLeaseMetadataKey, s.instanceID, standaloneOwnerLeaseTTL.Milliseconds(),
+	)
+	return err
+}
+
+func (s *StandalonePostgresBacked) clearOwnerLease() {
+	queryCtx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	defer cancel()
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	_, _ = s.db.Exec(queryCtx,
+		`DELETE FROM `+s.tablePrefix+`metadata WHERE key = $1 AND value LIKE $2`,
+		standaloneOwnerLeaseMetadataKey, s.instanceID+"|%",
+	)
+}
+
 func (s *StandalonePostgresBacked) loadFromDB(ctx context.Context) error {
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
@@ -242,53 +301,63 @@ func (s *StandalonePostgresBacked) loadFromDB(ctx context.Context) error {
 	s.StateMu.Lock()
 	defer s.StateMu.Unlock()
 
-	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
+	// Read all tables inside one read-only transaction
+	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{
+		AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to begin read transaction: %w", err)
+	}
+	defer func() {
+		rollbackCtx, cancel := context.WithTimeout(ctx, s.timeout)
+		_ = tx.Rollback(rollbackCtx)
+		cancel()
+	}()
 
 	// Load hosts
-	err := s.loadHosts(queryCtx)
+	err = s.loadHosts(ctx, tx)
 	if err != nil {
 		return fmt.Errorf("failed to load hosts: %w", err)
 	}
 
 	// Load host actor types
-	err = s.loadHostActorTypes(queryCtx)
+	err = s.loadHostActorTypes(ctx, tx)
 	if err != nil {
 		return fmt.Errorf("failed to load host actor types: %w", err)
 	}
 
 	// Load active actors
-	err = s.loadActiveActors(queryCtx)
+	err = s.loadActiveActors(ctx, tx)
 	if err != nil {
 		return fmt.Errorf("failed to load active actors: %w", err)
 	}
 
 	// Load alarms
-	err = s.loadAlarms(queryCtx)
+	err = s.loadAlarms(ctx, tx)
 	if err != nil {
 		return fmt.Errorf("failed to load alarms: %w", err)
 	}
 
 	// Load dead jobs
-	err = s.loadTerminalJobs(queryCtx)
+	err = s.loadTerminalJobs(ctx, tx)
 	if err != nil {
 		return fmt.Errorf("failed to load dead jobs: %w", err)
 	}
 
 	// Load actor state
-	err = s.loadActorState(queryCtx)
+	err = s.loadActorState(ctx, tx)
 	if err != nil {
 		return fmt.Errorf("failed to load actor state: %w", err)
 	}
 
 	// Load workflow events
-	err = s.loadWorkflowEvents(queryCtx)
+	err = s.loadWorkflowEvents(ctx, tx)
 	if err != nil {
 		return fmt.Errorf("failed to load workflow events: %w", err)
 	}
 
 	// Load consumed join tokens
-	err = s.loadConsumedJoinTokens(queryCtx)
+	err = s.loadConsumedJoinTokens(ctx, tx)
 	if err != nil {
 		return fmt.Errorf("failed to load consumed join tokens: %w", err)
 	}
@@ -296,9 +365,11 @@ func (s *StandalonePostgresBacked) loadFromDB(ctx context.Context) error {
 	return nil
 }
 
-func (s *StandalonePostgresBacked) loadHosts(ctx context.Context) error {
+func (s *StandalonePostgresBacked) loadHosts(ctx context.Context, tx pgx.Tx) error {
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	rows, err := s.db.Query(ctx, "SELECT host_id, host_address, host_last_health_check FROM "+s.tablePrefix+"hosts")
+	rows, err := tx.Query(queryCtx, "SELECT host_id, host_address, host_last_health_check FROM "+s.tablePrefix+"hosts")
 	if err != nil {
 		return err
 	}
@@ -322,9 +393,11 @@ func (s *StandalonePostgresBacked) loadHosts(ctx context.Context) error {
 	return nil
 }
 
-func (s *StandalonePostgresBacked) loadHostActorTypes(ctx context.Context) error {
+func (s *StandalonePostgresBacked) loadHostActorTypes(ctx context.Context, tx pgx.Tx) error {
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	rows, err := s.db.Query(ctx, "SELECT host_id, actor_type, actor_idle_timeout, actor_concurrency_limit, actor_completed_job_retention, actor_dead_lettered_job_retention FROM "+s.tablePrefix+"host_actor_types")
+	rows, err := tx.Query(queryCtx, "SELECT host_id, actor_type, actor_idle_timeout, actor_concurrency_limit, actor_completed_job_retention, actor_dead_lettered_job_retention FROM "+s.tablePrefix+"host_actor_types")
 	if err != nil {
 		return err
 	}
@@ -359,9 +432,11 @@ func (s *StandalonePostgresBacked) loadHostActorTypes(ctx context.Context) error
 	return nil
 }
 
-func (s *StandalonePostgresBacked) loadActiveActors(ctx context.Context) error {
+func (s *StandalonePostgresBacked) loadActiveActors(ctx context.Context, tx pgx.Tx) error {
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	rows, err := s.db.Query(ctx, "SELECT actor_type, actor_id, host_id, actor_idle_timeout, actor_activation FROM "+s.tablePrefix+"active_actors")
+	rows, err := tx.Query(queryCtx, "SELECT actor_type, actor_id, host_id, actor_idle_timeout, actor_activation FROM "+s.tablePrefix+"active_actors")
 	if err != nil {
 		return err
 	}
@@ -389,9 +464,11 @@ func (s *StandalonePostgresBacked) loadActiveActors(ctx context.Context) error {
 	return nil
 }
 
-func (s *StandalonePostgresBacked) loadAlarms(ctx context.Context) error {
+func (s *StandalonePostgresBacked) loadAlarms(ctx context.Context, tx pgx.Tx) error {
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	rows, err := s.db.Query(ctx, `
+	rows, err := tx.Query(queryCtx, `
 		SELECT
 			alarm_id, actor_type, actor_id, alarm_name, alarm_due_time,
 			alarm_interval, alarm_cron, alarm_ttl_time, alarm_data,
@@ -462,9 +539,11 @@ func (s *StandalonePostgresBacked) loadAlarms(ctx context.Context) error {
 	return nil
 }
 
-func (s *StandalonePostgresBacked) loadTerminalJobs(ctx context.Context) error {
+func (s *StandalonePostgresBacked) loadTerminalJobs(ctx context.Context, tx pgx.Tx) error {
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	rows, err := s.db.Query(ctx, `
+	rows, err := tx.Query(queryCtx, `
 		SELECT
 			job_id, actor_type, actor_id, job_method, job_data,
 			job_status, attempts, last_error, ended_at, original_due, job_interval, job_cron, expiration_time
@@ -520,9 +599,11 @@ func (s *StandalonePostgresBacked) loadTerminalJobs(ctx context.Context) error {
 	return nil
 }
 
-func (s *StandalonePostgresBacked) loadActorState(ctx context.Context) error {
+func (s *StandalonePostgresBacked) loadActorState(ctx context.Context, tx pgx.Tx) error {
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	rows, err := s.db.Query(ctx, "SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time, workflow_labels FROM "+s.tablePrefix+"actor_state")
+	rows, err := tx.Query(queryCtx, "SELECT actor_type, actor_id, actor_state_data, actor_state_expiration_time, workflow_labels FROM "+s.tablePrefix+"actor_state")
 	if err != nil {
 		return err
 	}
@@ -559,10 +640,12 @@ func (s *StandalonePostgresBacked) loadActorState(ctx context.Context) error {
 	return nil
 }
 
-func (s *StandalonePostgresBacked) loadWorkflowEvents(ctx context.Context) error {
+func (s *StandalonePostgresBacked) loadWorkflowEvents(ctx context.Context, tx pgx.Tx) error {
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
 	// Rows are read in sequence order, so each actor's history is appended already sorted
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	rows, err := s.db.Query(ctx, "SELECT actor_type, actor_id, event_seq, event_time, event_kind, event_data FROM "+s.tablePrefix+"workflow_events ORDER BY actor_type, actor_id, event_seq")
+	rows, err := tx.Query(queryCtx, "SELECT actor_type, actor_id, event_seq, event_time, event_kind, event_data FROM "+s.tablePrefix+"workflow_events ORDER BY actor_type, actor_id, event_seq")
 	if err != nil {
 		return err
 	}
@@ -618,50 +701,7 @@ func (s *StandalonePostgresBacked) PersistChanges(ctx context.Context, changes *
 		}
 	}()
 
-	// Process host changes
-	err = s.persistHostChanges(queryCtx, tx, changes)
-	if err != nil {
-		return err
-	}
-
-	// Process host actor type changes
-	err = s.persistHostActorTypeChanges(queryCtx, tx, changes)
-	if err != nil {
-		return err
-	}
-
-	// Process active actor changes
-	err = s.persistActiveActorChanges(queryCtx, tx, changes)
-	if err != nil {
-		return err
-	}
-
-	// Process alarm changes
-	err = s.persistAlarmChanges(queryCtx, tx, changes)
-	if err != nil {
-		return err
-	}
-
-	// Process dead job changes
-	err = s.persistTerminalJobChanges(queryCtx, tx, changes)
-	if err != nil {
-		return err
-	}
-
-	// Process actor state changes
-	err = s.persistActorStateChanges(queryCtx, tx, changes)
-	if err != nil {
-		return err
-	}
-
-	// Process workflow event changes
-	err = s.persistWorkflowEventChanges(queryCtx, tx, changes)
-	if err != nil {
-		return err
-	}
-
-	// Process consumed join token changes
-	err = s.persistConsumedJoinTokenChanges(queryCtx, tx, changes)
+	err = s.applyChangesToTx(queryCtx, tx, changes)
 	if err != nil {
 		return err
 	}
@@ -677,10 +717,132 @@ func (s *StandalonePostgresBacked) PersistChanges(ctx context.Context, changes *
 	return nil
 }
 
-func (s *StandalonePostgresBacked) loadConsumedJoinTokens(ctx context.Context) error {
+func (s *StandalonePostgresBacked) applyChangesToTx(ctx context.Context, tx pgx.Tx, changes *internal.Changes) error {
+	// Process host changes
+	err := s.persistHostChanges(ctx, tx, changes)
+	if err != nil {
+		return err
+	}
+
+	// Process host actor type changes
+	err = s.persistHostActorTypeChanges(ctx, tx, changes)
+	if err != nil {
+		return err
+	}
+
+	// Process active actor changes
+	err = s.persistActiveActorChanges(ctx, tx, changes)
+	if err != nil {
+		return err
+	}
+
+	// Process alarm changes
+	err = s.persistAlarmChanges(ctx, tx, changes)
+	if err != nil {
+		return err
+	}
+
+	// Process dead job changes
+	err = s.persistTerminalJobChanges(ctx, tx, changes)
+	if err != nil {
+		return err
+	}
+
+	// Process actor state changes
+	err = s.persistActorStateChanges(ctx, tx, changes)
+	if err != nil {
+		return err
+	}
+
+	// Process workflow event changes
+	err = s.persistWorkflowEventChanges(ctx, tx, changes)
+	if err != nil {
+		return err
+	}
+
+	// Process consumed join token changes
+	return s.persistConsumedJoinTokenChanges(ctx, tx, changes)
+}
+
+type postgresRestoreTx struct {
+	s  *StandalonePostgresBacked
+	tx pgx.Tx
+}
+
+func (r *postgresRestoreTx) PersistBatch(ctx context.Context, changes *internal.Changes) error {
+	return r.s.applyChangesToTx(ctx, r.tx, changes)
+}
+
+func (r *postgresRestoreTx) Commit(ctx context.Context) error {
+	err := r.tx.Commit(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to commit restore transaction: %w", err)
+	}
+
+	return nil
+}
+
+func (r *postgresRestoreTx) Rollback(ctx context.Context) {
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.s.timeout)
+	_ = r.tx.Rollback(rollbackCtx)
+	cancel()
+}
+
+// BeginRestore opens a single rollback-safe transaction for Restore, refusing when another standalone runtime owns the database and wiping persistent tables in bulk
+func (s *StandalonePostgresBacked) BeginRestore(ctx context.Context) (internal.RestoreTx, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin restore transaction: %w", err)
+	}
+
+	var (
+		leaseVal string
+		nowMs    int64
+	)
+	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
+	err = tx.QueryRow(ctx,
+		`SELECT value, (EXTRACT(EPOCH FROM (now() AT TIME ZONE 'utc')) * 1000)::bigint
+		FROM `+s.tablePrefix+`metadata
+		WHERE key = $1
+		FOR UPDATE`,
+		standaloneOwnerLeaseMetadataKey,
+	).Scan(&leaseVal, &nowMs)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.timeout)
+		_ = tx.Rollback(rollbackCtx)
+		cancel()
+		return nil, fmt.Errorf("failed to check standalone owner lease: %w", err)
+	}
+	if err == nil {
+		ownerID, expMs, ok := parseOwnerLeaseValue(leaseVal)
+		if ok && ownerID != s.instanceID && expMs >= nowMs {
+			rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.timeout)
+			_ = tx.Rollback(rollbackCtx)
+			cancel()
+			return nil, components.ErrStandaloneRuntimeActive
+		}
+	}
+
+	for _, table := range []string{"workflow_events", "actor_state", "terminal_jobs", "alarms"} {
+		// #nosec G202 -- the only concatenated values are static table prefixes and table names, not user input
+		_, err = tx.Exec(ctx, "DELETE FROM "+s.tablePrefix+table)
+		if err != nil {
+			rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.timeout)
+			_ = tx.Rollback(rollbackCtx)
+			cancel()
+			return nil, fmt.Errorf("failed to wipe table %s: %w", table, err)
+		}
+	}
+
+	return &postgresRestoreTx{s: s, tx: tx}, nil
+}
+
+func (s *StandalonePostgresBacked) loadConsumedJoinTokens(ctx context.Context, tx pgx.Tx) error {
+	queryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
 	nowUTC := s.Clock.Now().UTC()
 	// #nosec G202 -- the only concatenated value is the static table prefix, not user input
-	rows, err := s.db.Query(ctx, "SELECT join_token, expires_at FROM "+s.tablePrefix+"consumed_join_tokens WHERE expires_at >= $1", nowUTC)
+	rows, err := tx.Query(queryCtx, "SELECT join_token, expires_at FROM "+s.tablePrefix+"consumed_join_tokens WHERE expires_at >= $1", nowUTC)
 	if err != nil {
 		return err
 	}

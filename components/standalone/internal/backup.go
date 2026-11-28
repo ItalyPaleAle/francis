@@ -4,25 +4,28 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"maps"
+	"time"
 
 	"github.com/italypaleale/francis/components"
 	"github.com/italypaleale/francis/internal/backup"
 )
 
-// restoreBatchSize is the number of records applied per persist-then-apply flush during a restore
+// restoreBatchSize is the number of records written per SQL batch inside a restore transaction
 const restoreBatchSize = 1000
 
-// Backup writes a snapshot of all persistent data to w
-// It can run while the cluster is online: each domain is snapshotted under its read lock, then streamed once the lock is released, so writers are only blocked briefly and never during the stream I/O
-func (p *Provider) Backup(ctx context.Context, w io.Writer) error {
-	// Snapshot each domain under its read lock
-	// Records placed in the maps are treated as immutable (mutations replace the entry rather than editing it in place), so the collected records stay valid after the lock is released
-	stateRecs, eventRecs := p.snapshotStateRecords()
-	alarmRecs, terminalJobRecs := p.snapshotAlarmAndTerminalJobRecords()
+// Backup writes a consistent snapshot of all persistent data to w
+// Holding Mu.RLock and StateMu.RLock together while snapshotting prevents concurrent turns from producing torn state-and-alarm snapshots, while keeping stream I/O outside both locks
+func (p *Provider) Backup(_ context.Context, w io.Writer) error {
+	p.Mu.RLock()
+	p.StateMu.RLock()
+	now := p.Clock.Now()
+	stateRecs, eventRecs := p.snapshotStateRecordsLocked(now)
+	alarmRecs, terminalJobRecs := p.snapshotAlarmAndTerminalJobRecordsLocked(now)
+	p.StateMu.RUnlock()
+	p.Mu.RUnlock()
 
 	// Write the header, which records the format version
-	bw, err := backup.NewWriter(w, p.Clock.Now())
+	bw, err := backup.NewWriter(w, now)
 	if err != nil {
 		return err
 	}
@@ -56,12 +59,8 @@ func (p *Provider) Backup(ctx context.Context, w io.Writer) error {
 	return nil
 }
 
-// snapshotStateRecords collects the non-expired actor state, and the workflow events of that state, under the state read lock
-func (p *Provider) snapshotStateRecords() ([]*backup.StateRecord, []*backup.WorkflowEventRecord) {
-	p.StateMu.RLock()
-	defer p.StateMu.RUnlock()
-
-	now := p.Clock.Now()
+// snapshotStateRecordsLocked collects non-expired actor state and matching workflow events while StateMu is read-locked
+func (p *Provider) snapshotStateRecordsLocked(now time.Time) ([]*backup.StateRecord, []*backup.WorkflowEventRecord) {
 	recs := make([]*backup.StateRecord, 0, len(p.ActorState))
 	var events []*backup.WorkflowEventRecord
 	for key, entry := range p.ActorState {
@@ -98,15 +97,11 @@ func (p *Provider) snapshotStateRecords() ([]*backup.StateRecord, []*backup.Work
 	return recs, events
 }
 
-// snapshotAlarmAndTerminalJobRecords collects all alarms (plain alarms and jobs, without the ephemeral lease fields) and dead jobs under the alarms read lock
-func (p *Provider) snapshotAlarmAndTerminalJobRecords() ([]*backup.AlarmRecord, []*backup.TerminalJobRecord) {
-	p.Mu.RLock()
-	defer p.Mu.RUnlock()
-
-	alarms := make([]*backup.AlarmRecord, len(p.AlarmsByID))
-	var i int
+// snapshotAlarmAndTerminalJobRecordsLocked collects all alarms and non-expired terminal jobs while Mu is read-locked
+func (p *Provider) snapshotAlarmAndTerminalJobRecordsLocked(now time.Time) ([]*backup.AlarmRecord, []*backup.TerminalJobRecord) {
+	alarms := make([]*backup.AlarmRecord, 0, len(p.AlarmsByID))
 	for _, a := range p.AlarmsByID {
-		alarms[i] = &backup.AlarmRecord{
+		alarms = append(alarms, &backup.AlarmRecord{
 			ID:        a.ID,
 			ActorType: a.ActorType,
 			ActorID:   a.ActorID,
@@ -118,14 +113,16 @@ func (p *Provider) snapshotAlarmAndTerminalJobRecords() ([]*backup.AlarmRecord, 
 			Data:      a.Data,
 			Kind:      a.Kind,
 			JobMethod: a.JobMethod,
-		}
-		i++
+		})
 	}
 
-	terminalJobs := make([]*backup.TerminalJobRecord, len(p.TerminalJobs))
-	i = 0
+	terminalJobs := make([]*backup.TerminalJobRecord, 0, len(p.TerminalJobs))
 	for _, d := range p.TerminalJobs {
-		terminalJobs[i] = &backup.TerminalJobRecord{
+		if d.HasExpired(now) {
+			continue
+		}
+
+		terminalJobs = append(terminalJobs, &backup.TerminalJobRecord{
 			JobID:       d.JobID,
 			ActorType:   d.ActorType,
 			ActorID:     d.ActorID,
@@ -139,15 +136,14 @@ func (p *Provider) snapshotAlarmAndTerminalJobRecords() ([]*backup.AlarmRecord, 
 			Interval:    d.Interval,
 			Cron:        d.Cron,
 			Expiration:  d.Expiration,
-		}
-		i++
+		})
 	}
 
 	return alarms, terminalJobs
 }
 
-// Restore wipes all persistent data and loads a snapshot from r
-// It holds both domain write mutexes for the whole operation and refuses to run while any host is connected
+// Restore wipes all persistent data and loads a snapshot from r atomically
+// Both SQL persistence (via RestorePersistHook) and in-memory maps are rolled back or left untouched if any error occurs mid-stream
 func (p *Provider) Restore(ctx context.Context, r io.Reader) error {
 	// Serialize against every writer in both domains for the whole wipe-and-load sequence
 	p.writeMu.Lock()
@@ -161,97 +157,94 @@ func (p *Provider) Restore(ctx context.Context, r io.Reader) error {
 		return err
 	}
 
-	// Validate the header before touching any data
+	// Validate the header before opening a transaction or touching any data
 	br, _, err := backup.NewReader(r)
 	if err != nil {
 		return err
 	}
 
-	// Wipe existing persistent data so the restore produces an exact mirror
-	err = p.wipePersistentData(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to wipe existing data: %w", err)
-	}
+	// Stage restored records into fresh maps so existing in-memory data survives any mid-stream error
+	newAlarms := make(map[AlarmKey]*Alarm)
+	newAlarmsByID := make(map[string]*Alarm)
+	newTerminalJobs := make(map[string]*TerminalJob)
+	newActorState := make(map[ActorKey]*StateEntry)
+	newWorkflowEvents := make(map[ActorKey][]components.WorkflowEvent)
 
-	// Load records in batches, keyed to the two lock domains
 	var (
-		alarmSets       []AlarmChange
-		terminalJobSets []TerminalJobChange
-		stateSets       []ActorStateChange
-		eventSets       []WorkflowEventChange
-		eventCount      int
-		stateLoaded     bool
+		rtx         RestoreTx
+		hasTx       bool
+		nonTxHook   PersistHook
+		alarmSets   []AlarmChange
+		termJobSets []TerminalJobChange
+		stateSets   []ActorStateChange
+		eventSets   []WorkflowEventChange
+		eventCount  int
+		stateLoaded bool
 	)
 
-	// flushMuDomain persists and applies the buffered alarm and dead-job records
-	flushMuDomain := func() error {
-		if len(alarmSets) == 0 && len(terminalJobSets) == 0 {
+	restoreHook, isRestoreHook := p.PersistHook.(RestorePersistHook)
+	if isRestoreHook {
+		rtx, err = restoreHook.BeginRestore(ctx)
+		if err != nil {
+			return err
+		}
+		hasTx = true
+		defer func() {
+			if hasTx {
+				rtx.Rollback(ctx)
+			}
+		}()
+	} else if p.PersistHook != nil {
+		nonTxHook = p.PersistHook
+	}
+
+	// flushTxBatch writes buffered records into the open RestoreTx when SQL-backed
+	flushTxBatch := func(changes *Changes) error {
+		if !hasTx || changes.IsEmpty() {
 			return nil
 		}
+		return rtx.PersistBatch(ctx, changes)
+	}
 
-		changes := NewChanges()
-		defer changes.Release()
-		changes.Alarms.Set = append(changes.Alarms.Set, alarmSets...)
-		changes.TerminalJobs.Set = append(changes.TerminalJobs.Set, terminalJobSets...)
-
-		flushErr := p.persistThenApply(ctx, &p.Mu, changes, func() {
-			for _, ac := range alarmSets {
-				a := ac.Value
-				p.Alarms[a.GetAlarmKey()] = a
-				p.AlarmsByID[a.ID] = a
-			}
-			for _, dc := range terminalJobSets {
-				p.TerminalJobs[dc.Value.JobID] = dc.Value
-			}
-		})
-		if flushErr != nil {
-			return flushErr
+	flushMuBatch := func() error {
+		if len(alarmSets) == 0 && len(termJobSets) == 0 {
+			return nil
 		}
-
-		alarmSets = alarmSets[:0]
-		terminalJobSets = terminalJobSets[:0]
+		if hasTx {
+			changes := NewChanges()
+			changes.Alarms.Set = append(changes.Alarms.Set, alarmSets...)
+			changes.TerminalJobs.Set = append(changes.TerminalJobs.Set, termJobSets...)
+			batchErr := flushTxBatch(changes)
+			changes.Release()
+			if batchErr != nil {
+				return batchErr
+			}
+			alarmSets = alarmSets[:0]
+			termJobSets = termJobSets[:0]
+		}
 		return nil
 	}
 
-	// flushStateDomain persists and applies the buffered state and workflow event records
-	// The backup writes events after all state, so the state an event belongs to has always been flushed before the event
-	flushStateDomain := func() error {
+	flushStateBatch := func() error {
 		if len(stateSets) == 0 && len(eventSets) == 0 {
 			return nil
 		}
-
-		changes := NewChanges()
-		defer changes.Release()
-		changes.ActorState.Set = append(changes.ActorState.Set, stateSets...)
-		changes.WorkflowEvents.Insert = append(changes.WorkflowEvents.Insert, eventSets...)
-
-		// Merge the events into the in-memory history ahead of time, so apply cannot fail
-		merged := make(map[ActorKey][]components.WorkflowEvent, len(eventSets))
-		for _, ec := range eventSets {
-			current, ok := merged[ec.Key]
-			if !ok {
-				current = p.WorkflowEvents[ec.Key]
+		if hasTx {
+			changes := NewChanges()
+			changes.ActorState.Set = append(changes.ActorState.Set, stateSets...)
+			changes.WorkflowEvents.Insert = append(changes.WorkflowEvents.Insert, eventSets...)
+			batchErr := flushTxBatch(changes)
+			changes.Release()
+			if batchErr != nil {
+				return batchErr
 			}
-			merged[ec.Key] = mergeSortedEvents(current, newWorkflowEvents(current, ec.Events))
+			stateSets = stateSets[:0]
+			eventSets = eventSets[:0]
+			eventCount = 0
 		}
-
-		flushErr := p.persistThenApply(ctx, &p.StateMu, changes, func() {
-			for _, sc := range stateSets {
-				p.ActorState[sc.Key] = sc.Value
-			}
-			maps.Copy(p.WorkflowEvents, merged)
-		})
-		if flushErr != nil {
-			return flushErr
-		}
-
-		stateSets = stateSets[:0]
-		eventSets = eventSets[:0]
-		eventCount = 0
 		return nil
 	}
 
-	// Consume the stream, buffering into the matching domain and flushing when a batch fills
 	for rec, recErr := range br.All() {
 		if recErr != nil {
 			return recErr
@@ -259,55 +252,63 @@ func (p *Provider) Restore(ctx context.Context, r io.Reader) error {
 
 		switch rec.Type {
 		case backup.RecordTypeState:
-			stateSets = append(stateSets, ActorStateChange{
-				Key:   NewActorKey(rec.State.ActorType, rec.State.ActorID),
-				Value: &StateEntry{Data: rec.State.Data, Expiration: rec.State.Expiration, WorkflowLabels: rec.State.WorkflowLabels},
-			})
-			if len(stateSets) >= restoreBatchSize {
-				err = flushStateDomain()
+			key := NewActorKey(rec.State.ActorType, rec.State.ActorID)
+			entry := &StateEntry{
+				Data:           rec.State.Data,
+				Expiration:     rec.State.Expiration,
+				WorkflowLabels: rec.State.WorkflowLabels,
+			}
+			newActorState[key] = entry
+			stateSets = append(stateSets, ActorStateChange{Key: key, Value: entry})
+			if hasTx && len(stateSets) >= restoreBatchSize {
+				err = flushStateBatch()
 				if err != nil {
 					return err
 				}
 			}
+
 		case backup.RecordTypeAlarm:
 			a := alarmFromRecord(rec.Alarm)
+			newAlarms[a.GetAlarmKey()] = a
+			newAlarmsByID[a.ID] = a
 			alarmSets = append(alarmSets, AlarmChange{Key: a.ID, Value: a})
-			if len(alarmSets)+len(terminalJobSets) >= restoreBatchSize {
-				err = flushMuDomain()
+			if hasTx && len(alarmSets)+len(termJobSets) >= restoreBatchSize {
+				err = flushMuBatch()
 				if err != nil {
 					return err
 				}
 			}
+
 		case backup.RecordTypeTerminalJob:
 			d := terminalJobFromRecord(rec.TerminalJob)
-			terminalJobSets = append(terminalJobSets, TerminalJobChange{Key: d.JobID, Value: d})
-			if len(alarmSets)+len(terminalJobSets) >= restoreBatchSize {
-				err = flushMuDomain()
+			newTerminalJobs[d.JobID] = d
+			termJobSets = append(termJobSets, TerminalJobChange{Key: d.JobID, Value: d})
+			if hasTx && len(alarmSets)+len(termJobSets) >= restoreBatchSize {
+				err = flushMuBatch()
 				if err != nil {
 					return err
 				}
 			}
+
 		case backup.RecordTypeWorkflowEvent:
-			// Events follow all state in the stream, so flushing the buffered state first lets each event be checked against the state it belongs to
 			if !stateLoaded {
-				err = flushStateDomain()
+				err = flushStateBatch()
 				if err != nil {
 					return err
 				}
 				stateLoaded = true
 			}
 
-			// An event whose state is not part of the backup would never be visible, so it is not restored
-			// Reading the state map without StateMu is safe here, since every writer of that map holds stateWriteMu, which Restore holds throughout
 			ev := rec.WorkflowEvent
 			key := NewActorKey(ev.ActorType, ev.ActorID)
-			_, hasState := p.ActorState[key]
+			_, hasState := newActorState[key]
 			if !hasState {
 				continue
 			}
 			event := components.WorkflowEvent{Seq: ev.Seq, Time: ev.Time, Kind: ev.Kind, Data: ev.Data}
+			existing := newWorkflowEvents[key]
+			newWorkflowEvents[key] = mergeSortedEvents(existing, newWorkflowEventsFromSlice(existing, []components.WorkflowEvent{event}))
 
-			// Consecutive events of the same actor are grouped into one change, which is how the backup writes them
 			if len(eventSets) > 0 && eventSets[len(eventSets)-1].Key == key {
 				last := &eventSets[len(eventSets)-1]
 				last.Events = append(last.Events, event)
@@ -315,29 +316,74 @@ func (p *Provider) Restore(ctx context.Context, r io.Reader) error {
 				eventSets = append(eventSets, WorkflowEventChange{Key: key, Events: []components.WorkflowEvent{event}})
 			}
 			eventCount++
-			if len(stateSets)+eventCount >= restoreBatchSize {
-				err = flushStateDomain()
+			if hasTx && len(stateSets)+eventCount >= restoreBatchSize {
+				err = flushStateBatch()
 				if err != nil {
 					return err
 				}
 			}
+
 		default:
 			return fmt.Errorf("unknown backup record type %q", rec.Type)
 		}
 	}
 
-	// Flush whatever is left in each domain
-	err = flushMuDomain()
-	if err != nil {
-		return err
+	if hasTx {
+		err = flushMuBatch()
+		if err != nil {
+			return err
+		}
+
+		err = flushStateBatch()
+		if err != nil {
+			return err
+		}
+
+		err = rtx.Commit(ctx)
+		if err != nil {
+			return err
+		}
+		hasTx = false
+	} else if nonTxHook != nil {
+		// Fallback for custom test PersistHooks that do not implement RestorePersistHook, invoked only after the entire stream is validated
+		changes := NewChanges()
+		defer changes.Release()
+		for id := range p.AlarmsByID {
+			changes.Alarms.Delete = append(changes.Alarms.Delete, id)
+		}
+		for id := range p.TerminalJobs {
+			changes.TerminalJobs.Delete = append(changes.TerminalJobs.Delete, id)
+		}
+		for key := range p.ActorState {
+			changes.ActorState.Delete = append(changes.ActorState.Delete, key)
+		}
+		changes.Alarms.Set = append(changes.Alarms.Set, alarmSets...)
+		changes.TerminalJobs.Set = append(changes.TerminalJobs.Set, termJobSets...)
+		changes.ActorState.Set = append(changes.ActorState.Set, stateSets...)
+		changes.WorkflowEvents.Insert = append(changes.WorkflowEvents.Insert, eventSets...)
+
+		err = nonTxHook.PersistChanges(ctx, changes)
+		if err != nil {
+			return err
+		}
 	}
 
-	err = flushStateDomain()
-	if err != nil {
-		return err
-	}
+	// Atomically swap the validated, committed state into memory
+	p.Mu.Lock()
+	p.StateMu.Lock()
+	p.Alarms = newAlarms
+	p.AlarmsByID = newAlarmsByID
+	p.TerminalJobs = newTerminalJobs
+	p.ActorState = newActorState
+	p.WorkflowEvents = newWorkflowEvents
+	p.StateMu.Unlock()
+	p.Mu.Unlock()
 
 	return nil
+}
+
+func newWorkflowEventsFromSlice(existing []components.WorkflowEvent, incoming []components.WorkflowEvent) []components.WorkflowEvent {
+	return newWorkflowEvents(existing, incoming)
 }
 
 // ensureNoHostsConnected returns ErrHostsConnected if any registered host is still healthy
@@ -350,45 +396,6 @@ func (p *Provider) ensureNoHostsConnected() error {
 		if p.IsHostHealthy(h) {
 			return components.ErrHostsConnected
 		}
-	}
-
-	return nil
-}
-
-// wipePersistentData deletes all actor state, alarms, and dead jobs from both the backing store and memory
-// The caller must hold writeMu and stateWriteMu
-func (p *Provider) wipePersistentData(ctx context.Context) error {
-	// Alarms and dead jobs live in the Mu domain
-	alarmChanges := NewChanges()
-	defer alarmChanges.Release()
-	for id := range p.AlarmsByID {
-		alarmChanges.Alarms.Delete = append(alarmChanges.Alarms.Delete, id)
-	}
-	for id := range p.TerminalJobs {
-		alarmChanges.TerminalJobs.Delete = append(alarmChanges.TerminalJobs.Delete, id)
-	}
-	err := p.persistThenApply(ctx, &p.Mu, alarmChanges, func() {
-		clear(p.Alarms)
-		clear(p.AlarmsByID)
-		clear(p.TerminalJobs)
-	})
-	if err != nil {
-		return err
-	}
-
-	// Actor state lives in the StateMu domain
-	stateChanges := NewChanges()
-	defer stateChanges.Release()
-	for key := range p.ActorState {
-		stateChanges.ActorState.Delete = append(stateChanges.ActorState.Delete, key)
-	}
-	// Deleting the state removes its workflow events too, both in the backing store and here
-	err = p.persistThenApply(ctx, &p.StateMu, stateChanges, func() {
-		clear(p.ActorState)
-		clear(p.WorkflowEvents)
-	})
-	if err != nil {
-		return err
 	}
 
 	return nil

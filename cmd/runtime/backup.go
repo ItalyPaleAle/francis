@@ -158,11 +158,15 @@ func runRestore(ctx context.Context, args []string) int {
 
 	err = provider.Restore(ctx, r)
 
-	// The provider refuses to restore while hosts are connected
-	if errors.Is(err, components.ErrHostsConnected) {
+	// The provider refuses to restore while hosts or a standalone runtime own the database
+	switch {
+	case errors.Is(err, components.ErrHostsConnected):
 		log.Error("Refusing to restore because one or more hosts are connected to the cluster. Stop all hosts connected to this database before restoring.")
 		return 2
-	} else if err != nil {
+	case errors.Is(err, components.ErrStandaloneRuntimeActive):
+		log.Error("Refusing to restore because a standalone runtime is currently running against this database. Stop the francis runtime before restoring.")
+		return 2
+	case err != nil:
 		log.Error("Error restoring backup", slog.Any("error", err))
 		return 1
 	}

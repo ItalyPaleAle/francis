@@ -2424,3 +2424,50 @@ func testWorkflowEventPersistence(t *testing.T, p *internal.Provider, reload fun
 		requireEvents(t, expect, listEvents(t, reload(t), "backup"))
 	})
 }
+
+func TestStandaloneRestoreRefusesWhileExternalRuntimeActive(t *testing.T) {
+	dbPath := t.TempDir() + "/standalone-owner.db"
+	cfg := components.NewProviderConfig()
+
+	s1, err := NewStandaloneSQLiteBacked(slog.New(slog.DiscardHandler), StandaloneSQLiteOptions{
+		ConnectionString: dbPath,
+	}, cfg)
+	require.NoError(t, err)
+	defer func() { _ = s1.Close() }()
+	err = s1.Init(t.Context())
+	require.NoError(t, err)
+
+	err = s1.SetState(t.Context(), ref.NewActorRef("T", "a1"), []byte("live"), components.SetStateOpts{})
+	require.NoError(t, err)
+
+	var snap bytes.Buffer
+	err = s1.Backup(t.Context(), &snap)
+	require.NoError(t, err)
+
+	runCtx, stopRun := context.WithCancel(t.Context())
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- s1.Run(runCtx)
+	}()
+	require.Eventually(t, s1.Running.Load, 2*time.Second, 10*time.Millisecond)
+
+	// Simulate an external CLI `francis restore` opening a second handle to the same database while s1 is running
+	s2, err := NewStandaloneSQLiteBacked(slog.New(slog.DiscardHandler), StandaloneSQLiteOptions{
+		ConnectionString: dbPath,
+	}, cfg)
+	require.NoError(t, err)
+	defer func() { _ = s2.Close() }()
+	err = s2.Init(t.Context())
+	require.NoError(t, err)
+
+	err = s2.Restore(t.Context(), bytes.NewReader(snap.Bytes()))
+	require.ErrorIs(t, err, components.ErrStandaloneRuntimeActive)
+
+	// Once the running standalone runtime exits cleanly, the external restore succeeds
+	stopRun()
+	runErr := <-runDone
+	require.NoError(t, runErr)
+
+	err = s2.Restore(t.Context(), bytes.NewReader(snap.Bytes()))
+	require.NoError(t, err)
+}

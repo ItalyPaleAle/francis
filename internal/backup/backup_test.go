@@ -245,3 +245,32 @@ func TestSameStreamHasSingleHeader(t *testing.T) {
 	err = dec.Decode(&Record{})
 	require.ErrorIs(t, err, io.EOF)
 }
+
+func TestNilRecordPayloadRejected(t *testing.T) {
+	for _, rt := range []RecordType{
+		RecordTypeState,
+		RecordTypeAlarm,
+		RecordTypeTerminalJob,
+		RecordTypeWorkflowEvent,
+		"unknown",
+	} {
+		t.Run(string(rt), func(t *testing.T) {
+			var buf bytes.Buffer
+			_, err := NewWriter(&buf, time.Now())
+			require.NoError(t, err)
+			err = msgpack.NewEncoder(&buf).Encode(Record{Type: rt})
+			require.NoError(t, err)
+
+			r, _, err := NewReader(&buf)
+			require.NoError(t, err)
+
+			var gotErr error
+			for _, recErr := range r.All() {
+				if recErr != nil {
+					gotErr = recErr
+				}
+			}
+			require.Error(t, gotErr)
+		})
+	}
+}
