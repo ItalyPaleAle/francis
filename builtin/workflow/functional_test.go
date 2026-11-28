@@ -3,6 +3,7 @@ package workflow_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -812,4 +813,108 @@ func TestLoopSkippedByItsConditionNeverRunsItsBody(t *testing.T) {
 		assert.Equal(t, 0, stepView(t, status, name).Tasks, "step %s", name)
 	}
 	assert.Equal(t, workflow.StepCompleted, stepView(t, status, "finish").Status)
+}
+
+// TestLoopSagaUnwindsInStrictLIFOAndPreservesPerIterationOutputsAndIndex verifies multi-step loop compensation order, iteration Index(), and per-iteration DecodeOutput
+func TestLoopSagaUnwindsInStrictLIFOAndPreservesPerIterationOutputsAndIndex(t *testing.T) {
+	_, badSkipErr := workflow.New("bad-loop-skip",
+		workflow.WithSteps(
+			workflow.Loop("batches",
+				workflow.Step("debit", workflow.WithRun(func(ctx context.Context, tk workflow.Task) (any, error) { return true, nil }), workflow.WithSkipOnFailure("after")),
+			).With(workflow.WithUntil("debit", true)),
+			workflow.Step("after", workflow.WithRun(func(ctx context.Context, tk workflow.Task) (any, error) { return nil, nil })),
+		),
+	)
+	require.Error(t, badSkipErr)
+
+	var (
+		mu       sync.Mutex
+		inFlight int
+		maxConc  int
+		events   []string
+	)
+	recordComp := func(entry string) {
+		mu.Lock()
+		events = append(events, entry)
+		mu.Unlock()
+	}
+	enterComp := func() func() {
+		mu.Lock()
+		inFlight++
+		if inFlight > maxConc {
+			maxConc = inFlight
+		}
+		mu.Unlock()
+		time.Sleep(15 * time.Millisecond)
+		return func() {
+			mu.Lock()
+			inFlight--
+			mu.Unlock()
+		}
+	}
+
+	wf, err := workflow.New("loop-lifo-saga",
+		workflow.WithTimeout(time.Minute),
+		workflow.WithSteps(
+			workflow.Loop("transfers",
+				workflow.Step("debit",
+					workflow.WithRun(func(ctx context.Context, tk workflow.Task) (any, error) {
+						return fmt.Sprintf("debit-iter-%d", tk.Index()), nil
+					}),
+					workflow.WithCompensate(func(ctx context.Context, c workflow.Compensation) error {
+						done := enterComp()
+						defer done()
+						var res string
+						dErr := c.DecodeResult(&res)
+						if dErr != nil {
+							return errors.Join(actor.ErrJobPermanentFailure, dErr)
+						}
+						recordComp(fmt.Sprintf("undo-debit[%d]:%s", c.Index(), res))
+						return nil
+					}),
+				),
+				workflow.Step("credit",
+					workflow.WithMaxAttempts(1),
+					workflow.WithRun(func(ctx context.Context, tk workflow.Task) (any, error) {
+						var debitOut string
+						dErr := tk.DecodeOutput("debit", &debitOut)
+						if dErr != nil {
+							return nil, errors.Join(actor.ErrJobPermanentFailure, dErr)
+						}
+						if tk.Index() == 1 {
+							return nil, errors.Join(actor.ErrJobPermanentFailure, errors.New("credit-1 failed"))
+						}
+						return false, nil
+					}),
+					workflow.WithCompensate(func(ctx context.Context, c workflow.Compensation) error {
+						done := enterComp()
+						defer done()
+						var debitOut string
+						dErr := c.DecodeOutput("debit", &debitOut)
+						if dErr != nil {
+							return errors.Join(actor.ErrJobPermanentFailure, dErr)
+						}
+						recordComp(fmt.Sprintf("undo-credit[%d]:from=%s", c.Index(), debitOut))
+						return nil
+					}),
+				),
+			).With(workflow.WithUntil("credit", true), workflow.WithMaxIterations(5)),
+		),
+	)
+	require.NoError(t, err)
+
+	host := startHost(t, wf)
+	svc := wf.Service(host.Service())
+
+	id, _, err := svc.Start(t.Context(), nil)
+	require.NoError(t, err)
+
+	status := awaitStatus(t, svc, id, workflow.StatusFailed)
+	assert.Equal(t, workflow.CompensationCompleted, status.Compensation)
+	assert.Equal(t, 1, maxConc, "loop iterations must unwind sequentially one frame at a time")
+	assert.Equal(t, []string{
+		"undo-debit[1]:debit-iter-1",
+		"undo-credit[0]:from=debit-iter-0",
+		"undo-debit[0]:debit-iter-0",
+	}, events)
 }

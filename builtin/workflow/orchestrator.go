@@ -244,12 +244,182 @@ func (o *orchestrator) runDeadline(ctx context.Context) error {
 		return o.dropDeadline(ctx)
 	}
 
+	// Recover in-flight worker or undo tasks whose jobs dead-lettered while best-effort worker.JobFailed also failed during the same outage
+	recoveredWorker, err := o.recoverDeadLetteredWorkers(ctx, &st, jobs)
+	if err != nil {
+		if errors.Is(err, errVersionNotServed) || errors.Is(err, ErrDefinitionConflict) {
+			return o.handleUnknownVersionDeadline(ctx)
+		}
+
+		return err
+	}
+
+	if recoveredWorker {
+		return o.client.SetAlarm(ctx, alarmDeadline, deadlineAlarmProperties(time.Now().Add(orchestratorRetryDelay)))
+	}
+
 	// The journal may be stamped with a version this host does not serve even when this host's own version is fine, and the deadline follows the configured policy rather than being declined forever
 	err = o.turn(ctx, &event{kind: evDeadline})
 	if errors.Is(err, errVersionNotServed) || errors.Is(err, ErrDefinitionConflict) {
 		return o.handleUnknownVersionDeadline(ctx)
 	}
 	return err
+}
+
+// recoverDeadLetteredWorkers checks worker and undo actors for in-flight tasks whose job dead-lettered without delivering methodDone or methodCompensated
+func (o *orchestrator) recoverDeadLetteredWorkers(ctx context.Context, st *instanceState, orchestratorJobs []actor.JobInfo) (bool, error) {
+	// Wait for queued report deliveries already accepted on the orchestrator to run first
+	for _, j := range orchestratorJobs {
+		if j.Status == actor.JobStatusActive && (j.Method == methodDone || j.Method == methodCompensated) {
+			return false, nil
+		}
+	}
+
+	var recovered bool
+	for i := range st.Steps {
+		sr := &st.Steps[i]
+		switch sr.Status {
+		case StepRunning:
+			for j := range sr.Tasks {
+				tr := &sr.Tasks[j]
+				if tr.Done || tr.ChildID != "" || tr.Attempts <= 0 {
+					continue
+				}
+
+				workerType := tr.WorkerType
+				if workerType == "" {
+					var err error
+					workerType, err = o.legacyTaskActorType(st, sr.Name, tr.Index, false)
+					if err != nil {
+						return recovered, err
+					}
+				}
+
+				deadJob, found, err := o.findUnreportedDeadWorkerJob(ctx, workerType, workerActorID(o.instanceID, sr.Name, tr.Index), methodRun)
+				if err != nil {
+					return recovered, err
+				}
+				if !found {
+					continue
+				}
+
+				errMsg := "task could not report its outcome"
+				if deadJob.LastError != "" {
+					errMsg += ": " + deadJob.LastError
+				}
+
+				err = o.turn(ctx, &event{
+					kind: evDone,
+					report: &reportPayload{
+						Step:      sr.Name,
+						Index:     tr.Index,
+						Attempt:   tr.Attempts,
+						Error:     errMsg,
+						Retryable: true,
+						Transport: true,
+					},
+				})
+				if err != nil {
+					return recovered, err
+				}
+
+				workerClient := builtinactor.NewClient[struct{}](workerType, workerActorID(o.instanceID, sr.Name, tr.Index), o.svc)
+				_ = workerClient.DeleteJob(ctx, deadJob.JobID)
+				recovered = true
+			}
+
+		case StepCompensating:
+			for j := range sr.Tasks {
+				tr := &sr.Tasks[j]
+				if tr.Comp == nil || tr.Comp.Done || tr.ChildID != "" || tr.Comp.Attempts <= 0 {
+					continue
+				}
+
+				undoType := tr.UndoType
+				if undoType == "" {
+					var err error
+					undoType, err = o.legacyTaskActorType(st, sr.Name, tr.Index, true)
+					if err != nil {
+						return recovered, err
+					}
+				}
+
+				deadJob, found, err := o.findUnreportedDeadWorkerJob(ctx, undoType, workerActorID(o.instanceID, sr.Name, tr.Index), methodCompensate)
+				if err != nil {
+					return recovered, err
+				}
+				if !found {
+					continue
+				}
+
+				errMsg := "task could not report its outcome"
+				if deadJob.LastError != "" {
+					errMsg += ": " + deadJob.LastError
+				}
+
+				err = o.turn(ctx, &event{
+					kind: evCompensated,
+					comp: &compReportPayload{
+						Step:      sr.Name,
+						Index:     tr.Index,
+						Attempt:   tr.Comp.Attempts,
+						Error:     errMsg,
+						Retryable: true,
+						Transport: true,
+					},
+				})
+				if err != nil {
+					return recovered, err
+				}
+
+				undoClient := builtinactor.NewClient[struct{}](undoType, workerActorID(o.instanceID, sr.Name, tr.Index), o.svc)
+				_ = undoClient.DeleteJob(ctx, deadJob.JobID)
+				recovered = true
+			}
+		}
+	}
+
+	return recovered, nil
+}
+
+// findUnreportedDeadWorkerJob returns the latest dead-lettered job for method on (actorType, actorID) when no live or newer completed job exists for that method
+func (o *orchestrator) findUnreportedDeadWorkerJob(ctx context.Context, actorType string, actorID string, method string) (actor.JobInfo, bool, error) {
+	client := builtinactor.NewClient[struct{}](actorType, actorID, o.svc)
+	jobs, err := client.ListJobs(ctx)
+	if err != nil {
+		return actor.JobInfo{}, false, fmt.Errorf("failed to inspect worker jobs for %s/%s: %w", actorType, actorID, err)
+	}
+
+	var (
+		latestDead      actor.JobInfo
+		hasDead         bool
+		latestCompleted time.Time
+	)
+	for _, j := range jobs {
+		if j.Method != method {
+			continue
+		}
+		switch j.Status {
+		case actor.JobStatusActive:
+			return actor.JobInfo{}, false, nil
+		case actor.JobStatusCompleted:
+			if j.EndedAt.After(latestCompleted) {
+				latestCompleted = j.EndedAt
+			}
+		case actor.JobStatusDeadLettered:
+			if !hasDead || j.EndedAt.After(latestDead.EndedAt) {
+				latestDead = j
+				hasDead = true
+			}
+		}
+	}
+	if !hasDead {
+		return actor.JobInfo{}, false, nil
+	}
+	if !latestCompleted.IsZero() && !latestDead.EndedAt.After(latestCompleted) {
+		return actor.JobInfo{}, false, nil
+	}
+	return latestDead, true, nil
 }
 
 // Invoke handles the operations a caller drives synchronously, which are the ones whose result the caller needs
@@ -405,7 +575,14 @@ func (o *orchestrator) decodeEvent(method string, data actor.Envelope) (*event, 
 		case methodSuspend:
 			kind = evSuspend
 		}
-		return &event{kind: kind, reason: p.Reason, fromParent: p.FromParent, compAttempt: p.CompAttempt}, nil
+		return &event{
+			kind:             kind,
+			reason:           p.Reason,
+			fromParent:       p.FromParent,
+			compAttempt:      p.CompAttempt,
+			parentWorkflow:   p.ParentWorkflow,
+			parentInstanceID: p.ParentInstanceID,
+		}, nil
 
 	case methodResume:
 		return &event{kind: evResume}, nil
@@ -1090,7 +1267,13 @@ func (o *orchestrator) unwindChild(ctx context.Context, st *instanceState, stepN
 	}
 
 	client := builtinactor.NewClient[struct{}](child.baseType, tr.ChildID, o.svc)
-	_, _, err := client.Dispatch(ctx, methodUnwind, reasonPayload{Reason: st.Cause, FromParent: true, CompAttempt: attempt},
+	_, _, err := client.Dispatch(ctx, methodUnwind, reasonPayload{
+		Reason:           st.Cause,
+		FromParent:       true,
+		CompAttempt:      attempt,
+		ParentWorkflow:   o.def.name,
+		ParentInstanceID: o.instanceID,
+	},
 		actor.WithIdempotencyKey(methodUnwind+idDelimiter+strconv.Itoa(attempt)))
 	if err != nil {
 		return fmt.Errorf("failed to unwind child %s: %w", tr.ChildID, err)

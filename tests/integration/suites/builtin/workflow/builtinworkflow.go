@@ -322,8 +322,13 @@ func (s *builtinWorkflow) cancelShipment(ctx context.Context, c workflow.Compens
 		return errors.Join(actor.ErrJobPermanentFailure, err)
 	}
 
-	// A child's frame belongs to the parent's unwind, and its instance ID is the parent's with the task's suffix appended
-	parent, _, _ := strings.Cut(res["booking"], "|")
+	// A child's frame belongs to the parent's unwind, and its instance ID is "<parentWorkflow>|<parentInstanceID>|<step>|<index>"
+	parts := strings.SplitN(res["booking"], "|", 3)
+	parent := parts[0]
+	if len(parts) >= 2 {
+		parent = parts[1]
+	}
+
 	s.recordUndo(parent, res["booking"]+":ship")
 	return nil
 }

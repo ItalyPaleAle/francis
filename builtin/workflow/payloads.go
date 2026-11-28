@@ -148,6 +148,9 @@ type reasonPayload struct {
 	FromParent bool `msgpack:"fromParent,omitempty"`
 	// CompAttempt is the parent's compensation attempt number, which the child echoes back so its report lands on the record being unwound
 	CompAttempt int `msgpack:"compAttempt,omitempty"`
+	// ParentWorkflow and ParentInstanceID authenticate parent-initiated unwind and cancel deliveries against st.Parent
+	ParentWorkflow   string `msgpack:"parentWorkflow,omitempty"`
+	ParentInstanceID string `msgpack:"parentInstanceId,omitempty"`
 }
 
 // stepOutput returns what later steps see as a step's output, which depends on its kind

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/italypaleale/go-kit/utils"
@@ -49,9 +51,11 @@ type event struct {
 	comp   *compReportPayload
 	raise  *eventPayload
 	reason string
-	// fromParent and compAttempt carry what a parent said when it asked this instance to stop and undo itself
-	fromParent  bool
-	compAttempt int
+	// fromParent, compAttempt, parentWorkflow, and parentInstanceID carry what a parent said when it asked this instance to stop and undo itself
+	fromParent       bool
+	compAttempt      int
+	parentWorkflow   string
+	parentInstanceID string
 }
 
 // apply folds an event into the journal
@@ -207,7 +211,7 @@ func (st *instanceState) applyReport(def *definition, p *reportPayload, now time
 
 		// Forward completion retains the effect for a possible parent unwind without rolling back committed optional work
 		if st.TerminalStatus == "" {
-			pushFrame(st, sr, d)
+			pushFrame(st, def, sr, d)
 			return false
 		}
 
@@ -361,6 +365,10 @@ func (st *instanceState) applyRaisedEvent(def *definition, p *eventPayload, now 
 
 // applyCancel asks a running or suspended instance to stop and unwind
 func (st *instanceState) applyCancel(def *definition, ev *event, now time.Time) bool {
+	if ev.fromParent && !st.matchesParentEvent(ev) {
+		return true
+	}
+
 	// Cancel takes precedence over a suspension, so it resumes the instance straight into the unwind
 	if st.Status == StatusCompensating {
 		return true
@@ -379,6 +387,10 @@ func (st *instanceState) applyCancel(def *definition, ev *event, now time.Time) 
 // applyUnwind moves a completed child back into compensating at its parent's request, which is the one verb only a parent may send
 // A completed child is kept rather than purged for as long as its parent is running for precisely this reason
 func (st *instanceState) applyUnwind(def *definition, ev *event, now time.Time) bool {
+	if !st.matchesParentEvent(ev) {
+		return true
+	}
+
 	if st.Status == StatusCompensating {
 		// A parent joining an existing rollback still needs its newest compensation attempt acknowledged
 		return !st.recordUnwoundBy(ev)
@@ -419,6 +431,19 @@ func (st *instanceState) applyUnwind(def *definition, ev *event, now time.Time) 
 	st.recordUnwoundBy(ev)
 	st.beginUnwind(def, reason, StatusCancelled, now)
 	return false
+}
+
+// matchesParentEvent verifies that a parent-stamped control request came from the parent recorded on st.Parent
+func (st *instanceState) matchesParentEvent(ev *event) bool {
+	if ev.parentWorkflow == "" && ev.parentInstanceID == "" {
+		return true
+	}
+
+	if st.Parent == nil {
+		return false
+	}
+
+	return st.Parent.Workflow == ev.parentWorkflow && st.Parent.InstanceID == ev.parentInstanceID
 }
 
 // recordUnwoundBy retains the highest parent compensation attempt so an older request cannot redirect the eventual acknowledgement
@@ -519,7 +544,7 @@ func (st *instanceState) beginUnwind(def *definition, cause string, terminal Sta
 			sr.CompletedAt = now
 		case StepRunning:
 			// A step in flight is closed out so the unwind can proceed, rather than waiting on attempts nobody is going to re-drive
-			abandonRunningStep(st, sr, def.byName[sr.Name], now)
+			abandonRunningStep(st, def, sr, def.byName[sr.Name], now)
 		}
 	}
 }
@@ -546,7 +571,7 @@ func abandonOutstandingTasks(sr *stepRecord, reason string, now time.Time) {
 
 // abandonRunningStep closes out the step that was in flight when the unwind opened
 // The tasks that had not reported are abandoned rather than failed, because an attempt already executing is never interrupted and a success it reports late still has to be compensated
-func abandonRunningStep(st *instanceState, sr *stepRecord, d *stepDef, now time.Time) {
+func abandonRunningStep(st *instanceState, def *definition, sr *stepRecord, d *stepDef, now time.Time) {
 	if d == nil {
 		return
 	}
@@ -570,7 +595,7 @@ func abandonRunningStep(st *instanceState, sr *stepRecord, d *stepDef, now time.
 		sr.Status = StepCompleted
 	}
 	sr.CompletedAt = now
-	pushFrame(st, sr, d)
+	pushFrame(st, def, sr, d)
 }
 
 // advance derives the next journal from the current one, as a pure function of the journal and the definition
@@ -654,7 +679,7 @@ func settleSteps(st *instanceState, def *definition, now time.Time) bool {
 		// A wait step is settled by its event rather than by a task reporting
 		if sr.Kind == KindWait {
 			if sr.Event != nil {
-				completeStep(st, sr, d, now)
+				completeStep(st, def, sr, d, now)
 				changed = true
 			}
 			continue
@@ -675,7 +700,7 @@ func settleSteps(st *instanceState, def *definition, now time.Time) bool {
 		if outcome == StepFailed {
 			failStep(st, def, sr, d, errMsg, now)
 		} else {
-			completeStep(st, sr, d, now)
+			completeStep(st, def, sr, d, now)
 		}
 		changed = true
 	}
@@ -716,11 +741,11 @@ func firstFailedTask(sr *stepRecord) int {
 }
 
 // completeStep records a step as completed and pushes its frame onto the compensation stack when there is anything to undo
-func completeStep(st *instanceState, sr *stepRecord, d *stepDef, now time.Time) {
+func completeStep(st *instanceState, def *definition, sr *stepRecord, d *stepDef, now time.Time) {
 	sr.Status = StepCompleted
 	sr.CompletedAt = now
 	sr.Remaining = 0
-	pushFrame(st, sr, d)
+	pushFrame(st, def, sr, d)
 }
 
 // failStep records a step as failed, applies WithSkipOnFailure to its named dependents, and opens the unwind unless the step declared otherwise
@@ -731,7 +756,7 @@ func failStep(st *instanceState, def *definition, sr *stepRecord, d *stepDef, er
 	sr.Remaining = 0
 
 	// A frame is still pushed when tasks of the step succeeded, since their effects are real and a fail-fast group is exactly that case
-	pushFrame(st, sr, d)
+	pushFrame(st, def, sr, d)
 
 	// The named dependents are pointless without this step, and are recorded as skipped rather than run and failed
 	// Skipping is not transitive: a skipped step is not a failed one, so its own list is not applied
@@ -752,12 +777,64 @@ func failStep(st *instanceState, def *definition, sr *stepRecord, d *stepDef, er
 	st.beginUnwind(def, cause, StatusFailed, now)
 }
 
+// formatStackFrame encodes a step frame on st.Stack, adding the iteration task index for loop body steps so iterations unwind in true LIFO order
+func formatStackFrame(step string, taskIndex int, perTask bool) string {
+	if !perTask {
+		return step
+	}
+
+	return step + idDelimiter + strconv.Itoa(taskIndex)
+}
+
+// parseStackFrame splits an st.Stack entry into its step name and optional loop-iteration task index
+func parseStackFrame(frame string) (step string, taskIndex int, perTask bool) {
+	name, rawIdx, ok := strings.Cut(frame, idDelimiter)
+	if !ok {
+		return frame, 0, false
+	}
+
+	idx, err := strconv.Atoi(rawIdx)
+	if err != nil {
+		return frame, 0, false
+	}
+
+	return name, idx, true
+}
+
+func hasRemainingFrameForStep(stack []string, stepName string) bool {
+	for _, entry := range stack {
+		name, _, _ := parseStackFrame(entry)
+		if name == stepName {
+			return true
+		}
+	}
+	return false
+}
+
 // pushFrame adds a settled step to the compensation stack when it is compensable and holds at least one task whose effect has to be undone
-func pushFrame(st *instanceState, sr *stepRecord, d *stepDef) {
+func pushFrame(st *instanceState, def *definition, sr *stepRecord, d *stepDef) {
 	if !d.isCompensable() {
 		return
 	}
-	if len(compensableTasks(sr, d)) == 0 {
+
+	compIdxs := compensableTasks(sr, d)
+	if len(compIdxs) == 0 {
+		return
+	}
+
+	// Loop body steps push one frame per compensable iteration task so multi-step loops unwind in reverse execution order across iterations
+	if def != nil && def.loopOf[sr.Name] != nil {
+		for _, idx := range compIdxs {
+			tr := &sr.Tasks[idx]
+			if tr.Comp != nil && tr.Comp.Done {
+				continue
+			}
+
+			frame := formatStackFrame(sr.Name, tr.Index, true)
+			if !slices.Contains(st.Stack, frame) {
+				st.Stack = append(st.Stack, frame)
+			}
+		}
 		return
 	}
 
@@ -1009,7 +1086,7 @@ func openLoop(st *instanceState, def *definition, sr *stepRecord, d *stepDef, no
 	if loopSatisfied(st, def, d) {
 		sr.StartedAt = now
 		sr.Output = loopResult(st, def, d)
-		completeStep(st, sr, d, now)
+		completeStep(st, def, sr, d, now)
 		return true
 	}
 
@@ -1096,7 +1173,10 @@ func refreshFrames(st *instanceState, def *definition) bool {
 	var changed bool
 	for i := range st.Steps {
 		sr := &st.Steps[i]
-		if sr.Status != StepCompleted && sr.Status != StepFailed {
+		isLoopCompensating := sr.Status == StepCompensating &&
+			def != nil &&
+			def.loopOf[sr.Name] != nil
+		if sr.Status != StepCompleted && sr.Status != StepFailed && !isLoopCompensating {
 			continue
 		}
 
@@ -1106,7 +1186,7 @@ func refreshFrames(st *instanceState, def *definition) bool {
 		}
 
 		before := len(st.Stack)
-		pushFrame(st, sr, d)
+		pushFrame(st, def, sr, d)
 		if len(st.Stack) != before {
 			changed = true
 		}
@@ -1122,13 +1202,18 @@ func unwindNextFrame(st *instanceState, def *definition, now time.Time) bool {
 		return true
 	}
 
-	name := st.Stack[len(st.Stack)-1]
+	top := st.Stack[len(st.Stack)-1]
+	name, taskIndex, perTask := parseStackFrame(top)
 	sr := st.step(name)
 	d := def.byName[name]
 	if sr == nil || d == nil {
 		// A frame naming a step the journal or the definition no longer has cannot be unwound, so it is dropped rather than blocking the rest
 		st.Stack = st.Stack[:len(st.Stack)-1]
 		return true
+	}
+
+	if perTask {
+		return unwindLoopTaskFrame(st, def, sr, taskIndex, now)
 	}
 
 	// Opening the frame gives every task that has to be undone its first compensation attempt, numbered before it is dispatched
@@ -1193,6 +1278,59 @@ func unwindNextFrame(st *instanceState, def *definition, now time.Time) bool {
 	return true
 }
 
+// unwindLoopTaskFrame unwinds a single iteration task of a loop body step so multi-step loops compensate strictly in reverse execution order
+func unwindLoopTaskFrame(st *instanceState, def *definition, sr *stepRecord, taskIndex int, now time.Time) bool {
+	tr := sr.task(taskIndex)
+	if tr == nil {
+		st.Stack = st.Stack[:len(st.Stack)-1]
+		return true
+	}
+
+	if sr.Status != StepCompensating {
+		st.captureStepHistory(sr)
+		sr.Status = StepCompensating
+	}
+	if tr.Comp == nil {
+		tr.Comp = &compRecord{Attempts: 1}
+		return true
+	}
+	if !tr.Comp.Done {
+		return false
+	}
+
+	st.Stack = st.Stack[:len(st.Stack)-1]
+	moreForStep := hasRemainingFrameForStep(st.Stack, sr.Name)
+
+	if tr.Comp.Error != "" {
+		if !moreForStep || def.compensationFailurePolicy == AbortUnwinding {
+			sr.Status = StepCompensationFailed
+		}
+		if def.compensationFailurePolicy == AbortUnwinding {
+			st.Compensation = CompensationFailed
+			terminate(st, def, now)
+			return true
+		}
+		st.Compensation = CompensationPartial
+		return true
+	}
+
+	if !moreForStep {
+		var anyFailed bool
+		for i := range sr.Tasks {
+			if sr.Tasks[i].Comp != nil && sr.Tasks[i].Comp.Error != "" {
+				anyFailed = true
+				break
+			}
+		}
+		if anyFailed {
+			sr.Status = StepCompensationFailed
+		} else {
+			sr.Status = StepCompensated
+		}
+	}
+	return true
+}
+
 // isLateAbandonedSuccess reports whether a terminal journal still needs to account for work that cancellation or a timeout could not interrupt
 func isLateAbandonedSuccess(st *instanceState, ev *event) bool {
 	if ev.kind != evDone || ev.report == nil || ev.report.Error != "" {
@@ -1224,7 +1362,7 @@ func (def *definition) configureTaskActors(d *stepDef, tr *taskRecord, instanceI
 		child = d.child
 	}
 	if child != nil {
-		tr.ChildID = workerActorID(instanceID, stepName, tr.Index)
+		tr.ChildID = childActorID(def.name, instanceID, stepName, tr.Index)
 		tr.ChildType = workflowActorTypePrefix + child.name
 		return
 	}

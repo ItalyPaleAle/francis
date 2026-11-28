@@ -202,8 +202,13 @@ func validateTypeComponent(s string) error {
 	if err != nil {
 		return err
 	}
+
 	if strings.ContainsRune(s, '.') {
 		return errors.New("must not contain '.'")
+	}
+
+	if strings.Contains(s, idDelimiter) {
+		return fmt.Errorf("must not contain %q", idDelimiter)
 	}
 	return nil
 }
@@ -459,13 +464,19 @@ func (def *definition) validateStep(d *stepDef, index int) (err error) {
 	}
 
 	// Skipping only makes sense for steps that have not run yet, so the named dependents must come after this one
+	ownLoop := def.loopOf[d.name]
 	for _, dep := range d.skipOnFailure {
 		pos, ok := def.order[dep]
 		if !ok {
 			return fmt.Errorf("step %q names %q in WithSkipOnFailure, which is not a top-level step of this workflow", d.name, dep)
 		}
+
 		if pos <= index {
 			return fmt.Errorf("step %q names %q in WithSkipOnFailure, but %q does not run after it", d.name, dep, dep)
+		}
+
+		if ownLoop != nil && def.loopOf[dep] != ownLoop {
+			return fmt.Errorf("loop body step %q names %q in WithSkipOnFailure outside loop %q; attach WithSkipOnFailure to the loop instead", d.name, dep, ownLoop.name)
 		}
 	}
 
@@ -681,4 +692,9 @@ func queueType(base string, capability string) string {
 // A hash of the three components would avoid constraining names, at the cost of unreadable IDs in logs and traces, and readability wins since these are what an operator greps for
 func workerActorID(instanceID string, step string, index int) string {
 	return instanceID + idDelimiter + step + idDelimiter + strconv.Itoa(index)
+}
+
+// childActorID prefixes the parent workflow's name so two parent workflows started with the same business instance ID never collide in a shared child workflow's ID space
+func childActorID(parentWorkflow string, instanceID string, step string, index int) string {
+	return parentWorkflow + idDelimiter + instanceID + idDelimiter + step + idDelimiter + strconv.Itoa(index)
 }

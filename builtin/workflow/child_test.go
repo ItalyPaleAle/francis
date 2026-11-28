@@ -468,3 +468,63 @@ func TestParentInstanceTimeoutUnwindsChild(t *testing.T) {
 	assert.NotNil(t, st.step("child").Tasks[0].Comp)
 	t.Logf("status=%s compensation=%s child.abandoned=%v", st.Status, st.Compensation, st.step("child").Tasks[0].Abandoned)
 }
+
+func TestChildIDNamespacesByParentWorkflowAndUnwindVerifiesParent(t *testing.T) {
+	_, badErr := New("bad|name", WithSteps(Step("only", WithRun(noopRun))))
+	require.Error(t, badErr)
+
+	sharedChild, err := New("shared-charge", WithSteps(Step("charge", WithRun(noopRun), WithCompensate(noopCompensate))))
+	require.NoError(t, err)
+
+	checkoutDef := testDefinition(t, "checkout", WithSteps(Child("charge", WithDefinition(sharedChild))))
+	subDef := testDefinition(t, "subscription", WithSteps(Child("charge", WithDefinition(sharedChild))))
+
+	now := time.Now()
+	checkoutState := startJournal(t, checkoutDef, now)
+	advance(checkoutState, checkoutDef, "order-100", now)
+	subState := startJournal(t, subDef, now)
+	advance(subState, subDef, "order-100", now)
+
+	checkoutChildID := checkoutState.step("charge").Tasks[0].ChildID
+	subChildID := subState.step("charge").Tasks[0].ChildID
+	assert.NotEqual(t, checkoutChildID, subChildID)
+
+	// A foreign parent workflow or instance attempting to unwind or cancel a child is rejected
+	host := newFakeHost()
+	child := newTestOrchestrator(t, sharedChild, host, checkoutChildID)
+	err = child.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{
+		Version: 1,
+		Parent: &parentRef{
+			Workflow:   "checkout",
+			InstanceID: "order-100",
+			Step:       "charge",
+			Index:      0,
+			Depth:      1,
+		},
+	}})
+	require.NoError(t, err)
+	err = child.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "charge", Index: 0, Attempt: 1, Output: json.RawMessage(`"ok"`)}})
+	require.NoError(t, err)
+	require.Equal(t, StatusCompleted, readJournal(t, host, sharedChild, checkoutChildID).Status)
+
+	err = child.Job(t.Context(), methodUnwind, &payloadEnvelope{value: reasonPayload{
+		Reason:           "foreign unwind",
+		FromParent:       true,
+		CompAttempt:      1,
+		ParentWorkflow:   "subscription",
+		ParentInstanceID: "order-100",
+	}})
+	require.NoError(t, err)
+	assert.Equal(t, StatusCompleted, readJournal(t, host, sharedChild, checkoutChildID).Status)
+
+	// The genuine parent workflow and instance ID reopens and unwinds the child
+	err = child.Job(t.Context(), methodUnwind, &payloadEnvelope{value: reasonPayload{
+		Reason:           "genuine unwind",
+		FromParent:       true,
+		CompAttempt:      1,
+		ParentWorkflow:   "checkout",
+		ParentInstanceID: "order-100",
+	}})
+	require.NoError(t, err)
+	assert.Equal(t, StatusCompensating, readJournal(t, host, sharedChild, checkoutChildID).Status)
+}

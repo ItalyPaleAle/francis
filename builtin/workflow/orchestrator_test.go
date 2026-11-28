@@ -722,8 +722,8 @@ func TestSweepRetainsDescendantsUntilTheirRootTerminates(t *testing.T) {
 	require.NoError(t, err)
 	host := newFakeHost()
 	root := newTestOrchestrator(t, rootWF, host, "root")
-	middleID := workerActorID("root", "middle", 0)
-	leafID := workerActorID(middleID, "leaf", 0)
+	middleID := childActorID("root", "root", "middle", 0)
+	leafID := childActorID("middle", middleID, "leaf", 0)
 	middle := newTestOrchestrator(t, middleWF, host, middleID)
 	leaf := newTestOrchestrator(t, leafWF, host, leafID)
 
@@ -1224,4 +1224,53 @@ func TestPurgeChecksAncestryUnlessItsOwnParentAsks(t *testing.T) {
 		assert.Equal(t, purgeResult{Found: true, Active: true}, result, "request %+v", req)
 		assert.True(t, host.hasJournal(leaf, "leaf-1"))
 	}
+}
+
+func TestRunDeadlineRecoversDeadLetteredForwardAndUndoWorkers(t *testing.T) {
+	host := newFakeHost()
+	wf, err := New("dead-worker-recovery", WithSteps(
+		Step("first", WithRun(noopRun), WithCompensate(noopCompensate), WithMaxAttempts(2)),
+		Step("second", WithRun(noopRun)),
+	))
+	require.NoError(t, err)
+
+	// Start the instance and simulate the forward worker job dead-lettering while best-effort worker.JobFailed also failed
+	o1 := newTestOrchestrator(t, wf, host, "inst-1")
+	err = o1.Job(t.Context(), methodStart, &payloadEnvelope{value: startPayload{Version: 1}})
+	require.NoError(t, err)
+
+	workerID := workerActorID("inst-1", "first", 0)
+	runJobID := host.jobIDFor(builtinActorType(wf.workerType("")), workerID, methodRun)
+	require.NotEmpty(t, runJobID)
+	host.deadLetter(runJobID, "outage")
+
+	// Activate a fresh orchestrator so unsavedDispatches is empty, and run the deadline recovery
+	o2 := newTestOrchestrator(t, wf, host, "inst-1")
+	err = o2.Alarm(t.Context(), alarmDeadline, &payloadEnvelope{value: deadlinePayload{Recurring: true}})
+	require.NoError(t, err)
+
+	st := readJournal(t, host, wf, "inst-1")
+	assert.Equal(t, 2, st.step("first").Tasks[0].Attempts)
+
+	// Complete attempt 2 of "first", then fail "second" so "first" enters compensation
+	err = o2.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "first", Index: 0, Attempt: 2, Output: json.RawMessage(`"ok"`)}})
+	require.NoError(t, err)
+	err = o2.Job(t.Context(), methodDone, &payloadEnvelope{value: reportPayload{Step: "second", Index: 0, Attempt: 1, Error: "boom"}})
+	require.NoError(t, err)
+
+	st = readJournal(t, host, wf, "inst-1")
+	require.Equal(t, StatusCompensating, st.Status)
+
+	// Dead-letter the undo worker job without delivering methodCompensated, then verify runDeadline recovers compensation too
+	undoJobID := host.jobIDFor(builtinActorType(wf.undoType("")), workerID, methodCompensate)
+	require.NotEmpty(t, undoJobID)
+	host.deadLetter(undoJobID, "undo outage")
+
+	o3 := newTestOrchestrator(t, wf, host, "inst-1")
+	err = o3.Alarm(t.Context(), alarmDeadline, &payloadEnvelope{value: deadlinePayload{Recurring: true}})
+	require.NoError(t, err)
+
+	st = readJournal(t, host, wf, "inst-1")
+	require.NotNil(t, st.step("first").Tasks[0].Comp)
+	assert.Equal(t, 2, st.step("first").Tasks[0].Comp.Attempts)
 }

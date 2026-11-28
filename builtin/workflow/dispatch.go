@@ -7,7 +7,7 @@ import (
 // buildRunPayload assembles what one task needs to run, from the journal, in memory
 // Building a payload is orchestration, while performing the work it describes is a step, and the engine never ships the whole journal to a worker, so a step's data dependencies stay explicit and auditable from the definition alone
 func (o *orchestrator) buildRunPayload(st *instanceState, sr *stepRecord, d *stepDef, member *stepDef, tr *taskRecord) runPayload {
-	outputs, skipped := o.upstreamOutputs(st, sr, d, member)
+	outputs, skipped := o.upstreamOutputs(st, sr, d, member, tr)
 
 	p := runPayload{
 		InstanceID:            o.instanceID,
@@ -17,7 +17,7 @@ func (o *orchestrator) buildRunPayload(st *instanceState, sr *stepRecord, d *ste
 		RegistryGeneration:    st.RegistryGeneration,
 		Step:                  sr.Name,
 		Index:                 tr.Index,
-		Positional:            d.isPositional(),
+		Positional:            o.def.isPositional(d),
 		Attempt:               tr.Attempts,
 		Input:                 st.Input,
 		Item:                  tr.Item,
@@ -38,7 +38,7 @@ func (o *orchestrator) buildRunPayload(st *instanceState, sr *stepRecord, d *ste
 
 // upstreamOutputs collects the outputs a task may read: the output of the immediately preceding step, and those of the steps named with WithInputFrom
 // A group's member declares its own dependencies alongside the group's, and a task gets both, since the member is what the handler was written against
-func (o *orchestrator) upstreamOutputs(st *instanceState, sr *stepRecord, d *stepDef, member *stepDef) (map[string]json.RawMessage, []string) {
+func (o *orchestrator) upstreamOutputs(st *instanceState, sr *stepRecord, d *stepDef, member *stepDef, tr *taskRecord) (map[string]json.RawMessage, []string) {
 	outputs := map[string]json.RawMessage{}
 	var skipped []string
 
@@ -58,7 +58,7 @@ func (o *orchestrator) upstreamOutputs(st *instanceState, sr *stepRecord, d *ste
 			outputs[name] = nil
 			return
 		}
-		outputs[name] = o.def.byName[name].stepOutput(other)
+		outputs[name] = o.def.stepOutputForConsumer(sr.Name, tr, other)
 	}
 
 	prev := o.precedingStepName(sr.Name)
@@ -79,6 +79,27 @@ func (o *orchestrator) upstreamOutputs(st *instanceState, sr *stepRecord, d *ste
 		return nil, nil
 	}
 	return outputs, skipped
+}
+
+// stepOutputForConsumer resolves the output a consumer task reads from an upstream step, matching iteration indexes when both belong to the same loop body
+func (def *definition) stepOutputForConsumer(consumerStep string, consumerTask *taskRecord, upstream *stepRecord) json.RawMessage {
+	if def != nil && consumerTask != nil {
+		consumerLoop := def.loopOf[consumerStep]
+		if consumerLoop != nil && def.loopOf[upstream.Name] == consumerLoop {
+			if upstream.Status == StepSkipped || upstream.Status == StepPending {
+				return nil
+			}
+
+			ut := upstream.task(consumerTask.Index)
+			if ut == nil {
+				return nil
+			}
+
+			return ut.taskOutput()
+		}
+	}
+
+	return def.byName[upstream.Name].stepOutput(upstream)
 }
 
 // precedingStepName returns the top-level step declared immediately before a step, or an empty string for the first one
@@ -102,7 +123,7 @@ func (o *orchestrator) childInput(st *instanceState, sr *stepRecord, d *stepDef,
 	if prev != "" {
 		other := st.step(prev)
 		if other != nil && other.Status != StepSkipped {
-			out := o.def.byName[prev].stepOutput(other)
+			out := o.def.stepOutputForConsumer(sr.Name, tr, other)
 			if len(out) > 0 {
 				return out
 			}
@@ -112,7 +133,7 @@ func (o *orchestrator) childInput(st *instanceState, sr *stepRecord, d *stepDef,
 	return st.Input
 }
 
-// isPositional reports whether a step's tasks have siblings to be positioned among, so an index means something to a handler
+// isPositional reports whether a step's tasks have siblings or loop iterations to be positioned among, so an index means something to a handler
 func (d *stepDef) isPositional() bool {
 	switch d.kind {
 	case KindParallel, KindForEach:
@@ -120,4 +141,12 @@ func (d *stepDef) isPositional() bool {
 	default:
 		return false
 	}
+}
+
+func (def *definition) isPositional(d *stepDef) bool {
+	if d.isPositional() {
+		return true
+	}
+
+	return def != nil && def.loopOf[d.name] != nil
 }
